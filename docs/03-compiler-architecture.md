@@ -616,6 +616,20 @@ a field, a map, a box, a closure. A length, an element, a comparison or a range
 (which copies) keeps nothing and clears nothing. A parameter, or anything read
 out of somewhere else, starts unowned.
 
+A write through a struct field (`q.items.push(v)`) takes the field's slice into
+a local, changes it and puts it back (§5.4), and the checker marks that read as
+a take (`FieldTake`). A field has nowhere to keep a flag, so the header keeps
+it, in a third, `i8` field: the write-back sets it when the local owned what it
+put back, and the next take reads it as the local's flag. Every other read of a
+`var` slice field clears it first, unless the local it reads into only glances
+— is read for a length, an element or a comparison in the same block, with no
+call, suspension or in-place write before the last of those
+(`kite_mir::held_reads`). So the mark is set only while the field is the one
+holder, and a loop that pushes through a field, reading its length between the
+pushes, is linear. The VM needs none of this: its take empties the field, so
+the count is the truth, and it empties a glancing register after its last read
+so a stale one does not make the field's slice look shared.
+
 `push` and `xs[i] = v` call a small helper per element type with the header and
 the flag. Owned with room, `push` writes the next slot and bumps the length;
 otherwise it copies into a buffer twice as long plus four, and the local owns the
@@ -771,9 +785,12 @@ and return the same object; otherwise they copy — twice the length plus four
 for a push, exactly the length for a write — and the local owns the copy. A
 hundred thousand pushes went from four seconds to a few milliseconds, and a
 store of a reference into an owned slice that has been promoted is the second
-thing the write barrier covers. `tests/differential.rs` runs
-`slices-are-values` and `slices-grow-in-place-natively` on all three backends,
-and natively again with a nursery of one page.
+thing the write barrier covers. A write through a struct field keeps its
+flag on the object, as the Wasm backend keeps it in the header: bit 10 of the
+first header word, `kite_rt::HELD_BIT`, which a copy never has and evacuation
+carries with the object. `tests/differential.rs` runs `slices-are-values`,
+`slices-grow-in-place-natively` and `fields-are-written-in-place-unseen` on all
+three backends, and natively again with a nursery of one page.
 
 A map is the same kind of object: room to spare, and the same owned flag
 for every map local a function writes into or removes from, passed to

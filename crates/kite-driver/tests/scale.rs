@@ -330,6 +330,66 @@ fn a_slice_or_a_map_grown_across_suspensions_is_written_in_place() {
     agrees_within("map-across-yield", maps, "50000 99999\n", Duration::from_secs(20), false);
 }
 
+/// Writing a slice through a struct field is linear on all three backends:
+/// pushing onto a field, a nested field, `self`'s field in a `var self`
+/// method, a `sync.Queue`, and a field of a struct held in a slice, and
+/// storing into an element through a field. Each write took the field's
+/// slice into a local that always looked shared, so every one of them copied
+/// the whole slice: at three hundred thousand of each the native backend took
+/// minutes and the VM hours. The field's slice is written in place now when
+/// nothing else holds it, and reading its length or an element between the
+/// writes, as the last loop's `if` does, does not count as holding it.
+#[test]
+fn a_slice_written_through_a_field_is_written_in_place() {
+    let src = r#"use std/sync
+
+struct Q {
+    var items: [int]
+    var total: int
+}
+
+struct Out {
+    var b: Q
+}
+
+impl Q {
+    fn add(var self, v: int) {
+        self.items.push(v)
+    }
+}
+
+fn main() {
+    let n = 300000
+    var q = Q{ items: [], total: 0 }
+    var o = Out{ b: Q{ items: [], total: 0 } }
+    var m = Q{ items: [], total: 0 }
+    var s: sync.Queue<int> = sync.queue()
+    var qs = [Q{ items: [0], total: 0 }]
+    for i in 0..n {
+        q.items.push(i)
+        o.b.items.push(i)
+        m.add(i)
+        sync.put(s, i)
+        if qs[0].items.len() <= n {
+            qs[0].total += qs[0].items[i / 2]
+            qs[0].items.push(i)
+        }
+    }
+    for i in 0..n {
+        q.items[i] = q.items[i] + 1
+    }
+    io.print("\(q.items[n - 1]) \(o.b.items.len()) \(m.items.len()) \(sync.size(s)) \(qs[0].items.len()) \(qs[0].total)")
+}
+"#;
+    agrees_within(
+        "push-through-a-field",
+        src,
+        "300000 300000 300000 300000 300001 22499550002\n",
+        Duration::from_secs(20),
+        true,
+    );
+}
+
 /// A deep chain of awaits — a recursive `async fn`, the shape of a recursive
 /// walk — is linear on all three backends. An `await` that had to wait parked
 /// with no target, and every task finishing woke every parked task, so each

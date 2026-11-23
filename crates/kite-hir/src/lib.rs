@@ -307,6 +307,13 @@ pub enum ExprKind {
     StructNew { struct_id: StructId, fields: Vec<Expr>, order: Vec<u32> },
     /// `p.x`, by field position.
     FieldGet { base: Box<Expr>, index: u32 },
+    /// `p.x` read in order to be changed and written straight back: the copy
+    /// out of a write through a field (`q.items.push(v)`, §5.4), whose
+    /// `SetField` follows with nothing between that reads the field. Means
+    /// exactly what `FieldGet` means; it is told apart only so a backend may
+    /// hand the local the field's own slice or map to write in place, when
+    /// nothing else holds it, rather than a copy of it.
+    FieldTake { base: Box<Expr>, index: u32 },
     /// `Circle(radius: 1.0)`, or a unit variant such as `Point`. `order` is
     /// as for `StructNew`: named payload fields evaluate in the order written.
     EnumNew { enum_id: EnumId, variant: u32, fields: Vec<Expr>, order: Vec<u32> },
@@ -458,6 +465,7 @@ impl Expr {
             E::Binary { lhs, rhs, .. } => lhs.writes(local) || rhs.writes(local),
             E::If { cond, then, else_ } => cond.writes(local) || then.writes(local) || else_.writes(local),
             E::FieldGet { base, .. }
+            | E::FieldTake { base, .. }
             | E::PairValue { base }
             | E::PairError { base }
             | E::ErrorMessage { base }
@@ -1003,6 +1011,7 @@ impl Program {
                 format!("{}{{{}}}", self.types.struct_def(*struct_id).name, a.join(", "))
             }
             ExprKind::FieldGet { base, index } => format!("{}.{}", self.expr(base), index),
+            ExprKind::FieldTake { base, index } => format!("take {}.{}", self.expr(base), index),
             ExprKind::EnumNew { enum_id, variant, fields, .. } => {
                 let def = self.types.enum_def(*enum_id);
                 let a: Vec<String> = fields.iter().map(|x| self.expr(x)).collect();

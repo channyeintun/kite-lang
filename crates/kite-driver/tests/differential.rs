@@ -3031,7 +3031,337 @@ pub async fn main() {
 }
 "#,
     ),
+    // A write through a field goes straight into the field's slice or map
+    // when nothing else holds it. Here everything else holds it once: read
+    // into a binding, passed and kept, captured, stored in another field and
+    // another struct, built into one with `..base`, returned from a method,
+    // put in an enum payload and handed to a task, then written through the
+    // field — directly, nested, through `var self`, inside a struct held in a
+    // slice, and across `await` and `task.yield()`. None of them may see the
+    // write. Its output is also pinned in `EXPECTED`.
+    ("fields-are-written-in-place-unseen", FIELD_ALIASING),
 ];
+
+/// See `fields-are-written-in-place-unseen` in [`NATIVE_TARGET`].
+const FIELD_ALIASING: &str = r#"// Every way a slice or map read out of a field can be kept, each followed by
+// a write through the field: what was kept must not see the write.
+
+struct Q {
+    var items: [int]
+    var other: [int]
+    var m: { str: int }
+}
+
+struct Holder {
+    xs: [int]
+}
+
+struct In {
+    var items: [int]
+    var m: { str: int }
+}
+
+struct Out {
+    var b: In
+}
+
+struct Grid {
+    var rows: [[int]]
+}
+
+enum Kept {
+    Slice([int])
+    Table({ str: int })
+}
+
+impl Q {
+    fn add(var self, v: int) {
+        self.items.push(v)
+    }
+
+    fn put(var self, k: str, v: int) {
+        self.m[k] = v
+    }
+
+    fn snapshot(self) -> [int] {
+        return self.items
+    }
+
+    fn table(self) -> { str: int } {
+        return self.m
+    }
+
+    fn add_keeping(var self, v: int) -> [int] {
+        let before = self.items
+        self.items.push(v)
+        return before
+    }
+}
+
+fn sl(xs: [int]) -> str {
+    return "[" + join_ints(xs, ",") + "]"
+}
+
+fn mp(m: { str: int }) -> str {
+    var parts: [str] = []
+    for k in m.keys() {
+        parts.push("\(k)=\(or_else(m[k], 0))")
+    }
+    return "{" + join(parts, ",") + "}"
+}
+
+fn grid(rows: [[int]]) -> str {
+    var parts: [str] = []
+    for r in rows {
+        parts.push(sl(r))
+    }
+    return join(parts, ";")
+}
+
+fn fresh() -> Q {
+    return Q{ items: [1, 2], other: [], m: { "a": 1 } }
+}
+
+fn keep(xs: [int]) -> Holder {
+    return Holder{ xs: xs }
+}
+
+fn grow(var q: Q, n: int) {
+    for i in 0..n {
+        q.items.push(i)
+        q.m["k\(i)"] = i
+    }
+}
+
+async fn later(xs: [int], m: { str: int }) -> str {
+    task.yield()
+    return "\(sl(xs)) \(mp(m))"
+}
+
+async fn across() {
+    var q = fresh()
+    grow(q, 3)
+    let a = q.items
+    let am = q.m
+    task.yield()
+    q.items.push(7)
+    q.m["y"] = 7
+    io.print("yield kept: \(sl(a)) \(mp(am)) now \(sl(q.items)) \(mp(q.m))")
+
+    let t = later(q.items, q.m)
+    q.items.push(8)
+    q.m.remove("a")
+    q.items[0] = 100
+    io.print("task saw: \(await t) now \(sl(q.items)) \(mp(q.m))")
+
+    let b = q.items
+    let bm = q.m
+    let u = later([], { })
+    _ = await u
+    q.items.push(9)
+    q.m["z"] = 9
+    io.print("await kept: \(sl(b)) \(mp(bm)) now \(sl(q.items)) \(mp(q.m))")
+
+    // Pushed in place before a suspension, kept after, written after.
+    for i in 0..4 {
+        q.items.push(i)
+    }
+    task.yield()
+    let c = q.items
+    q.items.push(10)
+    task.yield()
+    q.items.push(11)
+    io.print("in place then kept: \(sl(c)) now \(sl(q.items))")
+
+    var o = Out{ b: In{ items: [], m: { } } }
+    for i in 0..3 {
+        o.b.items.push(i)
+        o.b.m["n\(i)"] = i
+    }
+    let d = o.b.items
+    let dm = o.b.m
+    task.yield()
+    o.b.items.push(5)
+    o.b.m.remove("n0")
+    io.print("nested across: \(sl(d)) \(mp(dm)) now \(sl(o.b.items)) \(mp(o.b.m))")
+}
+
+fn main() {
+    // A let.
+    var q = fresh()
+    let a = q.items
+    let am = q.m
+    q.items.push(3)
+    q.m["b"] = 2
+    io.print("let: \(sl(a)) \(mp(am)) now \(sl(q.items)) \(mp(q.m))")
+
+    // Grown in place first, then kept, then written.
+    for i in 0..5 {
+        q.items.push(i)
+        q.m["g\(i)"] = i
+    }
+    let a2 = q.items
+    let am2 = q.m
+    q.items.push(99)
+    q.items[0] = -1
+    q.m["g0"] = -1
+    q.m.remove("g1")
+    io.print("grown then let: \(sl(a2)) \(mp(am2)) now \(sl(q.items)) \(mp(q.m))")
+
+    // Passed to a function that keeps it.
+    let h = keep(q.items)
+    q.items.push(4)
+    io.print("kept by callee: \(sl(h.xs)) now \(q.items.len())")
+
+    // Captured by a closure.
+    let snap = q.items
+    let msnap = q.m
+    let f = || snap.len()
+    let g = || msnap.len()
+    q.items.push(5)
+    q.m["c"] = 3
+    io.print("closure: \(f()) \(g()) now \(q.items.len()) \(q.m.len())")
+
+    // Stored in a second field, then in a second struct.
+    q.other = q.items
+    q.items.push(6)
+    io.print("second field: \(q.other.len()) now \(q.items.len())")
+    var p = Q{ items: q.items, other: [], m: q.m }
+    q.items.push(7)
+    q.m["d"] = 4
+    io.print("second struct: \(p.items.len()) \(p.m.len()) now \(q.items.len()) \(q.m.len())")
+    p.items.push(70)
+    p.m["p"] = 70
+    io.print("second struct written: \(p.items.len()) \(p.m.len()) q \(q.items.len()) \(q.m.len())")
+
+    // A struct built with `..base`.
+    let r = Q{ ..q, other: [0] }
+    q.items.push(8)
+    q.m["e"] = 5
+    io.print("..base: \(r.items.len()) \(r.m.len()) now \(q.items.len()) \(q.m.len())")
+
+    // Returned from a method.
+    let s = q.snapshot()
+    let sm = q.table()
+    q.add(9)
+    q.put("f", 6)
+    io.print("method: \(s.len()) \(sm.len()) now \(q.items.len()) \(q.m.len())")
+    let before = q.add_keeping(10)
+    io.print("kept inside the method: \(before.len()) now \(q.items.len())")
+
+    // A local copy changed on its own leaves the field alone.
+    var l = q.items
+    l.push(11)
+    var lm = q.m
+    lm["own"] = 1
+    io.print("local copy: \(l.len()) \(lm.len()) field \(q.items.len()) \(q.m.len())")
+
+    // A walk over the field while the field grows.
+    var walked = 0
+    for x in q.items {
+        if walked < 3 {
+            q.items.push(x)
+        }
+        walked += 1
+    }
+    io.print("walk: \(walked) now \(q.items.len())")
+
+    // A struct reference shares its fields: that is not a slice alias.
+    var q2 = q
+    q2.items.push(12)
+    io.print("same struct: \(q.items.len()) \(q2.items.len())")
+
+    // Nested fields.
+    var o = Out{ b: In{ items: [1], m: { } } }
+    let ob = o.b.items
+    o.b.items.push(2)
+    o.b.m["x"] = 1
+    let obm = o.b.m
+    o.b.m["y"] = 2
+    io.print("nested: \(sl(ob)) \(mp(obm)) now \(sl(o.b.items)) \(mp(o.b.m))")
+    let inner = o.b
+    o.b.items.push(3)
+    io.print("nested holder kept: \(sl(inner.items)) \(sl(o.b.items))")
+
+    // A field of a struct held in a slice and in a map.
+    var qs = [fresh(), fresh()]
+    let e0 = qs[0].items
+    qs[0].items.push(3)
+    qs[1].m["z"] = 26
+    io.print("in a slice: \(sl(e0)) \(sl(qs[0].items)) \(sl(qs[1].items)) \(mp(qs[1].m))")
+    var byname: { str: In } = { "one": In{ items: [1], m: { } } }
+    let one = byname["one"]
+    if one != nil {
+        var held = one
+        let kept = held.items
+        held.items.push(2)
+        io.print("in a map: \(sl(kept)) \(sl(held.items)) \(byname["one"] != nil)")
+    }
+
+    // A slice of slices in a field.
+    var gr = Grid{ rows: [[1], [2]] }
+    let row = gr.rows[0]
+    let rows = gr.rows
+    gr.rows[0].push(10)
+    gr.rows.push([3])
+    io.print("grid: \(sl(row)) \(grid(rows)) now \(grid(gr.rows))")
+
+    // An enum payload.
+    let k = Kept.Slice(q.items)
+    let km = Kept.Table(q.m)
+    q.items.push(13)
+    q.m["g"] = 7
+    let klen = match k {
+        Slice(xs) => xs.len(),
+        Table(t) => t.len(),
+    }
+    let kmlen = match km {
+        Slice(xs) => xs.len(),
+        Table(t) => t.len(),
+    }
+    io.print("enum: \(klen) \(kmlen) now \(q.items.len()) \(q.m.len())")
+
+    // Equality against a copy taken before.
+    let eq_before = q.items
+    q.items.push(14)
+    io.print("equal: \(eq_before == q.items) \(eq_before.len())")
+
+    // Kept and read again with no call between the write and the read.
+    let near = q.items
+    let nearm = q.m
+    q.items.push(15)
+    q.items[0] = 77
+    q.m["h"] = 8
+    q.m.remove("a")
+    let n1 = near.len()
+    let n2 = near[0]
+    let n3 = nearm.len()
+    let n4 = nearm["a"] != nil
+    io.print("near: \(n1) \(n2) \(n3) \(n4) now \(q.items.len()) \(q.items[0])")
+
+    // Kept in a loop, by a local written on one pass and read on a later one.
+    var carry: [int] = []
+    var carrym: { str: int } = { }
+    for i in 0..6 {
+        if i == 3 {
+            carry = q.items
+            carrym = q.m
+        }
+        q.items.push(i)
+        q.m["L\(i)"] = i
+    }
+    io.print("carried: \(carry.len()) \(carrym.len()) now \(q.items.len()) \(q.m.len())")
+
+    // The pushed value read from the field itself.
+    q.items.push(q.items.len())
+    q.items.push(q.items[0])
+    q.m["self"] = q.m.len()
+    io.print("own value: \(q.items[q.items.len() - 2]) \(q.items[q.items.len() - 1]) \(q.m["self"] != nil)")
+
+    let t = across()
+    _ = t
+}
+"#;
 
 /// Programs the type checker once refused, or accepted and then typed in a
 /// way the backends could not agree about.
@@ -4426,6 +4756,7 @@ fn slices_agree_natively_with_a_page_of_nursery() {
         "strings-index-by-character",
         "maps-are-indexed-and-keep-their-order",
         "slices-and-maps-move-across-a-suspension",
+        "fields-are-written-in-place-unseen",
     ] {
         let (_, src) = WASM_TARGET
             .iter()
@@ -6601,6 +6932,38 @@ pub async fn main() {
 "#,
         "false true\nfalse true true\n2 3\n",
     ),
+    // What every copy of a field's slice or map holds after a write through
+    // the field: what it held when it was taken, as it was before writes
+    // through a field went in place.
+    ("fields-are-written-in-place-unseen", FIELD_ALIASING, "let: [1,2] {a=1} now [1,2,3] {a=1,b=2}\n\
+grown then let: [1,2,3,0,1,2,3,4] {a=1,b=2,g0=0,g1=1,g2=2,g3=3,g4=4} now [-1,2,3,0,1,2,3,4,99] {a=1,b=2,g0=-1,g2=2,g3=3,g4=4}\n\
+kept by callee: [-1,2,3,0,1,2,3,4,99] now 10\n\
+closure: 10 6 now 11 7\n\
+second field: 11 now 12\n\
+second struct: 12 7 now 13 8\n\
+second struct written: 13 8 q 13 8\n\
+..base: 13 8 now 14 9\n\
+method: 14 9 now 15 10\n\
+kept inside the method: 15 now 16\n\
+local copy: 17 11 field 16 10\n\
+walk: 16 now 19\n\
+same struct: 20 20\n\
+nested: [1] {x=1} now [1,2] {x=1,y=2}\n\
+nested holder kept: [1,2,3] [1,2,3]\n\
+in a slice: [1,2] [1,2,3] [1,2] {a=1,z=26}\n\
+in a map: [1] [1,2] true\n\
+grid: [1] [1];[2] now [1,10];[2];[3]\n\
+enum: 20 10 now 21 11\n\
+equal: false 21\n\
+near: 22 -1 11 true now 23 77\n\
+carried: 26 14 now 29 17\n\
+own value: 29 77 true\n\
+yield kept: [1,2,0,1,2] {a=1,k0=0,k1=1,k2=2} now [1,2,0,1,2,7] {a=1,k0=0,k1=1,k2=2,y=7}\n\
+task saw: [1,2,0,1,2,7] {a=1,k0=0,k1=1,k2=2,y=7} now [100,2,0,1,2,7,8] {k0=0,k1=1,k2=2,y=7}\n\
+await kept: [100,2,0,1,2,7,8] {k0=0,k1=1,k2=2,y=7} now [100,2,0,1,2,7,8,9] {k0=0,k1=1,k2=2,y=7,z=9}\n\
+in place then kept: [100,2,0,1,2,7,8,9,0,1,2,3] now [100,2,0,1,2,7,8,9,0,1,2,3,10,11]\n\
+nested across: [0,1,2] {n0=0,n1=1,n2=2} now [0,1,2,5] {n1=1,n2=2}\n\
+"),
 ];
 
 #[test]

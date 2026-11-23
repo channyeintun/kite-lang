@@ -62,6 +62,36 @@ const STATE: u32 = 0;
 const TASK: u32 = 1;
 const FIRST_LOCAL: u32 = 2;
 
+/// What a resume function's name ends with. No name a program writes has a
+/// `$` in it.
+const RESUME_SUFFIX: &str = "$resume";
+
+/// Whether `inst`, in `func`, moves a local into its frame across a
+/// suspension or back out of it — a spill or a reload, which only this pass
+/// writes — and if so, which local. A resume function's frame is its one
+/// parameter, local 0.
+///
+/// A spill is a move ([`Rvalue::Unspill`]): the reload hands the value back
+/// to the local it came from, and nothing else ever reads the frame's copy.
+pub fn frame_move(func: &Function, inst: &Inst) -> Option<Local> {
+    if !func.name.ends_with(RESUME_SUFFIX) {
+        return None;
+    }
+    let frame = |o: &Operand| matches!(o, Operand::Local(l) if l.index() == 0);
+    match inst {
+        Inst::SetField { base, index, value: Operand::Local(l) }
+            if frame(base) && *index >= FIRST_LOCAL =>
+        {
+            Some(*l)
+        }
+        Inst::Assign {
+            dst,
+            value: Rvalue::FieldGet { base, index } | Rvalue::Unspill { base, index, .. },
+        } if frame(base) && *index >= FIRST_LOCAL => Some(*dst),
+        _ => None,
+    }
+}
+
 /// Field positions in a `Task<T>`, as declared by [`Types::task_of`].
 ///
 /// Public because a runner that calls an `async fn` by name gets the task
@@ -106,7 +136,7 @@ fn build(func: &mut Function, resume_id: FnId, types: &mut Types) -> Function {
     let body_locals = std::mem::take(&mut func.locals);
 
     let resume = resume_function(
-        format!("{}$resume", func.name),
+        format!("{}{}", func.name, RESUME_SUFFIX),
         body,
         &body_locals,
         &flagged,
@@ -643,6 +673,9 @@ impl Builder<'_> {
                 },
                 Rvalue::FieldGet { base, index } => {
                     Rvalue::FieldGet { base: shift(base), index }
+                }
+                Rvalue::FieldTake { base, index } => {
+                    Rvalue::FieldTake { base: shift(base), index }
                 }
                 Rvalue::EnumNew { enum_id, variant, fields } => Rvalue::EnumNew {
                     enum_id,

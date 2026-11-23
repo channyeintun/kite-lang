@@ -141,6 +141,8 @@ fn compile_fn(func: &mir::Function, traits: &[u32]) -> FnProto {
         arg_base: func.locals.len() as Reg,
         scratch: (func.locals.len() + max_args) as Reg,
         extra_registers: 0,
+        emptied: emptied_after(func),
+        taken: taken_locals(func),
     };
     e.run();
 
@@ -171,6 +173,65 @@ struct Emitter<'a> {
     /// First register above the argument window, used for constant staging.
     scratch: Reg,
     extra_registers: usize,
+    /// By block, the statements after which a local that glanced at a
+    /// field's slice or map is emptied, and the locals: see [`emptied_after`].
+    emptied: Vec<Vec<(usize, Reg)>>,
+    /// The locals a `FieldTake` gives a field's slice or map to, emptied once
+    /// the write-back has put it back.
+    taken: Vec<bool>,
+}
+
+/// After which statement of each block each local that only glanced at a
+/// field's slice or map (`kite_mir::held_reads`) is read for the last time.
+///
+/// The VM's sharing is `Rc`'s count, so a register still holding what it read
+/// out of `q.items` would make the field's slice look shared, and the next
+/// `q.items.push(v)` a copy of it: `if q.items.len() < n { q.items.push(v) }`
+/// was quadratic for that reason alone. Emptying the register after its last
+/// read leaves the field the one holder. Only a local some length, element or
+/// lookup reads is emptied — that is a slice's or a map's; one compared and
+/// nothing else is left alone, which costs a copy, not a wrong answer.
+fn emptied_after(func: &mir::Function) -> Vec<Vec<(usize, Reg)>> {
+    let mut container = vec![false; func.locals.len()];
+    for b in &func.blocks {
+        for s in &b.stmts {
+            if let mir::Inst::Assign { value, .. } = s {
+                let base = match value {
+                    mir::Rvalue::SliceLen { base }
+                    | mir::Rvalue::MapLen { base }
+                    | mir::Rvalue::MapKeys { base }
+                    | mir::Rvalue::MapValues { base }
+                    | mir::Rvalue::IndexGet { base, .. }
+                    | mir::Rvalue::SliceGet { base, .. }
+                    | mir::Rvalue::MapGet { base, .. } => base,
+                    _ => continue,
+                };
+                if let mir::Operand::Local(l) = base {
+                    container[l.index()] = true;
+                }
+            }
+        }
+    }
+    let mut out = vec![Vec::new(); func.blocks.len()];
+    for (l, at) in mir::held_reads(func).into_iter().enumerate() {
+        if let (Some((b, s)), true) = (at, container[l]) {
+            out[b].push((s, l as Reg));
+        }
+    }
+    out
+}
+
+/// Which locals a `FieldTake` assigns.
+fn taken_locals(func: &mir::Function) -> Vec<bool> {
+    let mut out = vec![false; func.locals.len()];
+    for b in &func.blocks {
+        for s in &b.stmts {
+            if let mir::Inst::Assign { dst, value: mir::Rvalue::FieldTake { .. } } = s {
+                out[dst.index()] = true;
+            }
+        }
+    }
+    out
 }
 
 impl<'a> Emitter<'a> {
@@ -189,8 +250,14 @@ impl<'a> Emitter<'a> {
                 continue;
             }
 
-            for stmt in &block.stmts {
+            for (si, stmt) in block.stmts.iter().enumerate() {
                 self.stmt(stmt);
+                for k in 0..self.emptied[i].len() {
+                    let (at, r) = self.emptied[i][k];
+                    if at == si {
+                        self.code.push(Op::LoadUnit { dst: r });
+                    }
+                }
             }
             self.terminator(&block.term, i);
         }
@@ -213,6 +280,13 @@ impl<'a> Emitter<'a> {
                 let obj = self.operand_reg(base, 0);
                 let src = self.operand_reg(value, 1);
                 self.code.push(Op::SetField { obj, index: *index as u16, src });
+                // A write-back: the field holds it again, and the local is
+                // dead, so it should not be a second count on the next take.
+                if let mir::Operand::Local(l) = value {
+                    if self.taken[l.index()] {
+                        self.code.push(Op::LoadUnit { dst: reg(*l) });
+                    }
+                }
                 return;
             }
             mir::Inst::SetIndex { base, index, value } => {
@@ -253,7 +327,9 @@ impl<'a> Emitter<'a> {
             // Read the field and empty it, so the local is the one count left
             // and its next `push` goes straight in. Nothing reads the field
             // again before the next spill writes it.
-            mir::Rvalue::Unspill { base, index, .. } => {
+            // Taken the same way, for the write through a field that
+            // follows: the write-back puts it back.
+            mir::Rvalue::Unspill { base, index, .. } | mir::Rvalue::FieldTake { base, index } => {
                 let obj = self.operand_reg(base, 0);
                 self.code.push(Op::GetField { dst, obj, index: *index as u16 });
                 let empty = self.operand_reg(&mir::Operand::Unit, 1);

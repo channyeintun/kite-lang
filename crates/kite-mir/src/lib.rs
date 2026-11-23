@@ -9,12 +9,13 @@
 //! optimisation passes want; the bytecode backend maps locals to registers
 //! directly and does not need it.
 
-use kite_hir::{BinOp, Builtin, EnumId, StructId, TraitId, TyId, Types, UnOp};
+use kite_hir::{BinOp, Builtin, EnumId, StructId, TraitId, TyId, TyKind, Types, UnOp};
 use kite_span::Span;
 use std::fmt;
 
 mod async_;
 mod lower;
+pub use async_::frame_move;
 pub use async_::transform as asyncify;
 pub use async_::{DONE as TASK_DONE, VALUE as TASK_VALUE};
 pub use lower::{lower, LITERAL_WINDOW};
@@ -225,6 +226,14 @@ pub enum Rvalue {
     CallBuiltin { builtin: Builtin, args: Vec<Operand> },
     StructNew { struct_id: StructId, fields: Vec<Operand> },
     FieldGet { base: Operand, index: u32 },
+    /// Field `index` of `base`, read to be changed and written straight back
+    /// by a `SetField` of this local to the same field, with nothing between
+    /// that reads the field (see [`kite_hir::ExprKind::FieldTake`]). Means what
+    /// `FieldGet` means. A backend may give the local the field's own slice or
+    /// map, owned, when nothing else holds it — each says how it knows that
+    /// (see [`held_reads`]) — and whatever it gives the local, the write-back
+    /// puts it back.
+    FieldTake { base: Operand, index: u32 },
     EnumNew { enum_id: EnumId, variant: u32, fields: Vec<Operand> },
     /// The variant index of an enum value, for dispatching a `match`.
     TagOf { base: Operand },
@@ -353,6 +362,7 @@ impl Rvalue {
             | R::ToStr { operand: o, .. }
             | R::Cast { operand: o, .. }
             | R::FieldGet { base: o, .. }
+            | R::FieldTake { base: o, .. }
             | R::TagOf { base: o }
             | R::VariantGet { base: o, .. }
             | R::MapLen { base: o }
@@ -408,6 +418,193 @@ impl Terminator {
             Terminator::Branch { then, else_, .. } => vec![*then, *else_],
             Terminator::Return(_) | Terminator::Unreachable => Vec::new(),
         }
+    }
+}
+
+/// Whether field `index` of a `base_ty` value is one a write through a field
+/// can change in place (§5.4): a `var` field of a struct the program declared,
+/// holding a slice or a map. A frame's or a task's fields — named with a `$`,
+/// which no program can write — are never written through, so they never
+/// need the backends' bookkeeping for one (see [`held_reads`]).
+pub fn takeable_field(types: &Types, base_ty: TyId, index: u32) -> bool {
+    let TyKind::Struct(sid) = *types.kind(base_ty) else {
+        return false;
+    };
+    let Some(field) = types.struct_def(sid).fields.get(index as usize) else {
+        return false;
+    };
+    field.mutable
+        && !field.name.starts_with('$')
+        && matches!(types.kind(field.ty), TyKind::Slice(_) | TyKind::Map(..))
+}
+
+/// The locals that only glance at a field's slice or map, by local: for each,
+/// the block that reads the field into it and the last statement there that
+/// reads the local.
+///
+/// A write through a field (`q.items.push(v)`) goes straight into the field's
+/// slice when nothing else holds it, and on a target with no reference count
+/// the backend learns that from a mark on the slice itself: set by the
+/// write-back, and cleared by any read of the field that could keep what it
+/// read — into a binding, a call, a closure, another field, a task. Clearing
+/// it on *every* read would make the commonest loop of all quadratic again:
+/// `if q.items.len() < n { q.items.push(v) }` reads the field each time round.
+/// So a read is let off when its local is assigned once, read only in the
+/// same block, only by reads that keep nothing and run no program code — a
+/// length, an element, a lookup, a window (which copies), a comparison — and
+/// with nothing between the field read and the last of those that could
+/// write a slice or map in place: no call of any kind, no suspension, no
+/// in-place write, no `FieldTake`. Such a local has stopped being read before
+/// anything could change what it holds, so it holds nothing a write could be
+/// seen through. The state-machine transform's spills and reloads of it
+/// ([`frame_move`]) are not reads: the frame's copy only ever goes back into
+/// the local, which reads nothing before the block reads the field again.
+///
+/// The bytecode VM's sharing is a reference count, which a local that still
+/// holds the slice would spoil; it empties these locals after their last
+/// read, which is the same fact put to the opposite use.
+pub fn held_reads(func: &Function) -> Vec<Option<(usize, usize)>> {
+    let n = func.locals.len();
+    // Where each local is assigned, if exactly once by a `FieldGet`; `None`
+    // once anything rules it out.
+    let mut def: Vec<Option<(usize, usize)>> = vec![None; n];
+    let mut ruled_out = vec![false; n];
+    for r in ruled_out.iter_mut().take(func.param_count) {
+        *r = true;
+    }
+    for (bi, b) in func.blocks.iter().enumerate() {
+        for (si, s) in b.stmts.iter().enumerate() {
+            if frame_move(func, s).is_some() {
+                continue;
+            }
+            let written = match s {
+                Inst::Assign { dst, value } => {
+                    let i = dst.index();
+                    if def[i].is_some() || !matches!(value, Rvalue::FieldGet { .. }) {
+                        ruled_out[i] = true;
+                    }
+                    def[i] = Some((bi, si));
+                    continue;
+                }
+                Inst::SlicePush { local, .. }
+                | Inst::MapSet { local, .. }
+                | Inst::MapRemove { local, .. }
+                | Inst::SetIndex { base: Operand::Local(local), .. } => *local,
+                Inst::SetIndex { .. } | Inst::SetField { .. } => continue,
+            };
+            ruled_out[written.index()] = true;
+        }
+    }
+    let mut last: Vec<Option<(usize, usize)>> = vec![None; n];
+    for (bi, b) in func.blocks.iter().enumerate() {
+        for (si, s) in b.stmts.iter().enumerate() {
+            let glance = match s {
+                Inst::Assign {
+                    value:
+                        Rvalue::SliceLen { base }
+                        | Rvalue::MapLen { base }
+                        | Rvalue::MapKeys { base }
+                        | Rvalue::MapValues { base }
+                        | Rvalue::IndexGet { base, .. }
+                        | Rvalue::SliceGet { base, .. }
+                        | Rvalue::MapGet { base, .. }
+                        | Rvalue::SliceRange { base, .. },
+                    ..
+                } => Some(base),
+                _ => None,
+            };
+            let moved = frame_move(func, s);
+            for o in s.operands() {
+                let Operand::Local(l) = o else { continue };
+                if moved == Some(*l) {
+                    continue;
+                }
+                let i = l.index();
+                let looks = matches!(s, Inst::Assign { value: Rvalue::Binary { .. }, .. })
+                    || matches!(glance, Some(Operand::Local(g)) if g == l);
+                match def[i] {
+                    Some((db, ds)) if looks && db == bi && ds < si => last[i] = Some((bi, si)),
+                    _ => ruled_out[i] = true,
+                }
+            }
+        }
+        if let Some(Operand::Local(l)) = b.term.operand() {
+            ruled_out[l.index()] = true;
+        }
+    }
+    (0..n)
+        .map(|i| {
+            if ruled_out[i] {
+                return None;
+            }
+            let (bi, si) = def[i]?;
+            // Read by nothing at all, it is over the moment it is made.
+            let (_, end) = last[i].unwrap_or((bi, si));
+            let stmts = &func.blocks[bi].stmts;
+            let quiet = stmts[si + 1..end.max(si + 1)].iter().all(|s| match s {
+                Inst::Assign { value, .. } => !may_write_in_place(value),
+                Inst::SetField { .. } => true,
+                Inst::SetIndex { .. }
+                | Inst::SlicePush { .. }
+                | Inst::MapSet { .. }
+                | Inst::MapRemove { .. } => false,
+            });
+            quiet.then_some((bi, end))
+        })
+        .collect()
+}
+
+/// Whether evaluating `value` could write some slice or map in place, or run
+/// code of the program's that could: see [`held_reads`]. Exhaustive, with no
+/// catch-all, so a new form has to be decided.
+fn may_write_in_place(value: &Rvalue) -> bool {
+    use Rvalue as R;
+    match value {
+        R::Call { .. }
+        | R::CallVirtual { .. }
+        | R::CallClosure { .. }
+        | R::CallBuiltin { .. }
+        | R::CallExtern { .. }
+        | R::StrOp { .. }
+        // A rendering can reach a `Display` the program wrote.
+        | R::ToStr { .. }
+        | R::Await { .. }
+        | R::Yield
+        | R::FieldTake { .. } => true,
+        R::Use(_)
+        | R::Binary { .. }
+        | R::Unary { .. }
+        | R::ClosureNew { .. }
+        | R::Cast { .. }
+        | R::StructNew { .. }
+        | R::FieldGet { .. }
+        | R::EnumNew { .. }
+        | R::TagOf { .. }
+        | R::VariantGet { .. }
+        | R::TupleNew { .. }
+        | R::MapNew { .. }
+        | R::MapGet { .. }
+        | R::MapLen { .. }
+        | R::MapKeys { .. }
+        | R::MapValues { .. }
+        | R::SliceNew { .. }
+        | R::IsNil { .. }
+        | R::Wrap { .. }
+        | R::Unwrap { .. }
+        | R::PairNew { .. }
+        | R::PairValue { .. }
+        | R::PairError { .. }
+        | R::ErrorNew { .. }
+        | R::ErrorMessage { .. }
+        | R::ErrorCause { .. }
+        | R::ErrorTag { .. }
+        | R::ErrorAs { .. }
+        | R::IndexGet { .. }
+        | R::SliceLen { .. }
+        | R::SliceGet { .. }
+        | R::SliceRange { .. }
+        | R::Owned { .. }
+        | R::Unspill { .. } => false,
     }
 }
 
@@ -551,6 +748,7 @@ impl fmt::Display for Rvalue {
                 write!(f, "}}")
             }
             Rvalue::FieldGet { base, index } => write!(f, "{}.{}", base, index),
+            Rvalue::FieldTake { base, index } => write!(f, "take {}.{}", base, index),
             Rvalue::EnumNew { enum_id, variant, fields } => {
                 write!(f, "enum{}#{}(", enum_id.0, variant)?;
                 write_operands(f, fields)?;

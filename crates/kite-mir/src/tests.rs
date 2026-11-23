@@ -547,3 +547,39 @@ fn nested_and_suspending_long_literals_lower_well_formed() {
         }
     }
 }
+
+/// A write through a field takes the field, and a read of the field only
+/// glances when what it read is finished with before anything could write
+/// in place: a length read and compared before the push does; a binding
+/// read after a call, or after the push, does not.
+#[test]
+fn a_field_read_glances_only_while_nothing_can_write() {
+    let b = build(
+        "struct Q {\n    var items: [int]\n}\n\n\
+         fn touch() {\n}\n\n\
+         fn main() {\n    var q = Q{ items: [] }\n\
+         \x20   if q.items.len() < 3 {\n        q.items.push(1)\n    }\n\
+         \x20   let kept = q.items\n    q.items.push(2)\n    io.print(kept.len())\n\
+         \x20   let first = q.items\n    touch()\n    io.print(first[0])\n}\n",
+    );
+    let f = b.main();
+    let takes = f
+        .blocks
+        .iter()
+        .flat_map(|b| &b.stmts)
+        .filter(|s| matches!(s, Inst::Assign { value: Rvalue::FieldTake { .. }, .. }))
+        .count();
+    assert_eq!(takes, 2, "{}", b.show());
+    let reads: Vec<Local> = f
+        .blocks
+        .iter()
+        .flat_map(|b| &b.stmts)
+        .filter_map(|s| match s {
+            Inst::Assign { dst, value: Rvalue::FieldGet { .. } } => Some(*dst),
+            _ => None,
+        })
+        .collect();
+    let glances = held_reads(f);
+    let glancing: Vec<bool> = reads.iter().map(|l| glances[l.index()].is_some()).collect();
+    assert_eq!(glancing, vec![true, false, false], "{}", b.show());
+}

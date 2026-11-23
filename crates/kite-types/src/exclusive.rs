@@ -153,7 +153,7 @@ fn place_of(
         ExprKind::Unwrap { value } | ExprKind::Wrap { value } | ExprKind::ToDyn { value, .. } => {
             place_of(value, types, func, aliases)
         }
-        ExprKind::FieldGet { base, index } => {
+        ExprKind::FieldGet { base, index } | ExprKind::FieldTake { base, index } => {
             let mut place = place_of(base, types, func, aliases)?;
             place.text.push('.');
             place.text.push_str(&field_name(base.ty, *index, types));
@@ -409,6 +409,7 @@ impl Checker<'_> {
                 self.expr(cause);
             }
             ExprKind::FieldGet { base, .. }
+            | ExprKind::FieldTake { base, .. }
             | ExprKind::PairValue { base }
             | ExprKind::PairError { base }
             | ExprKind::ErrorMessage { base }
