@@ -1265,13 +1265,21 @@ impl<'a> Writer<'a, '_> {
                         VariantPayload::Named(fields) => {
                             let mut args = Vec::new();
                             // Said as the positional form says its own: an
-                            // array where an object belongs, or `{}`, reached
-                            // the first field's reader as a type error about
-                            // that field, and a key that was not there as one
-                            // about the value that was not there either.
+                            // array where an object belongs reached the first
+                            // field's reader as a type error about that field,
+                            // and a key that was not there as one about the
+                            // value that was not there either. An empty object
+                            // is an object: with every field optional it is
+                            // the payload with each one nil, and otherwise its
+                            // first required key is what is missing.
                             let names: Vec<&str> =
                                 fields.iter().map(|f| f.name.name.as_str()).collect();
-                            body.push(format!("        if {j}.entries({}).len() == 0 {{", held));
+                            let shaped = self.temp("object");
+                            body.push(format!(
+                                "        let {} = match {} {{ {j}.Json.Object(_) => true, _ => false }}",
+                                shaped, held
+                            ));
+                            body.push(format!("        if !{} {{", shaped));
                             body.push(format!(
                                 "            return _, errors.new(\"{}.{}: expected an object with the keys {}\")",
                                 decl.bare,

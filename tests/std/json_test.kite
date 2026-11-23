@@ -324,7 +324,9 @@ fn checks() -> [error] {
     out.push(test.equal_str(kind("{\"Box\":{\"w\":1}}"), "Box.h: missing", "a key that is not there is missing"))
     out.push(test.equal_str(kind("{\"Box\":{\"w\":1,\"h\":\"x\"}}"), "Box.h: expected a whole number", "and one of the wrong type is that"))
     out.push(test.equal_str(kind("{\"Box\":[1,2]}"), "Kind.Box: expected an object with the keys w, h", "an array is not an object"))
-    out.push(test.equal_str(kind("{\"Box\":{}}"), "Kind.Box: expected an object with the keys w, h", "nor is a payload with no keys"))
+    out.push(test.equal_str(kind("{\"Box\":{}}"), "Box.w: missing", "an empty object is an object, with its keys missing"))
+    out.push(test.equal_str(kind("{\"Box\":5}"), "Kind.Box: expected an object with the keys w, h", "nor is a number"))
+    out.push(test.equal_str(kind("{\"Maybe\":{}}"), "Maybe(w: nil)", "and with every field optional, {} is each one nil"))
 
     return out
 }
@@ -335,6 +337,7 @@ enum Kind {
     One(int)
     Two(int, str)
     Box(w: int, h: int)
+    Maybe(w: Option<int>)
 }
 
 /// What decoding `doc` as a `Kind` says: the variant, or the error.
