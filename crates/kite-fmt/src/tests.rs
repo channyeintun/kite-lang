@@ -20,6 +20,14 @@ fn idempotent(src: &str) -> String {
     once
 }
 
+/// A `use` path written from the file does not parse, and is laid out from
+/// its tokens — as written. It came out `use../ one / a`.
+#[test]
+fn a_use_path_with_dots_is_kept_as_written() {
+    same("use ../one/a\nuse ./two\npub use ../three\n\nfn main() {\n}\n");
+    assert_eq!(fmt("use  ../one/a\n\nfn main() {\n}\n"), "use ../one/a\n\nfn main() {\n}\n");
+}
+
 /// `Option<int>=nil` lexes `>=` as one token. It came out `Option<int>= nil`,
 /// and `Option<int> = nil` passed `--check` as well: two layouts of one
 /// program. There is one.

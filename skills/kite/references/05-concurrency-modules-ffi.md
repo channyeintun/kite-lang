@@ -18,7 +18,11 @@ The deltas that will catch you out, in the order you will hit them:
 5. **A `use` path is looked for beside the importing module, then outward**:
    in its own directory first, then each enclosing one, stopping at the
    package's root (the entry file's directory, or the dependency's own). The
-   nearest wins, so sibling directory modules reach each other.
+   nearest wins, so sibling directory modules reach each other. A path is a
+   name, never written from the file: `use ../one/a` and `use ./a` are one
+   `E0100` each, whose note gives the path to write (`use one/a`).
+   `use` lines come before the file's declarations; one written below them is
+   one `E0100` at the `use`, and still imports.
 6. **A module is where its source is**, so `util` inside `a/` and `util` inside
    `b/` are two modules, and so are `dep/utils` and `utils` — but the standard
    library's twenty names, `io`, `draw`, `ptr` and `prelude` are reserved on

@@ -1246,7 +1246,18 @@ impl Loader {
                 manifest.display()
             ));
         }
-        diags.push(missing);
+        // A `use` the parser refused — `use ../one/a`, kept as `one/a` so
+        // that `a.f()` is not reported unknown as well — has had its one
+        // error, which says how a path is looked for.
+        let refused = diags.iter().any(|d| {
+            d.code == Some(codes::E0100)
+                && d.labels.first().is_some_and(|l| {
+                    l.span.file == span.file && span.start <= l.span.start && l.span.end <= span.end
+                })
+        });
+        if !refused {
+            diags.push(missing);
+        }
         None
     }
 

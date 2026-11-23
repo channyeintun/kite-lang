@@ -2038,6 +2038,13 @@ has one of its own and `config/` beside `ui/` otherwise, and a dependency never
 resolves a `use` into the program that imports it. A `use` that matches
 nowhere is `E0400`, and its note lists every place that was tried.
 
+A path is therefore a name and never written from the file: `use ../config`,
+`use ./config` and `use /config` are `E0100`, with a note giving the path to
+write instead (`use config`). A file's `use` lines
+come before anything it declares; one below a declaration is `E0100` too, and
+the import is still made, so the names it brings in are not reported missing as
+well.
+
 **Neither form is a module until a `use` names it.** A `.kite` file nothing
 imports is not compiled, and two files sharing a directory share nothing by
 virtue of sitting there: `main.kite` above cannot see what `money.kite`

@@ -1255,6 +1255,7 @@ impl<'a> Parser<'a> {
             self.note_unparsed(before, reported);
         }
 
+        let mut first_declaration = None;
         while !self.at_end() {
             self.skip_newlines();
             if self.at_end() {
@@ -1268,6 +1269,16 @@ impl<'a> Parser<'a> {
             self.refused_to_close = false;
             self.panicking = false;
             let before = self.pos;
+            if self.at(T::Use) || self.at_pub_use() {
+                let reported = self.diags.len();
+                if let Some(u) = self.parse_late_use(first_declaration) {
+                    file.uses.push(u);
+                }
+                self.skip_newlines();
+                self.note_unparsed(before, reported);
+                continue;
+            }
+            first_declaration.get_or_insert(self.span());
             let saved = self.checkpoint();
             let mut item = self.parse_item();
             if std::mem::take(&mut self.rewind) {
@@ -1373,9 +1384,42 @@ impl<'a> Parser<'a> {
         u
     }
 
+    /// A `use` below a declaration. The imports of a file come first
+    /// (§13.1), so it is refused — once, at the `use`, where it was two
+    /// `expected a declaration` errors, one for each word — and then
+    /// recorded as the import it is, so the names it brings in are not
+    /// reported missing as well. A late `pub use` has one error too: the
+    /// `pub` one, which says both things.
+    fn parse_late_use(&mut self, first: Option<Span>) -> Option<Use> {
+        let at = self.span();
+        let is_pub = self.at_pub_use();
+        let reported = self.diags.len();
+        let u = self.parse_maybe_pub_use();
+        let first = first.unwrap_or(at);
+        if is_pub {
+            if let Some(d) = self.diags.get_mut(reported) {
+                d.notes.push("a `use` also goes above the file's declarations".to_string());
+            }
+        } else if self.diags.len() == reported {
+            self.diags.push(
+                Diagnostic::error(codes::E0100, "a `use` goes above the file's declarations")
+                    .with_primary(at, "this `use` follows a declaration")
+                    .with_secondary(first, "the first declaration is here")
+                    .with_note(
+                        "a file's imports come before anything it declares; move this line \
+                         above the first declaration",
+                    ),
+            );
+        }
+        u
+    }
+
     fn parse_use(&mut self) -> Option<Use> {
         let start = self.span();
         self.bump(); // `use`
+        if matches!(self.peek(), T::DotDot | T::Dot | T::Slash) {
+            return self.relative_use(start);
+        }
         let mut path = vec![self.ident()?];
         while self.eat(T::Slash) {
             path.push(self.ident()?);
@@ -1384,6 +1428,52 @@ impl<'a> Parser<'a> {
         let span = start.to(self.prev_span());
         self.expect_terminator();
         Some(Use { path, alias, span })
+    }
+
+    /// `use ../one/a`, `use ./a` or `use /a`: a path written from this file.
+    /// A `use` path is a name, looked for beside the module and then in each
+    /// directory around it up to the package's root (§13.1), so the `..` is
+    /// what goes. Refused once at the lead, and recorded as the path without
+    /// it — what the note says to write — so the names it brings in are not
+    /// reported missing too. It was two errors for the one `..`, and then a
+    /// third for the module.
+    fn relative_use(&mut self, start: Span) -> Option<Use> {
+        let lead = self.span();
+        let lead_text = self.text(lead).to_string();
+        let mut path = Vec::new();
+        while !matches!(self.peek(), T::Newline | T::Eof | T::As) {
+            if self.at(T::Ident) {
+                path.push(self.ident()?);
+            } else {
+                self.bump();
+            }
+        }
+        let alias = if self.eat(T::As) && self.at(T::Ident) { Some(self.ident()?) } else { None };
+        let span = start.to(self.prev_span());
+        let written = self.text(Span::new(self.file, lead.start, span.end)).to_string();
+        let names: Vec<&str> = path.iter().map(|s| s.name.as_str()).collect();
+        let mut d = Diagnostic::error(
+            codes::E0100,
+            format!("a `use` path does not start with `{}`", lead_text),
+        )
+        .with_primary(lead, "a path is not written from this file");
+        if names.is_empty() {
+            d = d.with_note(
+                "a `use` path is the module's name, looked for beside this module and then in \
+                 each directory around it, up to the package's root",
+            );
+        } else {
+            d = d.with_note(format!(
+                "a `use` path is looked for beside this module and then in each directory around \
+                 it, up to the package's root, so `{}` is written `use {}`; a module outside the \
+                 package cannot be imported",
+                written.split(" as ").next().unwrap_or(&written).trim(),
+                names.join("/"),
+            ));
+        }
+        self.diags.push(d);
+        self.expect_terminator();
+        (!path.is_empty()).then_some(Use { path, alias, span })
     }
 
     fn parse_item(&mut self) -> Option<Item> {
@@ -1395,12 +1485,6 @@ impl<'a> Parser<'a> {
         // amount of Kite could say instead — which is the bar an attribute has
         // to clear.
         let attribute = if self.at(T::At) { Some(self.parse_attribute()?) } else { None };
-        if attribute.is_none() && self.at_pub_use() {
-            // Below the declarations: refused as one, and the rest of the
-            // line read, so it is not reported again a word at a time.
-            self.parse_maybe_pub_use()?;
-            return Some(Item::Error(start));
-        }
         let is_pub = self.eat(T::Pub);
         let async_at = self.span();
         let is_async = self.eat(T::Async);
