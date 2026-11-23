@@ -7858,6 +7858,10 @@ impl<'a> Checker<'a> {
                         last_segment(&self.types.trait_def(bound).name),
                         self.types.name(arg)
                     ),
+                    None if !self.may_implement_here(ty, Some(tr)) => format!(
+                        "{}; or name the type the error was made from",
+                        self.not_implementable_here("Error", ty)
+                    ),
                     None => format!(
                         "write `{} {{ fn message(self) -> str {{ … }} }}`, or name the type \
                          the error was made from",
@@ -11270,6 +11274,33 @@ impl<'a> Checker<'a> {
         format!("impl<{}> {} for {}<{}>", params, trait_name, base, params)
     }
 
+    /// Whether this module may write `impl <tr> for <ty>`: it declares the
+    /// type or the trait (§8.2, the rule E0406 holds an `impl` to). A note
+    /// that says to write one the rule refuses ends in another error.
+    fn may_implement_here(&self, ty: TyId, tr: Option<hir::TraitId>) -> bool {
+        let here = |ti: u32| {
+            let decl = self.resolved.types[ti as usize].decl_index;
+            self.resolved.module_of_item(decl) == self.module
+        };
+        self.type_index_of(ty).is_some_and(here) || tr.and_then(|t| self.trait_index_of(t)).is_some_and(here)
+    }
+
+    /// The note for a type another module declares, where the `impl` that
+    /// would fix it is that module's (or the trait's) to write.
+    fn not_implementable_here(&self, trait_name: &str, ty: TyId) -> String {
+        let trait_name = trait_name.strip_prefix("prelude.").unwrap_or(trait_name);
+        format!(
+            "`{}` and `{}` are both declared outside this module, so `impl {} for {}` cannot \
+             be written here (E0406); hold the value in a struct of this module's own and \
+             implement `{}` for that",
+            self.types.name(ty),
+            trait_name,
+            trait_name,
+            self.types.name(ty),
+            trait_name
+        )
+    }
+
     /// Every bound must hold for the type chosen.
     fn check_bounds(&mut self, generics: &[GenericDef], targs: &[TyId], span: Span) {
         for (g, t) in generics.iter().zip(targs.iter()) {
@@ -11346,6 +11377,9 @@ impl<'a> Checker<'a> {
                         self.types.with_article(*t),
                         written_trait(&self.types.trait_def(tr).name)
                     )),
+                    _ if self.type_index_of(*t).is_some() && !self.may_implement_here(*t, Some(*bound)) => {
+                        d.with_note(self.not_implementable_here(&bn, *t))
+                    }
                     _ if self.type_index_of(*t).is_some() => {
                         d.with_note(format!("write `{}`", self.impl_to_write(&bn, *t)))
                     }
@@ -13763,6 +13797,9 @@ impl<'a> Checker<'a> {
                 );
             }
         }
+        if !self.may_implement_here(ty, self.display_trait()) {
+            return self.not_implementable_here("Display", ty);
+        }
         format!("write `{} {{ fn show(self) -> str {{ … }} }}`", self.impl_to_write("Display", ty))
     }
 
@@ -14076,8 +14113,12 @@ impl<'a> Checker<'a> {
                     None => {
                         let (tn, fname) =
                             (written_trait(&self.types.trait_def(tr).name), self.types.name(found));
-                        let header = self.impl_to_write(&tn, found);
-                        format!("`{}` does not implement `{}`; write `{}` to use it here", fname, tn, header)
+                        if self.may_implement_here(found, Some(tr)) {
+                            let header = self.impl_to_write(&tn, found);
+                            format!("`{}` does not implement `{}`; write `{}` to use it here", fname, tn, header)
+                        } else {
+                            format!("`{}` does not implement `{}`: {}", fname, tn, self.not_implementable_here(&tn, found))
+                        }
                     }
                 };
                 d = d.with_note(note);
@@ -14089,6 +14130,9 @@ impl<'a> Checker<'a> {
         if expected == TyId::ERR && self.type_index_of(found).is_some() {
             match self.error_trait().and_then(|tr| self.unmet_bound_note(found, tr)) {
                 Some(bounded) => d = d.with_note(bounded),
+                None if !self.may_implement_here(found, self.error_trait()) => {
+                    d = d.with_note(self.not_implementable_here("Error", found));
+                }
                 None => {
                     d = d.with_note(format!(
                         "a type may stand here once it implements `Error`: write \

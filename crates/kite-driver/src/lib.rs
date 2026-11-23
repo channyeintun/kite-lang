@@ -1838,6 +1838,31 @@ mod tests {
         assert!(!text.contains("unknown type") && !text.contains("similar type"), "{}", text);
     }
 
+    /// A note never says to write an `impl` the orphan rule refuses:
+    /// `io.print(j)` for a `json.Json` said to write `impl Display for
+    /// json.Json`, which is E0406. It says to hold the value in a struct of
+    /// the file's own, and that, written, compiles.
+    #[test]
+    fn a_note_for_another_modules_type_offers_no_orphan_impl() {
+        let c = compile(
+            "t.kite",
+            "use std/json\nfn main() {\n  let (j, e) = json.parse(\"1\")\n  if e == nil {\n    io.print(j)\n  }\n}\n",
+            Emit::Check,
+        );
+        let text = c.render_diagnostics();
+        assert!(c.failed(), "{}", text);
+        assert!(!text.contains("write `impl Display for json.Json"), "{}", text);
+        assert!(text.contains("hold the value in a struct of this module's own"), "{}", text);
+        let c = compile(
+            "t.kite",
+            "use std/json\nstruct Shown {\n  j: json.Json\n}\nimpl Display for Shown {\n  fn show(self) -> str {\n    \
+             return json.stringify(self.j)\n  }\n}\nfn main() {\n  let (j, e) = json.parse(\"1\")\n  if e == nil {\n    \
+             io.print(Shown{ j: j })\n  }\n}\n",
+            Emit::Check,
+        );
+        assert!(!c.failed(), "{}", c.render_diagnostics());
+    }
+
     /// `<error>` is the checker's name for a type that failed, and is never
     /// in a message: a type or a value built around a reported name is that
     /// one report, wherever it is used afterwards.
