@@ -684,8 +684,8 @@ codes! {
          \n\
          Example:\n\
          \n\
-         \x20   let A = B + 1\n\
-         \x20   let B = A + 1    // E0119: `A` is defined in terms of itself\n\
+         \x20   let A = B + 1    // E0119: `A` is defined in terms of itself\n\
+         \x20   let B = A + 1\n\
          \n\
          \x20   fn main() {\n\
          \x20       io.print(A)\n\
@@ -1249,11 +1249,11 @@ codes! {
          \n\
          Example:\n\
          \n\
-         \x20   fn depth<T>(x: T, n: int) -> int {\n\
+         \x20   fn depth<T>(x: T, n: int) -> int {    // E0220: `depth` instantiates itself without end\n\
          \x20       if n == 0 {\n\
          \x20           return 0\n\
          \x20       }\n\
-         \x20       return depth([x], n - 1)    // E0220: a new copy of `depth` at every level\n\
+         \x20       return depth([x], n - 1)    // a new copy of `depth` at every level\n\
          \x20   }\n\
          \n\
          \x20   fn main() {\n\
@@ -1883,8 +1883,8 @@ codes! {
          \n\
          Example:\n\
          \n\
-         \x20   @derive(Debug)    // E0700: not a type declaration\n\
-         \x20   fn f() {\n\
+         \x20   @derive(Debug)\n\
+         \x20   fn f() {    // E0700: not a type declaration\n\
          \x20   }\n\
          \n\
          \x20   fn main() {\n\
@@ -2112,21 +2112,33 @@ codes! {
          \n\
          Example, a function of seventy thousand `let` lines (written out here as `…`), as a generator can produce:\n\
          \n\
-         \x20   fn main() {\n\
+         \x20   fn main() {    // E0902: a frame of 70006 registers, more than 65536\n\
          \x20       let a0 = 0\n\
          \x20       let a1 = 1\n\
          \x20       …\n\
-         \x20       let a69999 = 69999    // E0902: a frame of 70006 registers, more than 65536\n\
+         \x20       let a69999 = 69999\n\
          \x20       io.print(a1)\n\
          \x20   }\n\
          \n\
-         The fix is to split the function, so that each has a frame of its own and none is near the limit. A function of a thousand `let` lines is fine:\n\
+         The fix is to split the function, so that each part has a frame of its own and none is near the limit — here two halves of thirty-five thousand lines:\n\
          \n\
-         \x20   fn main() {\n\
+         \x20   fn first() {\n\
          \x20       let a0 = 0\n\
          \x20       let a1 = 1\n\
          \x20       …\n\
-         \x20       let a999 = 999\n\
+         \x20       let a34999 = 34999\n\
          \x20       io.print(a1)\n\
+         \x20   }\n\
+         \n\
+         \x20   fn second() {\n\
+         \x20       let a35000 = 35000\n\
+         \x20       …\n\
+         \x20       let a69999 = 69999\n\
+         \x20       io.print(a35000)\n\
+         \x20   }\n\
+         \n\
+         \x20   fn main() {\n\
+         \x20       first()\n\
+         \x20       second()\n\
          \x20   }";
 }

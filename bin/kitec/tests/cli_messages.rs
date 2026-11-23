@@ -181,21 +181,38 @@ const NO_EXAMPLE: [(&str, &str); 2] = [
 /// the text shows has `…` where the thousands of lines are.
 fn generated(code: &str, fixed: bool) -> Option<String> {
     match code {
-        "E0102" => {
-            let depth = if fixed { 200 } else { 300 };
-            Some(format!(
-                "fn main() {{\n    let x = {}1{}\n    io.print(x)\n}}\n",
-                "(".repeat(depth),
-                ")".repeat(depth)
-            ))
-        }
+        // Three hundred deep; the fix names the middle, as the text says,
+        // so that each half is a hundred and fifty.
+        "E0102" if fixed => Some(format!(
+            "fn main() {{\n    let inner = {o}1{c}\n    let x = {o}inner{c}\n    io.print(x)\n}}\n",
+            o = "(".repeat(150),
+            c = ")".repeat(150)
+        )),
+        "E0102" => Some(format!(
+            "fn main() {{\n    let x = {}1{}\n    io.print(x)\n}}\n",
+            "(".repeat(300),
+            ")".repeat(300)
+        )),
+        // Seventy thousand `let`s in one function; the fix is the text's two
+        // halves.
         "E0902" => {
-            let n = if fixed { 1000 } else { 70000 };
-            let mut text = String::from("fn main() {\n");
-            for i in 0..n {
-                text.push_str(&format!("    let a{} = {}\n", i, i));
+            let lets = |text: &mut String, from: usize, to: usize| {
+                for i in from..to {
+                    text.push_str(&format!("    let a{} = {}\n", i, i));
+                }
+            };
+            let mut text = String::new();
+            if fixed {
+                text.push_str("fn first() {\n");
+                lets(&mut text, 0, 35000);
+                text.push_str("    io.print(a1)\n}\n\nfn second() {\n");
+                lets(&mut text, 35000, 70000);
+                text.push_str("    io.print(a35000)\n}\n\nfn main() {\n    first()\n    second()\n}\n");
+            } else {
+                text.push_str("fn main() {\n");
+                lets(&mut text, 0, 70000);
+                text.push_str("    io.print(a1)\n}\n");
             }
-            text.push_str("    io.print(a1)\n}\n");
             Some(text)
         }
         _ => None,
@@ -233,6 +250,9 @@ fn every_code_has_an_example_that_raises_it_and_a_fix_that_compiles() {
         let fix_block = block_after(&said, "The fix").unwrap_or_else(|| panic!("{}: no fix block", code));
         let manifest = example_block.trim_start().starts_with("[package]");
         let (entry, fixed_entry);
+        // The line an example marks `// E0xxx` is the line the report points
+        // at; a mark on a line of its own is about the line below it.
+        let mut marked: Option<(String, usize)> = None;
         if manifest {
             // A manifest is the example: what is checked is whether it reads,
             // in a package whose program does nothing.
@@ -254,6 +274,14 @@ fn every_code_has_an_example_that_raises_it_and_a_fix_that_compiles() {
         } else {
             let files = files_of(&example_block);
             write_all(&at, &files);
+            let mark = format!("// {}", code);
+            marked = files.iter().find_map(|(name, body)| {
+                let body = body.trim_start_matches('\n');
+                let lines: Vec<&str> = body.lines().collect();
+                let i = lines.iter().position(|l| l.contains(&mark))?;
+                let below = lines[i].trim_start().starts_with("//");
+                Some((name.clone(), if below { i + 2 } else { i + 1 }))
+            });
             entry = at.join(&files[0].0);
             // A fix that names files replaces those of the example; one that
             // is a program on its own replaces the entry; one that shows only
@@ -288,6 +316,10 @@ fn every_code_has_an_example_that_raises_it_and_a_fix_that_compiles() {
             code,
             said_err
         );
+        if let Some((name, line)) = &marked {
+            let at_line = format!("{}:{}:", name, line);
+            assert!(said_err.contains(&at_line), "{} example marks {} but the report is elsewhere:\n{}", code, at_line, said_err);
+        }
         if !also.contains(&code) {
             let others: Vec<String> = said_err
                 .lines()
