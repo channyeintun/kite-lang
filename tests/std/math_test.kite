@@ -123,10 +123,48 @@ fn exp_checks() -> [error] {
     return out
 }
 
+fn edge_checks() -> [error] {
+    var out: [error] = []
+    // NaN in, NaN out, and the limits at infinity, as in libm. Each of these
+    // was a number: ln(inf) and cbrt(±inf) reached a series as inf / inf,
+    // and asin clamped a NaN into range, so a NaN came back an angle.
+    out.push(same(math.ln(inf()), inf(), "ln(inf)"))
+    out.push(same(math.ln(nan()), nan(), "ln(NaN)"))
+    out.push(same(math.cbrt(inf()), inf(), "cbrt(inf)"))
+    out.push(same(math.cbrt(-inf()), -inf(), "cbrt(-inf)"))
+    out.push(same(math.cbrt(nan()), nan(), "cbrt(NaN)"))
+    out.push(same(math.cbrt(-0.0), -0.0, "cbrt(-0)"))
+    out.push(same(math.asin(nan()), nan(), "asin(NaN)"))
+    out.push(same(math.acos(nan()), nan(), "acos(NaN)"))
+    out.push(same(math.asin(2.0), math.pi() / 2.0, "past one, asin answers for one"))
+    // Near ±1, 1 − x² was computed after x² had rounded: 960 units out.
+    out.push(test.is_true(math.abs(math.asin(0.9999999999) - 1.5707821846586878) < 0.0000000000000005, "asin near one, within two units"))
+    // atan2, C99's table: the sign of a zero decides the side of an axis.
+    out.push(same(math.atan2(-0.0, -1.0), -math.pi(), "atan2(-0, -1)"))
+    out.push(same(math.atan2(0.0, -1.0), math.pi(), "atan2(0, -1)"))
+    out.push(same(math.atan2(-0.0, 0.0), -0.0, "atan2(-0, 0)"))
+    out.push(same(math.atan2(0.0, -0.0), math.pi(), "atan2(0, -0)"))
+    out.push(same(math.atan2(-0.0, -0.0), -math.pi(), "atan2(-0, -0)"))
+    out.push(same(math.atan2(-1.0, 0.0), -math.pi() / 2.0, "atan2(-1, 0)"))
+    out.push(same(math.atan2(1.0, -0.0), math.pi() / 2.0, "atan2(1, -0)"))
+    out.push(same(math.atan2(inf(), inf()), 0.7853981633974483, "atan2(inf, inf)"))
+    out.push(same(math.atan2(-inf(), -inf()), -2.356194490192345, "atan2(-inf, -inf)"))
+    out.push(same(math.atan2(inf(), 3.0), math.pi() / 2.0, "atan2(inf, 3)"))
+    out.push(same(math.atan2(1.0, -inf()), math.pi(), "atan2(1, -inf)"))
+    out.push(same(math.atan2(-1.0, -inf()), -math.pi(), "atan2(-1, -inf)"))
+    out.push(same(math.atan2(-1.0, inf()), -0.0, "atan2(-1, inf)"))
+    out.push(same(math.atan2(nan(), 1.0), nan(), "atan2(NaN, 1)"))
+    out.push(same(math.atan2(1.0, nan()), nan(), "atan2(1, NaN)"))
+    out.push(same(math.atan2(1e-300, -1e300), math.pi(), "a quotient that underflows"))
+    out.push(test.is_true(math.abs(math.atan2(-3.0, -4.0) - -2.498091544796509) < 0.000000000000001, "the third quadrant"))
+    return out
+}
+
 fn main() {
     var results: [error] = []
     results = concat(results, pow_checks())
     results = concat(results, exp_checks())
+    results = concat(results, edge_checks())
     var failed = 0
     for e in results {
         if e != nil {

@@ -738,9 +738,17 @@ pub fn powf(base: float, exponent: float) -> float {
 }
 
 /// The cube root, keeping the sign — unlike `powf`, which cannot.
+///
+/// ```kite
+/// assert(cbrt(-27.0) == -3.0, "the sign is kept")
+/// assert(cbrt(-1.0 / 0.0) < -max_float(), "an infinity is its own root")
+/// ```
+///
+/// A zero, an infinity and a NaN are their own roots, signs included. An
+/// infinity used to reach Newton's step, where `inf / inf` is a NaN.
 pub fn cbrt(x: float) -> float {
-    if x == 0.0 {
-        return 0.0
+    if x == 0.0 || !(abs(x) < abs(x) * 2.0) {
+        return x
     }
     if x < 0.0 {
         return -cbrt(-x)
@@ -1090,43 +1098,82 @@ pub fn atan(x: float) -> float {
     return sum
 }
 
-/// The angle of the point `(x, y)` from the positive x axis, in `(-π, π]`.
+/// The angle of the point `(x, y)` from the positive x axis, in `[-π, π]`.
+///
+/// ```kite
+/// assert(atan2(-0.0, -1.0) == -pi(), "just below the negative x axis")
+/// assert(atan2(1.0 / 0.0, 1.0 / 0.0) == pi() / 4.0, "both infinite")
+/// ```
 ///
 /// The quadrant comes from the signs, which is the whole reason this exists
 /// separately from `atan(y / x)`: that division throws away which quadrant the
 /// point was in, and `(-1, -1)` and `(1, 1)` are not the same direction.
+///
+/// The signs include a zero's, and the edges are C99's: on the x axis the
+/// answer is ±0 or ±π, signed as `y` is — so `atan2(-0.0, -1.0)` is -π, the
+/// limit from below the axis, where it used to be +π — and a zero `x` takes
+/// `-0.0`'s side as `-x` does. Infinities give the limiting angle: ±π/2
+/// against a finite `x`, ±π/4 or ±3π/4 against an infinite one, ±0 or ±π for
+/// a finite `y` against one. These used to divide and get a NaN. A NaN in
+/// either answers a NaN.
 pub fn atan2(y: float, x: float) -> float {
+    if !(y >= y) || !(x >= x) {
+        return y + x
+    }
+    // -0.0 is not below zero; only dividing by it tells it from 0.0.
+    let below = y < 0.0 || (y == 0.0 && 1.0 / y < 0.0)
+    let left = x < 0.0 || (x == 0.0 && 1.0 / x < 0.0)
+    let sign = if below { -1.0 } else { 1.0 }
+    if y == 0.0 {
+        return if left { sign * pi() } else { y }
+    }
+    if x == 0.0 {
+        return sign * pi() / 2.0
+    }
+    let y_infinite = !(abs(y) <= max_float())
+    if !(abs(x) <= max_float()) {
+        if y_infinite {
+            return sign * (if left { 2.356194490192345 } else { 0.7853981633974483 })
+        }
+        return if left { sign * pi() } else { sign * 0.0 }
+    }
+    if y_infinite {
+        return sign * pi() / 2.0
+    }
     if x > 0.0 {
         return atan(y / x)
     }
-    if x < 0.0 {
-        if y >= 0.0 {
-            return atan(y / x) + pi()
-        }
+    if below {
         return atan(y / x) - pi()
     }
-    if y > 0.0 {
-        return pi() / 2.0
-    }
-    if y < 0.0 {
-        return -pi() / 2.0
-    }
-    // The origin has no direction. Zero is the conventional answer and the one
-    // every libm gives.
-    return 0.0
+    return atan(y / x) + pi()
 }
 
+/// The arcsine, in `[-π/2, π/2]`. Past ±1 there is none, and the answer is
+/// that of ±1 — the nearest point that has one. A NaN answers a NaN; it used
+/// to be clamped into range and come back as -π/2, a NaN made into an angle.
+///
+/// ```kite
+/// assert(asin(1.0) == pi() / 2.0, "asin(1)")
+/// assert(!(asin(0.0 / 0.0) >= 0.0) && !(asin(0.0 / 0.0) < 0.0), "a NaN stays one")
+/// ```
 pub fn asin(x: float) -> float {
-    let c = clamp(x, -1.0, 1.0)
-    if c >= 1.0 {
+    if !(x >= x) {
+        return x
+    }
+    if x >= 1.0 {
         return pi() / 2.0
     }
-    if c <= -1.0 {
+    if x <= -1.0 {
         return -pi() / 2.0
     }
-    return atan(c / sqrt(1.0 - c * c))
+    // 1 − x² as (1 − x)(1 + x): near ±1, `x * x` has already rounded away
+    // most of what the subtraction leaves.
+    return atan(x / sqrt((1.0 - x) * (1.0 + x)))
 }
 
+/// The arccosine, in `[0, π]`, with `asin`'s edges: past ±1 the answer is
+/// that of ±1, and a NaN answers a NaN.
 pub fn acos(x: float) -> float {
     return pi() / 2.0 - asin(x)
 }
