@@ -257,6 +257,7 @@ pub fn absf(x: float) -> float {
     return x
 }
 
+/// The smaller of two `int`s. [`math.min`] is the one for floats.
 pub fn min(a: int, b: int) -> int {
     if a < b {
         return a
@@ -264,6 +265,7 @@ pub fn min(a: int, b: int) -> int {
     return b
 }
 
+/// The larger of two `int`s. [`math.max`] is the one for floats.
 pub fn max(a: int, b: int) -> int {
     if a > b {
         return a
@@ -374,6 +376,7 @@ pub fn sum(items: [int]) -> int {
     return total
 }
 
+/// The sum of the floats, added left to right; 0.0 for an empty slice. A NaN anywhere makes the answer a NaN. [`sum`] is the one for `int`s, and traps on overflow.
 pub fn sumf(items: [float]) -> float {
     var total = 0.0
     for item in items {
@@ -394,6 +397,13 @@ pub fn contains(s: str, needle: str) -> bool {
     return s.index_of(needle) >= 0
 }
 
+/// Whether `s` begins with `prefix`. Every string begins with the empty one.
+///
+/// ```kite
+/// assert(starts_with("kite", "ki"), "a prefix")
+/// assert(!starts_with("kite", "te"), "not a prefix")
+/// assert(starts_with("kite", ""), "the empty one is always there")
+/// ```
 pub fn starts_with(s: str, prefix: str) -> bool {
     if prefix.len() > s.len() {
         return false
@@ -401,6 +411,12 @@ pub fn starts_with(s: str, prefix: str) -> bool {
     return s.slice(0, prefix.len()) == prefix
 }
 
+/// Whether `s` ends with `suffix`. Every string ends with the empty one.
+///
+/// ```kite
+/// assert(ends_with("kite", "te"), "a suffix")
+/// assert(!ends_with("kite", "ki"), "not a suffix")
+/// ```
 pub fn ends_with(s: str, suffix: str) -> bool {
     if suffix.len() > s.len() {
         return false
@@ -1366,10 +1382,21 @@ fn big_compare(a: [int], b: [int]) -> int {
 // wrong — and a library that pretended otherwise would be wrong quietly. What
 // this is for is protocol text: header names, flags, identifiers.
 
+/// `text` with its ASCII capitals made small. Every other character is left as it is: see the note above on why case is not guessed at beyond ASCII.
+///
+/// ```kite
+/// assert(lower("Content-Type") == "content-type", "a header name")
+/// assert(lower("É") == "É", "only ASCII")
+/// ```
 pub fn lower(text: str) -> str {
     return mapped(text, "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz")
 }
 
+/// `text` with its ASCII small letters made capital, and every other character left as it is.
+///
+/// ```kite
+/// assert(upper("get") == "GET", "a method")
+/// ```
 pub fn upper(text: str) -> str {
     return mapped(text, "abcdefghijklmnopqrstuvwxyz", "ABCDEFGHIJKLMNOPQRSTUVWXYZ")
 }
@@ -1481,6 +1508,7 @@ pub fn min_by<T>(items: [T], less: fn(T, T) -> bool) -> Option<T> {
     return best
 }
 
+/// The item that `less` puts last, or nil for an empty slice. `less(a, b)` says whether `a` goes before `b`; among items it does not separate, the first is the answer. [`min_by`] is the one that wants the first.
 pub fn max_by<T>(items: [T], less: fn(T, T) -> bool) -> Option<T> {
     if items.len() == 0 {
         return nil
@@ -1887,10 +1915,12 @@ pub fn hash_combine(accumulated: int, next: int) -> int {
     return h
 }
 
+/// The hash of an `int`: [`hash_seed`] with the value folded in by [`hash_combine`].
 pub fn hash_int(value: int) -> int {
     return hash_combine(hash_seed(), value)
 }
 
+/// The hash of a `bool`: [`hash_seed`] with 1 for true and 0 for false folded in by [`hash_combine`].
 pub fn hash_bool(value: bool) -> int {
     return hash_combine(hash_seed(), if value { 1 } else { 0 })
 }

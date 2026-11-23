@@ -116,6 +116,13 @@ pub fn floor(x: float) -> float {
     return t
 }
 
+/// The smallest whole number not below `x`, as a `float`; it rounds toward positive infinity, where [`floor`] rounds toward negative. A NaN stays one, an infinity stays itself, and `ceil(-0.5)` is `-0.0`.
+///
+/// ```kite
+/// assert(ceil(2.1) == 3.0, "up")
+/// assert(ceil(-2.9) == -2.0, "toward positive infinity, so up")
+/// assert(ceil(5.0) == 5.0, "a whole number is itself")
+/// ```
 pub fn ceil(x: float) -> float {
     let t = trunc(x)
     if t < x {
@@ -688,14 +695,17 @@ pub fn pi() -> float {
     return 3.141592653589793
 }
 
+/// Euler's number, the base of the natural logarithm, to the precision a `float` holds.
 pub fn e() -> float {
     return 2.718281828459045
 }
 
+/// The ratio of a circle's circumference to its radius, 2π, to the precision a `float` holds.
 pub fn tau() -> float {
     return 6.283185307179586
 }
 
+/// The natural logarithm of 2, to the precision a `float` holds.
 pub fn ln2() -> float {
     return 0.6931471805599453
 }
@@ -1518,6 +1528,7 @@ fn cos_split(r: float, tail: float) -> float {
     return cos_near(r) - tail * r
 }
 
+/// The sine of `x`, an angle in radians. Large angles are reduced by whole quarter turns without losing the fraction, and the sign of a zero is kept, so `sin(-0.0)` is `-0.0`. A NaN or an infinity gives a NaN.
 pub fn sin(x: float) -> float {
     // A zero is its own sine, and the sign is part of the answer: IEEE 754,
     // C and JavaScript all give sin(-0) = -0, and `tan` divides it by one and
@@ -1543,6 +1554,7 @@ pub fn sin(x: float) -> float {
     return -cos_split(q.r, q.tail)
 }
 
+/// The cosine of `x`, an angle in radians, reduced as [`sin`] does it. A NaN or an infinity gives a NaN.
 pub fn cos(x: float) -> float {
     if abs(x) <= 0.7853981633974483 {
         return cos_near(x)
@@ -1560,6 +1572,7 @@ pub fn cos(x: float) -> float {
     return sin_split(q.r, q.tail)
 }
 
+/// The tangent of `x`, an angle in radians: `sin(x)` over `cos(x)`. Near a quarter turn it is very large and not infinite, since no `float` is exactly π/2; a NaN or an infinity gives a NaN.
 pub fn tan(x: float) -> float {
     let c = cos(x)
     if c == 0.0 {
@@ -1712,10 +1725,20 @@ pub fn acos(x: float) -> float {
     return pi() / 2.0 - asin(x)
 }
 
+/// An angle given in radians, in degrees.
+///
+/// ```kite
+/// assert(degrees(pi()) == 180.0, "half a turn")
+/// ```
 pub fn degrees(radians: float) -> float {
     return radians * 180.0 / pi()
 }
 
+/// An angle given in degrees, in radians. [`degrees`] is its inverse, up to rounding.
+///
+/// ```kite
+/// assert(radians(180.0) == pi(), "half a turn")
+/// ```
 pub fn radians(degrees: float) -> float {
     return degrees * pi() / 180.0
 }

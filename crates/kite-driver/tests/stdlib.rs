@@ -245,3 +245,41 @@ fn the_standard_librarys_documentation_examples_run() {
     // passing on an empty set, which is how a check like this dies.
     assert!(ran > 0, "no documentation examples ran");
 }
+
+/// Every `pub` function, type, constant, alias and trait of `std/` has a doc
+/// comment, so that `kitec doc` never prints a bare signature. A hundred and
+/// two had none. The comment may sit above an attribute (`@derive`, `@host`).
+#[test]
+fn every_public_item_of_the_standard_library_is_documented() {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../std");
+    let mut bare = Vec::new();
+    let mut files: Vec<PathBuf> = std::fs::read_dir(&dir)
+        .expect("std/")
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.extension().is_some_and(|x| x == "kite"))
+        .collect();
+    files.sort();
+    for path in files {
+        let text = std::fs::read_to_string(&path).expect("read");
+        let lines: Vec<&str> = text.lines().collect();
+        for (i, line) in lines.iter().enumerate() {
+            let rest = line.trim_start();
+            let Some(rest) = rest.strip_prefix("pub ") else { continue };
+            let rest = rest.strip_prefix("async ").unwrap_or(rest);
+            let is_item = ["fn ", "struct ", "enum ", "const ", "type ", "trait "]
+                .iter()
+                .any(|k| rest.starts_with(k));
+            if !is_item {
+                continue;
+            }
+            let mut j = i;
+            while j > 0 && lines[j - 1].trim_start().starts_with('@') {
+                j -= 1;
+            }
+            if j == 0 || !lines[j - 1].trim_start().starts_with("///") {
+                bare.push(format!("{}:{}: {}", path.file_name().unwrap().to_string_lossy(), i + 1, line.trim()));
+            }
+        }
+    }
+    assert!(bare.is_empty(), "{} public items have no doc comment:\n{}", bare.len(), bare.join("\n"));
+}

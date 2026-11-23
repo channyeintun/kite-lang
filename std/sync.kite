@@ -41,6 +41,7 @@ pub struct Mutex<T> {
     var held: bool
 }
 
+/// A [`Mutex`] holding `value`, not held by anyone.
 pub fn mutex<T>(value: T) -> Mutex<T> {
     return Mutex{ value: value, held: false }
 }
@@ -151,6 +152,7 @@ pub struct Queue<T> {
     var head: int
 }
 
+/// An empty [`Queue`]. Its element type comes from where it is bound, as `var q: Queue<int> = queue()`.
 pub fn queue<T>() -> Queue<T> {
     return Queue{ items: [], head: 0 }
 }
@@ -201,14 +203,17 @@ pub struct Atomic {
     var value: int
 }
 
+/// An [`Atomic`] holding `value`.
 pub fn atomic(value: int) -> Atomic {
     return Atomic{ value: value }
 }
 
+/// The integer the atomic holds now.
 pub fn load(a: Atomic) -> int {
     return a.value
 }
 
+/// Replace the integer the atomic holds with `value`, whatever it held.
 pub fn store(var a: Atomic, value: int) {
     a.value = value
 }

@@ -128,6 +128,7 @@ pub enum Kind {
     Directory
 }
 
+/// What is at `path`: [`Kind`]`.File`, `Kind.Directory`, or `Kind.Missing` when nothing is there, and when the host cannot tell. It never fails.
 pub fn kind(path: str) -> Kind {
     let code = path_kind(path)
     if code == 1 {
@@ -152,6 +153,7 @@ pub fn exists(path: str) -> bool {
     }
 }
 
+/// Whether `path` is a file. False for a directory and for nothing; see [`exists`] for why asking first is a weak habit.
 pub fn is_file(path: str) -> bool {
     return match kind(path) {
         File => true
@@ -160,6 +162,7 @@ pub fn is_file(path: str) -> bool {
     }
 }
 
+/// Whether `path` is a directory. False for a file and for nothing.
 pub fn is_dir(path: str) -> bool {
     return match kind(path) {
         Directory => true

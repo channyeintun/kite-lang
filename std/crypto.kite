@@ -103,14 +103,23 @@ pub fn token() -> str {
     return random_hex(16)
 }
 
+/// The SHA-256 digest of the UTF-8 bytes of `text`, as lowercase hex.
+///
+/// The error is the host's, when it cannot compute the digest; it names the call, `crypto sha256`.
 pub async fn sha256(text: str) -> (str, error) {
     return await finish(digest_start("SHA-256", text), "sha256")
 }
 
+/// The SHA-384 digest of the UTF-8 bytes of `text`, as lowercase hex.
+///
+/// The error is the host's, when it cannot compute the digest; it names the call, `crypto sha384`.
 pub async fn sha384(text: str) -> (str, error) {
     return await finish(digest_start("SHA-384", text), "sha384")
 }
 
+/// The SHA-512 digest of the UTF-8 bytes of `text`, as lowercase hex.
+///
+/// The error is the host's, when it cannot compute the digest; it names the call, `crypto sha512`.
 pub async fn sha512(text: str) -> (str, error) {
     return await finish(digest_start("SHA-512", text), "sha512")
 }
