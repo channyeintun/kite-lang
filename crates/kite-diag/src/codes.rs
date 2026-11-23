@@ -114,6 +114,7 @@ codes! {
          - An unknown letter or character: `\"C:\\path\"`, `\"\\d\"`, `\"\\e\"`. A backslash that is meant as one is written twice: `\"C:\\\\path\"`.\n\
          - `\\u` not followed by `{`: `\"\\u0041\"`. A unicode escape is hex digits between braces, `\"\\u{41}\"`.\n\
          - A `\\u{` that is never closed: `\"\\u{41\"`.\n\
+         - A `\\` at the end of a line, meant to continue the string on the next: a `\"` string may not span lines, so write `\\n` for the line break, or use a `\"\"\"` block string, where a line break is text already.\n\
          - A `\\u{…}` that holds no character: no digits, a digit that is not hexadecimal, a value past `10FFFF`, or one in the surrogate range `D800` to `DFFF`.\n\
          \n\
          Example:\n\

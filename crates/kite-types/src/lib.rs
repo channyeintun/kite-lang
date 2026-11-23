@@ -16455,6 +16455,31 @@ pub(crate) fn decode_escapes_into(
                 out.push('\\');
                 out.push('(');
             }
+            // A `\` ending a line, which the label cannot show as written:
+            // the line break in it broke the message across two lines.
+            Some('\n' | '\r') => {
+                let note = if source.starts_with("\"\"\"") {
+                    "a line break in a block string is part of its text already; remove the `\\`"
+                } else {
+                    "a `\"` string may not span lines: write `\\n` for a line break in its text, or \
+                     use a `\"\"\"` block string"
+                };
+                diags.push(
+                    Diagnostic::error(codes::E0003, "invalid escape sequence")
+                        .with_primary(at(1), "a `\\` at the end of a line is not an escape")
+                        .with_note(note),
+                );
+            }
+            Some(other) if other.is_control() => {
+                diags.push(
+                    Diagnostic::error(codes::E0003, "invalid escape sequence")
+                        .with_primary(
+                            at(1 + other.len_utf8()),
+                            format!("a `\\` before U+{:04X} is not an escape", other as u32),
+                        )
+                        .with_note("valid escapes: \\n \\t \\r \\0 \\\\ \\\" \\' \\u{...}"),
+                );
+            }
             Some(other) => {
                 diags.push(
                     Diagnostic::error(codes::E0003, "invalid escape sequence")
