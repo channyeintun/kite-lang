@@ -4928,6 +4928,18 @@ const EXPECTED: &[(&str, &str, &str)] = &[
         "[] 0 [] [] 0\n",
     ),
     (
+        // An escaped quote in a block string is text, so it cannot be the
+        // first quote of the closing `"""` (§2.4) — with a hole in the
+        // string and without, and inside a hole's own block string.
+        "an-escaped-quote-does-not-close-a-block-string",
+        "fn main() {\n  let n = 2\n\
+         \x20 let a = \"\"\"\nsay \\\"\"\"\"\n\
+         \x20 let b = \"\"\"\n    a \\\"\"\" b \\(n)\n    \"\"\"\n\
+         \x20 let c = \"\"\"x \\(\"\"\"in \\\"\"\"\") y\"\"\"\n\
+         \x20 io.print(\"[\\(a)] [\\(b)] [\\(c)]\")\n}\n",
+        "[say \"] [a \"\"\" b 2] [x in \" y]\n",
+    ),
+    (
         // A hole is an ordinary expression (§2.4), and that includes a block
         // string: the lexer ended the outer one at the inner one's `"""`.
         "a-block-string-in-a-hole-of-a-block-string",

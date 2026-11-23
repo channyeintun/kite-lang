@@ -545,8 +545,11 @@ impl<'a> Lexer<'a> {
                 // it — a block string included — is read as one: its `"""`
                 // is its own, not the end of this one (§2.4: a hole is an
                 // ordinary expression). `\\` is stepped over whole, so the
-                // `(` after an escaped backslash opens nothing; any other
-                // escape is left as it was read before holes were.
+                // `(` after an escaped backslash opens nothing, and so is
+                // `\"`: an escaped quote is text, so it cannot be the first
+                // quote of the closing delimiter — `\""""` is a quote and
+                // then the end. Any other escape is left as it was read
+                // before holes were.
                 if self.bytes[self.pos] == b'\\' && self.pos + 1 < self.limit {
                     match self.bytes[self.pos + 1] {
                         b'(' => {
@@ -554,7 +557,7 @@ impl<'a> Lexer<'a> {
                             self.skip_interpolation();
                             continue;
                         }
-                        b'\\' => self.pos += 1,
+                        b'\\' | b'"' => self.pos += 1,
                         _ => {}
                     }
                 }

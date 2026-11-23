@@ -120,10 +120,10 @@ fn string_end(bytes: &[u8], at: usize) -> Option<usize> {
         match (bytes[i], bytes.get(i + 1)) {
             (b'"', _) if !block => return Some(i),
             (b'\\', Some(b'(')) => i = matching_paren(bytes, i + 1)? + 1,
-            // The lexer ends a block string at the first `"""` after
-            // anything but a hole, an escaped `\\` included, so this does.
-            (b'\\', Some(b'\\')) => i += 2,
-            (b'\\', _) if !block => i += 2,
+            // The lexer ends a block string at the first `"""` that is not
+            // in a hole and does not begin with an escaped `\"`, and steps
+            // over an escaped `\\` whole, so this does.
+            (b'\\', Some(_)) => i += 2,
             _ => i += 1,
         }
     }

@@ -175,6 +175,10 @@ character, so a line indented less loses what it has and a tab where the
 delimiter's line has spaces is kept. A line break in the source is a line
 break whether the file writes it LF or CRLF, so a block string's lines are
 joined by `\n` alone and never end in a `\r` that was not written as `\r`.
+A block string ends at the first `"""` that is not inside a hole. Escapes are
+read in a block string as in a `"` string, and an escaped quote is text: it is
+never the first quote of the closing delimiter, so `\""""` is a `"` and then
+the end, and `\"""` writes three quotes.
 
 `int`, `float`, `bool` and `str` render themselves; every other type renders
 through its own `Display`. Because a hole is an expression,

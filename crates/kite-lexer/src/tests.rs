@@ -212,6 +212,17 @@ fn block_string_holds_non_ascii_text() {
     assert_eq!(bare("\"\"\"é\"\"\""), vec![T::Str]);
 }
 
+/// An escaped quote in a block string is text, so it is never the first
+/// quote of the closing delimiter: `\""""` is a quote and then the end, and
+/// `a \""" b` holds three quotes. An escaped backslash is still stepped over,
+/// so the `"""` after `\\` closes.
+#[test]
+fn an_escaped_quote_does_not_close_a_block_string() {
+    assert_eq!(bare("\"\"\"\nsay \\\"\"\"\"\nx"), vec![T::Str, T::Ident]);
+    assert_eq!(bare("\"\"\"\na \\\"\"\" b\n\"\"\"\nx"), vec![T::Str, T::Ident]);
+    assert_eq!(bare("\"\"\"\\\\\"\"\"\nx"), vec![T::Str, T::Ident]);
+}
+
 #[test]
 fn interpolation_with_nested_quotes_stays_one_token() {
     // The `"` inside \( ) must not terminate the outer literal.
