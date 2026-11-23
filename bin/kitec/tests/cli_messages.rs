@@ -198,7 +198,6 @@ fn a_whole_program_example_and_its_fix_are_what_they_say() {
             if manifest {
                 let out = package(&format!("{}_fix", code), &fix);
                 assert!(out.status.success(), "{} fix:\n{}\n{}", code, fix, stderr(&out));
-                checked += 1;
                 continue;
             }
             // A fix that shows only `main` keeps the example's declarations.
