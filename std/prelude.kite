@@ -1736,41 +1736,19 @@ pub fn product(items: [int]) -> int {
     return total
 }
 
-/// The smallest of `items`, or nil when there are none.
+/// The floats multiplied together; 1.0 for none. Overflow is an infinity,
+/// as `*` makes it, and a NaN anywhere makes the product one.
 ///
 /// ```kite
-/// assert(min_of([3, 1, 2]) == 1, "smallest")
-/// assert(min_of([]) == nil, "none")
+/// assert(productf([0.5, 4.0, 3.0]) == 6.0, "multiplied")
+/// assert(productf([]) == 1.0, "none")
 /// ```
-pub fn min_of(items: [int]) -> Option<int> {
-    if items.len() == 0 {
-        return nil
-    }
-    var best = items[0]
+pub fn productf(items: [float]) -> float {
+    var total = 1.0
     for item in items {
-        if item < best {
-            best = item
-        }
+        total = total * item
     }
-    return best
-}
-
-/// The largest of `items`, or nil when there are none.
-///
-/// ```kite
-/// assert(max_of([3, 1, 2]) == 3, "largest")
-/// ```
-pub fn max_of(items: [int]) -> Option<int> {
-    if items.len() == 0 {
-        return nil
-    }
-    var best = items[0]
-    for item in items {
-        if item > best {
-            best = item
-        }
-    }
-    return best
+    return total
 }
 
 /// The integers written out and joined with `sep` — a `[int]` has no text form
@@ -1804,10 +1782,18 @@ pub fn join_floats(items: [float], sep: str) -> str {
 
 /// The value under `key`, or `fallback` when the map has none.
 ///
+/// On a map of optional values an entry holding `nil` counts as none, so this
+/// answers `fallback` for it: `m[key]` is an `Option<V>`, and an
+/// `Option<Option<V>>` is one `Option`, so nothing tells a missing key from a
+/// `nil` stored under it. Where that matters, ask `m.keys()`.
+///
 /// ```kite
 /// let ages = { "ada": 36 }
 /// assert(get_or(ages, "ada", 0) == 36, "present")
 /// assert(get_or(ages, "bob", 0) == 0, "absent")
+/// var maybe: { str: Option<int> } = { }
+/// maybe["eve"] = nil
+/// assert(get_or(maybe, "eve", 5) == 5, "a nil value is not told from no entry")
 /// ```
 pub fn get_or<K, V>(m: { K: V }, key: K, fallback: V) -> V {
     let v = m[key]
@@ -1817,11 +1803,20 @@ pub fn get_or<K, V>(m: { K: V }, key: K, fallback: V) -> V {
     return v
 }
 
-/// Whether the map has an entry under `key`.
+/// Whether the map has an entry under `key` — one whose value is not `nil`.
+///
+/// On a map of optional values an entry holding `nil` answers false, for the
+/// reason [`get_or`] gives: `m[key]` cannot tell it from a missing key. Such an
+/// entry is still there, and still counted by `len()`; `index_of(m.keys(), key)`
+/// finds it.
 ///
 /// ```kite
 /// assert(has_key({ "a": 1 }, "a"), "there")
 /// assert(!has_key({ "a": 1 }, "b"), "not there")
+/// var maybe: { str: Option<int> } = { }
+/// maybe["a"] = nil
+/// assert(!has_key(maybe, "a") && maybe.len() == 1, "a nil value reads as absent")
+/// assert(index_of(maybe.keys(), "a") == 0, "but the key is there")
 /// ```
 pub fn has_key<K, V>(m: { K: V }, key: K) -> bool {
     return m[key] != nil

@@ -548,16 +548,16 @@ pub fn wrapping_mul(a: int, b: int) -> int {
 /// the power is negative — an `int` has no reciprocals.
 ///
 /// ```kite
-/// assert(ipow(3, 4) == 81, "ipow")
-/// assert(ipow(-2, 63) == min_int(), "exactly the smallest int")
-/// assert(ipow(2, 63) == nil, "one past the largest")
-/// assert(ipow(0, 0) == 1, "anything to the zero is one")
+/// assert(checked_pow(3, 4) == 81, "checked_pow")
+/// assert(checked_pow(-2, 63) == min_int(), "exactly the smallest int")
+/// assert(checked_pow(2, 63) == nil, "one past the largest")
+/// assert(checked_pow(0, 0) == 1, "anything to the zero is one")
 /// ```
 ///
 /// By squaring, with every product checked. The square is not taken after
 /// the last bit of the power is used, so an answer that fits is never
 /// refused because a square it did not need would have overflowed.
-pub fn ipow(base: int, exponent: int) -> Option<int> {
+pub fn checked_pow(base: int, exponent: int) -> Option<int> {
     if exponent < 0 {
         return nil
     }
@@ -1057,6 +1057,12 @@ pub fn powf(base: float, exponent: float) -> float {
         }
         // Past 2⁶³ every float is even, so the base's sign is lost.
         b = abs(base)
+        // -1 has become 1, which the first test had already let past: its
+        // logarithm is zero, and a zero times an exponent past 1.3e300 is
+        // inf × 0 inside product_error's split — a NaN for (-1)^1e301.
+        if b == 1.0 {
+            return 1.0
+        }
     }
     let size = abs(b)
     if !(abs(exponent) < 1.0 / 0.0) {
@@ -1676,7 +1682,33 @@ pub fn asin(x: float) -> float {
 
 /// The arccosine, in `[0, π]`, with `asin`'s edges: past ±1 the answer is
 /// that of ±1, and a NaN answers a NaN.
+///
+/// ```kite
+/// assert(acos(1.0) == 0.0 && acos(-1.0) == pi(), "the ends")
+/// let near = acos(0.9999999999999998)
+/// assert(near > 2.10734242554e-8 && near < 2.10734242555e-8, "near 1")
+/// ```
 pub fn acos(x: float) -> float {
+    if !(x >= x) {
+        return x
+    }
+    if x >= 1.0 {
+        return 0.0
+    }
+    if x <= -1.0 {
+        return pi()
+    }
+    // π/2 − asin(x) is fine in the middle, but as x nears 1 both terms near
+    // π/2 and the subtraction cancels: acos(1 − 2⁻⁵³) came out 25 million
+    // units in the last place off. Past ±½ the half-angle form
+    // 2·atan(√((1 − x)/(1 + x))) has no subtraction to lose, since 1 − x and
+    // 1 + x are exact there.
+    if x > 0.5 {
+        return 2.0 * atan(sqrt((1.0 - x) / (1.0 + x)))
+    }
+    if x < -0.5 {
+        return pi() - 2.0 * atan(sqrt((1.0 + x) / (1.0 - x)))
+    }
     return pi() / 2.0 - asin(x)
 }
 

@@ -169,6 +169,12 @@ fn checks() -> [error] {
     out.push(test.equal_str(fmt.pad("ab", 4), "ab  ", "pad"))
     out.push(test.equal_str(fmt.pad_left("ab", 4), "  ab", "pad_left"))
     out.push(test.equal_str(fmt.centre("ab", 6), "  ab  ", "centre"))
+    // Padding is one `repeat` now, not a space a pass: a width of a hundred
+    // thousand took seconds. Narrower than the text, it leaves it alone.
+    out.push(test.equal_int(fmt.pad("x", 100000).len() + fmt.pad_left("x", 100000).len(), 200000, "a wide pad"))
+    out.push(test.is_true(fmt.pad("abc", 1) == "abc" && fmt.pad_left("abc", -5) == "abc", "a pad narrower than the text"))
+    out.push(test.equal_str(fmt.centre("abc", 6), " abc  ", "centre gives the odd space to the right"))
+    out.push(test.equal_str(fmt.hex(255, 6) + " " + fmt.fixed(0.5, 3), "0000ff 0.500", "zero padding"))
     out.push(test.equal_str(fmt.ellipsis("abcdef", 4), "abc…", "ellipsis"))
     out.push(test.equal_str(fmt.ellipsis("abc", 4), "abc", "ellipsis leaves short text alone"))
     // Never wider than asked: a width of zero or less was answered "…".
@@ -266,6 +272,12 @@ fn checks() -> [error] {
     let several = errors.join([errors.new("a is missing"), nil, errors.wrap(errors.new("gone"), "b"), errors.new("c")])
     out.push(test.equal_str(errors.message_or(several, "?"), "a is missing; b: gone; c", "join of several"))
     out.push(test.equal_str(errors.message_or(errors.root(several), "?"), "a is missing", "its cause is the first"))
+    // Joined in pairs now, so an odd count must still keep every message in order.
+    var seven: [error] = []
+    for i in 0..7 {
+        seven.push(errors.new("e\(i)"))
+    }
+    out.push(test.equal_str(errors.message_or(errors.join(seven), "?"), "e0; e1; e2; e3; e4; e5; e6", "join of seven, in order"))
 
     // ---- test ----
     // inf - inf is a NaN, which is within no tolerance, so equal infinities

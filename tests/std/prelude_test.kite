@@ -348,8 +348,9 @@ fn checks() -> [error] {
     out.push(test.equal_int(index_of(["a"], "b"), -1, "index_of absent"))
     out.push(test.equal_int(product([2, 3, 4]), 24, "product"))
     out.push(test.equal_int(product([]), 1, "product of none"))
-    out.push(test.is_true(min_of([3, -1, 2]) == -1 && max_of([3, -1, 2]) == 3, "min_of and max_of"))
-    out.push(test.is_true(min_of([]) == nil && max_of([]) == nil, "min_of and max_of of none"))
+    out.push(test.equal_float(productf([0.5, 4.0, 3.0]), 6.0, 0.0, "productf"))
+    out.push(test.equal_float(productf([]), 1.0, 0.0, "productf of none"))
+    out.push(test.equal_float(productf([1e200, 1e200]), 1.0 / 0.0, 0.0, "productf overflows to inf"))
     out.push(test.equal_str(join_ints([1, -2, 3], ","), "1,-2,3", "join_ints"))
     out.push(test.equal_str(join_ints([], ","), "", "join_ints of none"))
     out.push(test.equal_str(join_floats([1.5, 2.0], " "), "1.5 2.0", "join_floats"))
@@ -360,6 +361,10 @@ fn checks() -> [error] {
     out.push(test.equal_int(get_or(ages, "eve", -1), -1, "get_or absent"))
     out.push(test.equal_int(get_or(ages, "bob", -1), 0, "get_or a zero is present"))
     out.push(test.is_true(has_key(ages, "bob") && !has_key(ages, "eve"), "has_key"))
+    // As documented: on a map of optional values a stored nil reads as absent.
+    var maybe: { str: Option<int> } = { }
+    maybe["a"] = nil
+    out.push(test.is_true(!has_key(maybe, "a") && maybe.len() == 1 && get_or(maybe, "a", 5) == 5, "a stored nil reads as absent"))
     let both = merged({ "a": 1, "b": 2 }, { "b": 3, "c": 4 })
     out.push(test.equal_int(both.len(), 3, "merged size"))
     out.push(test.equal_int(get_or(both, "b", -1), 3, "merged: the right wins"))

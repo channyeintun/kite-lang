@@ -40,7 +40,11 @@ fn checks() -> [error] {
     out.push(test.equal_str(fmt.scientific(1.7976931348623157e308, 3), "1.798e+308", "the largest float"))
     out.push(test.equal_str(fmt.scientific(1.0 / 0.0, 2), "inf", "inf"))
     out.push(test.equal_str(fmt.scientific(-1.0 / 0.0, 2), "-inf", "-inf"))
-    out.push(test.equal_str(fmt.scientific(0.0 / 0.0, 2), "nan", "nan"))
+    out.push(test.equal_str(fmt.scientific(0.0 / 0.0, 2), "NaN", "a NaN, as interpolation writes it"))
+    let nan = 0.0 / 0.0
+    out.push(test.equal_str(fmt.fixed(nan, 2), "\(nan)", "fixed writes a NaN as interpolation does"))
+    out.push(test.equal_str(fmt.fixed(-nan, 2), "\(-nan)", "and a negated one"))
+    out.push(test.equal_str(fmt.scientific(-1.0 / 0.0, 1), "\(-1.0 / 0.0)", "and -inf"))
     out.push(test.equal_str(fmt.scientific(2.5, -1), "3e+0", "a negative places is zero"))
 
     let t = fmt.table([["name", "qty", "note"], ["bolt", "30", "steel"], ["washer", "5", ""]])

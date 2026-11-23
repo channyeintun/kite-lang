@@ -628,7 +628,8 @@ arrays. `buffer.F64` is a flat `[float]` with a `stride` written down beside it.
 `f64(stride)` `count(b)` `get(b, record, field)` `record(b, i)`
 `push(b, values)` `set(b, record, field, value)` `column(b, field)`
 `extent(b, field)`. `push` and `set` **return a new buffer** — bind the result.
-The shape is checked: `push` of anything but exactly `stride` numbers, a field
+Each is a copy of the whole buffer, so a loop of `push` is quadratic: build
+many records as rows with `from_records(stride, rows)`. The shape is checked: `push` of anything but exactly `stride` numbers, a field
 outside `0..stride` or a record outside `0..count(b)` traps with a message
 naming the mistake (a ragged push used to be accepted and shift every record
 after it, and a field past the stride read the next record).
@@ -897,11 +898,18 @@ interpolation already renders. What it cannot do is *align*.
 `pad(s, width)` `pad_left` `centre` `ellipsis(s, width)` `fixed(x, places)`
 `percent(part, whole)` `grouped(n)` `row(cells, widths)`
 
+Widths are **characters** (`s.len()`), not terminal columns: an ideograph or
+emoji counts one and draws two, a combining mark counts one and draws none, so
+CJK and emoji columns come out ragged, and `ellipsis` can cut an accent off its
+letter. `text.cell_width` counts columns; fmt does not use it, so that padding
+a number does not pull std/text's tables into every program.
+
 `fixed` writes the float's own digits, as many places as asked for, and rounds
 its exact value half away from zero: `fixed(2.125, 2)` is `2.13`, and
 `fixed(2.005, 2)` is `2.00`, because the float written `2.005` is a little
 below it. A negative number keeps its sign when it rounds to zero, and so does
--0.0, as `%.Nf` writes them: `fixed(-0.0, 2)` is `-0.00`.
+-0.0, as `%.Nf` writes them: `fixed(-0.0, 2)` is `-0.00`. An infinity and a
+NaN are spelled as interpolation spells them, `inf`, `-inf` and `NaN`.
 
 ### fs — files and directories. **Not on the web**
 
@@ -1575,8 +1583,10 @@ than the word being cut.
 
 UAX #9 rules P2–P3, X1–X10, W1–W7, N0–N2, I1–I2, L1–L2 (not L3, L4, HL1–HL6);
 UAX #14 as of Unicode 15.0, LB1–LB31, with SA treated as AL, CB unimplemented,
-the later LB15a–d, LB20a and LB28a not implemented, and East Asian Width read
-only for LB30's openers; Arabic joining to Presentation Forms-B with the
+the later LB15a–d, LB20a and LB28a not implemented, East Asian Width read
+only for LB30's openers, and a skin tone kept with whatever it follows;
+`is_combining` is every `Mn` and `Me` of Unicode 15.1, and `bidi_class`
+answers NSM from it, but its other classes are a listed subset; Arabic joining to Presentation Forms-B with the
 lam-alef ligature, not HarfBuzz.
 
 ```kite

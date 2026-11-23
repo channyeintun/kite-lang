@@ -72,6 +72,11 @@ pub fn record(b: F64, index: int) -> [float] {
 /// produces a new one rather than editing the one it was given.
 ///
 /// `values` must be exactly one record, `stride` numbers long.
+///
+/// The new buffer is a copy of the whole old one, so building N records by
+/// pushing them one at a time copies N²/2 numbers: thirty thousand records
+/// of three took seconds. Build them as rows and hand them to
+/// [`from_records`], which copies each number once.
 pub fn push(b: F64, values: [float]) -> F64 {
     if values.len() != b.stride {
         require(false, "buffer: pushed \(values.len()) numbers into records of \(b.stride)")
@@ -79,7 +84,9 @@ pub fn push(b: F64, values: [float]) -> F64 {
     return F64{ values: concat(b.values, values), stride: b.stride }
 }
 
-/// A buffer with one number replaced.
+/// A buffer with one number replaced — a copy of the whole buffer, as
+/// [`push`] is, so a loop that changes every record wants [`map_column`] or
+/// [`from_records`] instead.
 pub fn set(b: F64, record: int, field: int, value: float) -> F64 {
     check_record(b, record)
     check_field(b, field)

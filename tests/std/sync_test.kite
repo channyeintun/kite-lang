@@ -130,6 +130,29 @@ async fn queue_checks() -> [error] {
     out.push(test.equal_strs(got, ["one", "two", "three"], "values cross between tasks in order"))
     out.push(test.equal_int(done - start, 15, "the waiting taker let the clock move"))
     out.push(test.equal_int(sync.size(q), 0, "nothing is left over"))
+
+    // Puts and takes interleaved across the points where the taken front is
+    // let go of: the order and the size hold through each.
+    var ints: sync.Queue<int> = sync.queue()
+    var next = 0
+    var taken: [int] = []
+    for round in 0..40 {
+        for k in 0..round % 7 + 1 {
+            sync.put(ints, next)
+            next += 1
+        }
+        for k in 0..round % 5 {
+            if sync.size(ints) > 0 {
+                taken.push(await sync.take(ints))
+            }
+        }
+    }
+    let waiting = sync.size(ints)
+    out.push(test.is_true(waiting > 0 && waiting == next - taken.len(), "size counts what is left"))
+    for sync.size(ints) > 0 {
+        taken.push(await sync.take(ints))
+    }
+    out.push(test.equal_ints(taken, range(0, next), "interleaved puts and takes keep their order"))
     return out
 }
 

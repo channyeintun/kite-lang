@@ -4,26 +4,30 @@
 // one: `\(x)` interpolation calls `Display.show` and has no injection surface
 // and nothing to learn. What interpolation cannot do is *align* things, which
 // is what this module is for.
+//
+// Every width here is counted in characters — code points, as `s.len()`
+// counts them — not in terminal columns. That lines up text whose characters
+// each take one column, and nothing else: an ideograph or an emoji takes two
+// columns and counts one, and a combining mark takes none and counts one, so
+// a column of CJK, emoji or decomposed accents comes out ragged. Counting
+// columns is `text.cell_width`'s job, and std/text is kept out of this module
+// on purpose: its tables would cost every program that only pads a number.
 
-/// `s` at least `width` characters wide, padded on the right.
+/// `s` at least `width` characters wide, padded on the right. Characters,
+/// not columns: see the note at the top of this module.
 pub fn pad(s: str, width: int) -> str {
-    var out = s
-    for out.len() < width {
-        out = out + " "
-    }
-    return out
+    // The spaces in one `repeat`, which doubles as it goes. Adding them one
+    // at a time copied the string once per space, so the cost grew with the
+    // square of the width.
+    return s + repeat(" ", width - s.len())
 }
 
 /// `s` at least `width` characters wide, padded on the left.
 pub fn pad_left(s: str, width: int) -> str {
-    var out = s
-    for out.len() < width {
-        out = " " + out
-    }
-    return out
+    return repeat(" ", width - s.len()) + s
 }
 
-/// `s` centred in `width`, with any odd space going to the right.
+/// `s` centred in `width` characters, with any odd space going to the right.
 pub fn centre(s: str, width: int) -> str {
     let spare = width - s.len()
     if spare <= 0 {
@@ -32,9 +36,15 @@ pub fn centre(s: str, width: int) -> str {
     return pad(pad_left(s, s.len() + spare / 2), width)
 }
 
-/// `s` cut to `width`, with an ellipsis when something was cut. The answer is
-/// never wider than `width`: at one the ellipsis is all there is room for,
-/// and at zero or less there is room for nothing.
+/// `s` cut to `width` characters, with an ellipsis when something was cut.
+/// The answer is never more than `width` characters: at one the ellipsis is
+/// all there is room for, and at zero or less there is room for nothing.
+///
+/// The cut falls between characters, not between what a reader sees as
+/// letters: it can part a letter from the combining accent after it, which
+/// then is lost — `ellipsis("cafe\u{301}s", 5)` is `cafe…` — or cut an emoji
+/// sequence in two. Nothing in the prelude can tell a mark from a letter;
+/// where that matters, cut at a boundary of `text.clusters`.
 ///
 /// ```kite
 /// assert(ellipsis("abcdef", 4) == "abc…", "cut")
@@ -75,7 +85,13 @@ pub fn ellipsis(s: str, width: int) -> str {
 /// does -0.0 itself, as `%.Nf` writes both. JavaScript's `toFixed` writes
 /// `-0` for the one and `0` for the other.
 ///
-/// An infinity is written `inf` or `-inf`, and a NaN `nan`.
+/// An infinity is written `inf` or `-inf`, and a NaN `NaN`, the spellings
+/// `\(x)` uses: this used to write `nan`, so a NaN read differently in a
+/// column of `fixed` from the same value interpolated beside it.
+///
+/// ```kite
+/// assert(fixed(0.0 / 0.0, 2) == "NaN" && fixed(-1.0 / 0.0, 2) == "-inf", "as interpolation writes them")
+/// ```
 pub fn fixed(x: float, places: int) -> str {
     let wanted = if places < 0 { 0 } else { places }
     // -0.0 is not below zero; only dividing by it tells it from 0.0.
@@ -86,7 +102,7 @@ pub fn fixed(x: float, places: int) -> str {
         return "\(sign)inf"
     }
     if !(size >= 0.0) {
-        return "nan"
+        return "NaN"
     }
     let exact = decimal(size)
     // The digits before the point and the ones after it, which there are
@@ -185,11 +201,7 @@ fn increment(digits: str) -> str {
 }
 
 fn zeros(count: int) -> str {
-    var out = ""
-    for i in 0..count {
-        out = out + "0"
-    }
-    return out
+    return repeat("0", count)
 }
 
 /// The exact decimal digits of a whole float at or above 2⁵³.
@@ -333,9 +345,7 @@ fn in_base(n: int, base: int, width: int) -> str {
             break
         }
     }
-    for out.len() < width {
-        out = "0" + out
-    }
+    out = zeros(width - out.len()) + out
     if n < 0 {
         return "-" + out
     }
@@ -356,7 +366,7 @@ fn in_base(n: int, base: int, width: int) -> str {
 /// Rounded as [`fixed`] rounds, from the float's exact decimal expansion and
 /// half away from zero, so the digits do not depend on how a backend prints
 /// a float. A negative number, -0.0 included, keeps its sign; an infinity is
-/// `inf` or `-inf` and a NaN `nan`, as `fixed` writes them. A negative
+/// `inf` or `-inf` and a NaN `NaN`, as `fixed` and interpolation write them. A negative
 /// `places` is taken as zero.
 pub fn scientific(x: float, places: int) -> str {
     let wanted = if places < 0 { 0 } else { places }
@@ -367,7 +377,7 @@ pub fn scientific(x: float, places: int) -> str {
         return "\(sign)inf"
     }
     if !(size >= 0.0) {
-        return "nan"
+        return "NaN"
     }
     if size == 0.0 {
         let fraction = if wanted > 0 { "." + zeros(wanted) } else { "" }
@@ -405,7 +415,9 @@ pub fn scientific(x: float, places: int) -> str {
 /// assert(t == "name    qty\nbolt    30\nwasher  5", "table")
 /// ```
 ///
-/// Widths are counted in characters, as [`pad`] counts them.
+/// Widths are counted in characters, as [`pad`] counts them, so a cell of
+/// ideographs or emoji is narrower in the count than on the screen and its
+/// column will not line up; `text.cell_width` counts columns.
 pub fn table(rows: [[str]]) -> str {
     var widths: [int] = []
     for cells in rows {
@@ -431,7 +443,7 @@ pub fn table(rows: [[str]]) -> str {
     return join(lines, "\n")
 }
 
-/// A row of columns, each padded to its width.
+/// A row of columns, each padded to its width in characters.
 pub fn row(cells: [str], widths: [int]) -> str {
     var out = ""
     for i in 0..cells.len() {
@@ -442,9 +454,6 @@ pub fn row(cells: [str], widths: [int]) -> str {
 }
 
 fn pad_zeros(n: int, places: int) -> str {
-    var out = "\(n)"
-    for out.len() < places {
-        out = "0" + out
-    }
-    return out
+    let written = "\(n)"
+    return zeros(places - written.len()) + written
 }

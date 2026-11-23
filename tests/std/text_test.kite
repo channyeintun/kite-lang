@@ -261,6 +261,22 @@ fn checks() -> [error] {
     out.push(test.equal_strs(text.clusters("\(thumb)\(thumb)"), [thumb, thumb], "a modifier stays with its base"))
     out.push(test.equal_strs(text.clusters("\(flag)\(flag)"), [flag, flag], "two regional indicators are a flag"))
     out.push(test.equal_strs(text.clusters("x\(zwj)"), ["x\(zwj)"], "a trailing joiner stays"))
+    // GB9 and GB11: a joiner stays with what is before it, and joins across
+    // only from one emoji to another. It took whatever followed it.
+    out.push(test.equal_strs(text.clusters("a\(zwj)中文"), ["a\(zwj)", "中", "文"], "a joiner after a letter joins nothing"))
+    out.push(test.equal_strs(text.clusters("x\(zwj) y"), ["x\(zwj)", " ", "y"], "nor does it swallow a space"))
+    // But a joiner that joins nothing ends no cluster: a mark or a joiner
+    // after it still attaches (GB9), and no emoji after those is joined on.
+    out.push(test.equal_strs(text.clusters("a\(zwj)\u{301}b"), ["a\(zwj)\u{301}", "b"], "a mark after a stray joiner attaches"))
+    let grin = text.from_code(0x1F600)
+    out.push(test.equal_strs(text.clusters("\(grin)\(zwj)\(zwj)\(grin)"), ["\(grin)\(zwj)\(zwj)", grin], "two joiners join no emoji"))
+    out.push(test.equal_int(text.cell_width("a\(zwj)中文"), 5, "so the ideographs keep their columns"))
+    let heart = text.from_code(0x2764) + text.from_code(0xFE0F)
+    let couple = text.from_code(0x1F469) + zwj + heart + zwj + text.from_code(0x1F468)
+    out.push(test.equal_strs(text.clusters("\(couple)!"), [couple, "!"], "an older symbol joins as an emoji"))
+    let tone = text.from_code(0x1F44B) + text.from_code(0x1F3FD) + zwj + text.from_code(0x1F680)
+    out.push(test.equal_strs(text.clusters(tone), [tone], "a skin tone before the joiner keeps the emoji"))
+    out.push(test.equal_strs(text.clusters("\(family)\(zwj)a"), [family + zwj, "a"], "an emoji's joiner before a letter joins nothing"))
     out.push(test.equal_int(text.clusters("").len(), 0, "nothing is no clusters"))
     out.push(test.equal_str(join(text.clusters("é日\(family)"), ""), "é日\(family)", "joined, they are the text again"))
     out.push(test.equal_int(text.cell_width("abc"), 3, "one column each"))
@@ -279,6 +295,17 @@ fn checks() -> [error] {
     out.push(test.equal_int(text.cell_width("a\u{200c}\u{200e}\u{202e}\u{2060}\u{feff}b"), 2, "format characters take none"))
     out.push(test.equal_int(text.cell_width(text.from_code(0x1F1EF) + acute), 1, "a lone regional indicator is no flag"))
     out.push(test.equal_int(text.cell_width(text.from_code(0x1FAE0)), 2, "the newer emoji are two"))
+    // is_combining is every Mn and Me of Unicode 15.1: it was the marks of
+    // the scripts the bidi table named, and a Bengali nukta measured a column.
+    out.push(test.equal_int(text.cell_width("x\u{9BC}y"), 2, "a nukta takes none"))
+    out.push(test.equal_int(text.clusters("x\u{BCD}y").len(), 2, "a virama stays with its letter"))
+    out.push(test.is_true(text.is_combining(0x0300) && text.is_combining(0x036F) && !text.is_combining(0x0370), "the first range, to its edges"))
+    out.push(test.is_true(text.is_combining(0xE01EF) && !text.is_combining(0xE01F0) && !text.is_combining(0x10FFFF), "the last range, to its edges"))
+    out.push(test.is_true(!text.is_combining(0x093E) && !text.is_combining(0x0915) && !text.is_combining(-1), "a spacing vowel sign, a letter, nothing"))
+    // And bidi_class answers NSM from the same table, but for the five marks
+    // Unicode makes L.
+    out.push(test.is_true(text.bidi_class(0x0711) == text.BidiClass.NSM, "a Syriac mark is NSM"))
+    out.push(test.is_true(text.is_combining(0x0CBF) && text.bidi_class(0x0CBF) == text.BidiClass.L, "a Kannada sign is a mark and L"))
 
     return out
 }

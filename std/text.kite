@@ -27,7 +27,10 @@
 //   departures, both of which the annex itself names: SA (Thai, Lao, Khmer,
 //   and Burmese syllable breaking) is treated as AL, which §5.1 prescribes in
 //   the absence of a dictionary, and CB is not implemented because nothing
-//   can be embedded in a run of Kite text to break around. The rules later
+//   can be embedded in a run of Kite text to break around. One tailoring
+//   of our own: an emoji skin tone attaches to whatever it follows, as a
+//   combining mark does, not only to an emoji base (LB30b), so a line never
+//   breaks inside what `clusters` calls one character. The rules later
 //   revisions added — LB15a–LB15d, LB20a, LB28a — are not here, and East
 //   Asian Width is read only where LB30 needs it; the section says which.
 // - `join_arabic` is the joining half of Arabic shaping: Joining_Type over
@@ -79,27 +82,24 @@ fn within(code: int, low: int, high: int) -> bool {
 ///
 /// The table is a subset of the Unicode character database, and the subset is
 /// listed rather than implied. It covers: the C0 and C1 controls; ASCII and
-/// Latin-1; Latin Extended-A and -B (0100–024F); the combining diacritics
-/// (0300–036F); Greek (0370–03FF); Cyrillic with its combining marks
-/// (0400–04FF); Hebrew (0590–05FF) and its presentation forms (FB1D–FB4F);
+/// Latin-1; Latin Extended-A and -B (0100–024F); every nonspacing and
+/// enclosing mark of every script, from [`is_combining`]'s table; Greek
+/// (0370–03FF); Cyrillic (0400–04FF); Hebrew (0590–05FF) and its
+/// presentation forms (FB1D–FB4F);
 /// the Arabic block (0600–06FF) with its digits, points and signs, the Arabic
 /// Supplement (0750–077F), Arabic Extended-B (0870–089F), Arabic Extended-A
 /// (08A0–08FF), and both Arabic presentation-forms blocks (FB50–FDFF,
-/// FE70–FEFF); the combining marks of Devanagari, Thai and Myanmar (whose
-/// letters are already L); general punctuation (2000–206F) including every
+/// FE70–FEFF); general punctuation (2000–206F) including every
 /// explicit bidi formatting character; currency signs (20A0–20CF); the
 /// arrow, mathematical and symbol blocks (2190–2BFF) and supplemental
 /// punctuation (2E00–2E7F) as ON; CJK punctuation and brackets (3000–303F);
-/// the variation selectors and combining half marks (FE00–FE2F); the marks of
-/// Combining Diacritical Marks Extended and Supplement (1AB0–1ACE, 1DC0–1DFF),
-/// of the symbol marks (20D0–20F0), of the ideographic tone marks (302A–302D),
-/// the kana voiced-sound marks (3099–309A) and the variation selectors
-/// supplement (E0100–E01EF); the small
-/// form variants (FE50–FE6F) as ON; and the fullwidth forms (FF01–FF65).
+/// the small form variants (FE50–FE6F) as ON; and the fullwidth forms
+/// (FF01–FF65).
 ///
 /// **Anything outside these ranges is treated as L.** For CJK, Hangul, kana,
 /// and the letters of Devanagari, Thai and Myanmar that is the correct
-/// answer; for Syriac, Thaana and N'Ko it is wrong and unclaimed; for emoji —
+/// answer; for the letters of Syriac, Thaana and N'Ko it is wrong and
+/// unclaimed (their marks are NSM, as every mark is); for emoji —
 /// which are ON, and which sit outside the Basic Multilingual Plane — it
 /// makes a symbol behave like a letter, which matters only when one sits
 /// between two runs of opposite direction. Within the covered Arabic and
@@ -177,32 +177,31 @@ pub fn bidi_class(code: int) -> BidiClass {
     if within(code, 0x0100, 0x024F) {
         return BidiClass.L
     }
-    // Combining diacritical marks.
-    if within(code, 0x0300, 0x036F) {
+    // Every nonspacing and enclosing mark is NSM but five, which Unicode
+    // makes L: two Kannada vowel signs, two Zanabazar Square vowel signs and
+    // a Bhaiksuki sign. Asked once here, from `is_combining`'s table, where
+    // each script used to list its own marks and the scripts that did not
+    // were L.
+    if is_combining(code) && code != 0x0CBF && code != 0x0CC6 && code != 0x11A07 && code != 0x11A08 &&
+    code != 0x11C3F {
         return BidiClass.NSM
     }
     // Greek — a few of its signs are properly ON, folded to L here.
     if within(code, 0x0370, 0x03FF) {
         return BidiClass.L
     }
-    // Cyrillic, with its combining marks.
-    if within(code, 0x0483, 0x0489) {
-        return BidiClass.NSM
-    }
+    // Cyrillic.
     if within(code, 0x0400, 0x04FF) {
         return BidiClass.L
     }
-    // Hebrew: the accents and points are marks, everything else in the block
-    // is R — including the unassigned gaps, which Unicode also defaults to R.
-    if within(code, 0x0591, 0x05BD) || code == 0x05BF || code == 0x05C1 || code == 0x05C2 ||
-    code == 0x05C4 || code == 0x05C5 || code == 0x05C7 {
-        return BidiClass.NSM
-    }
+    // Hebrew: past its accents and points, which are marks, everything in the
+    // block is R — including the unassigned gaps, which Unicode also defaults
+    // to R.
     if within(code, 0x0590, 0x05FF) {
         return BidiClass.R
     }
-    // The Arabic block. The number signs wrap around digits, so they count as
-    // numbers; the points and Koranic marks are marks; the two poetic signs
+    // The Arabic block, past its points and Koranic marks. The number signs
+    // wrap around digits, so they count as numbers; the two poetic signs
     // and the sajdah sign are ON; everything else — letters, the letter mark
     // at 061C, the punctuation that behaves like a letter — is AL.
     if within(code, 0x0600, 0x0605) || code == 0x06DD {
@@ -218,11 +217,6 @@ pub fn bidi_class(code: int) -> BidiClass {
     code == 0x06DE || code == 0x06E9 {
         return BidiClass.ON
     }
-    if within(code, 0x0610, 0x061A) || within(code, 0x064B, 0x065F) || code == 0x0670 ||
-    within(code, 0x06D6, 0x06DC) || within(code, 0x06DF, 0x06E4) || code == 0x06E7 ||
-    code == 0x06E8 || within(code, 0x06EA, 0x06ED) {
-        return BidiClass.NSM
-    }
     if within(code, 0x0660, 0x0669) || code == 0x066B || code == 0x066C {
         return BidiClass.AN
     }
@@ -236,44 +230,15 @@ pub fn bidi_class(code: int) -> BidiClass {
     if within(code, 0x0750, 0x077F) || within(code, 0x0870, 0x089F) {
         return BidiClass.AL
     }
-    if within(code, 0x08CA, 0x08E1) || within(code, 0x08E3, 0x08FF) {
-        return BidiClass.NSM
-    }
     if code == 0x08E2 {
         return BidiClass.AN
     }
     if within(code, 0x08A0, 0x08FF) {
         return BidiClass.AL
     }
-    // Devanagari combining marks; the letters fall through to L.
-    if within(code, 0x0900, 0x0902) || code == 0x093A || code == 0x093C ||
-    within(code, 0x0941, 0x0948) || code == 0x094D || within(code, 0x0951, 0x0957) ||
-    code == 0x0962 || code == 0x0963 {
-        return BidiClass.NSM
-    }
-    // Thai combining marks and the baht sign; the letters fall through to L.
-    if code == 0x0E31 || within(code, 0x0E34, 0x0E3A) || within(code, 0x0E47, 0x0E4E) {
-        return BidiClass.NSM
-    }
+    // The Thai baht sign; the letters fall through to L.
     if code == 0x0E3F {
         return BidiClass.ET
-    }
-    // Myanmar combining marks; the letters fall through to L.
-    if within(code, 0x102D, 0x1030) || within(code, 0x1032, 0x1037) || code == 0x1039 ||
-    code == 0x103A || code == 0x103D || code == 0x103E || code == 0x1058 ||
-    code == 0x1059 || within(code, 0x105E, 0x1060) || within(code, 0x1071, 0x1074) ||
-    code == 0x1082 || code == 0x1085 || code == 0x1086 || code == 0x108D ||
-    code == 0x109D {
-        return BidiClass.NSM
-    }
-    // The marks of the blocks that exist only for marks — Combining Diacritical
-    // Marks Extended and Supplement, the marks for symbols, the Ideographic
-    // Annotation marks, the kana voiced-sound marks (how decomposed Japanese
-    // is written) and the variation selectors supplement.
-    if within(code, 0x1AB0, 0x1ACE) || within(code, 0x1DC0, 0x1DFF) ||
-    within(code, 0x20D0, 0x20F0) || within(code, 0x302A, 0x302D) || code == 0x3099 ||
-    code == 0x309A || within(code, 0xE0100, 0xE01EF) {
-        return BidiClass.NSM
     }
     // General punctuation, including every explicit formatting character.
     if within(code, 0x2000, 0x200A) {
@@ -359,9 +324,6 @@ pub fn bidi_class(code: int) -> BidiClass {
         return BidiClass.ON
     }
     // Hebrew presentation forms.
-    if code == 0xFB1E {
-        return BidiClass.NSM
-    }
     if within(code, 0xFB1D, 0xFB4F) {
         return BidiClass.R
     }
@@ -372,10 +334,6 @@ pub fn bidi_class(code: int) -> BidiClass {
     }
     if within(code, 0xFB50, 0xFDFF) {
         return BidiClass.AL
-    }
-    // Variation selectors and combining half marks.
-    if within(code, 0xFE00, 0xFE0F) || within(code, 0xFE20, 0xFE2F) {
-        return BidiClass.NSM
     }
     // Small form variants — a few are properly CS, folded to ON here.
     if within(code, 0xFE50, 0xFE6F) {
@@ -400,17 +358,231 @@ pub fn bidi_class(code: int) -> BidiClass {
         return BidiClass.ON
     }
     // Everything else — CJK ideographs and kana, Hangul, the letters of
-    // Devanagari, Thai and Myanmar, and every script this table does not
-    // cover — is L.
+    // Devanagari, Thai and Myanmar, and the letters of every script this
+    // table does not cover — is L.
     return BidiClass.L
 }
 
-/// Whether a code point is a nonspacing mark — `Mn`, the class the bidi table
-/// calls NSM, for the scripts and mark blocks `bidi_class` covers (a subset of
-/// Unicode, listed there). A mark advances nothing: it draws over the letter before it, so
-/// it is transparent to joining and takes its direction from its base.
+/// Whether a code point is a nonspacing or enclosing mark — General_Category
+/// `Mn` or `Me`, every one of them as of **Unicode 15.1**. A mark advances
+/// nothing: it draws over the letter before it, so it is transparent to
+/// joining, takes its direction from its base, and stays with it when a line
+/// is wrapped or a string cut into clusters. Spacing marks (`Mc`), such as most
+/// Devanagari vowel signs, take room of their own and are not counted.
+///
+/// ```kite
+/// assert(is_combining(0x0301) && is_combining(0x09BC) && is_combining(0x0BCD), "accent, nukta, virama")
+/// assert(is_combining(0x20E3), "the keycap encloses")
+/// assert(!is_combining(0x0061) && !is_combining(0x093E), "a letter, a spacing vowel sign")
+/// ```
+///
+/// The table was the marks of the scripts `bidi_class` named, which left out
+/// 1,246 of Unicode's 1,985 `Mn`: the Bengali and Gurmukhi nuktas, the Tamil
+/// virama, Tibetan, Syriac and more were letters, so `wrap` set them on lines
+/// of their own. It is now generated from the Unicode data: 343 ranges once
+/// adjacent ones are merged, in chunks of sixteen. A few tests pick the chunk
+/// a code point falls in and a bisection finds the range within it. A
+/// module-level slice cannot be written, and building all 343 ranges on every
+/// call would cost more than the search; a tree of tests over every range was
+/// four times the Wasm.
 pub fn is_combining(code: int) -> bool {
-    return bidi_class(code) == BidiClass.NSM
+    // Nothing below the combining diacriticals is a mark: ASCII and Latin-1
+    // text answers after one test.
+    if code < 0x0300 {
+        return false
+    }
+    // Starts and ends, in pairs: find the last range starting at or before
+    // `code`, and see whether `code` is within it.
+    let r = mark_ranges(code)
+    var lo = 0
+    var hi = r.len() / 2
+    for lo < hi {
+        let mid = (lo + hi) / 2
+        if r[2 * mid] <= code {
+            lo = mid + 1
+        } else {
+            hi = mid
+        }
+    }
+    return lo > 0 && code <= r[2 * lo - 1]
+}
+
+/// The chunk of the mark table `code` falls in, as start and end pairs.
+/// Generated from Python's `unicodedata` (Unicode 15.1): every code point of
+/// General_Category Mn or Me, adjacent ones merged into ranges.
+fn mark_ranges(code: int) -> [int] {
+    if code < 0xA806 {
+        if code < 0x0D41 {
+            if code < 0x0962 {
+                if code < 0x07A6 {
+                    return [
+                        0x0300, 0x036F, 0x0483, 0x0489, 0x0591, 0x05BD, 0x05BF, 0x05BF,
+                        0x05C1, 0x05C2, 0x05C4, 0x05C5, 0x05C7, 0x05C7, 0x0610, 0x061A,
+                        0x064B, 0x065F, 0x0670, 0x0670, 0x06D6, 0x06DC, 0x06DF, 0x06E4,
+                        0x06E7, 0x06E8, 0x06EA, 0x06ED, 0x0711, 0x0711, 0x0730, 0x074A,
+                    ]
+                }
+                return [
+                    0x07A6, 0x07B0, 0x07EB, 0x07F3, 0x07FD, 0x07FD, 0x0816, 0x0819,
+                    0x081B, 0x0823, 0x0825, 0x0827, 0x0829, 0x082D, 0x0859, 0x085B,
+                    0x0898, 0x089F, 0x08CA, 0x08E1, 0x08E3, 0x0902, 0x093A, 0x093A,
+                    0x093C, 0x093C, 0x0941, 0x0948, 0x094D, 0x094D, 0x0951, 0x0957,
+                ]
+            }
+            if code < 0x0ABC {
+                return [
+                    0x0962, 0x0963, 0x0981, 0x0981, 0x09BC, 0x09BC, 0x09C1, 0x09C4,
+                    0x09CD, 0x09CD, 0x09E2, 0x09E3, 0x09FE, 0x09FE, 0x0A01, 0x0A02,
+                    0x0A3C, 0x0A3C, 0x0A41, 0x0A42, 0x0A47, 0x0A48, 0x0A4B, 0x0A4D,
+                    0x0A51, 0x0A51, 0x0A70, 0x0A71, 0x0A75, 0x0A75, 0x0A81, 0x0A82,
+                ]
+            }
+            if code < 0x0C00 {
+                return [
+                    0x0ABC, 0x0ABC, 0x0AC1, 0x0AC5, 0x0AC7, 0x0AC8, 0x0ACD, 0x0ACD,
+                    0x0AE2, 0x0AE3, 0x0AFA, 0x0AFF, 0x0B01, 0x0B01, 0x0B3C, 0x0B3C,
+                    0x0B3F, 0x0B3F, 0x0B41, 0x0B44, 0x0B4D, 0x0B4D, 0x0B55, 0x0B56,
+                    0x0B62, 0x0B63, 0x0B82, 0x0B82, 0x0BC0, 0x0BC0, 0x0BCD, 0x0BCD,
+                ]
+            }
+            return [
+                0x0C00, 0x0C00, 0x0C04, 0x0C04, 0x0C3C, 0x0C3C, 0x0C3E, 0x0C40,
+                0x0C46, 0x0C48, 0x0C4A, 0x0C4D, 0x0C55, 0x0C56, 0x0C62, 0x0C63,
+                0x0C81, 0x0C81, 0x0CBC, 0x0CBC, 0x0CBF, 0x0CBF, 0x0CC6, 0x0CC6,
+                0x0CCC, 0x0CCD, 0x0CE2, 0x0CE3, 0x0D00, 0x0D01, 0x0D3B, 0x0D3C,
+            ]
+        }
+        if code < 0x1920 {
+            if code < 0x0F39 {
+                return [
+                    0x0D41, 0x0D44, 0x0D4D, 0x0D4D, 0x0D62, 0x0D63, 0x0D81, 0x0D81,
+                    0x0DCA, 0x0DCA, 0x0DD2, 0x0DD4, 0x0DD6, 0x0DD6, 0x0E31, 0x0E31,
+                    0x0E34, 0x0E3A, 0x0E47, 0x0E4E, 0x0EB1, 0x0EB1, 0x0EB4, 0x0EBC,
+                    0x0EC8, 0x0ECE, 0x0F18, 0x0F19, 0x0F35, 0x0F35, 0x0F37, 0x0F37,
+                ]
+            }
+            if code < 0x108D {
+                return [
+                    0x0F39, 0x0F39, 0x0F71, 0x0F7E, 0x0F80, 0x0F84, 0x0F86, 0x0F87,
+                    0x0F8D, 0x0F97, 0x0F99, 0x0FBC, 0x0FC6, 0x0FC6, 0x102D, 0x1030,
+                    0x1032, 0x1037, 0x1039, 0x103A, 0x103D, 0x103E, 0x1058, 0x1059,
+                    0x105E, 0x1060, 0x1071, 0x1074, 0x1082, 0x1082, 0x1085, 0x1086,
+                ]
+            }
+            return [
+                0x108D, 0x108D, 0x109D, 0x109D, 0x135D, 0x135F, 0x1712, 0x1714,
+                0x1732, 0x1733, 0x1752, 0x1753, 0x1772, 0x1773, 0x17B4, 0x17B5,
+                0x17B7, 0x17BD, 0x17C6, 0x17C6, 0x17C9, 0x17D3, 0x17DD, 0x17DD,
+                0x180B, 0x180D, 0x180F, 0x180F, 0x1885, 0x1886, 0x18A9, 0x18A9,
+            ]
+        }
+        if code < 0x1B36 {
+            return [
+                0x1920, 0x1922, 0x1927, 0x1928, 0x1932, 0x1932, 0x1939, 0x193B,
+                0x1A17, 0x1A18, 0x1A1B, 0x1A1B, 0x1A56, 0x1A56, 0x1A58, 0x1A5E,
+                0x1A60, 0x1A60, 0x1A62, 0x1A62, 0x1A65, 0x1A6C, 0x1A73, 0x1A7C,
+                0x1A7F, 0x1A7F, 0x1AB0, 0x1ACE, 0x1B00, 0x1B03, 0x1B34, 0x1B34,
+            ]
+        }
+        if code < 0x1CE2 {
+            return [
+                0x1B36, 0x1B3A, 0x1B3C, 0x1B3C, 0x1B42, 0x1B42, 0x1B6B, 0x1B73,
+                0x1B80, 0x1B81, 0x1BA2, 0x1BA5, 0x1BA8, 0x1BA9, 0x1BAB, 0x1BAD,
+                0x1BE6, 0x1BE6, 0x1BE8, 0x1BE9, 0x1BED, 0x1BED, 0x1BEF, 0x1BF1,
+                0x1C2C, 0x1C33, 0x1C36, 0x1C37, 0x1CD0, 0x1CD2, 0x1CD4, 0x1CE0,
+            ]
+        }
+        return [
+            0x1CE2, 0x1CE8, 0x1CED, 0x1CED, 0x1CF4, 0x1CF4, 0x1CF8, 0x1CF9,
+            0x1DC0, 0x1DFF, 0x20D0, 0x20F0, 0x2CEF, 0x2CF1, 0x2D7F, 0x2D7F,
+            0x2DE0, 0x2DFF, 0x302A, 0x302D, 0x3099, 0x309A, 0xA66F, 0xA672,
+            0xA674, 0xA67D, 0xA69E, 0xA69F, 0xA6F0, 0xA6F1, 0xA802, 0xA802,
+        ]
+    }
+    if code < 0x114BA {
+        if code < 0xFE20 {
+            if code < 0xAA35 {
+                return [
+                    0xA806, 0xA806, 0xA80B, 0xA80B, 0xA825, 0xA826, 0xA82C, 0xA82C,
+                    0xA8C4, 0xA8C5, 0xA8E0, 0xA8F1, 0xA8FF, 0xA8FF, 0xA926, 0xA92D,
+                    0xA947, 0xA951, 0xA980, 0xA982, 0xA9B3, 0xA9B3, 0xA9B6, 0xA9B9,
+                    0xA9BC, 0xA9BD, 0xA9E5, 0xA9E5, 0xAA29, 0xAA2E, 0xAA31, 0xAA32,
+                ]
+            }
+            return [
+                0xAA35, 0xAA36, 0xAA43, 0xAA43, 0xAA4C, 0xAA4C, 0xAA7C, 0xAA7C,
+                0xAAB0, 0xAAB0, 0xAAB2, 0xAAB4, 0xAAB7, 0xAAB8, 0xAABE, 0xAABF,
+                0xAAC1, 0xAAC1, 0xAAEC, 0xAAED, 0xAAF6, 0xAAF6, 0xABE5, 0xABE5,
+                0xABE8, 0xABE8, 0xABED, 0xABED, 0xFB1E, 0xFB1E, 0xFE00, 0xFE0F,
+            ]
+        }
+        if code < 0x11038 {
+            return [
+                0xFE20, 0xFE2F, 0x101FD, 0x101FD, 0x102E0, 0x102E0, 0x10376, 0x1037A,
+                0x10A01, 0x10A03, 0x10A05, 0x10A06, 0x10A0C, 0x10A0F, 0x10A38, 0x10A3A,
+                0x10A3F, 0x10A3F, 0x10AE5, 0x10AE6, 0x10D24, 0x10D27, 0x10EAB, 0x10EAC,
+                0x10EFD, 0x10EFF, 0x10F46, 0x10F50, 0x10F82, 0x10F85, 0x11001, 0x11001,
+            ]
+        }
+        if code < 0x11234 {
+            return [
+                0x11038, 0x11046, 0x11070, 0x11070, 0x11073, 0x11074, 0x1107F, 0x11081,
+                0x110B3, 0x110B6, 0x110B9, 0x110BA, 0x110C2, 0x110C2, 0x11100, 0x11102,
+                0x11127, 0x1112B, 0x1112D, 0x11134, 0x11173, 0x11173, 0x11180, 0x11181,
+                0x111B6, 0x111BE, 0x111C9, 0x111CC, 0x111CF, 0x111CF, 0x1122F, 0x11231,
+            ]
+        }
+        return [
+            0x11234, 0x11234, 0x11236, 0x11237, 0x1123E, 0x1123E, 0x11241, 0x11241,
+            0x112DF, 0x112DF, 0x112E3, 0x112EA, 0x11300, 0x11301, 0x1133B, 0x1133C,
+            0x11340, 0x11340, 0x11366, 0x1136C, 0x11370, 0x11374, 0x11438, 0x1143F,
+            0x11442, 0x11444, 0x11446, 0x11446, 0x1145E, 0x1145E, 0x114B3, 0x114B8,
+        ]
+    }
+    if code < 0x11EF3 {
+        if code < 0x11727 {
+            return [
+                0x114BA, 0x114BA, 0x114BF, 0x114C0, 0x114C2, 0x114C3, 0x115B2, 0x115B5,
+                0x115BC, 0x115BD, 0x115BF, 0x115C0, 0x115DC, 0x115DD, 0x11633, 0x1163A,
+                0x1163D, 0x1163D, 0x1163F, 0x11640, 0x116AB, 0x116AB, 0x116AD, 0x116AD,
+                0x116B0, 0x116B5, 0x116B7, 0x116B7, 0x1171D, 0x1171F, 0x11722, 0x11725,
+            ]
+        }
+        if code < 0x11A98 {
+            return [
+                0x11727, 0x1172B, 0x1182F, 0x11837, 0x11839, 0x1183A, 0x1193B, 0x1193C,
+                0x1193E, 0x1193E, 0x11943, 0x11943, 0x119D4, 0x119D7, 0x119DA, 0x119DB,
+                0x119E0, 0x119E0, 0x11A01, 0x11A0A, 0x11A33, 0x11A38, 0x11A3B, 0x11A3E,
+                0x11A47, 0x11A47, 0x11A51, 0x11A56, 0x11A59, 0x11A5B, 0x11A8A, 0x11A96,
+            ]
+        }
+        return [
+            0x11A98, 0x11A99, 0x11C30, 0x11C36, 0x11C38, 0x11C3D, 0x11C3F, 0x11C3F,
+            0x11C92, 0x11CA7, 0x11CAA, 0x11CB0, 0x11CB2, 0x11CB3, 0x11CB5, 0x11CB6,
+            0x11D31, 0x11D36, 0x11D3A, 0x11D3A, 0x11D3C, 0x11D3D, 0x11D3F, 0x11D45,
+            0x11D47, 0x11D47, 0x11D90, 0x11D91, 0x11D95, 0x11D95, 0x11D97, 0x11D97,
+        ]
+    }
+    if code < 0x1D17B {
+        return [
+            0x11EF3, 0x11EF4, 0x11F00, 0x11F01, 0x11F36, 0x11F3A, 0x11F40, 0x11F40,
+            0x11F42, 0x11F42, 0x13440, 0x13440, 0x13447, 0x13455, 0x16AF0, 0x16AF4,
+            0x16B30, 0x16B36, 0x16F4F, 0x16F4F, 0x16F8F, 0x16F92, 0x16FE4, 0x16FE4,
+            0x1BC9D, 0x1BC9E, 0x1CF00, 0x1CF2D, 0x1CF30, 0x1CF46, 0x1D167, 0x1D169,
+        ]
+    }
+    if code < 0x1E130 {
+        return [
+            0x1D17B, 0x1D182, 0x1D185, 0x1D18B, 0x1D1AA, 0x1D1AD, 0x1D242, 0x1D244,
+            0x1DA00, 0x1DA36, 0x1DA3B, 0x1DA6C, 0x1DA75, 0x1DA75, 0x1DA84, 0x1DA84,
+            0x1DA9B, 0x1DA9F, 0x1DAA1, 0x1DAAF, 0x1E000, 0x1E006, 0x1E008, 0x1E018,
+            0x1E01B, 0x1E021, 0x1E023, 0x1E024, 0x1E026, 0x1E02A, 0x1E08F, 0x1E08F,
+        ]
+    }
+    return [
+        0x1E130, 0x1E136, 0x1E2AE, 0x1E2AE, 0x1E2EC, 0x1E2EF, 0x1E4EC, 0x1E4EF,
+        0x1E8D0, 0x1E8D6, 0x1E944, 0x1E94A, 0xE0100, 0xE01EF,
+    ]
 }
 
 // ---- paragraph direction ---------------------------------------------------
@@ -1822,6 +1994,11 @@ pub fn join_arabic(run: str) -> str {
 //   * **CB is not implemented**, because there is nothing embedded to break
 //     around: `Content` holds text or a picture, never text with a picture
 //     inside it.
+
+// And one tailoring: **a skin tone attaches to whatever it follows**, as LB9
+// attaches a mark, where UAX #14 keeps it only after an emoji base (LB30b) and
+// lets a line break before it anywhere else. The grapheme rules call it
+// Extend, and this keeps `wrap` from breaking inside one of `clusters`.
 //
 // **The revision is Unicode 15.0** (UAX #14 revision 49): rules LB2 to LB31
 // as that revision numbers them, with the tailorable ones at their defaults —
@@ -2090,6 +2267,12 @@ pub fn line_break_class(code: int) -> LineBreak {
     // piece of code. Devanagari, Thai, Arabic and Burmese all depend on this:
     // a mark that started a line would be drawn over nothing.
     if is_combining(code) {
+        return LineBreak.CM
+    }
+    // The tag characters, which spell out a subdivision flag after a black
+    // flag, are CM in the Line_Break data. Read as letters, they let `wrap`
+    // break before them and set the tags of 🏴 on a line of their own.
+    if code == 0xE0001 || within(code, 0xE0020, 0xE007F) {
         return LineBreak.CM
     }
 
@@ -2363,6 +2546,19 @@ pub fn break_opportunities(body: str) -> [bool] {
     // (LB10), which is the case a line beginning with one falls into.
     let original = classes
     for i in 0..classes.len() {
+        // A skin tone is EM, which LB30b keeps only after an emoji base; after
+        // anything else UAX #14 lets the line break before it, and a wrap cut
+        // "a" from its modifier. Here it attaches to whatever it follows, as a
+        // mark does — the grapheme rules call it Extend — so `wrap` and
+        // `clusters` keep the same things together. Where there is nothing for
+        // it to attach to it stays an EM.
+        if classes[i] == LineBreak.EM && i > 0 {
+            let before = classes[i - 1]
+            if before != LineBreak.SP && before != LineBreak.ZW && !is_mandatory(before) {
+                classes[i] = before
+                absorbed[i] = true
+            }
+        }
         if classes[i] == LineBreak.CM || classes[i] == LineBreak.ZWJ {
             if i == 0 {
                 classes[i] = LineBreak.AL
@@ -2843,20 +3039,36 @@ fn split_point(body: str, start: int, end: int, width: float, measure: fn(str) -
 }
 
 /// The position after the character at `i` and everything that stays with it:
-/// the marks attached to it, an emoji skin-tone modifier or tag character, and
-/// a zero-width joiner together with the character it joins on — so a family
-/// emoji, which is several people stuck together with joiners, is one cluster.
+/// the marks attached to it, an emoji skin-tone modifier or tag character, a
+/// zero-width joiner, and — when the joiner is between two emoji — the emoji
+/// after it, so a family emoji, which is several people stuck together with
+/// joiners, is one cluster.
 fn next_cluster(body: str, i: int, end: int) -> int {
     var k = i + 1
     // Two regional indicators are one flag.
     if k < end && within(body.code_at(i), 0x1F1E6, 0x1F1FF) && within(body.code_at(k), 0x1F1E6, 0x1F1FF) {
         k += 1
     }
+    // Whether the cluster so far is an emoji and what has attached to it,
+    // which is what UAX #29 rule GB11 asks before it joins across a ZWJ.
+    var emoji = pictographic(body.code_at(i))
     for k < end {
         let c = body.code_at(k)
         if c == 0x200D {
-            // The joiner takes what follows it, whatever that is.
-            k = if k + 1 < end { k + 2 } else { k + 1 }
+            // A joiner stays with what is before it (GB9), and takes what
+            // follows it only from one emoji to another (GB11). It used to
+            // take whatever followed, so "a", ZWJ, "中" was one cluster one
+            // column wide, and a space after a stray joiner was swallowed.
+            // A joiner that joins nothing still ends no cluster: the marks
+            // and joiners after it attach as well (GB9), but no emoji after
+            // them is joined on, since only marks may stand between an emoji
+            // and the joiner GB11 joins across.
+            k += 1
+            if emoji && k < end && pictographic(body.code_at(k)) {
+                k += 1
+            } else {
+                emoji = false
+            }
         } else if is_combining(c) || within(c, 0x1F3FB, 0x1F3FF) || within(c, 0xE0020, 0xE007F) {
             k += 1
         } else {
@@ -2866,11 +3078,33 @@ fn next_cluster(body: str, i: int, end: int) -> int {
     return k
 }
 
+/// Extended_Pictographic, as far as GB11 needs it: the characters an emoji
+/// ZWJ sequence is made of. Listed by block rather than read from the Unicode
+/// database — the older symbol and arrow blocks emoji were drawn from, and the
+/// emoji planes from U+1F000 on, less the regional indicators and skin tones,
+/// which are not pictographs. Pictographic punctuation (‼, ⁉, ™, ©, ®) is
+/// counted too; a few non-emoji symbols in the listed blocks are as well,
+/// which matters only where one is followed by a joiner and an emoji.
+fn pictographic(c: int) -> bool {
+    if c < 0x2000 {
+        return c == 0xA9 || c == 0xAE
+    }
+    if c < 0x1F000 {
+        return c == 0x203C || c == 0x2049 || c == 0x2122 || c == 0x2139 || within(c, 0x2194, 0x21AA) ||
+        within(c, 0x231A, 0x23FF) || c == 0x24C2 || within(c, 0x25AA, 0x25FE) || within(c, 0x2600, 0x27BF) ||
+        within(c, 0x2934, 0x2935) || within(c, 0x2B05, 0x2B55) || c == 0x3030 || c == 0x303D || c == 0x3297 ||
+        c == 0x3299
+    }
+    return (within(c, 0x1F000, 0x1FAFF) && !within(c, 0x1F1E6, 0x1F1FF) && !within(c, 0x1F3FB, 0x1F3FF)) ||
+    within(c, 0x1FC00, 0x1FFFD)
+}
+
 /// `body` cut into clusters: each entry is one character with everything that
 /// stays with it — the combining marks and variation selectors after it, an
-/// emoji skin-tone modifier, a zero-width joiner and the character it joins
-/// on, and a pair of regional indicators (a flag). Joined, the entries are
-/// `body` again.
+/// emoji skin-tone modifier, a zero-width joiner, and a pair of regional
+/// indicators (a flag). A joiner between two emoji joins them into one entry,
+/// as UAX #29 has it; after anything else it stays with what is before it and
+/// joins nothing. Joined, the entries are `body` again.
 ///
 /// The same cut `wrap` makes when it must break inside a word. It is a
 /// reading of what the library knows as a mark (see `is_combining`), not the
@@ -2881,6 +3115,9 @@ fn next_cluster(body: str, i: int, end: int) -> int {
 /// let parts = clusters("ae\u{301}b")
 /// assert(parts.len() == 3, "the accent stays with its letter")
 /// assert(parts[1] == "e\u{301}", "as one entry")
+/// let family = "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}"
+/// assert(clusters(family).len() == 1, "joined emoji are one entry")
+/// assert(clusters("a\u{200D}b").len() == 2, "a joiner after a letter joins nothing")
 /// ```
 pub fn clusters(body: str) -> [str] {
     var out: [str] = []
