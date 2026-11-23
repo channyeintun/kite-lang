@@ -6829,7 +6829,7 @@ impl<'a> Checker<'a> {
                         let names: Vec<String> = def
                             .bounds
                             .iter()
-                            .map(|b| self.types.trait_def(*b).name.clone())
+                            .map(|b| written_trait(&self.types.trait_def(*b).name))
                             .collect();
                         d.with_note(format!(
                             "`{}` is bounded by {}, and none of those declares `{}`",
@@ -11098,7 +11098,7 @@ impl<'a> Checker<'a> {
                     self.note_impl_use(*t, *bound, span);
                     continue;
                 }
-                let (tn, bn) = (self.types.name(*t), self.types.trait_def(*bound).name.clone());
+                let (tn, bn) = (self.types.name(*t), written_trait(&self.types.trait_def(*bound).name));
                 let mut d = Diagnostic::error(
                     codes::E0208,
                     format!("`{}` does not implement `{}`", tn, bn),
@@ -11127,7 +11127,7 @@ impl<'a> Checker<'a> {
                                 tn,
                                 bn,
                                 param,
-                                self.types.trait_def(unmet).name,
+                                written_trait(&self.types.trait_def(unmet).name),
                                 self.types.name(arg)
                             )),
                             None => d.with_note(format!(
@@ -11150,7 +11150,7 @@ impl<'a> Checker<'a> {
                     TyKind::Dyn(tr) => d.with_note(format!(
                         "{} has only what `{}` declares",
                         self.types.with_article(*t),
-                        self.types.trait_def(tr).name
+                        written_trait(&self.types.trait_def(tr).name)
                     )),
                     _ if self.type_index_of(*t).is_some() => {
                         d.with_note(format!("write `{}`", self.impl_to_write(&bn, *t)))
@@ -13881,7 +13881,7 @@ impl<'a> Checker<'a> {
                     Some(bounded) => bounded,
                     None => {
                         let (tn, fname) =
-                            (self.types.trait_def(tr).name.clone(), self.types.name(found));
+                            (written_trait(&self.types.trait_def(tr).name), self.types.name(found));
                         let header = self.impl_to_write(&tn, found);
                         format!("`{}` does not implement `{}`; write `{}` to use it here", fname, tn, header)
                     }
@@ -14476,7 +14476,7 @@ fn check_impls(
                         if d.bounds.contains(b) {
                             continue;
                         }
-                        let bound = types.trait_def(*b).name.clone();
+                        let bound = written_trait(&types.trait_def(*b).name);
                         diags.push(
                             Diagnostic::error(
                                 codes::E0208,
@@ -16241,6 +16241,13 @@ fn check_compared_params(
 }
 
 /// The last segment of a possibly-qualified name.
+/// A trait's name as a program writes it. The prelude's traits are held as
+/// `prelude.Hash`, and a note that says so names something no program can
+/// write: the reader's own spelling is `Hash`.
+fn written_trait(name: &str) -> String {
+    name.strip_prefix("prelude.").unwrap_or(name).to_string()
+}
+
 fn last_segment(name: &str) -> &str {
     name.rsplit('.').next().unwrap_or(name)
 }
