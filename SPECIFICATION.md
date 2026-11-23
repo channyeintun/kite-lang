@@ -2155,8 +2155,9 @@ the same accounts, so `sweep(xs, xs)` with two `var [Account]` parameters is
 `E0800`, and so is `settle(xs, xs[0])`. A generic parameter is judged by what
 the call passes it, so `transfer<T: Ledger>(a, a, 50)` is the same error. A call
 through a function value is checked against the function when a `let` names
-it; otherwise every reference it is passed counts as written, because a
-function type does not say which of its parameters are `var`.
+it. Through any other function value — a parameter `f: fn(Account, Account,
+int)` — the call is not checked, because a function type does not say which of
+its parameters are `var`, and most such values only read.
 
 **This is not borrowing.** There is no ownership, no move, no lifetime, and
 nothing to annotate. A borrow checker exists to replace a collector, which is

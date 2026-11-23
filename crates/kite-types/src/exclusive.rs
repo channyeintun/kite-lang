@@ -48,9 +48,11 @@
 //! A call through `dyn Trait` is checked as well: the implementation is not
 //! known here, so a parameter counts as written when any row of the trait's
 //! vtable declares it `var`. A call through a function value is checked
-//! against the function when a `let` binding says which one it is, and
-//! otherwise counts every reference it is passed as written: a function type
-//! does not say which parameters are `var`.
+//! against the function when the call or a `let` binding says which one it
+//! is. Any other function value is not checked: a function type does not say
+//! which parameters are `var`, and counting each as written refused ordinary
+//! read-only callbacks — `better(xs[i], xs[best])` — while a value passed on
+//! one call further escaped the check all the same.
 
 use kite_diag::{codes, DiagBag, Diagnostic};
 use kite_hir::{self as hir, ExprKind, LocalId, Stmt, TyId, TyKind, Types};
@@ -96,7 +98,6 @@ struct Checker<'a> {
 /// One parameter of whatever the call reaches. Flattened out of `hir::Local`
 /// because a virtual call has no single callee to borrow it from.
 struct Param {
-    /// Empty for an unknown function value's, which has no name to give.
     name: String,
     ty: TyId,
     mutable: bool,
@@ -520,10 +521,15 @@ impl Checker<'_> {
     /// It was not checked at all, so `let f = transfer` and then `f(a, a, 50)`
     /// was the §14.1 bug with one line added. Where the function is known —
     /// written in the call, or the value of a `let` — its parameters are
-    /// checked as a direct call's are. Where it is not, a function type does
-    /// not say which parameters are `var`, so each one holding a reference
-    /// counts as written: the call is refused when it might be the bug rather
-    /// than accepted when it might not be.
+    /// checked as a direct call's are.
+    ///
+    /// **Where it is not, the call is not checked.** A function type does not
+    /// say which parameters are `var`. Counting every reference as written
+    /// refused the ordinary read-only callback — a `better: fn(Player,
+    /// Player) -> bool` called as `better(xs[i], xs[best])` — with a note
+    /// whose fix, call it by name, a higher-order function cannot take; and
+    /// it bought little, since `apply(transfer, a, a)` passes the one object
+    /// to `apply` under two names and the call inside sees two.
     fn call_value(&mut self, callee: &hir::Expr, args: &[hir::Expr], call_span: Span) {
         let known = match &callee.kind {
             ExprKind::ClosureNew { func, captures, .. } => Some((*func, captures.len())),
@@ -541,13 +547,7 @@ impl Checker<'_> {
                     .map(|p| Param { name: p.name.clone(), ty: p.ty, mutable: p.mutable })
                     .collect()
             }
-            None => match self.program.types.kind(callee.ty) {
-                TyKind::Fn { params, .. } if params.len() == args.len() => params
-                    .iter()
-                    .map(|ty| Param { name: String::new(), ty: *ty, mutable: true })
-                    .collect(),
-                _ => return,
-            },
+            None => return,
         };
         self.check_args(&params, args, call_span);
     }
@@ -607,9 +607,6 @@ impl Checker<'_> {
             (pb, pa, span_b, span_a)
         };
 
-        if written.name.is_empty() {
-            return self.report_value(a, span_a, b, span_b, call_span);
-        }
         let message = if a.text == b.text {
             format!("`{}` is passed twice to this call, and parameter `{}` writes it", a.text, written.name)
         } else if both {
@@ -656,27 +653,6 @@ impl Checker<'_> {
             .with_secondary(span_written, secondary)
             .with_secondary(call_span, "in this call")
             .with_note(note);
-        self.diags.push(diag);
-    }
-
-    /// The same, for a function value that is not known: no parameter has a
-    /// name to give, and none is known to be `var` — only possibly so.
-    fn report_value(&mut self, a: &Place, span_a: Span, b: &Place, span_b: Span, call_span: Span) {
-        let message = if a.text == b.text {
-            format!("`{}` is passed twice to a function value, which may write it", a.text)
-        } else {
-            format!("`{}` and `{}` are the same object, passed to a function value", a.text, b.text)
-        };
-        self.reported.insert(call_span);
-        let diag = Diagnostic::error(codes::E0800, message)
-            .with_primary(span_b, "the same object again")
-            .with_secondary(span_a, "first passed here")
-            .with_secondary(call_span, "in this call")
-            .with_note(
-                "a function type does not say which of its parameters are `var`, so each \
-                 reference a function value is passed counts as written. Pass distinct \
-                 objects, or call the function by its name, where its parameters can be read.",
-            );
         self.diags.push(diag);
     }
 }

@@ -1,7 +1,7 @@
 // Three ways §14.1's bug got past E0800. A copy-on-write value is copied
 // shallowly, so two `var` slices of one slice of structs hold the same
 // structs; a generic parameter is the struct it is passed; and a call through
-// a function value reaches a function whose parameters may be `var`.
+// a function value known to be `transfer` is a call to `transfer`.
 
 struct Account {
     var balance: int
@@ -45,8 +45,16 @@ fn read(from: Account, to: Account) -> int {
     return from.balance + to.balance
 }
 
-fn through(f: fn(Account, Account, int), a: Account) {
-    f(a, a, 1) //~ ERROR E0800
+// A function value that is not known is not checked: its type does not say
+// which parameters are `var`, and most such values only read.
+fn best(xs: [Account], better: fn(Account, Account) -> bool) -> int {
+    var at = 0
+    for i in 1..xs.len() {
+        if better(xs[i], xs[at]) {
+            at = i
+        }
+    }
+    return at
 }
 
 fn main() {
@@ -70,5 +78,5 @@ fn main() {
     // Known to be `read`, whose parameters are not `var`.
     let r = read
     io.print(r(a, a))
-    through(transfer, a)
+    io.print(best(xs, |p: Account, q: Account| p.balance > q.balance))
 }

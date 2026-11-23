@@ -503,9 +503,10 @@ codes! {
          other, so `f(o, o.inner)` counts as well as `f(a, a)`. A slice, map, \
          tuple or optional of structs counts too: it is copied on write, but \
          shallowly, so two copies hold the same structs. A generic parameter \
-         is judged by the argument passed to it. A function value whose \
-         function is not known counts every reference it is passed as \
-         written, because its type does not say which parameters are `var`. \
+         is judged by the argument passed to it. A call through a function \
+         value is checked when the call or a `let` says which function it is; \
+         through any other, it is not, because a function type does not say \
+         which parameters are `var`. \
          Pass distinct objects, or take one `var` parameter and return the \
          second result.\n\n\
          This sees one call site. Aliasing arranged elsewhere — two fields \

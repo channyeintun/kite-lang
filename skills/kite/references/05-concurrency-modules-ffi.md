@@ -970,9 +970,11 @@ argument of the same call may name it.** Precisely:
   is rejected as `transfer(a, a, 50)` is.
 - A call through a **function value** is checked against the function when a
   `let` names it (`let f = transfer` then `f(a, a, 50)` is rejected). Through
-  any other function value — a parameter `f: fn(Account, Account, int)` — every
-  reference counts as written, since a function type does not say which
-  parameters are `var`: `f(a, a, 1)` is rejected even if `f` only reads.
+  any other function value — a parameter `f: fn(Account, Account, int)` — the
+  call is **not checked**, since a function type does not say which parameters
+  are `var`: `f(a, a, 1)` compiles, and is the §14.1 bug when `f` is
+  `transfer`. Do not hand a function with two `var` parameters around as a
+  value.
 
 ```kite
 struct Account {
