@@ -375,6 +375,38 @@ fn a_socket_that_cannot_connect_says_so() {
     assert_eq!(out, "refused\n", "{}", out);
 }
 
+/// A socket that is closed before it opens says why, and not nothing.
+///
+/// The state goes from connecting straight to closed, with no error event in
+/// between, and the message used to end at its own colon.
+#[test]
+fn a_socket_closed_before_it_opened_says_so() {
+    if !node_available() {
+        eprintln!("skipping: node is not on PATH");
+        return;
+    }
+    let runner = "import { readFile } from \"node:fs/promises\";\n\
+         import { run, setWriter } from \"./app.js\";\n\
+         globalThis.WebSocket = class {\n\
+         \x20 constructor() { setTimeout(() => this.onclose && this.onclose({}), 0); }\n\
+         \x20 close() {}\n\
+         };\n\
+         const out = [];\n\
+         setWriter((l) => out.push(l));\n\
+         await run(new Uint8Array(await readFile(new URL(\"./app.wasm\", import.meta.url))));\n\
+         process.stdout.write(out.map((l) => l + \"\\n\").join(\"\"));\n";
+    let out = run_runner_under_node(
+        "socket-hangup",
+        "use std/socket\n\
+         async fn main() {\n\
+         \x20 let (s, err) = await socket.connect(\"ws://x/y\")\n\
+         \x20 if err != nil {\n    io.print(err.message())\n  }\n}\n",
+        runner,
+        &[],
+    );
+    assert_eq!(out, "socket ws://x/y: closed before it opened\n", "{}", out);
+}
+
 /// A transport failure is an `error`. A status is not.
 #[test]
 fn a_transport_failure_is_an_error() {
@@ -996,6 +1028,31 @@ fn a_missing_property_is_an_error_and_not_a_zero() {
     );
 }
 
+/// Calling a method that is not there names that method.
+///
+/// The engine's own message quotes the glue's source, `t[textOf(...)] is not a
+/// function`, and the name the program wrote appeared nowhere.
+#[test]
+fn a_missing_method_is_named_in_the_error() {
+    if !node_available() {
+        eprintln!("skipping: node is not on PATH");
+        return;
+    }
+    let src = "use std/js\n\n\
+        fn main() {\n\
+        \x20 let (_, err) = js.call0(js.global(\"probe\"), \"noSuchMethod\")\n\
+        \x20 if err != nil {\n    io.print(err.message())\n  }\n\
+        \x20 let (v, ok) = js.call1(js.global(\"probe\"), \"twice\", js.of_num(4.0))\n\
+        \x20 if ok == nil {\n    io.print(js.num_or(js.global(\"probe\"), \"count\", 0.0))\n  }\n\
+        }\n";
+    let out = run_runner_under_node("jsnomethod", src, JS_RUNNER, &[]);
+    assert!(
+        out.contains("`noSuchMethod` is not a function") && !out.contains("textOf"),
+        "{}",
+        out
+    );
+}
+
 /// Numbers cross as `f64`, and the limit that implies is refused rather than
 /// discovered as a value that came back different from the one that went out.
 #[test]
@@ -1563,6 +1620,262 @@ fn the_example_page_program_works() {
          filtered: 5000 rows · 503 matched · 100 shown\n\
          sorted: 5000 rows · 503 matched · 100 shown\n\
          order changed: true\n"
+    );
+}
+
+/// An `update` whose DOM call fails midway leaves the view in step with the
+/// document, so the next one does not strand what the failed one added.
+///
+/// Going from two keyed rows to a third builds and appends it, then fails
+/// removing the first; the view kept describing the two rows, and the update
+/// after it built the third a second time.
+#[test]
+fn a_failed_html_update_leaves_the_view_true_to_the_page() {
+    if !node_available() {
+        eprintln!("skipping: node is not on PATH");
+        return;
+    }
+    let src = "use std/dom\nuse std/html\n\n\
+        fn rows(keys: [str]) -> [html.Node] {\n\
+        \x20 var out: [html.Node] = []\n\
+        \x20 for k in keys {\n    out.push(html.keyed(k, html.txt(\"p\", [], k)))\n  }\n\
+        \x20 return out\n\
+        }\n\
+        fn main() {\n\
+        \x20 let root = dom.find(\"#root\")\n\
+        \x20 if root == nil {\n    return\n  }\n\
+        \x20 let (view, err) = html.mount(root, rows([\"x\", \"y\"]))\n\
+        \x20 if err != nil {\n    return\n  }\n\
+        \x20 let first = html.update(view, rows([\"z\"]))\n\
+        \x20 io.print(\"first failed: \\(first != nil)\")\n\
+        \x20 let second = html.update(view, rows([\"z\"]))\n\
+        \x20 io.print(\"second ok: \\(second == nil)\")\n\
+        }\n";
+    let runner = "import { readFile } from \"node:fs/promises\";\n\
+         import { instantiate, resident, setWriter } from \"./app.js\";\n\
+         class Element {}\n\
+         let failures = 1;\n\
+         const mk = (tag) => {\n\
+         \x20 const el = {\n\
+         \x20   tagName: tag, attrs: {}, children: [], text: \"\",\n\
+         \x20   get textContent() { return this.text; },\n\
+         \x20   set textContent(v) { this.text = v; if (v === \"\") this.children = []; },\n\
+         \x20   getAttribute(n) { return n in this.attrs ? this.attrs[n] : null; },\n\
+         \x20   setAttribute(n, v) { this.attrs[n] = v; },\n\
+         \x20   removeAttribute(n) { delete this.attrs[n]; },\n\
+         \x20   classList: { add() {}, remove() {}, contains: () => false },\n\
+         \x20   appendChild(c) {\n\
+         \x20     const at = this.children.indexOf(c);\n\
+         \x20     if (at !== -1) this.children.splice(at, 1);\n\
+         \x20     this.children.push(c); c.parent = this; return c;\n\
+         \x20   },\n\
+         \x20   remove() {\n\
+         \x20     if (failures > 0) { failures--; throw new Error(\"remove failed\"); }\n\
+         \x20     const p = this.parent; if (!p) return;\n\
+         \x20     const at = p.children.indexOf(this);\n\
+         \x20     if (at !== -1) p.children.splice(at, 1);\n\
+         \x20   },\n\
+         \x20   addEventListener() {}, removeEventListener() {},\n\
+         \x20 };\n\
+         \x20 Object.setPrototypeOf(el, Element.prototype);\n\
+         \x20 return el;\n\
+         };\n\
+         const root = mk(\"div\");\n\
+         globalThis.Element = Element;\n\
+         globalThis.document = {\n\
+         \x20 querySelector: (s) => (s === \"#root\" ? root : null),\n\
+         \x20 querySelectorAll: () => [],\n\
+         \x20 createElement: (t) => mk(t),\n\
+         };\n\
+         const out = [];\n\
+         setWriter((l) => out.push(l));\n\
+         const exports = await instantiate(new Uint8Array(await readFile(new URL(\"./app.wasm\", import.meta.url))));\n\
+         resident(exports);\n\
+         exports.main();\n\
+         out.push(\"on the page: \" + root.children.map((c) => c.text).join(\",\"));\n\
+         process.stdout.write(out.map((l) => l + \"\\n\").join(\"\"));\n";
+    let out = run_runner_under_node("htmlfail", src, runner, &[]);
+    assert_eq!(
+        out,
+        "first failed: true\nsecond ok: true\non the page: z\n",
+        "{}",
+        out
+    );
+}
+
+/// `html.render` and `html.escape` write a description out as text.
+#[test]
+fn html_renders_a_description_as_text() {
+    if !node_available() {
+        eprintln!("skipping: node is not on PATH");
+        return;
+    }
+    let src = "use std/dom\nuse std/html\n\n\
+        fn main() {\n\
+        \x20 let page = [html.el(\"ul\", [html.class(\"list\"), html.click(|e: dom.Event| { })], [\n\
+        \x20   html.txt(\"li\", [html.data(\"n\", \"1\")], \"a < b & \\\"c\\\"\"),\n\
+        \x20   html.empty(\"br\", []),\n\
+        \x20   html.text(\"bare\"),\n\
+        \x20   html.empty(\"input\", [html.attr(\"value\", \"x\\\" onclick=\\\"y\"), html.attr(\"a b\", \"1\")]),\n\
+        \x20   html.txt(\"b>\", [], \"odd tag\"),\n\
+        \x20 ])]\n\
+        \x20 io.print(html.render(page))\n\
+        \x20 io.print(html.escape(\"Tom & Jerry's <b>\"))\n\
+        }\n";
+    let out = run_under_node("htmlrender", src);
+    assert_eq!(
+        out,
+        "<ul class=\"list\"><li data-n=\"1\">a &lt; b &amp; &quot;c&quot;</li><br>\
+         <span>bare</span><input value=\"x&quot; onclick=&quot;y\"><span>odd tag</span></ul>\n\
+         Tom &amp; Jerry&#39;s &lt;b&gt;\n"
+    );
+}
+
+/// The one-line wrappers on `dom` and `js` call what they say they call.
+#[test]
+fn dom_and_js_shorthands_reach_the_page() {
+    if !node_available() {
+        eprintln!("skipping: node is not on PATH");
+        return;
+    }
+    let src = "use std/dom\nuse std/js\n\n\
+        fn main() {\n\
+        \x20 let cell = dom.find(\"#cell\")\n\
+        \x20 if cell == nil {\n    return\n  }\n\
+        \x20 io.print(\"disabled \\(dom.has_attribute(cell, \"disabled\")) hidden \\(dom.has_attribute(cell, \"hidden\"))\")\n\
+        \x20 let row = dom.closest(cell, \"tr\")\n\
+        \x20 io.print(\"closest tr: \\(row != nil) none: \\(dom.closest(cell, \"table\") == nil)\")\n\
+        \x20 let up = dom.parent(cell)\n\
+        \x20 if up == nil {\n    return\n  }\n\
+        \x20 io.print(\"parent is a row: \\(dom.has_attribute(up, \"row\")) its parent: \\(dom.parent(up) == nil)\")\n\
+        \x20 io.print(\"focus: \\(dom.focus(cell) == nil)\")\n\
+        \x20 io.print(\"clear: \\(dom.clear(cell) == nil) text [\\(dom.text(cell))]\")\n\
+        \x20 let probe = js.global(\"probe\")\n\
+        \x20 io.print(\"int_or \\(js.int_or(probe, \"count\", -1)) \\(js.int_or(probe, \"ratio\", -1)) \\(js.int_or(probe, \"missing\", -1)) \\(js.int_or(probe, \"name\", -1))\")\n\
+        \x20 io.print(\"has \\(js.has(probe, \"count\")) \\(js.has(probe, \"missing\")) \\(js.has(probe, \"nope\")) \\(js.has(probe, \"off\"))\")\n\
+        }\n";
+    let runner = "import { readFile } from \"node:fs/promises\";\n\
+         import { run, setWriter } from \"./app.js\";\n\
+         class Element {}\n\
+         const mk = (tag, attrs, parent) => {\n\
+         \x20 const el = { tagName: tag, attrs, parentElement: parent ?? null, text: \"stuff\", focused: false,\n\
+         \x20   hasAttribute(n) { return n in this.attrs; },\n\
+         \x20   closest(s) { for (let e = this; e; e = e.parentElement) if (e.tagName === s) return e; return null; },\n\
+         \x20   focus() { this.focused = true; },\n\
+         \x20   get textContent() { return this.text; },\n\
+         \x20   set textContent(v) { this.text = v; },\n\
+         \x20 };\n\
+         \x20 Object.setPrototypeOf(el, Element.prototype);\n\
+         \x20 return el;\n\
+         };\n\
+         const row = mk(\"tr\", { row: \"\" }, null);\n\
+         const cell = mk(\"td\", { disabled: \"\" }, row);\n\
+         globalThis.Element = Element;\n\
+         globalThis.document = { querySelector: (s) => (s === \"#cell\" ? cell : null) };\n\
+         globalThis.probe = { count: 7, ratio: 1.5, missing: undefined, name: \"kite\", off: false };\n\
+         const out = [];\n\
+         setWriter((l) => out.push(l));\n\
+         await run(new Uint8Array(await readFile(new URL(\"./app.wasm\", import.meta.url))));\n\
+         out.push(\"focused \" + cell.focused);\n\
+         process.stdout.write(out.map((l) => l + \"\\n\").join(\"\"));\n";
+    let out = run_runner_under_node("domshort", src, runner, &[]);
+    assert_eq!(
+        out,
+        "disabled true hidden false\n\
+         closest tr: true none: true\n\
+         parent is a row: true its parent: true\n\
+         focus: true\n\
+         clear: true text []\n\
+         int_or 7 -1 -1 -1\n\
+         has true false false true\n\
+         focused true\n"
+    );
+}
+
+/// `socket.take` answers at once, with a message or with nothing.
+#[test]
+fn a_socket_can_be_polled() {
+    if !node_available() {
+        eprintln!("skipping: node is not on PATH");
+        return;
+    }
+    // A socket that opens, then delivers two messages in one turn, so that after
+    // waiting for the first the second is already there and a third is not.
+    let runner = "import { readFile } from \"node:fs/promises\";\n\
+         import { run, setWriter } from \"./app.js\";\n\
+         globalThis.WebSocket = class {\n\
+         \x20 constructor() {\n\
+         \x20   setTimeout(() => {\n\
+         \x20     this.onopen();\n\
+         \x20     setTimeout(() => {\n\
+         \x20       this.onmessage({ data: \"one\" });\n\
+         \x20       this.onmessage({ data: \"two\" });\n\
+         \x20     }, 0);\n\
+         \x20   }, 0);\n\
+         \x20 }\n\
+         \x20 close() {}\n\
+         };\n\
+         const out = [];\n\
+         setWriter((l) => out.push(l));\n\
+         await run(new Uint8Array(await readFile(new URL(\"./app.wasm\", import.meta.url))));\n\
+         process.stdout.write(out.map((l) => l + \"\\n\").join(\"\"));\n";
+    let src = "use std/socket\n\
+         async fn main() {\n\
+         \x20 let (s, err) = await socket.connect(\"ws://x/y\")\n\
+         \x20 if err != nil {\n    io.print(\"failed\")\n    return\n  }\n\
+         \x20 io.print(\"before: \\(socket.take(s) == nil)\")\n\
+         \x20 let (first, rerr) = await socket.receive(s)\n\
+         \x20 if rerr != nil {\n    io.print(\"receive failed\")\n    return\n  }\n\
+         \x20 io.print(first)\n\
+         \x20 io.print(or_else(socket.take(s), \"<nil>\"))\n\
+         \x20 io.print(\"after: \\(socket.take(s) == nil)\")\n\
+         \x20 socket.close(s)\n}\n";
+    let out = run_runner_under_node("socket-take", src, runner, &[]);
+    assert_eq!(out, "before: true\none\ntwo\nafter: true\n", "{}", out);
+}
+
+/// A world for `std/window` to read: an address, a scroll position, and a time
+/// zone with daylight saving, so that "now" and "at an instant" can differ.
+const WINDOW_RUNNER: &str = "import { readFile } from \"node:fs/promises\";\n\
+     process.env.TZ = \"America/New_York\";\n\
+     import { run, setWriter } from \"./app.js\";\n\
+     globalThis.window = { scrollY: -0.6, scrollX: 2.5, innerWidth: 800.4 };\n\
+     globalThis.location = { search: \"?a%20b=1&c+d=2&e=%41%zz&f&g=h%E4%B8%AD&a%20b=late\" };\n\
+     const out = [];\n\
+     setWriter((l) => out.push(l));\n\
+     await run(new Uint8Array(await readFile(new URL(\"./app.wasm\", import.meta.url))));\n\
+     process.stdout.write(out.map((l) => l + \"\\n\").join(\"\"));\n";
+
+/// `window` reads the address as the server does, rounds a negative pixel the
+/// right way, and can ask for the time zone at an instant.
+///
+/// `parameter` compared the raw name and returned a value with any malformed
+/// escape wholly undecoded; `pixels` added a half and cast, which sends -0.6 to
+/// 0; and the zone offset was only ever the offset now, an hour out for a
+/// January instant read in July.
+#[test]
+fn window_decodes_rounds_and_dates_as_documented() {
+    if !node_available() {
+        eprintln!("skipping: node is not on PATH");
+        return;
+    }
+    let src = "use std/window\n\n\
+        fn show(name: str) -> str {\n\
+        \x20 let v = window.parameter(name)\n\
+        \x20 if v == nil {\n    return \"nil\"\n  }\n\
+        \x20 return \"[\\(v)]\"\n\
+        }\n\
+        fn main() {\n\
+        \x20 io.print(\"\\(show(\"a b\")) \\(show(\"c d\")) \\(show(\"e\")) \\(show(\"f\")) \\(show(\"g\")) \\(show(\"zz\"))\")\n\
+        \x20 let all = window.parameters()\n\
+        \x20 io.print(\"\\(all.len()) [\\(or_else(all[\"a b\"], \"-\"))] [\\(or_else(all[\"e\"], \"-\"))] [\\(or_else(all[\"f\"], \"-\"))]\")\n\
+        \x20 io.print(\"\\(window.scroll_y()) \\(window.scroll_x()) \\(window.width())\")\n\
+        \x20 io.print(\"\\(window.timezone_offset_at(1705276800000)) \\(window.timezone_offset_at(1721001600000))\")\n\
+        }\n";
+    let out = run_runner_under_node("window", src, WINDOW_RUNNER, &[]);
+    assert_eq!(
+        out,
+        "[1] [2] [A%zz] [] [h\u{4e2d}] nil\n5 [1] [A%zz] []\n-1 3 800\n-300 -240\n"
     );
 }
 

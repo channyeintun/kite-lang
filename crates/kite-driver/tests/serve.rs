@@ -442,6 +442,166 @@ fn repeated_and_differently_cased_headers_survive() {
     assert_eq!(out, "cookies a=1 b=2\ntype application/json\n", "{}", out);
 }
 
+/// A response header's name is held to what a request's is: a colon in a name
+/// is not a header called something else, and a NUL in a value is not sent.
+///
+/// `respond` refused only a line break in a name, so `Set-Cookie: a=b; x` as a
+/// name went out as a `Set-Cookie` header the handler never meant to write.
+#[test]
+fn a_response_header_name_must_be_a_token_and_a_value_has_no_nul() {
+    if !node_available() {
+        eprintln!("skipping: node is not installed");
+        return;
+    }
+    let src = "use std/http\n\
+         async fn main() {\n\
+         \x20   let (server, err) = await http.open(0)\n\
+         \x20   if err != nil {\n        io.print(err.message())\n        return\n    }\n\
+         \x20   io.print(\"listening \\(http.port_of(server))\")\n\
+         \x20   let (incoming, aerr) = await http.accept(server)\n\
+         \x20   if aerr != nil {\n        return\n    }\n\
+         \x20   let colon = http.respond(incoming, http.ok(\"x\"),\n\
+         \x20       [http.Header{ name: \"Set-Cookie: session=evil; x\", value: \"1\" }])\n\
+         \x20   let nul = http.respond(incoming, http.ok(\"x\"),\n\
+         \x20       [http.Header{ name: \"x-a\", value: \"a\\0b\" }])\n\
+         \x20   let none: [http.Header] = []\n\
+         \x20   let big = http.respond(incoming, http.status(1000, \"x\"), none)\n\
+         \x20   var why = \"\"\n\
+         \x20   if big != nil {\n        why = big.message()\n    }\n\
+         \x20   let last = http.respond(incoming, http.ok(\"colon=\\(colon != nil) nul=\\(nul != nil) \\(why)\"), none)\n\
+         \x20   if last != nil {\n        io.print(last.message())\n    }\n\
+         }\n";
+    let client = client_with(
+        r#"  const r = await fetch(`http://127.0.0.1:${port}/`);
+  console.log("cookie " + JSON.stringify(r.headers.get("set-cookie")));
+  console.log("body " + (await r.text()));"#,
+    );
+    let out = serve_under_node("header-names", src, &client);
+    assert_eq!(
+        out,
+        "cookie null\nbody colon=true nul=true http.respond: `1000` is not a status HTTP sends (100 to 599)\n",
+        "{}",
+        out
+    );
+}
+
+/// `run` sends the headers a handler put on its response, and answers 500 to a
+/// handler whose header could not be sent without ending the server.
+///
+/// `run` passed no headers at all, so a JSON API served through it was
+/// `text/plain` and nothing could redirect or set a cookie.
+#[test]
+fn run_sends_the_headers_a_handler_added() {
+    if !node_available() {
+        eprintln!("skipping: node is not installed");
+        return;
+    }
+    let src = "use std/http\n\
+         fn api(request: http.Request) -> http.Response {\n\
+         \x20   let r = http.with_header(http.ok(\"{}\"), \"Content-Type\", \"application/json\")\n\
+         \x20   let r2 = http.with_header(r, \"Set-Cookie\", \"a=1\")\n\
+         \x20   return http.with_header(r2, \"Set-Cookie\", \"b=2\")\n\
+         }\n\
+         fn bad(request: http.Request) -> http.Response {\n\
+         \x20   return http.with_header(http.ok(\"x\"), \"Set-Cookie: evil; x\", \"1\")\n\
+         }\n\
+         fn plain(request: http.Request) -> http.Response {\n\
+         \x20   return http.ok(\"plain\")\n\
+         }\n\
+         fn data(request: http.Request) -> http.Response {\n\
+         \x20   return http.json(201, \"{}\")\n\
+         }\n\
+         fn go(request: http.Request) -> http.Response {\n\
+         \x20   return http.redirect(\"/done\")\n\
+         }\n\
+         fn zero(request: http.Request) -> http.Response {\n\
+         \x20   return http.status(0, \"zero\")\n\
+         }\n\
+         async fn main() {\n\
+         \x20   let (server, err) = await http.open(0)\n\
+         \x20   if err != nil {\n        io.print(err.message())\n        return\n    }\n\
+         \x20   io.print(\"listening \\(http.port_of(server))\")\n\
+         \x20   let routes = [\n\
+         \x20       http.route(\"GET\", \"/api\", api),\n\
+         \x20       http.route(\"GET\", \"/zero\", zero),\n\
+         \x20       http.route(\"GET\", \"/data\", data),\n\
+         \x20       http.route(\"GET\", \"/go\", go),\n\
+         \x20       http.route(\"GET\", \"/bad\", bad),\n\
+         \x20       http.route(\"GET\", \"/plain\", plain),\n\
+         \x20   ]\n\
+         \x20   let (n, rerr) = await http.run(server, routes)\n\
+         \x20   if rerr != nil {\n        io.print(rerr.message())\n    }\n\
+         }\n";
+    let client = client_with(
+        r#"  const a = await fetch(`http://127.0.0.1:${port}/api`);
+  console.log("api " + a.status + " " + a.headers.get("content-type") + " " + a.headers.getSetCookie().join(" "));
+  const b = await fetch(`http://127.0.0.1:${port}/bad`);
+  console.log("bad " + b.status + " " + JSON.stringify(b.headers.get("set-cookie")));
+  const d = await fetch(`http://127.0.0.1:${port}/data`);
+  console.log("data " + d.status + " " + d.headers.get("content-type"));
+  const g = await fetch(`http://127.0.0.1:${port}/go`, { redirect: "manual" });
+  console.log("go " + g.status + " " + g.headers.get("location"));
+  const z = await fetch(`http://127.0.0.1:${port}/zero`);
+  console.log("zero " + z.status);
+  const p = await fetch(`http://127.0.0.1:${port}/plain`);
+  console.log("plain " + p.status + " " + p.headers.get("content-type") + " " + (await p.text()));"#,
+    );
+    let out = serve_under_node("run-headers", src, &client);
+    assert_eq!(
+        out,
+        "api 200 application/json a=1 b=2\nbad 500 null\ndata 201 application/json; charset=utf-8\ngo 303 /done\nzero 500\nplain 200 text/plain; charset=utf-8 plain\n",
+        "{}",
+        out
+    );
+}
+
+/// A header value the host cannot put on the wire — a character past U+00FF,
+/// or a control character other than a tab — is a 500 for that one caller,
+/// and the server goes on answering.
+///
+/// Node refuses such a value in `writeHead`; the adapter answered 500 and told
+/// the program "already answered", and `run` ended the server on it, so one
+/// handler's `€` in a header stopped every route.
+#[test]
+fn a_header_value_the_host_cannot_carry_does_not_end_the_server() {
+    if !node_available() {
+        eprintln!("skipping: node is not installed");
+        return;
+    }
+    let src = "use std/http\n\
+         fn euro(request: http.Request) -> http.Response {\n\
+         \x20   return http.with_header(http.ok(\"x\"), \"x-price\", \"5\u{20AC}\")\n\
+         }\n\
+         fn bell(request: http.Request) -> http.Response {\n\
+         \x20   return http.redirect(\"/a\u{7}b\")\n\
+         }\n\
+         fn latin(request: http.Request) -> http.Response {\n\
+         \x20   return http.with_header(http.ok(\"latin\"), \"x-name\", \"caf\u{E9}\tok\")\n\
+         }\n\
+         async fn main() {\n\
+         \x20   let (server, err) = await http.open(0)\n\
+         \x20   if err != nil {\n        io.print(err.message())\n        return\n    }\n\
+         \x20   io.print(\"listening \\(http.port_of(server))\")\n\
+         \x20   let routes = [\n\
+         \x20       http.route(\"GET\", \"/euro\", euro),\n\
+         \x20       http.route(\"GET\", \"/bell\", bell),\n\
+         \x20       http.route(\"GET\", \"/latin\", latin),\n\
+         \x20   ]\n\
+         \x20   let (n, rerr) = await http.run(server, routes)\n\
+         \x20   if rerr != nil {\n        io.print(rerr.message())\n    }\n\
+         }\n";
+    let client = client_with(
+        r#"  const e = await fetch(`http://127.0.0.1:${port}/euro`);
+  console.log("euro " + e.status + " " + JSON.stringify(e.headers.get("x-price")));
+  const b = await fetch(`http://127.0.0.1:${port}/bell`, { redirect: "manual" });
+  console.log("bell " + b.status);
+  const l = await fetch(`http://127.0.0.1:${port}/latin`);
+  console.log("latin " + l.status + " " + (await l.text()));"#,
+    );
+    let out = serve_under_node("uncarriable", src, &client);
+    assert_eq!(out, "euro 500 null\nbell 500\nlatin 200 latin\n", "{}", out);
+}
+
 /// While a server waits for requests it costs nothing, and a task's sleep
 /// still comes due.
 ///

@@ -1,0 +1,32 @@
+// std/canvas's own tests: the colour arithmetic, which is an ordinary function
+// of numbers and needs no surface to be checked. The drawing itself is the
+// host's; what these calls hand it is recorded by the WasmGC runner and
+// discarded by the others.
+
+use std/test
+use std/canvas
+
+fn checks() -> [error] {
+    var out: [error] = []
+    out.push(test.equal_int(canvas.rgb(0x12, 0x34, 0x56), 0x123456, "packed"))
+    out.push(test.equal_int(canvas.rgb(300, -5, 255), 0xFF00FF, "each part clamped on its own"))
+    out.push(test.equal_int(canvas.mix(0x000000, 0xFFFFFF, 0.5), 0x808080, "halfway rounds up"))
+    out.push(test.equal_int(canvas.mix(0x102030, 0x405060, 0.0), 0x102030, "none of the other"))
+    out.push(test.equal_int(canvas.mix(0x102030, 0x405060, 1.0), 0x405060, "all of it"))
+    out.push(test.equal_int(canvas.mix(0x102030, 0x405060, -3.0), 0x102030, "below zero is held to zero"))
+    out.push(test.equal_int(canvas.mix(0xFF0000, 0x0000FF, 0.25), 0xBF0040, "channels blend apart"))
+
+    canvas.text_centered(50.0, 0.0, "centred", 0xFFFFFF)
+    return out
+}
+
+fn main() {
+    var failed = 0
+    for e in checks() {
+        if e != nil {
+            io.print("FAILED \(e.message())")
+            failed += 1
+        }
+    }
+    io.print("canvas: \(checks().len() - failed) passed, \(failed) failed")
+}

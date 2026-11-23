@@ -31,6 +31,8 @@
 //! passing a `dom.Element` through to the drawing builtins, which is a change
 //! to the boundary rather than to this file.
 
+use std/math
+
 // ---- shapes ---------------------------------------------------------------
 
 /// A filled rectangle.
@@ -101,6 +103,64 @@ pub fn width_of(body: str) -> float {
 /// plus leading.
 pub fn line_height() -> float {
     return text.height()
+}
+
+/// A run of text centred on `cx`: [`text`] with its left edge moved back by
+/// half of [`width_of`], measured in the font currently selected.
+pub fn text_centered(cx: float, y: float, body: str, colour: int) {
+    draw.text(cx - text.width(body) / 2.0, y, body, colour)
+}
+
+// ---- colours --------------------------------------------------------------
+
+/// A colour from its parts, as the `0xRRGGBB` every drawing call takes. Each
+/// part is clamped to 0..255 first, so a part that overshoots does not bleed
+/// into its neighbour.
+///
+/// ```kite
+/// assert(rgb(0x12, 0x34, 0x56) == 0x123456, "packed")
+/// assert(rgb(300, -5, 255) == 0xFF00FF, "clamped")
+/// ```
+pub fn rgb(r: int, g: int, b: int) -> int {
+    return part(r) * 65536 + part(g) * 256 + part(b)
+}
+
+fn part(v: int) -> int {
+    if v < 0 {
+        return 0
+    }
+    if v > 255 {
+        return 255
+    }
+    return v
+}
+
+/// A blend of two colours: `a` at `t` of 0.0, `b` at 1.0, and each channel
+/// worked out on its own and rounded to nearest. `t` outside 0.0 to 1.0 is
+/// held to it.
+///
+/// ```kite
+/// assert(mix(0x000000, 0xFFFFFF, 0.5) == 0x808080, "halfway, rounded up")
+/// assert(mix(0xFF0000, 0x0000FF, 0.0) == 0xFF0000, "none of the other")
+/// assert(mix(0xFF0000, 0x0000FF, 2.0) == 0x0000FF, "all of it, however far past")
+/// ```
+pub fn mix(a: int, b: int, t: float) -> int {
+    var k = t
+    if k < 0.0 {
+        k = 0.0
+    }
+    if k > 1.0 {
+        k = 1.0
+    }
+    return rgb(
+        channel(a / 65536 % 256, b / 65536 % 256, k),
+        channel(a / 256 % 256, b / 256 % 256, k),
+        channel(a % 256, b % 256, k),
+    )
+}
+
+fn channel(from: int, to: int, k: float) -> int {
+    return math.round_to(from as float + (to - from) as float * k)
 }
 
 // ---- pictures -------------------------------------------------------------

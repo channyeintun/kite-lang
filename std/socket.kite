@@ -58,7 +58,13 @@ pub async fn connect(url: str) -> (Socket, error) {
         task.yield()
     }
     if socket_state(id) != 1 {
-        return _, errors.new("socket \(url): \(socket_error(id))")
+        // A socket that closes without ever having failed has no reason to
+        // give: that is the host's way of saying the server hung up first.
+        var why = socket_error(id)
+        if why == "" {
+            why = "closed before it opened"
+        }
+        return _, errors.new("socket \(url): \(why)")
     }
     return Socket{ id: id }, nil
 }
@@ -92,6 +98,15 @@ pub async fn receive(s: Socket) -> (str, error) {
         task.yield()
     }
     return socket_next(s.id), nil
+}
+
+/// The next message if one has already arrived, and nothing if not — without
+/// waiting, which [`receive`] does. For a program that polls once a frame.
+pub fn take(s: Socket) -> Option<str> {
+    if socket_pending(s.id) == 0 {
+        return nil
+    }
+    return socket_next(s.id)
 }
 
 /// How many messages are waiting. A program with something else to do asks

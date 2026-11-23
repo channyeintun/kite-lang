@@ -1710,6 +1710,18 @@ if (HOSTS.js) {
     return c;
   };
 
+  // A method called by name. Checked here, because the engine's own message
+  // for a missing one quotes this file's source (`t[textOf(...)] is not a
+  // function`) and so names the glue and not the method the program asked for.
+  const method = (t, name, ...args) => {
+    const n = textOf(name);
+    const f = t[n];
+    if (typeof f !== "function") {
+      throw new TypeError("`" + n + "` is not a function");
+    }
+    return f.apply(t, args);
+  };
+
   Object.assign(HOSTS.js, {
     // Guarded like everything else: a global can be a getter, and some throw
     // — `localStorage` in a sandboxed or storage-blocked frame is a
@@ -1727,11 +1739,11 @@ if (HOSTS.js) {
       }),
     js_at: (target, index) => on(target, () => target[Number(index)]),
 
-    js_call0: (t, name) => on(t, () => t[textOf(name)]()),
-    js_call1: (t, name, a) => on(t, () => t[textOf(name)](a)),
-    js_call2: (t, name, a, b) => on(t, () => t[textOf(name)](a, b)),
-    js_call3: (t, name, a, b, c) => on(t, () => t[textOf(name)](a, b, c)),
-    js_call4: (t, name, a, b, c, d) => on(t, () => t[textOf(name)](a, b, c, d)),
+    js_call0: (t, name) => on(t, () => method(t, name)),
+    js_call1: (t, name, a) => on(t, () => method(t, name, a)),
+    js_call2: (t, name, a, b) => on(t, () => method(t, name, a, b)),
+    js_call3: (t, name, a, b, c) => on(t, () => method(t, name, a, b, c)),
+    js_call4: (t, name, a, b, c, d) => on(t, () => method(t, name, a, b, c, d)),
 
     js_new0: (name) => guard(() => new (ctor(name))()),
     js_new1: (name, a) => guard(() => new (ctor(name))(a)),
