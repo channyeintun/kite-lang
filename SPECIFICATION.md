@@ -930,6 +930,13 @@ registers. A closure is a function of its own: a `defer` in its body runs when
 the closure returns. Unlike Go, `defer` cannot modify the return value — it is
 purely for release of resources, which is the only use that survives scrutiny.
 
+For the same reason a deferred call's result goes nowhere, so a call whose
+result holds a failure — an `error`, a `(T, error)`, or the `Task` of one — may
+not be deferred (`E0302`, [R6](#73-correlated-results-and-taint-analysis)):
+it runs after the function has answered, and the failure would have nobody to
+reach. Go's `defer f.Close()` drops exactly that error. Defer a function that
+handles it instead.
+
 ### 6.4 `match`
 
 See [§9](#9-enums-and-pattern-matching).
@@ -1061,7 +1068,8 @@ The rules:
 > result is either yields the `Task` of a failure on its way, and the `Task`
 > is held to the same rules as what it will give — left as a statement it is
 > `E0302`, and bound to a name it is Unchecked until it is awaited, returned
-> or passed on.
+> or passed on. A deferred call binds nothing either, and runs when nothing
+> is left to hear of its failure, so deferring one of these is `E0302` too.
 >
 > **R7.** An `error`, or a whole `(T, error)`, bound to a single name makes
 > that binding Unchecked — by `let` or by `var`, whether it came straight from

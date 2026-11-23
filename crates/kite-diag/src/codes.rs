@@ -524,7 +524,10 @@ codes! {
          the block does. Copying it is not inspecting it: after `let e = err` \
          either name may be inspected, but one of them must be. The `Task` \
          of an `async fn` that answers with an error is held to the same \
-         rule: it has to be awaited, returned or passed on. Silently \
+         rule: it has to be awaited, returned or passed on. A call whose \
+         result holds a failure cannot be deferred: it runs after the \
+         function has returned, so its error has nowhere to go — defer a \
+         function that handles it instead. Silently \
          dropping errors is the single most common source of production \
          failures in languages that permit it.\n\n\
          To propagate, write `check`. To handle it where it happened, test \

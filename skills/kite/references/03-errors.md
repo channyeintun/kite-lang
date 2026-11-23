@@ -223,7 +223,7 @@ aliasing, no lifetimes.
 | R3 | an Unchecked binding going out of scope is `E0302` — at the end of its block, on the path of every `return`, `check`, `break` or `continue` that leaves it behind, and at a write over it (`e = nil`, `e = other`, `e = g()`) |
 | R4 | on a path where `e == nil` is proved, `e` becomes Checked and `v` Clean — by `e == nil` or `!(e != nil)`, by either side of an `&&` that held, by either side of an `||` that failed, and past `check errors.wrap(…)`, nested or not. An error test crosses `&&` and `\|\|`, so `if err == nil && v > 0 { … }` and `if err != nil \|\| v < 0 { return }` both read `v` cleanly (an optional's narrowing does not) |
 | R5 | on a path where `e != nil`, `e` becomes Checked and `v` stays Tainted **permanently** |
-| R6 | a bare-statement call whose type is `error` or `(T, error)` is `E0302` — and so is the `Task` of one: an `async fn` answering with an error, called and never awaited |
+| R6 | a bare-statement call whose type is `error` or `(T, error)` is `E0302` — and so is the `Task` of one: an `async fn` answering with an error, called and never awaited — and so is a `defer` of any of them |
 | R7 | an `error` or a whole `(T, error)` bound to one name — `let` or `var`, from a call, `await`, a value `if`, a tuple literal, or assigned later with `e = f()` — is **Unchecked**; only `nil` is not. A copy of another binding (`let e = err`) shares that binding's obligation: inspect either name |
 
 R2 in practice:
@@ -1044,7 +1044,7 @@ always on. Verified: `kitec run --release` on a program whose only failure is an
 | code | `--explain` title | triggered by |
 |---|---|---|
 | `E0301` | value used before its error was checked | reading a Tainted value; also `.message()` on an error not proved non-nil |
-| `E0302` | error is never checked | Unchecked binding out of scope; `let (v, _) = f()`; bare-statement fallible call |
+| `E0302` | error is never checked | Unchecked binding out of scope; `let (v, _) = f()`; bare-statement fallible call; `defer` of one |
 | `E0303` | `check` outside a fallible function | `check` where the return type has no error component |
 | `E0200` | type mismatch | `return a, b` in a non-fallible function; a non-`Error` type in an error slot; `check` on a non-`error`; `io.print(err)` |
 | `E0203` | missing return value | `return (1, nil)` in a fallible function (*a fallible function returns two values*); a missing `return` (*not every path returns a value*) |

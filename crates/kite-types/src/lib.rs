@@ -2209,6 +2209,29 @@ impl<'a> Checker<'a> {
         if matches!(call.kind, ExprKind::Error) {
             return None;
         }
+        // A deferred call's result goes nowhere: it runs after the function
+        // has answered, so a failure it reports has nobody left to hear it.
+        // That is Go's `defer f.Close()`, the drop §7.1 sets out to remove,
+        // and it is R6 — a call whose result holds a failure, bound to
+        // nothing — in another position.
+        if let Some(holder) = self.holder(call.ty) {
+            let what = match holder {
+                Holder::Task => "this call starts a task whose error nobody will see",
+                _ => "this call's error would be thrown away when it runs",
+            };
+            self.diags.push(
+                Diagnostic::error(codes::E0302, "error is never checked")
+                    .with_primary(expr.span(), what)
+                    .with_note(
+                        "a deferred call runs after the function has returned, so its error \
+                         has nowhere to go",
+                    )
+                    .with_note(
+                        "defer a function that handles the error itself — one that tests it \
+                         and logs it, or writes `_ = …` where dropping it is meant",
+                    ),
+            );
+        }
         // Set before the body was checked, by the same scan that found this
         // statement; absent only if the two disagree about what a `defer` is.
         let stack = self.defers?;

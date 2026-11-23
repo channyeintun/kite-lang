@@ -1,0 +1,56 @@
+// A deferred call runs after the function has returned, so its result goes
+// nowhere. One whose result holds a failure — an error, a result pair, or the
+// task of one — would drop that failure with nobody left to hear of it, which
+// is Go's `defer f.Close()`. Each of these used to compile.
+
+fn close(name: str) -> error {
+    return errors.new("closing \(name) failed")
+}
+
+fn read(name: str) -> (int, error) {
+    return 1, nil
+}
+
+async fn flush(name: str) -> error {
+    return errors.new("flushing \(name) failed")
+}
+
+fn note(name: str) {
+    io.print("closed \(name)")
+}
+
+// A function that handles the error is what to defer.
+fn close_or_log(name: str) {
+    let err = close(name)
+    if err != nil {
+        io.print(err.message())
+    }
+}
+
+fn deferred_error() {
+    defer close("a") //~ ERROR E0302
+    io.print("working")
+}
+
+fn deferred_pair() {
+    defer read("a") //~ ERROR E0302
+    io.print("working")
+}
+
+async fn deferred_task() {
+    defer flush("a") //~ ERROR E0302
+    io.print("working")
+}
+
+fn deferred_and_handled() {
+    defer close_or_log("a")
+    defer note("b")
+    io.print("working")
+}
+
+async fn main() {
+    deferred_error()
+    deferred_pair()
+    await deferred_task()
+    deferred_and_handled()
+}
