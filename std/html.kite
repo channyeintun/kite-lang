@@ -686,11 +686,25 @@ pub fn mount(into: dom.Element, nodes: [Node]) -> (Mounted, error) {
 }
 
 /// Compare a new description against what is there, and change the difference.
+///
+/// When a DOM call fails partway the error comes back and the view is rebuilt
+/// from `nodes`, so the next `update` starts from what is really on the page.
 pub fn update(var view: Mounted, nodes: [Node]) -> error {
     let gone = Gone{ keys: [] }
     let (live, err) = reconcile(view.into, view.live, nodes, gone)
     view.gone = gone.keys
     if err != nil {
+        // A DOM call failed part of the way through, so the document has been
+        // changed in some places and not others, and `view.live` still says
+        // what was there before. Keeping it would make the next update patch
+        // elements that are no longer where it thinks, and leave behind the
+        // ones this one had already added. Building afresh from the
+        // description is the one state that can be vouched for; if that fails
+        // too the view is left as it was, and the error is the first one.
+        let (again, merr) = mount(view.into, nodes)
+        if merr == nil {
+            view.live = again.live
+        }
         return err
     }
     view.live = live

@@ -1604,6 +1604,86 @@ fn the_example_page_program_works() {
     );
 }
 
+/// An `update` whose DOM call fails midway leaves the view in step with the
+/// document, so the next one does not strand what the failed one added.
+///
+/// Going from two keyed rows to a third builds and appends it, then fails
+/// removing the first; the view kept describing the two rows, and the update
+/// after it built the third a second time.
+#[test]
+fn a_failed_html_update_leaves_the_view_true_to_the_page() {
+    if !node_available() {
+        eprintln!("skipping: node is not on PATH");
+        return;
+    }
+    let src = "use std/dom\nuse std/html\n\n\
+        fn rows(keys: [str]) -> [html.Node] {\n\
+        \x20 var out: [html.Node] = []\n\
+        \x20 for k in keys {\n    out.push(html.keyed(k, html.txt(\"p\", [], k)))\n  }\n\
+        \x20 return out\n\
+        }\n\
+        fn main() {\n\
+        \x20 let root = dom.find(\"#root\")\n\
+        \x20 if root == nil {\n    return\n  }\n\
+        \x20 let (view, err) = html.mount(root, rows([\"x\", \"y\"]))\n\
+        \x20 if err != nil {\n    return\n  }\n\
+        \x20 let first = html.update(view, rows([\"z\"]))\n\
+        \x20 io.print(\"first failed: \\(first != nil)\")\n\
+        \x20 let second = html.update(view, rows([\"z\"]))\n\
+        \x20 io.print(\"second ok: \\(second == nil)\")\n\
+        }\n";
+    let runner = "import { readFile } from \"node:fs/promises\";\n\
+         import { instantiate, resident, setWriter } from \"./app.js\";\n\
+         class Element {}\n\
+         let failures = 1;\n\
+         const mk = (tag) => {\n\
+         \x20 const el = {\n\
+         \x20   tagName: tag, attrs: {}, children: [], text: \"\",\n\
+         \x20   get textContent() { return this.text; },\n\
+         \x20   set textContent(v) { this.text = v; if (v === \"\") this.children = []; },\n\
+         \x20   getAttribute(n) { return n in this.attrs ? this.attrs[n] : null; },\n\
+         \x20   setAttribute(n, v) { this.attrs[n] = v; },\n\
+         \x20   removeAttribute(n) { delete this.attrs[n]; },\n\
+         \x20   classList: { add() {}, remove() {}, contains: () => false },\n\
+         \x20   appendChild(c) {\n\
+         \x20     const at = this.children.indexOf(c);\n\
+         \x20     if (at !== -1) this.children.splice(at, 1);\n\
+         \x20     this.children.push(c); c.parent = this; return c;\n\
+         \x20   },\n\
+         \x20   remove() {\n\
+         \x20     if (failures > 0) { failures--; throw new Error(\"remove failed\"); }\n\
+         \x20     const p = this.parent; if (!p) return;\n\
+         \x20     const at = p.children.indexOf(this);\n\
+         \x20     if (at !== -1) p.children.splice(at, 1);\n\
+         \x20   },\n\
+         \x20   addEventListener() {}, removeEventListener() {},\n\
+         \x20 };\n\
+         \x20 Object.setPrototypeOf(el, Element.prototype);\n\
+         \x20 return el;\n\
+         };\n\
+         const root = mk(\"div\");\n\
+         globalThis.Element = Element;\n\
+         globalThis.document = {\n\
+         \x20 querySelector: (s) => (s === \"#root\" ? root : null),\n\
+         \x20 querySelectorAll: () => [],\n\
+         \x20 createElement: (t) => mk(t),\n\
+         };\n\
+         const out = [];\n\
+         setWriter((l) => out.push(l));\n\
+         const exports = await instantiate(new Uint8Array(await readFile(new URL(\"./app.wasm\", import.meta.url))));\n\
+         resident(exports);\n\
+         exports.main();\n\
+         out.push(\"on the page: \" + root.children.map((c) => c.text).join(\",\"));\n\
+         process.stdout.write(out.map((l) => l + \"\\n\").join(\"\"));\n";
+    let out = run_runner_under_node("htmlfail", &src, runner, &[]);
+    assert_eq!(
+        out,
+        "first failed: true\nsecond ok: true\non the page: z\n",
+        "{}",
+        out
+    );
+}
+
 /// A world for `std/window` to read: an address, a scroll position, and a time
 /// zone with daylight saving, so that "now" and "at an instant" can differ.
 const WINDOW_RUNNER: &str = "import { readFile } from \"node:fs/promises\";\n\
