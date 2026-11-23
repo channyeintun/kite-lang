@@ -1838,6 +1838,27 @@ mod tests {
         assert!(!text.contains("unknown type") && !text.contains("similar type"), "{}", text);
     }
 
+    /// `<error>` is the checker's name for a type that failed, and is never
+    /// in a message: a type or a value built around a reported name is that
+    /// one report, wherever it is used afterwards.
+    #[test]
+    fn no_message_names_the_error_type() {
+        let programs = [
+            "fn main() {\n  let c = 3 as Option<Box<int>>\n}\n",
+            "fn main() {\n  let xs: [Nope] = nil\n  io.print(xs.len() + 1)\n}\n",
+            "struct W<T> {\n  v: T\n}\nfn f(w: W<Nope>) -> int {\n  return w + 1\n}\nfn main() {\n}\n",
+            "fn main() {\n  var x = [nope]\n  io.print(x.foo)\n}\n",
+            "fn main() {\n  var x = (1, nope)\n  return x\n}\n",
+            "fn take(n: int) -> int {\n  return n\n}\nfn main() {\n  let m = {\"a\": nope}\n  io.print(take(m))\n}\n",
+        ];
+        for src in programs {
+            let c = compile("t.kite", src, Emit::Check);
+            let text = c.render_diagnostics();
+            assert!(c.failed(), "{}", src);
+            assert!(!text.contains("<error>"), "{}\n{}", src, text);
+        }
+    }
+
     /// `first(nil, 3)` stays an error — only a closure waits for a later
     /// argument — but it no longer says there is no expected type and tells
     /// the reader to annotate a binding that does not exist: it names what

@@ -2937,9 +2937,15 @@ impl<'a> Checker<'a> {
                 let value = self.coerce(value, want);
                 let ret = self.learn_ret(sig.ret, value.ty);
                 if ret == TyId::UNIT {
+                    // A value whose own error was reported has no type to name.
+                    let what = if self.types.is_poisoned(value.ty) {
+                        "a value is returned here".to_string()
+                    } else {
+                        format!("this is {}", self.types.with_article(value.ty))
+                    };
                     self.diags.push(
                         Diagnostic::error(codes::E0200, "returning a value from a `()` function")
-                            .with_primary(value.span, format!("this is {}", self.types.with_article(value.ty)))
+                            .with_primary(value.span, what)
                             .with_secondary(sig.name_span, "no return type declared here"),
                     );
                 } else {
@@ -4223,7 +4229,20 @@ impl<'a> Checker<'a> {
 
     /// `expected` is a hint, not a constraint — it steers literal typing and
     /// improves messages. The caller still checks the result.
+    /// Check an expression. A value whose type is built from the error type
+    /// — `[nope]`, `(1, nope)`, a closure returning one — is the error type
+    /// whole: the name it was built around has its report, and each later
+    /// use of a `[<error>]` printed that, a second report of the one cause
+    /// with the compiler's internals in its words.
     fn expr(&mut self, e: &ast::Expr, expected: Option<TyId>) -> hir::Expr {
+        let mut out = self.expr_of(e, expected);
+        if out.ty != TyId::ERROR && self.types.holds_error(out.ty) {
+            out.ty = TyId::ERROR;
+        }
+        out
+    }
+
+    fn expr_of(&mut self, e: &ast::Expr, expected: Option<TyId>) -> hir::Expr {
         match e {
             ast::Expr::Int(span) => {
                 let text = self.text(*span);
@@ -5054,7 +5073,10 @@ impl<'a> Checker<'a> {
     fn cast(&mut self, expr: &ast::Expr, ty: &ast::Type, span: Span) -> hir::Expr {
         let value = self.expr(expr, None);
         let to = self.resolve_type(ty);
-        if self.types.is_poisoned(value.ty) || self.types.is_poisoned(to) {
+        // A target built around a name that was reported — `Option<Box<int>>`
+        // with no `Box` — is as poisoned as the bare error: "cannot cast
+        // `int` to `Option<<error>>`" was the same cause twice.
+        if self.types.is_poisoned(value.ty) || self.types.holds_error(value.ty) || self.types.holds_error(to) {
             return self.lit(ExprKind::Error, TyId::ERROR, span);
         }
         if !self.types.is_numeric(value.ty) || !self.types.is_numeric(to) {
@@ -11193,16 +11215,7 @@ impl<'a> Checker<'a> {
     /// `[P{ x 1 }]` is — or of `|n| 1` where nothing fixed `n`, which E0211
     /// has reported: `cannot infer T` beside it was the same cause twice.
     fn made_of_error(&self, ty: TyId) -> bool {
-        match self.types.kind(ty) {
-            TyKind::Error => true,
-            TyKind::Slice(e) | TyKind::Optional(e) | TyKind::Fallible(e) => self.made_of_error(*e),
-            TyKind::Map(k, v) => self.made_of_error(*k) || self.made_of_error(*v),
-            TyKind::Tuple(es) => es.iter().any(|e| self.made_of_error(*e)),
-            TyKind::Fn { params, ret } => {
-                params.iter().any(|p| self.made_of_error(*p)) || self.made_of_error(*ret)
-            }
-            _ => false,
-        }
+        self.types.holds_error(ty)
     }
 
     /// The solved type arguments, reporting any parameter nothing pinned down.
@@ -14158,16 +14171,7 @@ impl<'a> Checker<'a> {
 
     /// Whether a type is, or is built from, one that failed to check.
     fn mentions_error(&self, ty: TyId) -> bool {
-        match self.types.kind(ty) {
-            _ if ty == TyId::ERROR => true,
-            TyKind::Slice(e) | TyKind::Optional(e) | TyKind::Fallible(e) => self.mentions_error(*e),
-            TyKind::Map(k, v) => self.mentions_error(*k) || self.mentions_error(*v),
-            TyKind::Tuple(es) => es.iter().any(|e| self.mentions_error(*e)),
-            TyKind::Fn { params, ret } => {
-                params.iter().any(|p| self.mentions_error(*p)) || self.mentions_error(*ret)
-            }
-            _ => false,
-        }
+        self.types.holds_error(ty)
     }
 
     fn arity_error(
@@ -15205,6 +15209,12 @@ fn resolve_named_ty(
                 .iter()
                 .map(|a| resolve_named_ty(a, resolved, module, type_ids, generics, types, diags))
                 .collect();
+            // A type written around a name that was reported is the error
+            // type whole, not `Wrap<<error>>`: every later use of a value of
+            // it would otherwise print that, a second report of one cause.
+            if args.contains(&TyId::ERROR) {
+                return TyId::ERROR;
+            }
             // `Task<T>` is the compiler's, like `Option<T>`: a program may
             // name one but cannot declare one, and there is nothing useful a
             // hand-written `Task` could be.
@@ -15363,16 +15373,25 @@ fn resolve_named_ty(
         }
         ast::Type::Slice { elem, .. } => {
             let e = resolve_named_ty(elem, resolved, module, type_ids, generics, types, diags);
+            if e == TyId::ERROR {
+                return TyId::ERROR;
+            }
             types.slice_of(e)
         }
         ast::Type::Map { key, value, .. } => {
             let k = resolve_named_ty(key, resolved, module, type_ids, generics, types, diags);
             let v = resolve_named_ty(value, resolved, module, type_ids, generics, types, diags);
+            if k == TyId::ERROR || v == TyId::ERROR {
+                return TyId::ERROR;
+            }
             check_map_key(types, k, key.span(), diags);
             types.map_of(k, v)
         }
         ast::Type::Optional { inner, .. } => {
             let i = resolve_named_ty(inner, resolved, module, type_ids, generics, types, diags);
+            if i == TyId::ERROR {
+                return TyId::ERROR;
+            }
             types.optional_of(i)
         }
         ast::Type::Tuple { elems, .. } => {
@@ -15380,6 +15399,12 @@ fn resolve_named_ty(
                 .iter()
                 .map(|e| resolve_named_ty(e, resolved, module, type_ids, generics, types, diags))
                 .collect();
+            // Except `(T, error)`, which may be a fallible function's result:
+            // the function stays fallible, its `return _, err` no new error.
+            let pair = es.len() == 2 && es[1] == TyId::ERR;
+            if es.contains(&TyId::ERROR) && !pair {
+                return TyId::ERROR;
+            }
             if es.is_empty() {
                 TyId::UNIT
             } else {
@@ -15395,6 +15420,9 @@ fn resolve_named_ty(
                 Some(r) => resolve_named_ty(r, resolved, module, type_ids, generics, types, diags),
                 None => TyId::UNIT,
             };
+            if r == TyId::ERROR || ps.contains(&TyId::ERROR) {
+                return TyId::ERROR;
+            }
             let r = fallible_form(r, types);
             types.fn_of(ps, r)
         }
