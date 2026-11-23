@@ -73,6 +73,19 @@ struct Checkpoint {
     depth_reported: bool,
 }
 
+/// The assignment a token begins, if it is `=` or a compound one.
+fn assign_op(k: T) -> Option<AssignOp> {
+    Some(match k {
+        T::Eq => AssignOp::Assign,
+        T::PlusEq => AssignOp::Add,
+        T::MinusEq => AssignOp::Sub,
+        T::StarEq => AssignOp::Mul,
+        T::SlashEq => AssignOp::Div,
+        T::PercentEq => AssignOp::Rem,
+        _ => return None,
+    })
+}
+
 /// The bracket a closing bracket closes.
 fn opener_of(close: T) -> T {
     match close {
@@ -321,6 +334,10 @@ struct Parser<'a> {
     /// mistake, and the parser does not report it missing a second time.
     unterminated: std::rc::Rc<[u32]>,
     swallowed_the_rest: bool,
+    /// The depth at which a statement written as a `match` arm is being read
+    /// (see [`Parser::parse_arm_statement`]): there a `,` ends it as a line
+    /// break would, and the arm takes the `,`.
+    arm_statement: Option<u32>,
 }
 
 /// How deep recursive descent may go before it gives up.
@@ -447,6 +464,7 @@ impl<'a> Parser<'a> {
             depth_reported: false,
             unterminated: std::rc::Rc::from([]),
             swallowed_the_rest: false,
+            arm_statement: None,
         }
     }
 
@@ -933,6 +951,7 @@ impl<'a> Parser<'a> {
                 self.bump();
             }
             T::RBrace | T::Eof => {}
+            T::Comma if self.arm_statement == Some(self.depth) => {}
             _ if self.unwinding => {}
             // After a `(` whose `)` was reported missing, the lexer goes on
             // reading the lines after it as the inside of that bracket, where
@@ -2997,6 +3016,21 @@ impl<'a> Parser<'a> {
             return Some(MatchArm { pattern, guard, body: MatchBody::Expr(Expr::Error(kw)), span });
         }
 
+        // `1 => let y = 5,`, `1 => for x in xs { … },` — the same mistake.
+        let statement = match self.peek() {
+            T::Let | T::Var | T::For | T::Defer | T::Check => true,
+            T::Underscore => self.peek_at(1) == T::Eq,
+            T::Ident => self.peek_at(1) == T::Colon && self.peek_at(2) == T::For,
+            _ => false,
+        };
+        if statement && !self.panicking {
+            let body = self.parse_arm_statement()?;
+            self.eat(T::Comma);
+            let span = start.to(self.prev_span());
+            return Some(MatchArm { pattern, guard, body, span });
+        }
+
+        let body_start = self.span();
         let body = if self.at(T::LBrace) {
             MatchBody::Block(self.parse_block()?)
         } else if self.at(T::If) {
@@ -3004,6 +3038,20 @@ impl<'a> Parser<'a> {
         } else {
             MatchBody::Expr(self.parse_expr()?)
         };
+
+        // `1 => s = 5,` — an assignment, which is a statement too. Read past,
+        // so the arms after it are read, and reported once: the `s` before
+        // the `=` was a value thrown away, and the `=` no pattern.
+        if matches!(body, MatchBody::Expr(_)) && assign_op(self.peek()).is_some() && !self.panicking
+        {
+            let op = self.bump();
+            let value = self.parse_expr()?;
+            let span = body_start.to(value.span());
+            self.arm_holds_a_statement(op.span, op.kind.describe(), "an assignment", span);
+            self.eat(T::Comma);
+            let arm = start.to(self.prev_span());
+            return Some(MatchArm { pattern, guard, body: MatchBody::Expr(Expr::Error(span)), span: arm });
+        }
 
         // A trailing comma is optional; a newline ends the arm either way.
         self.eat(T::Comma);
@@ -3023,6 +3071,50 @@ impl<'a> Parser<'a> {
         let out = self.parse_arm_if_inner();
         self.depth -= 1;
         out
+    }
+
+    /// A statement written where an arm wants an expression — `let`, `var`,
+    /// `for`, `defer`, `check` or `_ = …` — read as the statement it is, up
+    /// to the `,` that ends the arm, so the arm keeps its pattern and the
+    /// arms after it are read. It is reported once, with the block that
+    /// holds it as the fix.
+    fn parse_arm_statement(&mut self) -> Option<MatchBody> {
+        let at = self.span();
+        let what = match self.peek() {
+            T::Underscore => "a discard `_ = …`".to_string(),
+            T::Ident => "a labelled `for`".to_string(),
+            k => format!("`{}`", k.text()),
+        };
+        let found = if self.at(T::Ident) { "a label" } else { self.peek().describe() };
+        let saved = self.arm_statement.replace(self.depth);
+        let stmt = self.parse_stmt();
+        self.arm_statement = saved;
+        let stmt = stmt?;
+        let written = at.to(self.prev_span());
+        let _ = stmt;
+        self.arm_holds_a_statement(at, found, &what, written);
+        Some(MatchBody::Expr(Expr::Error(written)))
+    }
+
+    /// The one report for an arm that holds a statement, whose note is the
+    /// arm with the statement put in a block — as written, where it fits.
+    fn arm_holds_a_statement(&mut self, at: Span, found: &str, what: &str, written: Span) {
+        let text = self.text(written);
+        let shown = if text.contains('\n') || text.chars().count() > 40 {
+            format!("{} …", self.text(Span::new(written.file, written.start, at.end)))
+        } else {
+            text.to_string()
+        };
+        self.diags.push(
+            Diagnostic::error(codes::E0100, "expected an expression")
+                .with_primary(at, format!("found {}", found))
+                .with_note(format!(
+                    "an arm is an expression or a block, and {} is a statement; put it in a \
+                     block: `=> {{ {} }}`",
+                    what, shown
+                )),
+        );
+        self.panicking = false;
     }
 
     fn parse_arm_if_inner(&mut self) -> Option<MatchBody> {
@@ -3213,14 +3305,9 @@ impl<'a> Parser<'a> {
     fn parse_expr_or_assign(&mut self, start: Span) -> Option<Stmt> {
         let lhs = self.parse_expr()?;
 
-        let op = match self.peek() {
-            T::Eq => AssignOp::Assign,
-            T::PlusEq => AssignOp::Add,
-            T::MinusEq => AssignOp::Sub,
-            T::StarEq => AssignOp::Mul,
-            T::SlashEq => AssignOp::Div,
-            T::PercentEq => AssignOp::Rem,
-            _ => {
+        let op = match assign_op(self.peek()) {
+            Some(op) => op,
+            None => {
                 let span = lhs.span();
                 self.expect_terminator();
                 let _ = span;
