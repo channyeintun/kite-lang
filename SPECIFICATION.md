@@ -1278,7 +1278,11 @@ self` cannot be called on a binding the caller does not own mutably.
 `Rect.square(2.0)` calls the associated function; `r.area()` calls the method.
 
 Multiple `impl` blocks for the same type are permitted within a module, and a
-type has one method of each name across all of them (`E0112`). A type's
+type has one method of each name across all of them (`E0112`) — trait
+implementations, and the default methods they take, included. So an inherent
+method and a trait's of the same name, or two traits', cannot both be on one
+type, and `x.foo()` never depends on which block came first; a type parameter
+bounded by two traits that both declare `foo` makes `x.foo()` `E0112` too. A type's
 inherent methods must be declared in the module that declares the type — there
 are no extension methods, so `x.foo()` can always be resolved by looking at where
 `x`'s type is defined. An `impl` block for another module's type is `E0406`,

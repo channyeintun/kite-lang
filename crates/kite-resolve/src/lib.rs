@@ -1283,6 +1283,66 @@ fn collect_functions(file: &SourceFile, map: &mut ResolveMap, diags: &mut DiagBa
             _ => {}
         }
     }
+    methods_clash_across_blocks(file, map, diags);
+}
+
+/// A type has one method of each name across all of its `impl` blocks, trait
+/// implementations and the defaults they take included (§8.2). A trait method
+/// and an inherent one of the same name, or two traits' — a call found
+/// whichever block came first in the file, so swapping two blocks changed
+/// what a program printed, and nothing said so.
+///
+/// Two blocks for the same trait share every name and are the one mistake
+/// of implementing it twice, which is reported where implementations are
+/// checked; and an inherent pair was reported as it was collected.
+fn methods_clash_across_blocks(file: &SourceFile, map: &ResolveMap, diags: &mut DiagBag) {
+    let mut first: HashMap<(u32, &str), usize> = HashMap::new();
+    for (i, f) in map.fns.iter().enumerate() {
+        let Some(o) = f.owner else { continue };
+        let Some(&prev) = first.get(&(o.type_index, f.name.as_str())) else {
+            first.insert((o.type_index, f.name.as_str()), i);
+            continue;
+        };
+        let p = map.fns[prev].owner.expect("a method has an owner");
+        if p.trait_index == o.trait_index {
+            continue;
+        }
+        // A default is given by the block that takes it, so that is where it
+        // is pointed at: the trait's own text is not the mistake.
+        let given = |sig: &FnSig, o: MethodOwner| -> (Span, String) {
+            let header = match &file.items[o.block_index] {
+                Item::Impl(imp) => (
+                    imp.trait_path.as_ref().map(|t| t.span).unwrap_or(imp.self_ty.span),
+                    match &imp.trait_path {
+                        Some(t) => format!("`impl {} for {}`", t.text(), imp.self_ty.text()),
+                        None => format!("`impl {}`", imp.self_ty.text()),
+                    },
+                ),
+                _ => (sig.span, String::new()),
+            };
+            if o.is_default {
+                (header.0, format!("by the default {} takes", header.1))
+            } else {
+                (sig.span, format!("in {}", header.1))
+            }
+        };
+        let (here, said) = given(f, o);
+        let (there, said_before) = given(&map.fns[prev], p);
+        let type_name = map.types[o.type_index as usize].name.clone();
+        diags.push(
+            Diagnostic::error(
+                codes::E0112,
+                format!("`{}` is defined more than once for `{}`", f.name, type_name),
+            )
+            .with_primary(here, format!("redefined here, {}", said))
+            .with_secondary(there, format!("first defined here, {}", said_before))
+            .with_note(
+                "a type has one method of each name across all of its `impl` blocks, trait \
+                 implementations included, so that `x.m()` names one method; rename one, or \
+                 implement only one of the traits",
+            ),
+        );
+    }
 }
 
 /// Pass 3: resolve every function and method body.

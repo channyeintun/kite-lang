@@ -140,7 +140,11 @@ codes! {
     E0112 = "E0112", "duplicate definition",
         "Two items in the same scope share a name. Shadowing is permitted in a \
          nested scope, but not in the same one, where it is almost always a \
-         typo.";
+         typo.\n\nA type's methods are one scope across all of its `impl` blocks, \
+         trait implementations included, so an inherent method and a trait's of \
+         the same name, or two traits', are a clash too: `x.m()` must name one \
+         method, not whichever block came first. Likewise a type parameter \
+         bounded by two traits that both declare `m`.";
 
     E0113 = "E0113", "wrong number of arguments",
         "Kite has no default arguments, no variadics, and no overloading, so \

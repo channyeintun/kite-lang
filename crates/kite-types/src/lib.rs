@@ -5839,26 +5839,6 @@ impl<'a> Checker<'a> {
         hir::Expr { kind: ExprKind::StrOp { op, args: hargs }, ty: ret, span }
     }
 
-    /// The method `name` on a value of the type `ti`, as `receiver_ty`.
-    ///
-    /// In the copy of a default method a block takes, `Self` is that block's
-    /// type, but known only by the trait's methods (§8.2): `self.hi()` is the
-    /// trait's `hi`, not an inherent one of the same name, or a call through
-    /// a `dyn` ran a method the trait never declared. The check of the
-    /// default on its own reports anything else the body asks of `Self`.
-    fn method_for(&self, ti: u32, receiver_ty: TyId, name: &str) -> Option<u32> {
-        let owner = self.resolved.fns.get(self.fn_index).and_then(|f| f.owner);
-        if let Some(o) = owner.filter(|o| o.is_default && o.type_index == ti) {
-            let self_ty = self.generics.iter().find(|(n, _)| n == "Self").map(|(_, t)| *t);
-            if self_ty == Some(receiver_ty) {
-                if let Some(f) = o.trait_index.and_then(|tr| self.resolved.trait_method(ti, tr, name)) {
-                    return Some(f);
-                }
-            }
-        }
-        self.resolved.method_on(ti, name)
-    }
-
     /// `receiver.method(args)`.
     fn method_call(
         &mut self,
@@ -6025,11 +6005,36 @@ impl<'a> Checker<'a> {
             let Some(def) = def else {
                 return self.lit(ExprKind::Error, TyId::ERROR, span);
             };
-            let found = def
+            let declaring: Vec<kite_hir::TraitId> = def
                 .bounds
                 .iter()
-                .find(|tr| self.types.trait_def(**tr).method(&name.name).is_some())
-                .copied();
+                .filter(|tr| self.types.trait_def(**tr).method(&name.name).is_some())
+                .copied()
+                .collect();
+            // Two bounds declaring the name is two methods of it reachable on
+            // one type, as two blocks giving a type the same name is (§8.2);
+            // the first bound written used to win.
+            if let [a, b, ..] = declaring[..] {
+                let (a, b) = (self.types.trait_def(a), self.types.trait_def(b));
+                let mut d = Diagnostic::error(
+                    codes::E0112,
+                    format!("`{}` is ambiguous on `{}`", name.name, def.name),
+                )
+                .with_primary(name.span, format!("both `{}` and `{}` declare `{}`", a.name, b.name, name.name))
+                .with_secondary(def.span, "this parameter is declared here");
+                if let Some((_, m)) = a.method(&name.name) {
+                    d = d.with_secondary(m.span, format!("`{}.{}`", a.name, name.name));
+                }
+                if let Some((_, m)) = b.method(&name.name) {
+                    d = d.with_secondary(m.span, format!("`{}.{}`", b.name, name.name));
+                }
+                self.diags.push(d.with_note(
+                    "a type has one method of each name, so no type can implement both; \
+                     bound the parameter by only one of them",
+                ));
+                return self.lit(ExprKind::Error, TyId::ERROR, span);
+            }
+            let found = declaring.first().copied();
             match found {
                 Some(tr) => return self.virtual_call(base, receiver, tr, name, args, span),
                 None => {
@@ -6080,7 +6085,7 @@ impl<'a> Checker<'a> {
         // method/field distinction to preserve here — a field of function type
         // *is* what a handler or a callback looks like, and `(r.handle)(x)`
         // would be punctuation standing in for nothing.
-        let found = self.method_for(ti, receiver.ty, &name.name);
+        let found = self.resolved.method_on(ti, &name.name);
         if found.is_none() {
             if let TyKind::Struct(sid) = *self.types.kind(receiver.ty) {
                 let field = self

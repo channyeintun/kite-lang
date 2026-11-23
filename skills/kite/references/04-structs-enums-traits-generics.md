@@ -949,14 +949,13 @@ fn main() {
 A trait may not be implemented for a primitive — `impl Doubler for int` is
 `E0204`, "an `impl` block needs a type declared in this module".
 
-When a type has both an inherent method and a trait method of the same name, the
-one that wins on the concrete type is whichever `impl` block comes **first in the
-file**. Inherent does not take priority, and nothing is reported — method lookup
-is a scan in declaration order that never asks which kind of block it found. A
-`dyn Trait` always runs the trait's body. This prints `trait` twice; swap the two
-blocks and the first line becomes `inherent`.
+A type has **one method of each name across all of its `impl` blocks**, trait
+implementations and the defaults they take included. An inherent method and a
+trait method of the same name, or two traits' methods of one name on one type,
+are `E0112` at the second block — the compiler used to run whichever block came
+first in the file, silently. Rename one, or implement only one of the traits.
 
-```kite
+```kite fails
 trait Greet {
     fn hi(self) -> str
 }
@@ -972,17 +971,18 @@ impl Greet for P {
 }
 
 impl P {
-    fn hi(self) -> str {
+    fn hi(self) -> str { //~ E0112
         return "inherent"
     }
 }
 
 fn main() {
     io.print(P{ n: 1 }.hi())
-    let d: dyn Greet = P{ n: 1 }
-    io.print(d.hi())
 }
 ```
+
+The same goes for a type parameter: with `T: A + B` where both traits declare
+`go`, `x.go()` is `E0112` at the call, since no type could implement both.
 
 ### The prelude's traits
 

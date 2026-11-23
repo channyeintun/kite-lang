@@ -5037,8 +5037,9 @@ fn main() {
         "7\nn2\n8\n",
     ),
     // A default method knows `Self` only by the trait's methods, so its
-    // `self.hi()` is the trait's `hi` — directly, through a bound and through
-    // a `dyn` — and never an inherent method that happens to share the name.
+    // `self.hi()` is the implementation's `hi` — directly, through a bound and
+    // through a `dyn`. It used to see an inherent `hi` too, and run it; a type
+    // can no longer have both (E0112).
     (
         "a-default-calls-the-traits-own-methods",
         r#"trait Greet {
@@ -5047,28 +5048,12 @@ fn main() {
     return self.hi() + self.hi()
   }
 }
-trait Pair {
-  fn hi(self) -> str
-  fn pair(self, other: Self) -> str {
-    return self.hi() + "/" + other.hi()
-  }
-}
 struct P {
   n: int
-}
-impl P {
-  fn hi(self) -> str {
-    return "[inherent]"
-  }
 }
 impl Greet for P {
   fn hi(self) -> str {
     return "[greet \(self.n)]"
-  }
-}
-impl Pair for P {
-  fn hi(self) -> str {
-    return "[pair \(self.n)]"
   }
 }
 struct Q {
@@ -5086,7 +5071,6 @@ fn main() {
   let d: dyn Greet = P{ n: 1 }
   io.print(d.twice())
   io.print(P{ n: 2 }.twice())
-  io.print(P{ n: 3 }.pair(P{ n: 4 }))
   io.print(twice_of(P{ n: 5 }))
   let all: [dyn Greet] = [P{ n: 6 }, Q{ n: 0 }]
   for g in all {
@@ -5094,7 +5078,7 @@ fn main() {
   }
 }
 "#,
-        "[greet 1][greet 1]\n[greet 2][greet 2]\n[pair 3]/[pair 4]\n[greet 5][greet 5]\n\
+        "[greet 1][greet 1]\n[greet 2][greet 2]\n[greet 5][greet 5]\n\
          [greet 6][greet 6]\n[q][q]\n",
     ),
 ];
