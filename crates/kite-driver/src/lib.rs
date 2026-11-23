@@ -1818,6 +1818,24 @@ mod tests {
         assert!(text.contains("unknown type `Nope`"), "{}", text);
         assert!(text.contains("cannot find `Nope` in module `sync`"), "{}", text);
         assert!(!text.contains("does not take type arguments") && !text.contains("`nil`"), "{}", text);
+
+        // Qualified by a name that is no imported module, with arguments:
+        // it said nothing, and the program ran.
+        let c = compile(
+            "t.kite",
+            "fn g(x: bogus.Thing<int>) {\n}\nfn main() {\n  let e: bogus.Thing<int> = nil\n  let b: sync.Nope<str> = nil\n}\n",
+            Emit::Check,
+        );
+        let codes: Vec<&str> = c.diags.iter().filter_map(|d| d.code.map(|x| x.0)).collect();
+        assert_eq!(codes, vec!["E0204", "E0204", "E0204"], "{}", c.render_diagnostics());
+        let text = c.render_diagnostics();
+        assert!(text.contains("unknown type `bogus.Thing`") && text.contains("unknown type `sync.Nope`"), "{}", text);
+
+        // A built-in type is declared — by the compiler — and takes none.
+        let c = compile("t.kite", "fn main() {\n  let a: int<str> = 1\n}\n", Emit::Check);
+        let text = c.render_diagnostics();
+        assert!(text.contains("`int` does not take type arguments"), "{}", text);
+        assert!(!text.contains("unknown type") && !text.contains("similar type"), "{}", text);
     }
 
     /// `first(nil, 3)` stays an error — only a closure waits for a later

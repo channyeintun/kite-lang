@@ -15238,10 +15238,35 @@ fn resolve_named_ty(
                     if p.segments.len() > 1 && resolved.modules.is_unresolved(module, &p.segments[0].name) {
                         return TyId::ERROR;
                     }
-                    if p.segments.len() == 1 && p.name() != "Self" {
+                    // A built-in type or a type parameter is declared, just
+                    // not by the program: `int<str>` was "unknown type `int`"
+                    // with "a similar type is in scope: `int`".
+                    let builtin = p.segments.len() == 1
+                        && (Types::primitive_from_name(p.name()).is_some()
+                            || p.name() == "Self"
+                            || generics.iter().any(|(n, _)| n == p.name()));
+                    if builtin {
+                        diags.push(
+                            Diagnostic::error(
+                                codes::E0204,
+                                format!("`{}` does not take type arguments", p.name()),
+                            )
+                            .with_primary(p.span, "type arguments are not accepted here"),
+                        );
+                    } else if p.segments.len() == 1 {
                         diags.push(unknown_type_here(p, resolved, module, generics));
-                    } else if let Some(d) = resolved.missing_type_member(module, &p.segments, codes::E0204) {
-                        diags.push(d);
+                    } else {
+                        // Qualified by a module that has no such type, or by
+                        // a name that is no module the file imports: each
+                        // is the same one E0204 it is without the arguments.
+                        // The second said nothing, and `bogus.Thing<int>`
+                        // was accepted.
+                        match resolved.missing_type_member(module, &p.segments, codes::E0204) {
+                            Some(d) => diags.push(d),
+                            None => {
+                                resolve_ty(t, types, diags);
+                            }
+                        }
                     }
                     TyId::ERROR
                 }
