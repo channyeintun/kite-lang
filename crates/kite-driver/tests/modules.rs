@@ -2200,6 +2200,23 @@ fn a_module_that_imports_itself_is_told_so() {
     assert!(said.contains("module `ui` imports itself"), "{}", said);
 }
 
+/// A file importing itself under the name of one of its own functions —
+/// `use main` in `main.kite` — is the one E0402: `main.helper()` below it is
+/// the refused `use`'s spelling, not the function `main`, which was `fn()
+/// has no methods` once more.
+#[test]
+fn a_self_import_named_as_a_function_is_one_error() {
+    let p = Project::new("self-import-fn");
+    let main = p.file(
+        "main.kite",
+        "use main\n\nfn helper() -> int {\n  return 1\n}\n\nfn main() {\n  io.print(main.helper())\n  main.main()\n}\n",
+    );
+    let said = p.run(&main).expect_err("a cycle of one");
+    assert!(said.contains("module `main` imports itself"), "{}", said);
+    assert!(!said.contains("E0205") && !said.contains("E0111"), "{}", said);
+    assert!(said.contains("1 previous error"), "{}", said);
+}
+
 /// A module is named in `E0111` and `E0204` the way the `use` that brought it
 /// in writes it. The title and the note said `money`; the label under the
 /// member said `src/money`, its identity below the package's `kite.toml`,
