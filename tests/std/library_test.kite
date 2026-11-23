@@ -279,6 +279,25 @@ fn checks() -> [error] {
     out.push(test.is_true(test.equal_float(1.0, nan, inf, "nan") != nil, "nor 1 of a NaN"))
     out.push(test.is_true(test.equal_float(inf, 1.0, 0.5, "inf") != nil, "an infinity is not near 1"))
     out.push(test.is_true(test.equal_float(1.0, 1.25, 0.5, "near") == nil, "within the tolerance"))
+    out.push(test.is_true(test.equal_floats([1.0, inf, nan], [1.0000001, inf, nan], 0.001, "fs") == nil, "equal_floats"))
+    out.push(test.is_true(test.equal_floats([], [], 0.0, "fs") == nil, "equal_floats of none"))
+    out.push(test.is_true(test.equal_floats([1.0, 2.0], [1.0], 1.0, "fs") != nil, "equal_floats, a length differs"))
+    out.push(test.equal_str(
+            errors.message_or(test.equal_floats([1.0, 2.0], [1.0, 3.0], 0.5, "fs"), ""),
+            "fs: at 1, expected 3.0 ± 0.5, found 2.0",
+            "equal_floats names the first that differs",
+        ))
+    out.push(test.is_true(test.contains("no such file: a.txt", "no such file", "c") == nil, "contains"))
+    out.push(test.is_true(test.contains("anything", "", "c") == nil, "contains the empty string"))
+    out.push(test.equal_str(
+            errors.message_or(test.contains("ok", "error", "c"), ""),
+            "c: expected text containing \"error\", found \"ok\"",
+            "contains, when it does not",
+        ))
+    let found: Option<str> = "x"
+    let missing: Option<str> = nil
+    out.push(test.is_true(test.some(found, "s") == nil, "some"))
+    out.push(test.equal_str(errors.message_or(test.some(missing, "lookup"), ""), "lookup: expected a value, found nil", "some of nil"))
 
     // ---- buffer ----
     var b = buffer.f64(2)
