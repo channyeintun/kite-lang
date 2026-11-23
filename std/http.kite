@@ -278,6 +278,9 @@ pub fn sending_pairs(headers: [Header]) -> (Options, error) {
         if breaks_a_line(h.value) {
             return _, errors.new("http: the value of `\(h.name)` contains a line break")
         }
+        if has_nul(h.value) {
+            return _, errors.new("http: the value of `\(h.name)` contains a NUL byte")
+        }
         lines.push("\(h.name): \(h.value)")
     }
     return sending_with(join(lines, "\n")), nil
@@ -974,17 +977,26 @@ pub struct Header {
 /// else added one" decidable. It cannot be decided from the joined string, and
 /// the host is handed nothing else.
 ///
-/// A name or value carrying a carriage return or a newline is refused rather
-/// than stripped: there is no escaping that keeps the meaning, and a header
-/// nobody can read is better than one somebody else wrote.
+/// A name that is not a token, a name or value carrying a carriage return or a
+/// newline, and a value carrying a NUL byte are refused rather than stripped:
+/// there is no escaping that keeps the meaning, and a header nobody can read is
+/// better than one somebody else wrote. The name is held to what
+/// [`sending_pairs`] holds a request's to — a colon in a name would otherwise
+/// end it early and make the rest of it a header of its own.
 pub fn respond(incoming: Incoming, response: Response, headers: [Header]) -> error {
     var lines: [str] = []
     for h in headers {
         if breaks_a_line(h.name) {
             return errors.new("http.respond: header name `\(h.name)` contains a line break")
         }
+        if !is_token(h.name) {
+            return errors.new("http.respond: `\(h.name)` is not a header name")
+        }
         if breaks_a_line(h.value) {
             return errors.new("http.respond: the value of `\(h.name)` contains a line break")
+        }
+        if has_nul(h.value) {
+            return errors.new("http.respond: the value of `\(h.name)` contains a NUL byte")
         }
         lines.push("\(h.name): \(h.value)")
     }
@@ -998,6 +1010,16 @@ pub fn respond(incoming: Incoming, response: Response, headers: [Header]) -> err
 /// parser might act on.
 fn breaks_a_line(text: str) -> bool {
     return text.index_of("\n") >= 0 || text.index_of("\r") >= 0
+}
+
+/// Whether text carries a NUL byte, which no header value may.
+fn has_nul(text: str) -> bool {
+    for i in 0..text.len() {
+        if text.code_at(i) == 0 {
+            return true
+        }
+    }
+    return false
 }
 
 /// Accept requests and answer them from a routing table, until the server is

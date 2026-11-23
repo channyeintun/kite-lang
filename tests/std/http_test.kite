@@ -99,6 +99,8 @@ fn checks() -> [error] {
     out.push(test.failed(colon, "a name carrying a line"))
     let (_, empty) = http.sending_pairs([http.Header{ name: "", value: "y" }])
     out.push(test.failed(empty, "an empty name"))
+    let (_, nul) = http.sending_pairs([http.Header{ name: "x-user", value: "ada\0evil" }])
+    out.push(test.failed(nul, "a NUL byte in a value"))
     return out
 }
 

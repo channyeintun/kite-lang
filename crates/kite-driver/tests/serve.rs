@@ -442,6 +442,41 @@ fn repeated_and_differently_cased_headers_survive() {
     assert_eq!(out, "cookies a=1 b=2\ntype application/json\n", "{}", out);
 }
 
+/// A response header's name is held to what a request's is: a colon in a name
+/// is not a header called something else, and a NUL in a value is not sent.
+///
+/// `respond` refused only a line break in a name, so `Set-Cookie: a=b; x` as a
+/// name went out as a `Set-Cookie` header the handler never meant to write.
+#[test]
+fn a_response_header_name_must_be_a_token_and_a_value_has_no_nul() {
+    if !node_available() {
+        eprintln!("skipping: node is not installed");
+        return;
+    }
+    let src = "use std/http\n\
+         async fn main() {\n\
+         \x20   let (server, err) = await http.open(0)\n\
+         \x20   if err != nil {\n        io.print(err.message())\n        return\n    }\n\
+         \x20   io.print(\"listening \\(http.port_of(server))\")\n\
+         \x20   let (incoming, aerr) = await http.accept(server)\n\
+         \x20   if aerr != nil {\n        return\n    }\n\
+         \x20   let colon = http.respond(incoming, http.ok(\"x\"),\n\
+         \x20       [http.Header{ name: \"Set-Cookie: session=evil; x\", value: \"1\" }])\n\
+         \x20   let nul = http.respond(incoming, http.ok(\"x\"),\n\
+         \x20       [http.Header{ name: \"x-a\", value: \"a\\0b\" }])\n\
+         \x20   let none: [http.Header] = []\n\
+         \x20   let last = http.respond(incoming, http.ok(\"colon=\\(colon != nil) nul=\\(nul != nil)\"), none)\n\
+         \x20   if last != nil {\n        io.print(last.message())\n    }\n\
+         }\n";
+    let client = client_with(
+        r#"  const r = await fetch(`http://127.0.0.1:${port}/`);
+  console.log("cookie " + JSON.stringify(r.headers.get("set-cookie")));
+  console.log("body " + (await r.text()));"#,
+    );
+    let out = serve_under_node("header-names", src, &client);
+    assert_eq!(out, "cookie null\nbody colon=true nul=true\n", "{}", out);
+}
+
 /// While a server waits for requests it costs nothing, and a task's sleep
 /// still comes due.
 ///

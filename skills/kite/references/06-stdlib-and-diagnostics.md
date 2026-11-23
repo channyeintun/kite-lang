@@ -1098,7 +1098,9 @@ space, `%XX` UTF-8 bytes) · `request_header(request, name) -> Option<str>`.
 Server: `open(port) -> (Server, error)` async (port 0 asks the host to choose),
 `port_of` · `accept(server) -> (Incoming, error)` async ·
 `respond(incoming, response, [Header]) -> error` — headers as **pairs, not
-text**, because a newline in a value would otherwise become a separator ·
+text**, because a newline in a value would otherwise become a separator; it
+refuses a name that is not a token, a line break in either, and a NUL in a
+value ·
 `run(server, [Route]) -> (int, error)` · `serve_closed` · `shut`. Once a
 server is `shut` and nothing is waiting, `accept` answers with an error and
 `run` returns the count it answered.
