@@ -2368,6 +2368,33 @@ impl<'a> FnResolver<'a> {
             self.diags.push(d);
             return;
         }
+        // `models.Kind.A`: three segments are a module, a type and a variant,
+        // so a head that is no module this file imported is what is wrong.
+        // It said ``cannot find `A` ``, naming the one segment that exists,
+        // where an expression or a type says the module is not in scope.
+        let head = &path.segments[0];
+        if path.segments.len() >= 3
+            && !self.map.modules.aliases.contains_key(&(self.module.clone(), head.name.clone()))
+        {
+            let mut d = Diagnostic::error(codes::E0111, format!("cannot find `{}`", head.name))
+                .with_primary(head.span, "no module of this name is in scope");
+            let declares = self.map.modules.std_declares;
+            if let Some(alias) = self.imported_as(&head.name) {
+                let rest = segments_text(&path.segments[1..]);
+                d = d.with_note(format!(
+                    "`{}` is imported here as `{}`, so this file writes `{}.{}`",
+                    head.name, alias, alias, rest
+                ));
+            } else if declares.is_some_and(|has| has(&head.name, &path.segments[1].name)) {
+                d = d.with_note(format!(
+                    "`{}.{}` is in the standard library's `{}` module, which this file does \
+                     not import: add `use std/{}`",
+                    head.name, path.segments[1].name, head.name, head.name
+                ));
+            }
+            self.diags.push(d);
+            return;
+        }
         let mut d = Diagnostic::error(codes::E0111, format!("cannot find `{}`", name))
             .with_primary(path.span, "no such type or variant");
         if self.map.ambiguous_variants.iter().any(|a| a == name) {

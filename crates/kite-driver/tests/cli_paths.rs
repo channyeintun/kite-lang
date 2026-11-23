@@ -546,6 +546,30 @@ fn a_module_used_by_its_old_name_says_what_it_is_called_here() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A qualified pattern is resolved from its first segment: `json.Json.Null`
+/// after `use std/json as j` is the module's old name, said once with the
+/// alias, and `zzz.Kind.A` names a module that is not there. Both said
+/// ``cannot find `Null` `` — the one segment that exists.
+#[test]
+fn a_pattern_through_a_module_not_in_scope_names_the_module() {
+    let dir = scratch(
+        "alias-pattern",
+        "t.kite",
+        "use std/json as j\n\nfn f(v: j.Json) -> int {\n    return match v {\n        \
+         json.Json.Null => 1,\n        json.Json.Number(n) => 2,\n        zzz.Kind.A => 3,\n        \
+         _ => 4,\n    }\n}\n\nfn main() {\n    io.print(f(j.Json.Null))\n}\n",
+    );
+    let Some((ok, _, err)) = kitec_in(&dir, &["check", "t.kite"]) else { return };
+    assert!(!ok, "{}", err);
+    assert_eq!(err.matches("cannot find `json`").count(), 2, "{}", err);
+    assert!(err.contains("`json` is imported here as `j`, so this file writes `j.Json.Null`"), "{}", err);
+    assert!(err.contains("`json` is imported here as `j`, so this file writes `j.Json.Number`"), "{}", err);
+    assert!(err.contains("cannot find `zzz`"), "{}", err);
+    assert!(err.contains("due to 3 previous errors"), "{}", err);
+    assert!(!err.contains("cannot find `Null`") && !err.contains("cannot find `A`"), "{}", err);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// `(f(1), f(2)).0` as a statement is a projection, and its label does not
 /// call it a call.
 #[test]
