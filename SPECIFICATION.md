@@ -991,7 +991,10 @@ The rules:
 > `e = g()` drops `f`'s failure, and is `E0302` at the write.
 >
 > **R4.** On any path where the compiler proves `e == nil`, `e` becomes Checked
-> and `v` becomes Clean.
+> and `v` becomes Clean. A condition proves what logic says it does: `e ==
+> nil` and `!(e != nil)` when they hold, either side of an `&&` that held
+> (the right side included, which runs only then), and either side of an
+> `||` that did not.
 >
 > **R5.** On any path where `e != nil`, `e` becomes Checked and `v` remains
 > Tainted permanently. The value slot on an error path holds no value at all —

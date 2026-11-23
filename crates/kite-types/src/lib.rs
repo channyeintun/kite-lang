@@ -2663,13 +2663,13 @@ impl<'a> Checker<'a> {
     fn if_stmt(&mut self, i: &ast::IfStmt, sig: &Signature) -> Option<(hir::Stmt, Flow)> {
         // `if err != nil { … }` is the explicit form of a check. Recognising it
         // here is what lets a hand-written test clean the value it guards.
-        let tested = self.error_tested_by(&i.cond);
+        let tested = self.error_facts(&i.cond, true);
         // `if x == nil { … } else { … }` narrows `x` in whichever branch it
         // cannot be nil. Kite has no `?` sigil of any kind: an inline `if`
         // does the same work, in the open.
         let narrowing = self.nil_test(&i.cond);
         let cond = self.condition(&i.cond);
-        if let Some((id, _)) = tested {
+        for (id, _) in tested {
             self.inspect(id);
         }
 
@@ -2677,7 +2677,7 @@ impl<'a> Checker<'a> {
         // merged at the join. A branch that diverges contributes nothing to the
         // join, because control never arrives from it.
         let entry = self.flow_state();
-        self.enter_branch(narrowing, tested, true);
+        self.enter_branch(narrowing, &i.cond, true);
         let (then, then_flow) = self.block(&i.then, sig);
         if then_flow == Flow::Diverges {
             self.report_unchecked_errors(Some(i.then.span));
@@ -2690,7 +2690,7 @@ impl<'a> Checker<'a> {
         // it arrives knowing the condition was false. An `else if` starts from
         // that knowledge too, so `if x == nil { … } else if c { … }` has `x`
         // narrowed in the second test's branches.
-        self.enter_branch(narrowing, tested, false);
+        self.enter_branch(narrowing, &i.cond, false);
         let (else_, else_flow) = match i.else_.as_deref() {
             None => (None, Flow::Falls),
             Some(ast::ElseBranch::Block(b)) => {
@@ -3411,12 +3411,7 @@ impl<'a> Checker<'a> {
     /// nil` proves the error present in the *then*, `err == nil` in the
     /// *else*. The branch's state is thrown away or joined at the end, so
     /// nothing here has to be undone.
-    fn enter_branch(
-        &mut self,
-        narrowing: Option<(u32, bool)>,
-        tested: Option<(u32, bool)>,
-        in_then: bool,
-    ) {
+    fn enter_branch(&mut self, narrowing: Option<(u32, bool)>, cond: &ast::Expr, in_then: bool) {
         if let Some((id, is_eq)) = narrowing {
             if is_eq != in_then {
                 if let TyKind::Optional(inner) = *self.types.kind(self.locals[id as usize].ty) {
@@ -3424,14 +3419,8 @@ impl<'a> Checker<'a> {
                 }
             }
         }
-        if let Some((id, is_eq)) = tested {
-            if is_eq != in_then {
-                self.error_nonnil.insert(id);
-            }
-        }
-        let mut taint = std::mem::take(&mut self.taint);
-        self.clean_guarded(&mut taint, tested, in_then);
-        self.taint = taint;
+        let facts = self.error_facts(cond, in_then);
+        self.assume_error_facts(&facts);
     }
 
     /// Start checking something only to learn its type.
@@ -3561,15 +3550,51 @@ impl<'a> Checker<'a> {
         }
     }
 
-    /// Clean the value an error guards, on the branch where the error is nil.
-    fn clean_guarded(&self, taint: &mut [Taint], tested: Option<(u32, bool)>, in_then: bool) {
-        let Some((id, is_eq)) = tested else { return };
-        // `err == nil` proves it in the then-branch; `err != nil` in the else.
-        if is_eq != in_then {
-            return;
+    /// What a condition proves about error locals when it comes out
+    /// `truth`: each error it pins down, and whether it is then nil.
+    ///
+    /// A single test, `err == nil` or `err != nil`, says something either
+    /// way. The connectives say exactly what logic says and nothing more:
+    /// `a && b` true means both are, and false means nothing about either;
+    /// `a || b` false means neither is, and true means nothing; `!a` swaps
+    /// the two. So `if err == nil && v > 0 { … }` reads `v` in its body, and
+    /// `if err != nil || w < 0 { return }` leaves `w` readable after it —
+    /// the Go-shaped guards that were refused as reading a tainted value.
+    fn error_facts(&self, cond: &ast::Expr, truth: bool) -> Vec<(u32, bool)> {
+        match cond {
+            ast::Expr::Paren { inner, .. } => self.error_facts(inner, truth),
+            ast::Expr::Unary { op: ast::UnaryOp::Not, operand, .. } => {
+                self.error_facts(operand, !truth)
+            }
+            ast::Expr::Binary { op: ast::BinaryOp::And, lhs, rhs, .. } if truth => {
+                let mut facts = self.error_facts(lhs, true);
+                facts.extend(self.error_facts(rhs, true));
+                facts
+            }
+            ast::Expr::Binary { op: ast::BinaryOp::Or, lhs, rhs, .. } if !truth => {
+                let mut facts = self.error_facts(lhs, false);
+                facts.extend(self.error_facts(rhs, false));
+                facts
+            }
+            _ => match self.error_tested_by(cond) {
+                Some((id, is_eq)) => vec![(id, is_eq == truth)],
+                None => Vec::new(),
+            },
         }
-        if let Some(&guarded) = self.guards.get(&id) {
-            taint[guarded as usize] = Taint::Clean;
+    }
+
+    /// Hold what a condition proved about error locals, on the side of it
+    /// being entered: a value is clean where its error is nil (R4), and an
+    /// error has a message where it is not.
+    fn assume_error_facts(&mut self, facts: &[(u32, bool)]) {
+        for &(id, nil) in facts {
+            if nil {
+                if let Some(&guarded) = self.guards.get(&id) {
+                    self.taint[guarded as usize] = Taint::Clean;
+                }
+            } else {
+                self.error_nonnil.insert(id);
+            }
         }
     }
 
@@ -3696,7 +3721,29 @@ impl<'a> Checker<'a> {
             ast::Expr::Binary { op, lhs, rhs, span } => {
                 if let Some(hop) = short_circuit(*op) {
                     let l = self.expr(lhs, Some(TyId::BOOL));
+                    // The right operand runs only when the left one came out
+                    // `true` for `&&`, `false` for `||`, so it is checked
+                    // knowing so — `err == nil && v > 0` reads `v` where
+                    // `err` is nil. What that knowledge lent it is taken back
+                    // afterwards, since control may have skipped it: a value
+                    // it cleaned is as clean as it was before, joined, and an
+                    // error it proved present is not known to be.
+                    let facts = self.error_facts(lhs, *op == ast::BinaryOp::And);
+                    let lent: Vec<(u32, Taint)> = facts
+                        .iter()
+                        .filter(|(_, nil)| *nil)
+                        .filter_map(|(id, _)| self.guards.get(id).copied())
+                        .map(|v| (v, self.taint[v as usize]))
+                        .collect();
+                    let nonnil = self.error_nonnil.clone();
+                    self.assume_error_facts(&facts);
                     let r = self.expr(rhs, Some(TyId::BOOL));
+                    for (v, was) in lent {
+                        self.taint[v as usize] = was.merge(self.taint[v as usize]);
+                    }
+                    if !facts.is_empty() {
+                        self.error_nonnil = nonnil.intersection(&self.error_nonnil).copied().collect();
+                    }
                     for side in [&l, &r] {
                         if !self.types.satisfies(side.ty, TyId::BOOL) && !self.types.is_poisoned(side.ty) {
                             self.diags.push(
@@ -7593,6 +7640,10 @@ impl<'a> Checker<'a> {
                 Some(Res::Local(id)) => self.locals[id as usize].ty == TyId::ERR,
                 _ => false,
             },
+            // A wrapper of a wrapper is nil exactly when the innermost error
+            // is, so `check errors.wrap(errors.wrap(err, "a"), "b")` speaks
+            // for `err` as the single wrap does.
+            ast::Expr::Call { callee, .. } => self.preserves_nil(callee),
             _ => false,
         }
     }
@@ -10815,14 +10866,13 @@ impl<'a> Checker<'a> {
         // of an error cleans the value it guards in the branch where it is
         // nil, which is §7.5's own `if err != nil { 8080 } else { port }`.
         let narrowing = self.nil_test(cond);
-        let tested = self.error_tested_by(cond);
         let c = self.condition(cond);
 
         // The branches are alternatives, joined afterwards, exactly as the
         // statement form's are: a branch is one expression, but a `match` in
         // it can hold statements, and what they do happens on one side only.
         let entry = self.flow_state();
-        self.enter_branch(narrowing, tested, true);
+        self.enter_branch(narrowing, cond, true);
         // The type the context wants steers both branches, as it does a
         // `let`'s initialiser — `let x: Option<int> = if c { 5 } else { nil }`
         // has no other place to learn what the `nil` is. Failing that, the
@@ -10832,7 +10882,7 @@ impl<'a> Checker<'a> {
         let then_exit = self.flow_state();
         self.set_flow_state(entry);
 
-        self.enter_branch(narrowing, tested, false);
+        self.enter_branch(narrowing, cond, false);
         let want = expected.or((!self.types.is_poisoned(t.ty)).then_some(t.ty));
         let e = match else_ {
             ast::ElseBranch::Block(b) => self.block_value(b, want),

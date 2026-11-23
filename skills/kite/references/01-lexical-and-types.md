@@ -827,7 +827,9 @@ fn main() {
 ```
 
 **Narrowing does not cross `&&`.** Both operands of a condition are checked
-against the unnarrowed type, so this is an error, and nesting is the fix:
+against the unnarrowed type, so this is an error, and nesting is the fix. (A
+test of an *error* does cross `&&` and `||` — `if err == nil && v > 0` reads
+`v` cleanly; that is the taint analysis, not this narrowing.)
 
 ```kite fails
 struct User {
