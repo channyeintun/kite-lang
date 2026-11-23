@@ -8199,47 +8199,103 @@ impl<'a> Checker<'a> {
         self.expect_ty(start_e.ty, TyId::INT, start_e.span, None);
         let end_e = self.expr(end, Some(TyId::INT));
         self.expect_ty(end_e.ty, TyId::INT, end_e.span, None);
+        let (mut seq, mut start_e, mut end_e) = (seq, start_e, end_e);
 
         // `a..=b` is `a..b + 1`, written out here so that no backend has to
-        // know there are two kinds of range. The `+` is the one the user would
-        // have written: it traps on overflow in a debug build and wraps in a
-        // release one, exactly as §3.1 says every other `+` does. A `b` of
-        // `max_int` is the only input that can tell, and it is not a window
-        // anyone asks for.
-        let end_e = if inclusive {
-            let one = hir::Expr { kind: ExprKind::Int(1), ty: TyId::INT, span: range_span };
-            let op = if self.release { hir::BinOp::AddIntWrap } else { hir::BinOp::AddInt };
-            hir::Expr {
-                kind: ExprKind::Binary { op, lhs: Box::new(end_e), rhs: Box::new(one) },
-                ty: TyId::INT,
-                span: range_span,
-            }
-        } else {
-            end_e
-        };
-
-        if seq.ty == TyId::STR {
-            return hir::Expr {
-                kind: ExprKind::StrOp {
-                    op: kite_hir::StrKind::Slice,
-                    args: vec![seq, start_e, end_e],
-                },
-                ty: TyId::STR,
-                span,
+        // know there are two kinds of range — but a `+ 1` that saturates. A
+        // window clamps to the sequence (§5.4), so `xs[1..=max_int]` is the
+        // rest of `xs`; the `+` the user would have written trapped there in
+        // a debug build and wrapped to an empty window in a release one.
+        //
+        // The end is read twice, to compare and to add, so an end that is not
+        // a local or a literal is bound to a hidden local first — and then so
+        // are the sequence and the start before it, which were written first
+        // and so run first. The common `xs[a..=b]` binds nothing.
+        let mut binds: Vec<(u32, hir::Expr)> = Vec::new();
+        if inclusive {
+            let one = |at: Span| hir::Expr { kind: ExprKind::Int(1), ty: TyId::INT, span: at };
+            end_e = match end_e.kind {
+                ExprKind::Int(b) => hir::Expr { kind: ExprKind::Int(b.saturating_add(1)), ..end_e },
+                _ => {
+                    if !matches!(end_e.kind, ExprKind::Local(_)) {
+                        seq = self.bind_for_reuse(seq, &mut binds);
+                        start_e = self.bind_for_reuse(start_e, &mut binds);
+                        end_e = self.bind_for_reuse(end_e, &mut binds);
+                    }
+                    let max = hir::Expr { kind: ExprKind::Int(i64::MAX), ty: TyId::INT, span: range_span };
+                    let at_max = hir::Expr {
+                        kind: ExprKind::Binary {
+                            op: hir::BinOp::EqInt,
+                            lhs: Box::new(end_e.clone()),
+                            rhs: Box::new(max),
+                        },
+                        ty: TyId::BOOL,
+                        span: range_span,
+                    };
+                    let next = hir::Expr {
+                        kind: ExprKind::Binary {
+                            op: hir::BinOp::AddInt,
+                            lhs: Box::new(end_e.clone()),
+                            rhs: Box::new(one(range_span)),
+                        },
+                        ty: TyId::INT,
+                        span: range_span,
+                    };
+                    hir::Expr {
+                        kind: ExprKind::If {
+                            cond: Box::new(at_max),
+                            then: Box::new(end_e),
+                            else_: Box::new(next),
+                        },
+                        ty: TyId::INT,
+                        span: range_span,
+                    }
+                }
             };
         }
 
-        if self.types.slice_elem(seq.ty).is_some() {
+        let window = if seq.ty == TyId::STR {
+            Some(hir::Expr {
+                kind: ExprKind::StrOp {
+                    op: kite_hir::StrKind::Slice,
+                    args: vec![seq.clone(), start_e, end_e],
+                },
+                ty: TyId::STR,
+                span,
+            })
+        } else if self.types.slice_elem(seq.ty).is_some() {
             let ty = seq.ty;
-            return hir::Expr {
+            Some(hir::Expr {
                 kind: ExprKind::SliceRange {
-                    base: Box::new(seq),
+                    base: Box::new(seq.clone()),
                     start: Box::new(start_e),
                     end: Box::new(end_e),
                 },
                 ty,
                 span,
-            };
+            })
+        } else {
+            None
+        };
+        if let Some(window) = window {
+            // Innermost last: the first bound is the outermost `match`, so it
+            // is evaluated first.
+            return binds.into_iter().rev().fold(window, |body, (id, value)| {
+                let ty = body.ty;
+                hir::Expr {
+                    kind: ExprKind::Match {
+                        scrutinee: Box::new(value),
+                        arms: vec![hir::MatchArm {
+                            pattern: hir::Pattern::Binding { local: hir::LocalId(id), unwrap: false },
+                            guard: None,
+                            body,
+                            span,
+                        }],
+                    },
+                    ty,
+                    span,
+                }
+            });
         }
 
         let found = self.types.with_article(seq.ty);
@@ -8700,6 +8756,29 @@ impl<'a> Checker<'a> {
             }),
         }
         hir::Stmt::Block(hir::Block { stmts })
+    }
+
+    /// An operand that is about to be read more than once, bound to a hidden
+    /// local in `binds` (the caller wraps the expression in a binding `match`
+    /// for each, first bound outermost, so they run in the order bound). A
+    /// literal or a local is left where it is: reading one twice is free.
+    fn bind_for_reuse(&mut self, e: hir::Expr, binds: &mut Vec<(u32, hir::Expr)>) -> hir::Expr {
+        if matches!(
+            e.kind,
+            ExprKind::Int(_)
+                | ExprKind::Float(_)
+                | ExprKind::Str(_)
+                | ExprKind::Bool(_)
+                | ExprKind::Nil
+                | ExprKind::Local(_)
+                | ExprKind::Error
+        ) {
+            return e;
+        }
+        let (ty, at) = (e.ty, e.span);
+        let id = self.synthetic_local("window", ty, at);
+        binds.push((id, e));
+        hir::Expr { kind: ExprKind::Local(hir::LocalId(id)), ty, span: at }
     }
 
     /// Bind a read to a new hidden local and answer the local.

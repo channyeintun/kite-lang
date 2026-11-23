@@ -4905,6 +4905,23 @@ fn a_race_of_no_tasks_names_the_mistake() {
 /// says the program prints.
 const EXPECTED: &[(&str, &str, &str)] = &[
     (
+        // §5.4: a window clamps, so `..=max_int` is to the end. Its `+ 1`
+        // trapped in a debug build and wrapped to an empty window in a
+        // release one; it saturates now, which is the same in both, and an
+        // end bound for reuse still runs after the sequence and the start.
+        "an-inclusive-window-to-max-int-clamps",
+        "fn big() -> int {\n  io.print(\"end\")\n  return 9223372036854775807\n}\n\
+         fn seq() -> [int] {\n  io.print(\"seq\")\n  return [1, 2, 3, 4]\n}\n\
+         fn from() -> int {\n  io.print(\"start\")\n  return 1\n}\n\
+         fn main() {\n  let xs = [1, 2, 3, 4]\n  let end = 9223372036854775807\n\
+         \x20 io.print(xs[1..=end].len())\n  io.print(\"abcd\"[1..=end])\n\
+         \x20 io.print(xs[1..=9223372036854775807].len())\n\
+         \x20 io.print(seq()[from()..=big()].len())\n\
+         \x20 io.print(xs[..=end].len())\n  io.print(xs[1..=2].len())\n  io.print(\"abcd\"[0..=1])\n\
+         \x20 let two = 2\n  io.print(xs[1..=two - 1].len())\n}\n",
+        "3\nbcd\n3\nseq\nstart\nend\n3\n4\n2\nab\n1\n",
+    ),
+    (
         // §5.3: a struct literal's fields and a variant's named payload run in
         // the order written, and `..base` runs first and once. They ran in
         // declaration order, and the base ran again for every field it
