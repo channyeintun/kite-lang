@@ -1043,9 +1043,15 @@ pub fn request_header(request: Request, name: str) -> Option<str> {
     return nil
 }
 
-/// Every value of a request header that was sent more than once, in order,
+/// The value of every line of a request that names this header, in order,
 /// where [`request_header`] answers with the first. Names are compared ignoring
 /// case. Empty when the request carried none.
+///
+/// What counts as a line is the host's: the Node server joins a header sent
+/// twice into one line with a comma (`1, 2`, which RFC 9110 §5.3 says is the
+/// same header), so there it is one entry to split at the commas, and a host
+/// that keeps each line gives one entry for each. Do not split a header whose
+/// single value may hold a comma (`Date`, `User-Agent`).
 ///
 /// ```kite
 /// let r = Request{ method: "GET", path: "/", body: "", headers: "X-Tag: a\nx-tag: b\nOther: c" }

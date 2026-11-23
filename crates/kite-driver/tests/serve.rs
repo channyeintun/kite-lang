@@ -810,6 +810,46 @@ fn a_handler_cannot_set_a_header_that_frames_the_message() {
     assert_eq!(out, "page 500\nchunked 500\nother 200 real\n", "{}", out);
 }
 
+/// A header sent twice reaches the program as one line joined with a comma,
+/// which is what `request_headers`' documentation says of the Node host.
+///
+/// The documentation said "every value ... sent more than once", which only a
+/// host that keeps each line could give; Node has already joined them.
+#[test]
+fn a_repeated_request_header_arrives_joined_with_a_comma() {
+    if !node_available() {
+        eprintln!("skipping: node is not installed");
+        return;
+    }
+    let src = "use std/http\n\
+         fn who(request: http.Request) -> http.Response {\n\
+         \x20   let all = http.request_headers(request, \"x-dup\")\n\
+         \x20   return http.ok(\"\\(all.len()) [\\(join(all, \"|\"))]\")\n\
+         }\n\
+         async fn main() {\n\
+         \x20   let (server, err) = await http.open(0)\n\
+         \x20   if err != nil {\n        io.print(err.message())\n        return\n    }\n\
+         \x20   io.print(\"listening \\(http.port_of(server))\")\n\
+         \x20   let (n, rerr) = await http.run(server, [http.route(\"GET\", \"/who\", who)])\n\
+         \x20   if rerr != nil {\n        io.print(rerr.message())\n    }\n\
+         }\n";
+    let client = client_with(
+        r#"  const http = await import("node:http");
+  const text = await new Promise((resolve, reject) => {
+    const req = http.request({ port, path: "/who", headers: { "x-dup": ["1", "2"] } }, (res) => {
+      let body = "";
+      res.on("data", (c) => { body += c; });
+      res.on("end", () => resolve(body));
+    });
+    req.on("error", reject);
+    req.end();
+  });
+  console.log(text);"#,
+    );
+    let out = serve_under_node("repeated-header", src, &client);
+    assert_eq!(out, "1 [1, 2]\n", "{}", out);
+}
+
 /// A 1xx is not a final answer, and a 204 or a 304 has no body: `run` answers
 /// 500 to a handler that builds one, instead of sending an interim response
 /// that leaves the connection's next answer paired with the wrong request.
