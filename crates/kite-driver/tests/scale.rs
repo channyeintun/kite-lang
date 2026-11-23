@@ -265,6 +265,55 @@ fn a_long_map_literal_is_built_in_linear_time() {
     vm_within("map-literal", &src, "200000 1\n", Duration::from_secs(20));
 }
 
+/// A literal of many plain reads of one local is compiled in linear time —
+/// timed here is the compiling, which is where the cost was. Each operand
+/// that names a local is fixed where it stands if a later operand writes
+/// that local (§5.3), and finding that out asked every later operand about
+/// every local: a slice literal of 80,000 reads of `a` took 5.8 s to check,
+/// and these would take minutes. One walk from the last operand back finds
+/// every local a later operand writes.
+#[test]
+fn a_long_literal_of_plain_reads_is_compiled_in_linear_time() {
+    let _turn = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+    let n = 200_000;
+    let slice = format!(
+        "fn main() {{\n  let a = 7\n  let xs = [{}]\n  io.print(xs.len())\n}}\n",
+        vec!["a"; n].join(", ")
+    );
+    let entries: Vec<String> = (0..n / 2).map(|i| format!("{}: a", i)).collect();
+    let map = format!(
+        "fn main() {{\n  let a = 7\n  let m = {{{}}}\n  io.print(m.len())\n}}\n",
+        entries.join(", ")
+    );
+    let started = Instant::now();
+    compiled("plain-reads-slice", &slice, Emit::Check);
+    compiled("plain-reads-map", &map, Emit::Check);
+    let took = started.elapsed();
+    assert!(took < Duration::from_secs(20), "compiling took {:?}", took);
+}
+
+/// A left-deep chain as long as the parser takes is lowered in time in
+/// proportion to it, however many there are. Finding what later operands
+/// write walked the first operand too, which nothing asks about: each link
+/// of `1 + 1 + …` walked every link before it, so sixty chains of 8,000
+/// took over half a minute to compile, against two seconds.
+#[test]
+fn a_long_left_deep_chain_is_lowered_in_linear_time() {
+    let _turn = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+    let sum = vec!["1"; 8000].join(" + ");
+    let fns: String = (0..60).map(|i| format!("fn f{}() -> int {{\n  return {}\n}}\n", i, sum)).collect();
+    let calls: Vec<String> = (0..60).map(|i| format!("f{}()", i)).collect();
+    let src = format!("{}fn main() {{\n  io.print({})\n}}\n", fns, calls.join(" + "));
+    let started = Instant::now();
+    // On the stack `kitec` gives the compiler: a chain this long nests as
+    // deep, and a test thread's stack is smaller.
+    kite_driver::on_compiler_stack(move || {
+        compiled("left-deep-chains", &src, Emit::Check);
+    });
+    let took = started.elapsed();
+    assert!(took < Duration::from_secs(10), "compiling took {:?}", took);
+}
+
 /// Checking is linear in the arms of a generated `match` and in the links of
 /// a field-access chain — the one place here where it is checking that is
 /// timed, since that is where the cost was. Each `match` arm was looked up
@@ -660,6 +709,79 @@ fn main() {
         "field-passed-to-a-reader",
         src,
         "300000 200000 7\n",
+        Duration::from_secs(20),
+        true,
+    );
+}
+
+/// A key or an index computed between a read of a field and the write after
+/// it is linear on all three backends, however it is computed, as long as
+/// nothing that computes it can write in place or run code it cannot see: a
+/// string method (`trim`, `slice`, `len`, `index_of`, `code_at`), a builtin
+/// that runs nothing (`text.from_code`), a rendered number, a function of
+/// the program's, a prelude function and a method. A string method or a
+/// builtin there counted as able to write in place, so the read of the
+/// field counted as keeping it and the next write copied the whole map or
+/// slice: at forty thousand, `self.counts[w.trim()] = …` took 10 s on the VM
+/// and Wasm and 7 s natively, and this program at fifty thousand would take
+/// minutes.
+#[test]
+fn a_key_or_index_computed_between_field_writes_is_linear() {
+    let src = r#"struct Counter {
+    var counts: { str: int }
+    var xs: [int]
+}
+
+struct K {
+    n: int
+}
+
+impl K {
+    fn name(self) -> str {
+        return "m\(self.n)"
+    }
+}
+
+fn key(i: int) -> str {
+    return "u\(i)"
+}
+
+fn idx(i: int, n: int) -> int {
+    return i % n
+}
+
+impl Counter {
+    fn add(var self, w: str) {
+        self.counts[w.trim()] = or_else(self.counts[w.trim()], 0) + 1
+    }
+
+    fn lowered(var self, w: str) {
+        self.counts[lower(w)] = or_else(self.counts[lower(w)], 0) + 1
+    }
+}
+
+fn main() {
+    let n = 50000
+    var c = Counter{ counts: { }, xs: [0] }
+    for i in 0..n {
+        c.add(" w\(i % (n / 2)) ")
+        c.lowered("L\(i)")
+        if c.counts["s\(i)".slice(0, 9)] == nil {
+            c.counts[text.from_code(65 + i % 26) + "\(i)"] = i
+        }
+        if c.counts[key(i)] == nil && c.counts[K{ n: i }.name()] == nil {
+            c.counts[key(i)] = i
+        }
+        c.xs.push(c.xs["k\(i)".len() % c.xs.len()] + c.xs[idx(i, c.xs.len())])
+        c.xs[("k\(i)".index_of("1") + 1) % c.xs.len()] += "k\(i)".code_at(0)
+    }
+    io.print("\(c.counts.len()) \(c.xs.len()) \(or_else(c.counts["w7"], -1))")
+}
+"#;
+    agrees_within(
+        "computed-key-through-a-field",
+        src,
+        "175000 50001 2\n",
         Duration::from_secs(20),
         true,
     );

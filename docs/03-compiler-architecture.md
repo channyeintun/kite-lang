@@ -641,12 +641,14 @@ quiet call that keeps nothing of it in the same block, with no other call,
 rendering, suspension or in-place write before the last of those
 (`kite_mir::held_reads`). A rendering counts unless its type renders itself —
 `int`, `float`, `bool` and `str` — since any other can reach a `Display` the
-program wrote. A call is quiet (`Kept::quiet`) when nothing it runs, to any
-depth, takes a field, resumes a frame, renders such a value, or calls a
-function value, a `dyn` method, the host or a builtin that runs code (printing
-among them): taking a field is the only way a local comes to own a slice or
-map it did not make, so such a call writes in place nothing that was there
-before it. So the mark is set only while the field is the one holder, and a
+program wrote. A string operation (`trim`, `slice`, `len`, `index_of`,
+`code_at`) and a builtin that runs no code (`text.from_code`) do not count:
+they read text and numbers and run nothing of the program's. A call is quiet
+(`Kept::quiet`) when nothing it runs, to any depth, takes a field, resumes a
+frame, renders such a value, or calls a function value, a `dyn` method, the
+host or a builtin that runs code (printing among them): taking a field is the
+only way a local comes to own a slice or map it did not make, so such a call
+writes in place nothing that was there before it. So the mark is set only while the field is the one holder, and a
 loop that pushes through a field, reading its length between the pushes, is
 linear. The VM needs none of this: its take empties the field, so the count is
 the truth, and it empties a glancing register after its last read so a stale

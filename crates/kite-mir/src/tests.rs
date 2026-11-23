@@ -746,3 +746,35 @@ fn rendering_a_number_does_not_end_a_glance() {
     assert!(glances[reads[1].index()].is_some(), "{}", b.show());
     assert!(renders_itself(TyId::INT) && !renders_itself(f.locals[0].ty), "{}", b.show());
 }
+
+/// A string operation or a builtin that runs nothing of the program's,
+/// between reading a field and its last glance, is quiet: `q.m[w.trim()]`,
+/// `q.xs[w.len() % n]` and `q.m[text.from_code(65)]` evaluate the field, then
+/// the key, then look it up. A key made by a call that prints still ends
+/// the glance.
+#[test]
+fn a_string_operation_or_a_quiet_builtin_does_not_end_a_glance() {
+    let b = build(
+        "struct Q {\n    var m: { str: int }\n    var xs: [int]\n}\n\n\
+         fn loud() -> str {\n    io.print(0)\n    return \"c\"\n}\n\n\
+         fn main() {\n    var q = Q{ m: { }, xs: [0] }\n    let w = \" a \"\n\
+         \x20   if q.m[w.trim()] == nil {\n        q.m[\"a\"] = 1\n    }\n\
+         \x20   q.xs.push(q.xs[w.len() % 1])\n\
+         \x20   if q.m[text.from_code(65)] == nil {\n        q.m[\"b\"] = 1\n    }\n\
+         \x20   if q.m[loud()] == nil {\n        q.m[\"c\"] = 1\n    }\n}\n",
+    );
+    let kept = Kept::of(&b.mir);
+    let f = b.main();
+    let reads: Vec<Local> = f
+        .blocks
+        .iter()
+        .flat_map(|b| &b.stmts)
+        .filter_map(|s| match s {
+            Inst::Assign { dst, value: Rvalue::FieldGet { .. } } => Some(*dst),
+            _ => None,
+        })
+        .collect();
+    let glances = held_reads(f, &kept);
+    let glancing: Vec<bool> = reads.iter().map(|l| glances[l.index()].is_some()).collect();
+    assert_eq!(glancing, vec![true, true, true, false], "{}", b.show());
+}

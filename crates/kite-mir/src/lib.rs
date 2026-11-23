@@ -584,11 +584,16 @@ fn may_write_in_place(value: &Rvalue, kept: &Kept) -> bool {
         // A rendering can reach a `Display` the program wrote — of anything
         // but the four types that render themselves.
         R::ToStr { from, .. } => !renders_itself(*from),
+        // No builtin writes a slice or map the program holds; the ones that
+        // run code of the program's, or suspend, are named one by one.
+        R::CallBuiltin { builtin, .. } => keep::builtin_runs_code(*builtin),
+        // A string operation is the runtime's, on text: text and numbers in,
+        // text or a number out, and nothing of the program's runs. So
+        // `q.m[w.trim()]` and `q.xs[s.len() % n]` glance as `q.m[w]` does.
+        R::StrOp { .. } => false,
         R::CallVirtual { .. }
         | R::CallClosure { .. }
-        | R::CallBuiltin { .. }
         | R::CallExtern { .. }
-        | R::StrOp { .. }
         | R::Await { .. }
         | R::Yield
         | R::FieldTake { .. } => true,
