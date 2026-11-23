@@ -1,0 +1,24 @@
+// A built-in type meets the prelude's `Display` as a bound, but a `dyn`
+// dispatches through its type's table row, which a primitive has none of. So
+// the copy of `wrap` for `int` cannot convert its `T` to a `dyn Display`; it
+// was lowered anyway, crashed the native backend and emitted an invalid Wasm
+// module.
+
+struct Shown {
+    n: int
+}
+
+impl Display for Shown {
+    fn show(self) -> str {
+        return "shown \(self.n)"
+    }
+}
+
+fn wrap<T: Display>(x: T) -> dyn Display {
+    return x //~ ERROR E0200
+}
+
+fn main() {
+    io.print(wrap(Shown{ n: 1 }).show())
+    io.print(wrap(3).show())
+}

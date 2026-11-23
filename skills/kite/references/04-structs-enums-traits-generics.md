@@ -1428,8 +1428,10 @@ may be passed on to the same bound — `fn outer<T: Shape>(x: T)` may call
 Display>` takes a `3`; through the bound, `x.hash()` and `x.debug()` are what
 `@derive` does with a field of that type, and `x.show()` is interpolation.
 That is all a primitive has: `3.hash()` written directly is still `E0205`, a
-`dyn Display` cannot hold one (`E0200`), and slices, maps, tuples and optionals
-meet none of these bounds.
+`dyn Display` cannot hold one (`E0200`) — nor can a generic function make its
+`T` a `dyn` when that `T` is a primitive: `fn wrap<T: Display>(x: T) -> dyn
+Display` called with a `3` is `E0200` at the conversion, naming the copy
+`wrap<int>` — and slices, maps, tuples and optionals meet none of these bounds.
 
 ```kite
 fn tell<T: Display>(x: T) -> str {

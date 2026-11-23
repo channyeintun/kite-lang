@@ -870,9 +870,16 @@ fn run_passes(
     // A function that calls itself at an ever larger type asks for a copy per
     // level, forever; monomorphisation refuses rather than stopping partway
     // and handing on calls into copies it never made.
-    if let Err(u) = kite_hir::mono::monomorphise(&mut hir) {
-        diags.push(unbounded_instantiation("function", &u.template, u.span, u.why));
-        return (String::new(), None, None, None, index);
+    match kite_hir::mono::monomorphise(&mut hir) {
+        Ok(()) => {}
+        Err(kite_hir::mono::Refused::Unbounded(u)) => {
+            diags.push(unbounded_instantiation("function", &u.template, u.span, u.why));
+            return (String::new(), None, None, None, index);
+        }
+        Err(kite_hir::mono::Refused::NoTable(n)) => {
+            diags.push(no_table(&hir.types, &n));
+            return (String::new(), None, None, None, index);
+        }
     }
     if let Some((name, span, why)) = hir.types.unbounded_instantiation() {
         diags.push(unbounded_instantiation("type", name, span, why));
@@ -1101,6 +1108,33 @@ fn run_passes(
 /// because what a finite program asks for is past what the compiler makes.
 /// Only the first is a claim about the program's recursion, so only it makes
 /// one.
+/// A copy of a generic function that converts a built-in value to a `dyn`:
+/// the value meets the bound, but has no table row for a `dyn` to dispatch
+/// through. See [`kite_hir::mono::NoTable`].
+fn no_table(types: &kite_hir::Types, n: &kite_hir::mono::NoTable) -> Diagnostic {
+    let ty = types.name(n.ty);
+    let full = &types.trait_def(n.trait_id).name;
+    let tr = full.rsplit('.').next().unwrap_or(full);
+    let mut d = Diagnostic::error(
+        kite_diag::codes::E0200,
+        format!("`{}` cannot be held as a `dyn {}`", ty, tr),
+    )
+    .with_primary(n.span, format!("in `{}`, this is {} made a `dyn {}`", n.copy, types.with_article(n.ty), tr));
+    if let Some(by) = &n.asked_by {
+        d = d.with_note(format!("`{}` is the copy `{}` asks for", n.copy, by));
+    }
+    d.with_note(format!(
+        "`{}` meets `{}` as a bound, but a `dyn` holds a value of a type with methods of its \
+         own, and a built-in type has none",
+        ty, tr
+    ))
+    .with_note(format!(
+        "keep the value as the type parameter rather than a `dyn`, or pass a struct that \
+         implements `{}` and holds the `{}`",
+        tr, ty
+    ))
+}
+
 fn unbounded_instantiation(what: &str, name: &str, span: Span, why: kite_hir::Refusal) -> Diagnostic {
     use kite_hir::Refusal;
     let specialised = "generics are specialised: every set of type arguments gets its own copy";

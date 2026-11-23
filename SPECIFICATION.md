@@ -1698,7 +1698,9 @@ The built-in `int`, `float`, `bool` and `str` satisfy the prelude's `Display`,
 `Debug` and `Hash` (§10.4) — what those ask of them is what interpolation and
 `@derive` already do with one — so `Cache<str, int>` above is a cache with
 string keys. They do so only as bounds: a primitive has no methods of its own
-to call directly, and is not a `dyn` of any trait.
+to call directly, and is not a `dyn` of any trait — so a generic function
+that converts its `T` to a `dyn` cannot have a primitive for that `T`, which is
+`E0200` at the conversion in the copy that would do it.
 
 A bound holds wherever it is written. On a function, it is checked at every call
 (`E0208`). On a struct or an enum, it is checked wherever a value is built — a
