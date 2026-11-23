@@ -75,7 +75,13 @@ pub fn ellipsis(s: str, width: int) -> str {
 /// does -0.0 itself, as `%.Nf` writes both. JavaScript's `toFixed` writes
 /// `-0` for the one and `0` for the other.
 ///
-/// An infinity is written `inf` or `-inf`, and a NaN `nan`.
+/// An infinity is written `inf` or `-inf`, and a NaN `NaN`, the spellings
+/// `\(x)` uses: this used to write `nan`, so a NaN read differently in a
+/// column of `fixed` from the same value interpolated beside it.
+///
+/// ```kite
+/// assert(fixed(0.0 / 0.0, 2) == "NaN" && fixed(-1.0 / 0.0, 2) == "-inf", "as interpolation writes them")
+/// ```
 pub fn fixed(x: float, places: int) -> str {
     let wanted = if places < 0 { 0 } else { places }
     // -0.0 is not below zero; only dividing by it tells it from 0.0.
@@ -86,7 +92,7 @@ pub fn fixed(x: float, places: int) -> str {
         return "\(sign)inf"
     }
     if !(size >= 0.0) {
-        return "nan"
+        return "NaN"
     }
     let exact = decimal(size)
     // The digits before the point and the ones after it, which there are
@@ -356,7 +362,7 @@ fn in_base(n: int, base: int, width: int) -> str {
 /// Rounded as [`fixed`] rounds, from the float's exact decimal expansion and
 /// half away from zero, so the digits do not depend on how a backend prints
 /// a float. A negative number, -0.0 included, keeps its sign; an infinity is
-/// `inf` or `-inf` and a NaN `nan`, as `fixed` writes them. A negative
+/// `inf` or `-inf` and a NaN `NaN`, as `fixed` and interpolation write them. A negative
 /// `places` is taken as zero.
 pub fn scientific(x: float, places: int) -> str {
     let wanted = if places < 0 { 0 } else { places }
@@ -367,7 +373,7 @@ pub fn scientific(x: float, places: int) -> str {
         return "\(sign)inf"
     }
     if !(size >= 0.0) {
-        return "nan"
+        return "NaN"
     }
     if size == 0.0 {
         let fraction = if wanted > 0 { "." + zeros(wanted) } else { "" }

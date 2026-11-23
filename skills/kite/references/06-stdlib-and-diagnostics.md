@@ -902,7 +902,8 @@ interpolation already renders. What it cannot do is *align*.
 its exact value half away from zero: `fixed(2.125, 2)` is `2.13`, and
 `fixed(2.005, 2)` is `2.00`, because the float written `2.005` is a little
 below it. A negative number keeps its sign when it rounds to zero, and so does
--0.0, as `%.Nf` writes them: `fixed(-0.0, 2)` is `-0.00`.
+-0.0, as `%.Nf` writes them: `fixed(-0.0, 2)` is `-0.00`. An infinity and a
+NaN are spelled as interpolation spells them, `inf`, `-inf` and `NaN`.
 
 ### fs — files and directories. **Not on the web**
 
