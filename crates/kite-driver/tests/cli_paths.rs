@@ -551,3 +551,32 @@ fn a_local_that_hides_a_prelude_function_says_so() {
     assert!(!err.contains("local `size` hides"), "{}", err);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A program given by a relative path has its manifests and its dependencies'
+/// files named relative too, and folded: `E0405`'s title printed the
+/// manifest's absolute path, and a dependency's file was `…/app/../a/a.kite`.
+#[test]
+fn a_dependency_and_its_manifest_are_named_as_the_entry_is() {
+    let dir = scratch("dep-paths", "unused.kite", "");
+    for (rel, text) in [
+        ("a/a.kite", "pub fn hello() -> int {\n    return \"s\"\n}\n"),
+        ("a/kite.toml", "[package]\nname = \"a\"\nversion = \"0.1.0\"\n"),
+        ("app/kite.toml", "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n[dependencies]\na = { path = \"../a\" }\n"),
+        ("app/main.kite", "use a\n\nfn main() {\n    io.print(a.hello())\n}\n"),
+    ] {
+        std::fs::create_dir_all(dir.join(rel).parent().unwrap()).expect("dir");
+        std::fs::write(dir.join(rel), text).expect("write");
+    }
+    let Some((ok, _, err)) = kitec_in(&dir, &["check", "app/main.kite"]) else { return };
+    assert!(!ok, "{}", err);
+    assert!(err.contains("─ a/a.kite:2:"), "folded and relative: {}", err);
+    assert!(!err.contains(".."), "{}", err);
+    // The same package with a manifest that does not read.
+    std::fs::write(dir.join("a/kite.toml"), "[package]\nname = \"a\"\nversion = \"0.1.0\"\nedition = \"2024\"\n").expect("write");
+    let Some((ok, _, err)) = kitec_in(&dir, &["check", "app/main.kite"]) else { return };
+    assert!(!ok, "{}", err);
+    assert!(err.contains("E0405"), "{}", err);
+    assert!(err.contains("`a/kite.toml` is not a manifest"), "title is relative and folded: {}", err);
+    assert!(!err.contains(dir.to_string_lossy().as_ref()), "no absolute path: {}", err);
+    let _ = std::fs::remove_dir_all(&dir);
+}

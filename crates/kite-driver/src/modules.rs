@@ -689,6 +689,9 @@ pub struct Loader {
     /// The manifests that did not read (`E0405`), by their directory as
     /// `manifests` keys it.
     unread: HashMap<PathBuf, PathBuf>,
+    /// The working directory, when the program was given by a relative path:
+    /// what a path in a diagnostic is shown relative to, as the entry's own is.
+    shown_from: Option<PathBuf>,
     /// What the program's own manifest declares, which decides how a
     /// package's modules are named — see [`Loader::label`].
     direct: Rc<HashMap<String, PathBuf>>,
@@ -869,6 +872,9 @@ impl Loader {
         // finds the manifest beside `src/` exactly as `kitec run src/main.kite`
         // does from above it.
         let start = self.files.absolute(dir);
+        if dir.is_relative() && matches!(self.files, Files::Disk) {
+            self.shown_from = std::env::current_dir().ok();
+        }
         let mut here = Some(start.as_path());
         while let Some(directory) = here {
             if self.files.is_file(&directory.join("kite.toml")) {
@@ -1003,6 +1009,33 @@ impl Loader {
         Some((root.join(&below), root))
     }
 
+    /// A path as a diagnostic shows it: folded, and — when the program was
+    /// given by a relative path, so that its own diagnostics are relative —
+    /// relative to where the compiler was run, as theirs are.
+    ///
+    /// The paths the loader holds are absolute and unfolded (`…/app/../b`),
+    /// which is what a program is compared by and not what a person reads.
+    fn shown_path(&self, path: &Path) -> PathBuf {
+        let folded = normalise(path);
+        let Some(from) = &self.shown_from else { return folded };
+        let (a, b): (Vec<_>, Vec<_>) = (from.components().collect(), folded.components().collect());
+        let common = a.iter().zip(&b).take_while(|(x, y)| x == y).count();
+        if common == 0 {
+            return folded;
+        }
+        let mut out = PathBuf::new();
+        for _ in common..a.len() {
+            out.push("..");
+        }
+        for part in &b[common..] {
+            out.push(part.as_os_str());
+        }
+        if out.as_os_str().is_empty() {
+            out.push(".");
+        }
+        out
+    }
+
     /// The manifest `package`'s dependencies were to come from, when it was
     /// there and did not read.
     fn unread_manifest(&self, package: &Package) -> Option<&PathBuf> {
@@ -1041,7 +1074,7 @@ impl Loader {
             // was `cannot find module`, and nothing named the file at fault.
             Err(e) => {
                 let (text, line, why) = unreadable(&path, e);
-                diags.push(manifest_error(&path, text, line, &why, sources));
+                diags.push(manifest_error(&self.shown_path(&path), text, line, &why, sources));
                 self.unread.insert(key.clone(), path.clone());
                 None
             }
@@ -1064,7 +1097,7 @@ impl Loader {
                 // surfaced as `cannot find module` for every dependency it
                 // declared — a diagnostic about the wrong file.
                 Err(error) => {
-                    diags.push(manifest_error(&path, text, error.line, &error.message, sources));
+                    diags.push(manifest_error(&self.shown_path(&path), text, error.line, &error.message, sources));
                     self.unread.insert(key.clone(), path.clone());
                 }
             }
@@ -1904,7 +1937,7 @@ impl Loader {
                     match self.files.read(&path) {
                         Ok(text) => {
                             self.inputs.push((path.clone(), text.clone()));
-                            files.push(sources.add(&path, &text));
+                            files.push(sources.add(self.shown_path(&path), &text));
                         }
                         Err(e) => diags.push(
                             Diagnostic::error(
