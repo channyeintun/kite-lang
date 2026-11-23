@@ -337,6 +337,88 @@ fn checks() -> [error] {
     out.push(test.is_true(text.bidi_class(0x0711) == text.BidiClass.NSM, "a Syriac mark is NSM"))
     out.push(test.is_true(text.is_combining(0x0CBF) && text.bidi_class(0x0CBF) == text.BidiClass.L, "a Kannada sign is a mark and L"))
 
+    // UAX #29 rule by rule, Unicode 17.0. These rules were missed: a spacing
+    // vowel sign, a Hangul jamo and a Prepend character each began a cluster
+    // of its own, and a mark after a control attached to it.
+    let cr = "\r"
+    let lf = "\n"
+    // GB3, GB4, GB5: CR LF is one cluster; a control stands alone.
+    out.push(test.equal_strs(text.clusters("a\r\nb"), ["a", "\r\n", "b"], "GB3: CR LF is one"))
+    out.push(test.equal_strs(text.clusters(lf + cr), [lf, cr], "GB3: LF CR is two"))
+    out.push(test.equal_strs(text.clusters(cr + acute), [cr, acute], "GB4: a mark does not attach to CR"))
+    out.push(test.equal_strs(text.clusters("a\t\u{301}b"), ["a", "\t", acute, "b"], "GB4: nor to a control"))
+    out.push(test.equal_strs(text.clusters("e\u{301}\u{200B}\u{301}"), ["e\u{301}", "\u{200B}", acute], "GB4, GB5: a control between marks"))
+    out.push(test.equal_strs(text.clusters("\u{600}\n"), ["\u{600}", "\n"], "GB5: Prepend does not take a control"))
+    out.push(test.equal_strs(text.clusters("a\u{200D}\r"), ["a\u{200D}", "\r"], "GB5: nor does a joiner"))
+    // GB6, GB7, GB8: Hangul jamo and syllables.
+    let g = "\u{1100}"
+    let a = "\u{1161}"
+    let k = "\u{11A8}"
+    out.push(test.equal_strs(text.clusters(g + a + k), [g + a + k], "GB6, GB7, GB8: L V T is one syllable"))
+    out.push(test.equal_strs(text.clusters(g + g + a), [g + g + a], "GB6: L L V"))
+    out.push(test.equal_strs(text.clusters(g + "가"), [g + "가"], "GB6: L LV"))
+    out.push(test.equal_strs(text.clusters(g + "각"), [g + "각"], "GB6: L LVT"))
+    out.push(test.equal_strs(text.clusters("가" + k), ["가" + k], "GB7: LV T"))
+    out.push(test.equal_strs(text.clusters("가" + a), ["가" + a], "GB7: LV V"))
+    out.push(test.equal_strs(text.clusters("각" + k + k), ["각" + k + k], "GB8: LVT T T"))
+    out.push(test.equal_strs(text.clusters("각" + a), ["각", a], "an LVT takes no vowel"))
+    out.push(test.equal_strs(text.clusters(k + g), [k, g], "a final before an initial breaks"))
+    out.push(test.equal_strs(text.clusters("한글"), ["한", "글"], "two syllables are two"))
+    // GB9a: a spacing mark stays with its base.
+    out.push(test.equal_strs(text.clusters("\u{915}\u{93F}\u{924}\u{93E}"), ["\u{915}\u{93F}", "\u{924}\u{93E}"], "GB9a: Devanagari कि and ता"))
+    out.push(test.equal_strs(text.clusters("\u{915}\u{94D}\u{937}\u{93F}"), ["\u{915}\u{94D}\u{937}\u{93F}"], "GB9a after GB9c: क्षि"))
+    out.push(test.equal_strs(text.clusters("\u{B95}\u{BCA}\u{B9F}\u{BBF}"), ["\u{B95}\u{BCA}", "\u{B9F}\u{BBF}"], "GB9a: Tamil கொ and டி"))
+    out.push(test.equal_strs(text.clusters("\u{1000}\u{1031}\u{1000}\u{103B}"), ["\u{1000}\u{1031}", "\u{1000}\u{103B}"], "GB9a: Myanmar ကေ and ကျ"))
+    out.push(test.equal_strs(text.clusters("\u{E01}\u{E33}"), ["\u{E01}\u{E33}"], "GB9a: Thai SARA AM"))
+    out.push(test.equal_strs(text.clusters("\u{995}\u{9BE}"), ["\u{995}\u{9BE}"], "GB9: Bengali AA, which is Extend"))
+    out.push(test.equal_strs(text.clusters(" \u{903}"), [" \u{903}"], "GB9a: after anything"))
+    // Myanmar's tall AA is a spacing mark UAX #29 leaves out of SpacingMark.
+    out.push(test.equal_strs(text.clusters("\u{1000}\u{102C}"), ["\u{1000}", "\u{102C}"], "GB9a leaves out U+102C"))
+    // GB9b: Prepend stays with what follows.
+    out.push(test.equal_strs(text.clusters("\u{600}\u{661}\u{662}"), ["\u{600}\u{661}", "\u{662}"], "GB9b: the Arabic number sign"))
+    out.push(test.equal_strs(text.clusters("a\u{600}b"), ["a", "\u{600}b"], "GB9b: after a letter, before the next"))
+    out.push(test.equal_strs(text.clusters("\u{D4E}\u{D15}"), ["\u{D4E}\u{D15}"], "GB9b: Malayalam dot reph"))
+    out.push(test.equal_strs(text.clusters("\u{600}\u{600} "), ["\u{600}\u{600} "], "GB9b: two prepended"))
+    out.push(test.equal_strs(text.clusters("\u{600}"), ["\u{600}"], "GB9b: at the end, alone"))
+    // ZWNJ is Extend: it stays with what is before it, but it is not InCB
+    // Extend, so it ends a conjunct.
+    let zwnj = "\u{200C}"
+    out.push(test.equal_strs(text.clusters("a\(zwnj)b"), ["a\(zwnj)", "b"], "GB9: ZWNJ stays"))
+    out.push(test.equal_strs(text.clusters(ka + virama + zwnj + ta), [ka + virama + zwnj, ta], "GB9c: ZWNJ ends a conjunct"))
+    // GB9c in the scripts Unicode 16.0 added.
+    out.push(test.equal_strs(text.clusters("\u{1000}\u{1039}\u{1000}"), ["\u{1000}\u{1039}\u{1000}"], "GB9c: a Myanmar stack"))
+    out.push(test.equal_strs(text.clusters("\u{17A0}\u{17D2}\u{17AB}\u{1791}\u{17D0}\u{1799}"), ["\u{17A0}\u{17D2}\u{17AB}", "\u{1791}\u{17D0}", "\u{1799}"], "GB9c: Khmer"))
+    // GB11, GB12, GB13.
+    out.push(test.equal_strs(text.clusters("\(grin)\u{308}\(zwj)\(grin)"), ["\(grin)\u{308}\(zwj)\(grin)"], "GB11: Extend before the joiner"))
+    out.push(test.equal_strs(text.clusters("\(grin)\(zwnj)\(zwj)\(grin)"), ["\(grin)\(zwnj)\(zwj)\(grin)"], "GB11: ZWNJ is Extend there"))
+    out.push(test.equal_strs(text.clusters("a\(zwj)\(grin)"), ["a\(zwj)", grin], "GB11: only from an emoji"))
+    let ri = text.from_code(0x1F1E6)
+    out.push(test.equal_strs(text.clusters(ri + ri + ri), [ri + ri, ri], "GB12: three indicators are a flag and one"))
+    out.push(test.equal_strs(text.clusters("a" + ri + ri + ri + "b"), ["a", ri + ri, ri, "b"], "GB13: after a letter too, and the odd one is alone"))
+    out.push(test.equal_strs(text.clusters(ri + acute + ri), [ri + acute, ri], "GB13: a mark between ends the pair"))
+    out.push(test.equal_strs(text.clusters(ri + zwj + ri), [ri + zwj, ri], "GB9 then GB999: a joiner does not pair them"))
+
+    // What is built on clusters follows them. cell_width: a Hangul syllable
+    // in jamo is the 2 of its initial (each vowel and final counted 1), a
+    // spacing vowel sign keeps its column, and a Prepend character takes none.
+    out.push(test.equal_int(text.cell_width(g + a + k), 2, "a syllable in jamo is two"))
+    out.push(test.equal_int(text.cell_width("가" + k), 2, "and so is LV with a final"))
+    out.push(test.equal_int(text.cell_width(a), 1, "a vowel with no initial stays one"))
+    out.push(test.equal_int(text.cell_width("\u{915}\u{93F}"), 2, "a spacing vowel sign keeps its column"))
+    out.push(test.equal_int(text.cell_width("\u{B95}\u{BCA}"), 2, "in Tamil too"))
+    out.push(test.equal_int(text.cell_width("\u{915}\u{94D}\u{937}\u{93F}"), 3, "a conjunct with a vowel sign"))
+    out.push(test.equal_int(text.cell_width("\u{600}\u{661}\u{662}"), 2, "a prepended sign takes none"))
+    out.push(test.equal_int(text.cell_width("\u{600}"), 1, "alone it keeps the one it had"))
+    out.push(test.equal_int(text.cell_width("\u{600}\u{301}"), 1, "and with only a mark after it"))
+    out.push(test.equal_int(text.cell_width("\u{995}\u{9BE}"), 2, "a spacing sign that is Extend keeps its column"))
+    out.push(test.equal_int(text.cell_width("\u{FF76}\u{FF9E}"), 2, "so does a halfwidth voicing mark"))
+    out.push(test.equal_int(text.cell_width("\r\n"), 0, "CR LF takes none"))
+    // wrap cuts between clusters when a run is too wide, so a vowel sign is
+    // not set on a line of its own, nor a jamo vowel apart from its initial.
+    let chars = |s: str| -> float { return s.len() as float }
+    out.push(test.equal_strs(text.wrap("\u{915}\u{93F}\u{924}\u{93E}", 1.0, chars), ["\u{915}\u{93F}", "\u{924}\u{93E}"], "wrap keeps a vowel sign"))
+    out.push(test.equal_strs(text.wrap(g + a + k + g + a, 2.0, chars), [g + a + k, g + a], "wrap keeps a syllable"))
+
     return out
 }
 

@@ -2923,9 +2923,12 @@ Existing functions that answer differently:
   of several characters at the width; `debug_str`, and so `@derive(Debug)`,
   escapes control, bidirectional and invisible characters.
 - **`std/text`.** `bidi_class` answers NSM for every mark of Unicode 15.1, and
-  such marks are line-break class CM; `wrap` and `clusters` keep combining
-  marks, ZWJ sequences, skin tones, flags, tag sequences and Indic conjuncts
-  whole.
+  such marks are line-break class CM; `clusters` follows UAX #29 as of
+  Unicode 17.0, every rule — so CR LF, a spacing vowel sign with its
+  consonant, a Hangul syllable written as jamo and a Prepend character with
+  what follows are one cluster each, and a mark after a control is not — and
+  `wrap` cuts an over-wide word only between them; `cell_width` counts a
+  syllable in jamo as 2 and a Prepend sign before a character as 0.
 - **`std/math`.** `exp` overflows to infinity; `min`, `max` and `clamp` — and
   the prelude's `minf`, `maxf` and `clampf` — carry a NaN whichever side it is
   on; `round`, `trunc`, `floor` and `ceil` keep a zero's sign; `powf` of a
