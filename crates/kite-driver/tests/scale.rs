@@ -158,3 +158,20 @@ fn main() {
                     259999 280001\n280001 true\ntrue 280006\n";
     agrees_within("long-text", src, expected, Duration::from_secs(30), true);
 }
+
+/// A long input read between the long pieces cut from it stays linear. The
+/// few strings whose characters have been indexed were let go each in turn,
+/// so a loop that read each 100-character piece it cut pushed the input out
+/// every fourth piece and indexed it afresh: 800,000 characters took over
+/// twenty seconds on the VM and natively. The one used longest ago is let go
+/// now, and the input, read every time, never is.
+#[test]
+fn a_long_input_read_between_its_long_pieces_stays_linear() {
+    let src = "fn main() {\n  var parts: [str] = []\n  for i in 0..160000 {\n\
+               \x20   parts.push(\"abcd\u{e9}fghij\")\n  }\n  let s = join(parts, \"\")\n\
+               \x20 var sum = 0\n  var i = 0\n  for i + 100 <= s.len() {\n\
+               \x20   let piece = s.slice(i, i + 100)\n\
+               \x20   sum = sum + piece.code_at(70) + piece.len()\n    i = i + 100\n  }\n\
+               \x20 io.print(\"\\(s.len()) \\(sum)\")\n}\n";
+    agrees_within("long-pieces", src, "1600000 3152000\n", Duration::from_secs(20), false);
+}

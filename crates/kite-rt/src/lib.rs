@@ -334,12 +334,11 @@ struct Rt {
     /// String constants, as immortal old-generation objects.
     strings: Vec<u64>,
     /// Where every [`CHAR_STRIDE`]-th character starts, in the few long
-    /// strings that are not ASCII most recently indexed, keyed by address —
+    /// strings that are not ASCII most recently used, keyed by address —
     /// see [`str_byte_at`]. An address names one object only until a
     /// collection moves or frees it, so a minor collection drops the
     /// nursery's entries and a major one drops them all.
     char_marks: Vec<(u64, Vec<u32>)>,
-    char_marks_next: usize,
 
     // ---- the scheduler -------------------------------------------------
     tasks: Vec<Scheduled>,
@@ -524,7 +523,6 @@ pub extern "C" fn kite_rt_startup() {
             shapes: Shapes::default(),
             strings: Vec::new(),
             char_marks: Vec::new(),
-            char_marks_next: 0,
             tasks: Vec::new(),
             clock: 0,
             wake_request: None,
@@ -1937,24 +1935,25 @@ const CHAR_MARKS_KEPT: usize = 4;
 /// Nothing here allocates on the Kite heap, so `s` cannot move meanwhile.
 unsafe fn str_marks<'a>(s: u64) -> &'a [u32] {
     let rt = rt();
+    // Kept in the order last used, and the one used longest ago is the one
+    // let go: a loop that reads a long input and, between reads, each long
+    // piece it cut from it would otherwise push the input out every few
+    // pieces and index it afresh, which is quadratic again.
     if let Some(at) = rt.char_marks.iter().position(|(p, _)| *p == s) {
-        return &rt.char_marks[at].1;
-    }
-    let marks: Vec<u32> = str_str(s)
-        .char_indices()
-        .step_by(CHAR_STRIDE)
-        .map(|(b, _)| b as u32)
-        .collect();
-    let at = if rt.char_marks.len() < CHAR_MARKS_KEPT {
-        rt.char_marks.push((s, marks));
-        rt.char_marks.len() - 1
+        let hit = rt.char_marks.remove(at);
+        rt.char_marks.push(hit);
     } else {
-        let at = rt.char_marks_next;
-        rt.char_marks[at] = (s, marks);
-        rt.char_marks_next = (at + 1) % CHAR_MARKS_KEPT;
-        at
-    };
-    &rt.char_marks[at].1
+        let marks: Vec<u32> = str_str(s)
+            .char_indices()
+            .step_by(CHAR_STRIDE)
+            .map(|(b, _)| b as u32)
+            .collect();
+        if rt.char_marks.len() == CHAR_MARKS_KEPT {
+            rt.char_marks.remove(0);
+        }
+        rt.char_marks.push((s, marks));
+    }
+    &rt.char_marks[rt.char_marks.len() - 1].1
 }
 
 /// How many bytes the `k` characters starting at byte `start` take — so a

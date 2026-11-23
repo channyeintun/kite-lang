@@ -396,28 +396,33 @@ impl CharIndex {
 /// do not push the input itself out.
 #[derive(Default)]
 struct CharIndexes {
+    /// In the order last used: the first is the one let go next.
     recent: Vec<(Rc<str>, Rc<CharIndex>)>,
-    next: usize,
 }
 
 impl CharIndexes {
     const KEPT: usize = 4;
     const SHORT: usize = 64;
 
+    /// The one used longest ago is the one let go, not each in turn: a loop
+    /// that reads a long input and, between reads, each long piece it cut
+    /// from it pushed the input out every few pieces and indexed it afresh,
+    /// which was quadratic again.
     fn of(&mut self, s: &Rc<str>) -> Rc<CharIndex> {
         if s.len() <= Self::SHORT {
             return Rc::new(CharIndex::new(s));
         }
-        if let Some((_, index)) = self.recent.iter().find(|(t, _)| Rc::ptr_eq(t, s)) {
-            return index.clone();
+        if let Some(at) = self.recent.iter().position(|(t, _)| Rc::ptr_eq(t, s)) {
+            let hit = self.recent.remove(at);
+            let index = hit.1.clone();
+            self.recent.push(hit);
+            return index;
         }
         let index = Rc::new(CharIndex::new(s));
-        if self.recent.len() < Self::KEPT {
-            self.recent.push((s.clone(), index.clone()));
-        } else {
-            self.recent[self.next] = (s.clone(), index.clone());
-            self.next = (self.next + 1) % Self::KEPT;
+        if self.recent.len() == Self::KEPT {
+            self.recent.remove(0);
         }
+        self.recent.push((s.clone(), index.clone()));
         index
     }
 }
