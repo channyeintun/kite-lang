@@ -187,6 +187,21 @@ fn checks() -> [error] {
     out.push(test.is_false(starts_with("he", "hello"), "starts_with a longer prefix"))
     out.push(test.equal_strs(split("a,b,c", ","), ["a", "b", "c"], "split"))
     out.push(test.equal_str(join(["a", "b"], "-"), "a-b", "join"))
+    // `split` walks the string and `join` works in pairs, so the edges are
+    // what each must still get right: a separator at either end, two in a
+    // row, one that overlaps itself, one longer than the text, and an odd
+    // count of pieces.
+    out.push(test.equal_strs(split(",a,,b,", ","), ["", "a", "", "b", ""], "split at the ends"))
+    out.push(test.equal_strs(split("aaa", "aa"), ["", "a"], "split takes the leftmost"))
+    out.push(test.equal_strs(split("é日é日", "日"), ["é", "é", ""], "split by a character"))
+    out.push(test.equal_strs(split("ab", "abc"), ["ab"], "split by a longer separator"))
+    out.push(test.equal_strs(split("", ","), [""], "split of nothing"))
+    out.push(test.equal_str(join([], "-"), "", "join of nothing"))
+    out.push(test.equal_str(join(["a"], "-"), "a", "join of one"))
+    out.push(test.equal_str(join(["a", "b", "c", "d", "e"], ", "), "a, b, c, d, e", "join of five"))
+    out.push(test.equal_str(join(["", "", ""], ""), "", "join of empties"))
+    out.push(test.equal_str(upper("héllo, World"), "HéLLO, WORLD", "upper"))
+    out.push(test.equal_str(debug_str("a\"b\\c\nd"), "\"a\\\"b\\\\c\\nd\"", "debug_str"))
     out.push(test.equal_str(replace("banana", "na", "NA"), "baNANA", "replace"))
     out.push(test.equal_strs(words("  two  words  "), ["two", "words"], "words"))
     out.push(test.equal_int("héllo日本".len(), 7, "len counts characters"))

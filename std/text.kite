@@ -1519,21 +1519,21 @@ fn run_of(
     if parity == 1 && !strong {
         // A reversed neutral run: already in visual order, brackets mirrored,
         // nothing left for the renderer to decide.
-        var body = ""
+        var body: [str] = []
         for k in from..to {
-            body = body + mirror_char(line.slice(pos[k], pos[k] + 1))
+            body.push(mirror_char(line.slice(pos[k], pos[k] + 1)))
         }
-        return Run{ body: body, rtl: false }
+        return Run{ body: join(body, ""), rtl: false }
     }
-    var body = ""
+    var body: [str] = []
     var i = lo
     for i <= hi {
         if keep[i] {
-            body = body + line.slice(i, i + 1)
+            body.push(line.slice(i, i + 1))
         }
         i += 1
     }
-    return Run{ body: body, rtl: parity == 1 }
+    return Run{ body: join(body, ""), rtl: parity == 1 }
 }
 
 // ---- Arabic joining --------------------------------------------------------
@@ -1744,13 +1744,13 @@ fn is_lam_alef(code: int) -> bool {
 pub fn join_arabic(run: str) -> str {
     let codes = codes_of(run)
     let n = codes.len()
-    var out = ""
+    var out: [str] = []
     var i = 0
     for i < n {
         let code = codes[i]
         let forms = arabic_forms(code)
         if forms.len() == 0 {
-            out = out + run.slice(i, i + 1)
+            out.push(run.slice(i, i + 1))
             i += 1
             continue
         }
@@ -1763,7 +1763,7 @@ pub fn join_arabic(run: str) -> str {
         // two letters apart. The marks follow the ligature, which carries
         // them as the lam did.
         if code == 0x0644 && after >= 0 && is_lam_alef(codes[after]) {
-            out = out + lam_alef(codes[after], joined_before) + run.slice(i + 1, after)
+            out.push(lam_alef(codes[after], joined_before) + run.slice(i + 1, after))
             i = after + 1
             continue
         }
@@ -1776,10 +1776,10 @@ pub fn join_arabic(run: str) -> str {
         } else if joined_after {
             index = 2
         }
-        out = out + forms.slice(index, index + 1)
+        out.push(forms.slice(index, index + 1))
         i += 1
     }
-    return out
+    return join(out, "")
 }
 
 // ---- UAX #14: line breaking -------------------------------------------------

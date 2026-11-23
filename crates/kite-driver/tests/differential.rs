@@ -4013,6 +4013,71 @@ fn a_long_string_is_read_by_character_in_linear_time() {
     }
 }
 
+/// The standard library's text functions are linear in their input on all
+/// three backends. `join`, `lower`, `upper`, `debug_str` and the JSON and
+/// TOML string readers and writers added each piece to one growing string,
+/// and `split` cut the rest of its input off after every piece — each a copy
+/// of everything so far, so `lower` of 100,000 characters took five seconds
+/// even on Wasm, where a character is an array element, and these 200,000
+/// took a minute and a half on the VM. They collect their pieces and join
+/// them in pairs now, and `split` walks its input. The bound is as generous
+/// as the one above.
+#[test]
+fn the_standard_librarys_text_functions_are_linear() {
+    let src = r#"use std/json
+use std/toml
+
+fn main() {
+    var parts: [str] = []
+    for i in 0..20000 {
+        parts.push("Ab \"Cd\", Ef")
+    }
+    let s = join(parts, " ")
+    let pieces = split(s, ", ")
+    io.print("\(s.len()) \(pieces.len()) \(pieces[1])")
+    io.print("\(lower(s).slice(0, 12)) \(upper(s).slice(0, 12))")
+    io.print("\(replace(s, "Cd", "XYZ").len()) \(debug_str(s).len())")
+    let encoded = json.stringify(json.Json.Text(s))
+    let (back, err) = json.parse(encoded)
+    if err != nil {
+        io.print(err.message())
+        return
+    }
+    io.print("\(encoded.len()) \(or_else(json.text(back), "") == s)")
+    let (doc, terr) = toml.parse("v = \(encoded)\n")
+    if terr != nil {
+        io.print(terr.message())
+        return
+    }
+    io.print("\(toml.text_at(doc, "v", "") == s) \(toml.emit(doc).len())")
+}
+"#;
+    let name = "long-text";
+    let bound = std::time::Duration::from_secs(30);
+    let timed = |backend: &str, run: &dyn Fn() -> String| {
+        let started = std::time::Instant::now();
+        let out = run();
+        let took = started.elapsed();
+        assert!(took < bound, "{} took {:?}", backend, took);
+        out
+    };
+    let vm = timed("the VM", &|| run_on_vm(name, src));
+    assert_eq!(
+        vm,
+        "239999 20001 Ef Ab \"Cd\"\nab \"cd\", ef  AB \"CD\", EF \n259999 280001\n280001 true\ntrue 280006\n"
+    );
+    if native_available() {
+        assert_eq!(timed("the native backend", &|| run_on_native(name, src)), vm);
+    }
+    if node_available() {
+        let dir = std::env::temp_dir().join(format!("kite-long-text-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("create work directory");
+        let wasm = timed("wasm", &|| run_on_wasm(name, src, &dir));
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(wasm, vm);
+    }
+}
+
 /// Literals longer than one `array.new_fixed` may be. V8 refuses more than
 /// 10,000 operands to one when the module is *instantiated*, after the
 /// validator has passed it, so a 10,001-element slice or map literal built a

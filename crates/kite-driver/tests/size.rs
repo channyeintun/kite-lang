@@ -73,7 +73,7 @@ fn a_library_of_four_functions_stays_small() {
 /// A real island: five thousand rows, filtered, sorted and diffed on every
 /// keystroke.
 ///
-/// Today 27,933 bytes, against a budget that was 24,576. What got bigger,
+/// Today 28,473 bytes, against a budget that was 24,576. What got bigger,
 /// measured rather than estimated — each number is this test run at that
 /// commit:
 ///
@@ -101,6 +101,11 @@ fn a_library_of_four_functions_stays_small() {
 ///    trip through the dispatch loop (→ 28,438), and then overflow checks and
 ///    map writes became calls to shared helpers, and a local that lives within
 ///    one block shares a slot with others of its type.
+/// 6. **540 bytes** (27,933 → 28,473) for `lower`, which the page calls on
+///    every row and every query: it adds its characters to a slice and joins
+///    them in pairs, where it added each to one growing string — quadratic,
+///    so a 100,000-character `lower` took five seconds on this target. That
+///    brings in `join` and a push onto a slice of strings.
 ///
 /// `examples/page` attaches its own listeners through `std/dom` and uses none
 /// of (2), so it pays for the machinery without spending it. That is the

@@ -173,21 +173,20 @@ pub fn temp_dir() -> str {
 }
 
 fn split_lines(body: str) -> [str] {
+    // Each line is cut out whole where it ends: adding it up a character at
+    // a time copied the line so far for every character of it.
     var out: [str] = []
-    var current = ""
+    var start = 0
     for i in 0..body.len() {
-        let c = body.slice(i, i + 1)
-        if c == "\n" {
-            if current.len() > 0 {
-                out.push(current)
+        if body.code_at(i) == 10 {
+            if i > start {
+                out.push(body.slice(start, i))
             }
-            current = ""
-        } else {
-            current = current + c
+            start = i + 1
         }
     }
-    if current.len() > 0 {
-        out.push(current)
+    if body.len() > start {
+        out.push(body.slice(start, body.len()))
     }
     return out
 }

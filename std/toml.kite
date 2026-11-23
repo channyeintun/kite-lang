@@ -282,7 +282,7 @@ fn parse_string(input: str, at: int) -> (Text, error) {
     if at + 3 <= input.len() && input.slice(at, at + 3) == triple {
         return parse_multiline(input, at + 3, triple, quote == "\"")
     }
-    var out = ""
+    var out: [str] = []
     var i = at + 1
     for {
         if i >= input.len() {
@@ -290,14 +290,14 @@ fn parse_string(input: str, at: int) -> (Text, error) {
         }
         let c = input.slice(i, i + 1)
         if c == quote {
-            return Text{ text: out, next: i + 1 }, nil
+            return Text{ text: join(out, ""), next: i + 1 }, nil
         }
         // A literal string has no escapes at all — that is its whole purpose,
         // and it is why Windows paths go in one.
         if c == "\\" && quote == "\"" {
             let (piece, err) = parse_escape(input, i)
             check err
-            out = out + piece.text
+            out.push(piece.text)
             i = piece.next
             continue
         }
@@ -307,7 +307,7 @@ fn parse_string(input: str, at: int) -> (Text, error) {
         if is_control(input.code_at(i)) {
             return _, errors.new("toml: a control character in a string must be escaped, at \(i)")
         }
-        out = out + c
+        out.push(c)
         i = i + 1
     }
 }
@@ -320,7 +320,7 @@ fn is_control(code: int) -> bool {
 }
 
 fn parse_multiline(input: str, at: int, closing: str, escapes: bool) -> (Text, error) {
-    var out = ""
+    var out: [str] = []
     var i = at
     // A newline immediately after the opening delimiter is trimmed, which is
     // what lets the content start on its own line — `\r\n` as much as `\n`,
@@ -344,9 +344,9 @@ fn parse_multiline(input: str, at: int, closing: str, escapes: bool) -> (Text, e
                 extra += 1
             }
             for k in 0..extra {
-                out = out + quote
+                out.push(quote)
             }
-            return Text{ text: out, next: i + 3 + extra }, nil
+            return Text{ text: join(out, ""), next: i + 3 + extra }, nil
         }
         let c = input.slice(i, i + 1)
         if c == "\\" && escapes {
@@ -360,7 +360,7 @@ fn parse_multiline(input: str, at: int, closing: str, escapes: bool) -> (Text, e
             }
             let (piece, err) = parse_escape(input, i)
             check err
-            out = out + piece.text
+            out.push(piece.text)
             i = piece.next
             continue
         }
@@ -371,7 +371,7 @@ fn parse_multiline(input: str, at: int, closing: str, escapes: bool) -> (Text, e
         if code != 10 && code != 13 && is_control(code) {
             return _, errors.new("toml: a control character in a string must be escaped, at \(i)")
         }
-        out = out + c
+        out.push(c)
         i = i + 1
     }
 }
@@ -548,7 +548,6 @@ fn parse_inline_table(input: str, at: int, depth: int) -> (Step, error) {
 /// trimmed from its ends. `trim()` takes every kind of whitespace, and taking
 /// a carriage return let `a = \r1` and `[1\r]` read as numbers.
 fn parse_scalar(input: str, at: int) -> (Step, error) {
-    var word = ""
     var i = at
     for {
         if i >= input.len() {
@@ -563,10 +562,9 @@ fn parse_scalar(input: str, at: int) -> (Step, error) {
         if is_control(input.code_at(i)) {
             return _, errors.new("toml: unexpected control character at \(i)")
         }
-        word = word + c
         i = i + 1
     }
-    let body = trim_blank(word)
+    let body = trim_blank(input.slice(at, i))
     if body.len() == 0 {
         return _, errors.new("toml: expected a value at \(at)")
     }
@@ -1014,17 +1012,14 @@ pub fn bool_at(doc: Toml, path: str, fallback: bool) -> bool {
 
 fn split_dots(path: str) -> [str] {
     var out: [str] = []
-    var current = ""
+    var start = 0
     for i in 0..path.len() {
-        let c = path.slice(i, i + 1)
-        if c == "." {
-            out.push(current)
-            current = ""
-        } else {
-            current = current + c
+        if path.code_at(i) == 46 {
+            out.push(path.slice(start, i))
+            start = i + 1
         }
     }
-    out.push(current)
+    out.push(path.slice(start, path.len()))
     return out
 }
 
@@ -1153,28 +1148,29 @@ fn emit_inline(table: { str: Toml }) -> str {
 }
 
 fn emit_string(body: str) -> str {
-    var out = "\""
+    var out = ["\""]
     for i in 0..body.len() {
         let c = body.slice(i, i + 1)
         if c == "\"" {
-            out = out + "\\\""
+            out.push("\\\"")
         } else if c == "\\" {
-            out = out + "\\\\"
+            out.push("\\\\")
         } else if c == "\n" {
-            out = out + "\\n"
+            out.push("\\n")
         } else if c == "\t" {
-            out = out + "\\t"
+            out.push("\\t")
         } else if c == "\r" {
-            out = out + "\\r"
+            out.push("\\r")
         } else if is_control(c.code_at(0)) {
             // Any other control character is written as an escape: raw, it
             // is not TOML, and this module's own reader refuses it.
-            out = out + "\\u" + hex4(c.code_at(0))
+            out.push("\\u" + hex4(c.code_at(0)))
         } else {
-            out = out + c
+            out.push(c)
         }
     }
-    return out + "\""
+    out.push("\"")
+    return join(out, "")
 }
 
 /// Four uppercase hex digits.
@@ -1310,14 +1306,14 @@ fn hex_of(c: str) -> int {
 }
 
 fn without(body: str, drop: str) -> str {
-    var out = ""
+    var out: [str] = []
     for i in 0..body.len() {
         let c = body.slice(i, i + 1)
         if c != drop {
-            out = out + c
+            out.push(c)
         }
     }
-    return out
+    return join(out, "")
 }
 
 /// Whether a bare word is a date or a time rather than a number.
