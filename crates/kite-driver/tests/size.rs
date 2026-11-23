@@ -76,7 +76,8 @@ fn a_library_of_four_functions_stays_small() {
 /// A real island: five thousand rows, filtered, sorted and diffed on every
 /// keystroke.
 ///
-/// Today 28,300 bytes, against a budget that was 24,576. What got bigger,
+/// Today 29,324 bytes, against a budget that was 24,576 and is now 32,768 (the
+/// "under 32 KB" of the roadmap's Phase 23). What got bigger,
 /// measured rather than estimated — each number is this test run at that
 /// commit:
 ///
@@ -116,6 +117,10 @@ fn a_library_of_four_functions_stays_small() {
 ///    names: the structs and enums no local, signature or field can hold
 ///    (→ 28,843), the signatures of host imports the module does not declare
 ///    (→ 28,351), and the dispatchers of traits nothing implements.
+/// 9. **1,024 bytes** (28,300 → 29,324) arrived with the three rounds of fixes
+///    since, merged one after another and measured only at the end, so what
+///    each of them cost is not separated. The budget did not move: the page
+///    has 3,444 bytes to spare.
 ///
 /// `examples/page` attaches its own listeners through `std/dom` and uses none
 /// of (2), so it pays for the machinery without spending it. That is the
