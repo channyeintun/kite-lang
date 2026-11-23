@@ -1924,7 +1924,9 @@ pub async fn fetch_user(id: UserId) -> (User, error) {
 
 An `async fn` returns a `Task<T>`. `await` suspends until it completes. A
 method or an associated function may be `async` too, and calling one yields
-its `Task` in the same way: `await conn.fetch()`.
+its `Task` in the same way: `await conn.fetch()`. Used as a value, a named
+`async fn` is what calling it is: `async fn dbl(x: int) -> int` is a
+`fn(int) -> Task<int>`, so it can be passed to `task.map` as it is.
 
 **Calling an `async fn` does not run its body.** It yields the `Task` and
 returns; the body runs when something drives it, which is `await`. Two calls

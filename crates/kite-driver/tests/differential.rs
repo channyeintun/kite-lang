@@ -5908,6 +5908,31 @@ fn main() {
 "#,
         "6\n3\n12\n1\ntrue\njob\n6\n7\n",
     ),
+    // A named `async fn` used as a value is its starter, a function that
+    // returns the task: passed where `fn(int) -> Task<int>` is wanted, bound
+    // and called, or handed to `task.map`. It was typed `fn(int) -> int`, so
+    // the first two were refused, and called through a binding it answered
+    // a task typed as an `int`.
+    (
+        "an-async-fn-as-a-value-returns-its-task",
+        r#"use std/task
+async fn dbl(x: int) -> int {
+  return x * 2
+}
+fn apply(f: fn(int) -> Task<int>, x: int) -> Task<int> {
+  return f(x)
+}
+async fn main() {
+  let t = apply(dbl, 4)
+  io.print(await t)
+  let f = dbl
+  io.print(await f(5))
+  let all = await task.map([1, 2, 3], dbl)
+  io.print(join_ints(all, ","))
+}
+"#,
+        "8\n10\n2,4,6\n",
+    ),
     // A derived `Encode` writes a tuple as an array of its elements in order,
     // in a field, a slice, a nested tuple and a payload, and `Decode` reads
     // back an array of exactly its length. Both used to refuse a tuple.

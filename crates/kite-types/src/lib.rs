@@ -5071,6 +5071,11 @@ impl<'a> Checker<'a> {
             return self.lit(ExprKind::Error, TyId::ERROR, span);
         }
         let (params, ret) = (sig.params.clone(), sig.ret);
+        // An `async fn`'s value is what calling it is: its starter, which
+        // returns the task (§12.1). It was typed by what the body returns,
+        // so it could not be passed where `fn(..) -> Task<T>` is wanted, and
+        // called through, it answered a task typed as its payload.
+        let ret = self.call_result(id, ret, span);
         let ty = self.types.fn_of(params, ret);
         hir::Expr {
             kind: ExprKind::ClosureNew {

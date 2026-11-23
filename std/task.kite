@@ -44,7 +44,7 @@ pub async fn all<T>(tasks: [Task<T>]) -> [T] {
 ///
 /// async fn run() {
 ///     let start = time.now()
-///     let doubled = await map([3, 1, 2], |n: int| slow_double(n))
+///     let doubled = await map([3, 1, 2], slow_double)
 ///     assert(doubled == [6, 2, 4], "in the order of the items")
 ///     assert(time.now() - start == 30, "together, so the slowest one's time")
 /// }
@@ -54,9 +54,10 @@ pub async fn all<T>(tasks: [Task<T>]) -> [T] {
 /// }
 /// ```
 ///
-/// `f` is an ordinary function returning a task, which an `async fn` called
-/// in a closure is: calling it only queues it, so the loop that builds the
-/// tasks finishes before the first of them runs.
+/// `f` is an ordinary function returning a task, which an `async fn` named
+/// as a value is, and one called in a closure too: calling it only queues
+/// it, so the loop that builds the tasks finishes before the first of them
+/// runs.
 pub async fn map<T, U>(items: [T], f: fn(T) -> Task<U>) -> [U] {
     var tasks: [Task<U>] = []
     for item in items {
