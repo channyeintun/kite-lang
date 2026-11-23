@@ -667,7 +667,11 @@ An engine accepts at most 50,000 locals and 7,654,321 bytes of code in one
 function, and a function past either is the program's size rather than the
 compiler's mistake: it is refused before validation with `E0902`, which names
 the limit. The bytecode VM has its own, a frame of 65,536 registers, and the
-native backend counts neither.
+native backend counts neither. A literal's length counts against neither
+limit: the VM stages the first 64 items of a slice or map literal and adds
+each one after them to what it has built, as the other backends build theirs
+a window at a time. Staged whole, a literal of seventy thousand constants
+took a register per element, and the VM refused it.
 
 Not every MIR local is a Wasm local. One that lives within a single block,
 written there before anything reads it, shares a Wasm local of its type with

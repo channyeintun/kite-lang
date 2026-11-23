@@ -4208,6 +4208,49 @@ fn a_literal_past_either_frame_limit_compiles() {
     }
 }
 
+/// A literal of seventy thousand constants runs on the VM as it does on the
+/// other two. The VM staged a literal's every element in a register of its
+/// own, so a slice of 70,000 constants was a frame of 70,007 registers and
+/// E0902, while 70,000 computed elements — built as they go — ran. It stages
+/// a window of them now and adds the rest. The map's last entry names its
+/// first key again, so the rule a key named twice follows must hold across
+/// what was staged and what was added.
+#[test]
+fn a_literal_of_constants_past_the_vms_frame_runs() {
+    let elems: Vec<String> = (0..70_000).map(|i| i.to_string()).collect();
+    let mut entries: Vec<String> = (0..3_000).map(|i| format!("\"k{}\": {}", i, i)).collect();
+    entries.push("\"k0\": -1".to_string());
+    let src = format!(
+        "fn main() {{\n  let xs = [{}]\n  io.print(\"\\(xs.len()) \\(xs[0]) \\(xs[69999])\")\n\
+         \x20 let m = {{{}}}\n  io.print(\"\\(m.len()) \\(m.values()[0]) \\(m.keys()[0]) \\(m.values()[2999])\")\n}}\n",
+        elems.join(", "),
+        entries.join(", ")
+    );
+    let name = "a-literal-of-constants";
+    let vm = kite_driver::on_compiler_stack({
+        let src = src.clone();
+        move || run_on_vm(name, &src)
+    });
+    assert_eq!(vm, "70000 0 69999\n3000 -1 k0 2999\n");
+    if native_available() {
+        let native = kite_driver::on_compiler_stack({
+            let src = src.clone();
+            move || run_on_native(name, &src)
+        });
+        assert_eq!(native, vm, "native");
+    }
+    if node_available() {
+        let dir = std::env::temp_dir().join(format!("kite-constant-literal-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("create work directory");
+        let wasm = kite_driver::on_compiler_stack({
+            let dir = dir.clone();
+            move || run_on_wasm(name, &src, &dir)
+        });
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(wasm, vm, "wasm");
+    }
+}
+
 /// Long chains compile and agree: a table of three hundred `else if`, a text
 /// of two thousand pieces joined with `+`, three hundred `||` and three
 /// hundred method calls in a row. The parser once charged each link against

@@ -17,7 +17,7 @@ mod async_;
 mod lower;
 pub use async_::transform as asyncify;
 pub use async_::{DONE as TASK_DONE, VALUE as TASK_VALUE};
-pub use lower::lower;
+pub use lower::{lower, LITERAL_WINDOW};
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub struct Local(pub u32);

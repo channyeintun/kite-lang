@@ -1151,15 +1151,12 @@ fn run_passes(
                 )
                 .with_primary(limit.span, limit.what)
                 // Each target's own limit, since the note once said the other
-                // two had none: WebAssembly counts locals, not the literal's
-                // staging, and refuses past fifty thousand of them. A literal
-                // is only this long here when its elements need no computing
-                // (constants and locals): past a short window, one computed
-                // element at a time is built into it.
+                // two had none: WebAssembly counts locals, and refuses past
+                // fifty thousand of them. A literal is never what is too
+                // large: every backend builds one a window at a time.
                 .with_note(
-                    "split the function, or build a large literal of constants in a loop; \
-                     `--native` does not have this limit, and `--emit wasm` accepts a \
-                     literal of any length and up to 50000 locals in one function",
+                    "split the function; `--native` does not have this limit, and \
+                     `--emit wasm` accepts up to 50000 locals in one function",
                 ),
             );
         }
