@@ -8437,6 +8437,39 @@ pub async fn main() {
 "#,
         "nil\ndisk full\nabsent\nnil\nnil b absent\nnil y absent\nnil nil\nnil absent false true\nnil\nnil absent absent\npresent true\n",
     ),
+    // A return type is the fallible form only as the pair `(T, error)`; with
+    // more after the `error` it is a tuple, as it is in a `let` annotation.
+    // `-> (int, error, int)` was E0100 `expected )`.
+    (
+        "a-returned-tuple-may-hold-an-error-in-the-middle",
+        r#"fn g(fail: bool) -> (int, error, int) {
+  if fail {
+    return (1, errors.new("no"), 2)
+  }
+  return (1, nil, 2)
+}
+fn h() -> (int,
+  error
+) {
+  return 7, nil
+}
+fn main() {
+  let (a, e, b) = g(false)
+  if e == nil {
+    io.print(a + b)
+  }
+  let (_, e2, _) = g(true)
+  if e2 != nil {
+    io.print(e2.message())
+  }
+  let (v, e3) = h()
+  if e3 == nil {
+    io.print(v)
+  }
+}
+"#,
+        "3\nno\n7\n",
+    ),
 ];
 
 #[test]

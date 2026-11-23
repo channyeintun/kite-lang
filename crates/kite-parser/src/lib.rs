@@ -2333,13 +2333,15 @@ impl<'a> Parser<'a> {
     fn parse_return_type(&mut self) -> Option<RetType> {
         if self.at(T::LParen) {
             // Could be a fallible pair or an ordinary tuple type. It is
-            // fallible exactly when the last element is the name `error`.
+            // fallible exactly when it is a pair whose second element is the
+            // name `error`: `(int, error, int)` is a tuple that holds one.
             let start = self.span();
             let save = self.pos;
             self.bump();
             let first = self.parse_type()?;
             if self.eat(T::Comma)
-                && self.at(T::Ident) && self.text_at(self.pos) == "error" {
+                && self.at(T::Ident) && self.text_at(self.pos) == "error"
+                && self.peek_at(1) == T::RParen {
                     self.bump();
                     let end = self.expect(T::RParen)?;
                     return Some(RetType::Fallible { value: first, span: start.to(end) });
