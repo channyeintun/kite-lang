@@ -565,6 +565,25 @@ fn a_projected_tuple_element_is_not_called_a_call() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A tuple or slice literal that holds failures, left as a statement, is
+/// called what it is: no call is there.
+#[test]
+fn a_literal_that_holds_failures_is_not_called_a_call() {
+    let dir = scratch(
+        "literal-label",
+        "t.kite",
+        "fn f(n: int) -> (int, error) {\n    return n, nil\n}\n\nfn g() -> error {\n    return nil\n}\n\n\
+         fn main() {\n    (f(1), f(2))\n    ((f(3), f(4)))\n    [g(), g()]\n    \
+         match 1 {\n        1 => (g(), 1)\n        _ => [f(5)]\n    }\n}\n",
+    );
+    let Some((ok, _, err)) = kitec_in(&dir, &["check", "t.kite"]) else { return };
+    assert!(!ok, "{}", err);
+    assert_eq!(err.matches("this tuple holds errors, and they are thrown away").count(), 3, "{}", err);
+    assert_eq!(err.matches("this slice holds errors, and they are thrown away").count(), 2, "{}", err);
+    assert!(!err.contains("this call returns"), "{}", err);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// Calling a local that hides a prelude function says so, as a module's
 /// constant of that name does.
 #[test]

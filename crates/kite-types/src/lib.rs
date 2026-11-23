@@ -9205,7 +9205,16 @@ impl<'a> Checker<'a> {
                  something that will, such as `task.all`",
             ),
         };
-        let what = if projected {
+        // A tuple or slice literal that holds failures is no call either:
+        // `(f(1), f(2))` as a statement is a tuple thrown away.
+        let literal = match &expr.kind {
+            ExprKind::TupleNew { .. } => Some("this tuple holds"),
+            ExprKind::SliceNew { .. } => Some("this slice holds"),
+            _ => None,
+        };
+        let what = if let (Some(literal), false) = (literal, projected) {
+            what.replace("this call returns", literal)
+        } else if projected {
             what.replace("this call returns", "this tuple element holds")
                 .replace("this call may return", "this tuple element may hold")
                 .replace("this call starts a task", "this tuple element is a task")
