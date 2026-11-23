@@ -482,6 +482,304 @@ fn is_white(c: int) -> bool {
     c == 0x3000
 }
 
+// ---- more strings -----------------------------------------------------------
+//
+// Positions and lengths below are in characters, as every `str` method's are.
+
+/// `s` written `n` times in a row; empty for an `n` of zero or less.
+///
+/// ```kite
+/// assert(repeat("ab", 3) == "ababab", "three times")
+/// assert(repeat("ab", 0) == "", "none")
+/// ```
+pub fn repeat(s: str, n: int) -> str {
+    var out = ""
+    var piece = s
+    var k = n
+    // Doubling the piece, so the copying is as long as the answer rather than
+    // as long as the answer times the count.
+    for k > 0 {
+        if k % 2 == 1 {
+            out = out + piece
+        }
+        k = k / 2
+        if k > 0 {
+            piece = piece + piece
+        }
+    }
+    return out
+}
+
+/// `s` without the whitespace — what `s.trim()` removes — at its start.
+///
+/// ```kite
+/// assert(trim_start("  a b ") == "a b ", "only the left")
+/// ```
+pub fn trim_start(s: str) -> str {
+    var i = 0
+    for i < s.len() && is_white(s.code_at(i)) {
+        i += 1
+    }
+    return s.slice(i, s.len())
+}
+
+/// `s` without the whitespace — what `s.trim()` removes — at its end.
+///
+/// ```kite
+/// assert(trim_end("  a b ") == "  a b", "only the right")
+/// ```
+pub fn trim_end(s: str) -> str {
+    var n = s.len()
+    for n > 0 && is_white(s.code_at(n - 1)) {
+        n -= 1
+    }
+    return s.slice(0, n)
+}
+
+/// `text` padded on the right with `with` until it is `width` long: the mirror
+/// of `pad_start`, with the same rules for a filler of more than one character
+/// (repeated and cut at the width) and for text already long enough (returned
+/// as it is).
+///
+/// ```kite
+/// assert(pad_end("ab", 5, ".") == "ab...", "padded on the right")
+/// assert(pad_end("7", 4, "ab") == "7aba", "a filler is cut at the width")
+/// ```
+pub fn pad_end(text: str, width: int, with: str) -> str {
+    let need = width - text.len()
+    if with.len() == 0 || need <= 0 {
+        return text
+    }
+    var pad = with
+    for pad.len() < need {
+        pad = pad + with
+    }
+    return text + pad.slice(0, need)
+}
+
+/// The lines of `s`. A line ends at `\n`, `\r\n` or `\r`, and the ending is not
+/// part of it; a final ending does not start another, empty, line. The empty
+/// string has no lines, and `"a\n\nb"` has three, the middle one empty.
+///
+/// ```kite
+/// assert(lines("a\r\nb\n").len() == 2, "no phantom last line, no CR left over")
+/// ```
+pub fn lines(s: str) -> [str] {
+    var out: [str] = []
+    let n = s.len()
+    var start = 0
+    var i = 0
+    for i < n {
+        let c = s.code_at(i)
+        if c == 10 || c == 13 {
+            out.push(s.slice(start, i))
+            if c == 13 && i + 1 < n && s.code_at(i + 1) == 10 {
+                i += 1
+            }
+            start = i + 1
+        }
+        i += 1
+    }
+    if start < n {
+        out.push(s.slice(start, n))
+    }
+    return out
+}
+
+/// What is left of `s` after `prefix`, or nil when `s` does not start with it.
+///
+/// ```kite
+/// assert(strip_prefix("--name", "--") == "name", "removed")
+/// assert(strip_prefix("name", "--") == nil, "absent")
+/// ```
+pub fn strip_prefix(s: str, prefix: str) -> Option<str> {
+    if !starts_with(s, prefix) {
+        return nil
+    }
+    return s.slice(prefix.len(), s.len())
+}
+
+/// What is left of `s` before `suffix`, or nil when `s` does not end with it.
+///
+/// ```kite
+/// assert(strip_suffix("main.kite", ".kite") == "main", "removed")
+/// assert(strip_suffix("main", ".kite") == nil, "absent")
+/// ```
+pub fn strip_suffix(s: str, suffix: str) -> Option<str> {
+    if !ends_with(s, suffix) {
+        return nil
+    }
+    return s.slice(0, s.len() - suffix.len())
+}
+
+/// `s` cut at the first `sep`: what is before it and what is after it. Nil
+/// when `sep` is not in `s`, and when `sep` is empty — there is no first place
+/// to cut at nothing.
+///
+/// ```kite
+/// let pair = split_once("key=a=b", "=")
+/// if pair != nil {
+///     let (key, value) = pair
+///     assert(key == "key" && value == "a=b", "at the first one")
+/// } else {
+///     assert(false, "found")
+/// }
+/// ```
+pub fn split_once(s: str, sep: str) -> Option<(str, str)> {
+    if sep.len() == 0 {
+        return nil
+    }
+    let at = s.index_of(sep)
+    if at < 0 {
+        return nil
+    }
+    return (s.slice(0, at), s.slice(at + sep.len(), s.len()))
+}
+
+/// The position of the first `needle` in `s` that starts at `from` or later,
+/// or -1. A `from` below zero is zero, and one past the end is the end, where
+/// only an empty `needle` is found.
+///
+/// ```kite
+/// assert(index_of_from("abcabc", "b", 2) == 4, "the next one")
+/// assert(index_of_from("abc", "b", 2) == -1, "none left")
+/// ```
+pub fn index_of_from(s: str, needle: str, from: int) -> int {
+    let start = clamp(from, 0, s.len())
+    let at = s.slice(start, s.len()).index_of(needle)
+    if at < 0 {
+        return -1
+    }
+    return start + at
+}
+
+/// The position of the last `needle` in `s`, or -1. An empty `needle` is at
+/// the end, `s.len()`.
+///
+/// ```kite
+/// assert(last_index_of("a/b/c.kite", "/") == 3, "the last slash")
+/// assert(last_index_of("abc", "x") == -1, "absent")
+/// ```
+pub fn last_index_of(s: str, needle: str) -> int {
+    let n = needle.len()
+    var i = s.len() - n
+    for i >= 0 {
+        if s.slice(i, i + n) == needle {
+            return i
+        }
+        i -= 1
+    }
+    return -1
+}
+
+/// The characters of `s` as code points, one per Unicode scalar.
+///
+/// ```kite
+/// assert(codes("aé") == [97, 233], "code points")
+/// ```
+pub fn codes(s: str) -> [int] {
+    var out: [int] = []
+    for i in 0..s.len() {
+        out.push(s.code_at(i))
+    }
+    return out
+}
+
+/// The string made of `cs`, one character per code point — `text.from_code`
+/// for each, so a value that is not a Unicode scalar becomes what it answers.
+///
+/// ```kite
+/// assert(from_codes([104, 105]) == "hi", "back to text")
+/// ```
+pub fn from_codes(cs: [int]) -> str {
+    var out = ""
+    for c in cs {
+        out = out + text.from_code(c)
+    }
+    return out
+}
+
+/// The characters of `s`, each as a one-character string.
+///
+/// ```kite
+/// assert(chars("abc") == ["a", "b", "c"], "one each")
+/// ```
+pub fn chars(s: str) -> [str] {
+    var out: [str] = []
+    for i in 0..s.len() {
+        out.push(s.slice(i, i + 1))
+    }
+    return out
+}
+
+/// `true` for exactly `"true"` and `false` for exactly `"false"`; anything
+/// else, including other cases and surrounding spaces, is nil.
+///
+/// ```kite
+/// assert(parse_bool("true") == true, "true")
+/// assert(parse_bool("yes") == nil, "nothing else")
+/// ```
+pub fn parse_bool(text: str) -> Option<bool> {
+    if text == "true" {
+        return true
+    }
+    if text == "false" {
+        return false
+    }
+    return nil
+}
+
+/// A whole number written in `base`, 2 to 36, or nil: an optional `-` and then
+/// digits, which are `0`–`9` and `a`–`z`, in either case. Nothing else — no
+/// `0x`, no spaces, no separators. A base outside 2..36, no digits, a digit
+/// the base does not have, and a number past the range of an `int` are all
+/// nil, by the rule `parse_int` has.
+///
+/// ```kite
+/// assert(parse_int_radix("ff", 16) == 255, "hexadecimal")
+/// assert(parse_int_radix("-101", 2) == -5, "binary")
+/// assert(parse_int_radix("12", 2) == nil, "not a binary digit")
+/// ```
+pub fn parse_int_radix(text: str, base: int) -> Option<int> {
+    if base < 2 || base > 36 {
+        return nil
+    }
+    var start = 0
+    if text.code_at(0) == 45 {
+        start = 1
+    }
+    if start >= text.len() {
+        return nil
+    }
+    let lowest = -9223372036854775807 - 1
+    var value = 0
+    for i in start..text.len() {
+        let c = text.code_at(i)
+        var d = 99
+        if c >= 48 && c <= 57 {
+            d = c - 48
+        } else if c >= 97 && c <= 122 {
+            d = c - 97 + 10
+        } else if c >= 65 && c <= 90 {
+            d = c - 65 + 10
+        }
+        if d >= base {
+            return nil
+        }
+        if value < (lowest + d) / base {
+            return nil
+        }
+        value = value * base - d
+    }
+    if start == 1 {
+        return value
+    }
+    if value == lowest {
+        return nil
+    }
+    return 0 - value
+}
+
 // ---- optionals ------------------------------------------------------------
 
 /// The value, or `fallback` when there is none.
@@ -1266,6 +1564,279 @@ pub fn chunked<T>(items: [T], size: int) -> [[T]] {
     }
     if group.len() > 0 {
         out.push(group)
+    }
+    return out
+}
+
+/// The integers from `from` up to, but not including, `to`, as a slice; empty
+/// when `to` is not above `from`. A range is not a value in Kite, so this is
+/// how one is handed to `map` or `filter`.
+///
+/// ```kite
+/// assert(range(2, 5) == [2, 3, 4], "half open")
+/// assert(range(5, 2).len() == 0, "or empty")
+/// ```
+pub fn range(from: int, to: int) -> [int] {
+    var out: [int] = []
+    for i in from..to {
+        out.push(i)
+    }
+    return out
+}
+
+/// A slice of `n` copies of `value`; empty for an `n` of zero or less.
+///
+/// ```kite
+/// assert(filled(0.0, 3) == [0.0, 0.0, 0.0], "a zeroed slice")
+/// ```
+pub fn filled<T>(value: T, n: int) -> [T] {
+    var out: [T] = []
+    for _i in 0..n {
+        out.push(value)
+    }
+    return out
+}
+
+/// `items` split in two, in their order: those `test` accepts, then the rest.
+///
+/// ```kite
+/// let (even, odd) = partition([1, 2, 3, 4], |n: int| n % 2 == 0)
+/// assert(even == [2, 4] && odd == [1, 3], "two halves")
+/// ```
+pub fn partition<T>(items: [T], test: fn(T) -> bool) -> ([T], [T]) {
+    var yes: [T] = []
+    var no: [T] = []
+    for item in items {
+        if test(item) {
+            yes.push(item)
+        } else {
+            no.push(item)
+        }
+    }
+    return (yes, no)
+}
+
+/// The items from the start for as long as `test` accepts them.
+///
+/// ```kite
+/// assert(take_while([1, 2, 5, 1], |n: int| n < 3) == [1, 2], "stops at the first no")
+/// ```
+pub fn take_while<T>(items: [T], test: fn(T) -> bool) -> [T] {
+    var out: [T] = []
+    for item in items {
+        if !test(item) {
+            break
+        }
+        out.push(item)
+    }
+    return out
+}
+
+/// What is left once the items from the start that `test` accepts are dropped.
+///
+/// ```kite
+/// assert(drop_while([1, 2, 5, 1], |n: int| n < 3) == [5, 1], "from the first no")
+/// ```
+pub fn drop_while<T>(items: [T], test: fn(T) -> bool) -> [T] {
+    var out: [T] = []
+    var dropping = true
+    for item in items {
+        if dropping && test(item) {
+            continue
+        }
+        dropping = false
+        out.push(item)
+    }
+    return out
+}
+
+/// Every run of `size` neighbouring items, in order — each one starting a
+/// place after the last, so they overlap. Empty when `size` is not above zero
+/// or is more than `items` has.
+///
+/// ```kite
+/// assert(windows([1, 2, 3, 4], 2) == [[1, 2], [2, 3], [3, 4]], "pairs")
+/// ```
+pub fn windows<T>(items: [T], size: int) -> [[T]] {
+    var out: [[T]] = []
+    if size <= 0 {
+        return out
+    }
+    var i = 0
+    for i + size <= items.len() {
+        out.push(items[i..i + size])
+        i += 1
+    }
+    return out
+}
+
+/// Every item turned into a slice by `f`, and the slices joined in order.
+///
+/// ```kite
+/// assert(flat_map([1, 2], |n: int| [n, n * 10]) == [1, 10, 2, 20], "each to many")
+/// ```
+pub fn flat_map<T, U>(items: [T], f: fn(T) -> [U]) -> [U] {
+    var out: [U] = []
+    for item in items {
+        for made in f(item) {
+            out.push(made)
+        }
+    }
+    return out
+}
+
+/// The first position holding something equal to `wanted`, or -1.
+///
+/// ```kite
+/// assert(index_of([5, 6, 7], 7) == 2, "found")
+/// assert(index_of([5, 6, 7], 9) == -1, "absent")
+/// ```
+pub fn index_of<T>(items: [T], wanted: T) -> int {
+    for i in 0..items.len() {
+        if items[i] == wanted {
+            return i
+        }
+    }
+    return -1
+}
+
+/// The items multiplied together; 1 for none. Overflow traps, as `sum`'s does.
+///
+/// ```kite
+/// assert(product([2, 3, 4]) == 24, "multiplied")
+/// ```
+pub fn product(items: [int]) -> int {
+    var total = 1
+    for item in items {
+        total = total * item
+    }
+    return total
+}
+
+/// The smallest of `items`, or nil when there are none.
+///
+/// ```kite
+/// assert(min_of([3, 1, 2]) == 1, "smallest")
+/// assert(min_of([]) == nil, "none")
+/// ```
+pub fn min_of(items: [int]) -> Option<int> {
+    if items.len() == 0 {
+        return nil
+    }
+    var best = items[0]
+    for item in items {
+        if item < best {
+            best = item
+        }
+    }
+    return best
+}
+
+/// The largest of `items`, or nil when there are none.
+///
+/// ```kite
+/// assert(max_of([3, 1, 2]) == 3, "largest")
+/// ```
+pub fn max_of(items: [int]) -> Option<int> {
+    if items.len() == 0 {
+        return nil
+    }
+    var best = items[0]
+    for item in items {
+        if item > best {
+            best = item
+        }
+    }
+    return best
+}
+
+/// The integers written out and joined with `sep` — a `[int]` has no text form
+/// of its own.
+///
+/// ```kite
+/// assert(join_ints([1, 2, 3], ", ") == "1, 2, 3", "joined")
+/// ```
+pub fn join_ints(items: [int], sep: str) -> str {
+    var out = ""
+    for i in 0..items.len() {
+        if i > 0 {
+            out = out + sep
+        }
+        out = out + "\(items[i])"
+    }
+    return out
+}
+
+/// The floats written out, as `\(x)` writes them, and joined with `sep`.
+///
+/// ```kite
+/// assert(join_floats([1.5, 2.0], " ") == "1.5 2.0", "joined")
+/// ```
+pub fn join_floats(items: [float], sep: str) -> str {
+    var out = ""
+    for i in 0..items.len() {
+        if i > 0 {
+            out = out + sep
+        }
+        out = out + "\(items[i])"
+    }
+    return out
+}
+
+// ---- maps ---------------------------------------------------------------------
+
+/// The value under `key`, or `fallback` when the map has none.
+///
+/// ```kite
+/// let ages = { "ada": 36 }
+/// assert(get_or(ages, "ada", 0) == 36, "present")
+/// assert(get_or(ages, "bob", 0) == 0, "absent")
+/// ```
+pub fn get_or<K, V>(m: { K: V }, key: K, fallback: V) -> V {
+    let v = m[key]
+    if v == nil {
+        return fallback
+    }
+    return v
+}
+
+/// Whether the map has an entry under `key`.
+///
+/// ```kite
+/// assert(has_key({ "a": 1 }, "a"), "there")
+/// assert(!has_key({ "a": 1 }, "b"), "not there")
+/// ```
+pub fn has_key<K, V>(m: { K: V }, key: K) -> bool {
+    return m[key] != nil
+}
+
+/// A new map with the entries of `a` and then those of `b`: where both have a
+/// key, `b`'s value wins. Keys keep the order they first appear in.
+///
+/// ```kite
+/// let m = merged({ "a": 1, "b": 2 }, { "b": 3, "c": 4 })
+/// assert(m.len() == 3 && get_or(m, "b", 0) == 3, "the right wins")
+/// ```
+pub fn merged<K, V>(a: { K: V }, b: { K: V }) -> { K: V } {
+    var out: { K: V } = { }
+    for (k, v) in a {
+        out[k] = v
+    }
+    for (k, v) in b {
+        out[k] = v
+    }
+    return out
+}
+
+/// The entries of the map as `(key, value)` pairs, in the map's order.
+///
+/// ```kite
+/// assert(entries({ "a": 1, "b": 2 }) == [("a", 1), ("b", 2)], "in order")
+/// ```
+pub fn entries<K, V>(m: { K: V }) -> [(K, V)] {
+    var out: [(K, V)] = []
+    for (k, v) in m {
+        out.push((k, v))
     }
     return out
 }
