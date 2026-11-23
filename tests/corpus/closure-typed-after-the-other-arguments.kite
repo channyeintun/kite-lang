@@ -1,0 +1,20 @@
+// A closure literal that waits on a later argument is typed after the
+// call's other arguments (§4.5). Each argument's own error is still reported
+// once, at that argument, and a closure nothing fixes is still E0211.
+fn three<T>(a: int, f: fn(T) -> int, b: T, c: str) -> int {
+    return a + f(b)
+}
+
+fn lone<T>(f: fn(T) -> int) -> int {
+    return 0
+}
+
+fn main() {
+    io.print(three(
+            "one", //~ ERROR E0200
+            |t| t + "x", //~ ERROR E0201
+            2,
+            3, //~ ERROR E0200
+        ))
+    io.print(lone(|u| 1)) //~ ERROR E0211
+}

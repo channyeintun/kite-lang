@@ -657,11 +657,23 @@ from an expression body's own type. A block body with none of these returns
 `()` — except where it is passed to a generic function's parameter whose result
 is a type parameter nothing else fixes, as `run<T>(g: fn() -> T)` or `map`'s
 `U`, or given to such a field of a generic struct's literal, as
-`Job{ run: || { … } }` for `struct Job<T> { run: fn() -> (T, error) }`. Then its `return` statements say what it returns: `run(|| { return 6 })`
+`Job{ run: || { … } }` for `struct Job<T> { run: fn() -> (T, error) }`.
+Then its `return` statements say what it returns: `run(|| { return 6 })`
 makes `T` an `int`, and where `fn() -> (T, error)` is wanted (or a `return`
 gives a pair or `_, err`) the closure is fallible, so `retry(|| { … return n,
 nil })` solves `T` from `n`. `-> (T, error)` written on a closure is the
 fallible form wherever it stands, exactly as on a named function.
+
+What another argument fixes counts wherever that argument is written. A
+closure literal that needs a type only another argument can give — a
+parameter it does not annotate, or the value of a fallible result when no
+`return` in its block gives one — is typed after the call's other arguments,
+so `r(|| { return _, errors.new("no") }, 6)` against
+`r<T>(g: fn() -> (T, error), x: T)` takes `T` from the `6`, and
+`apply(|n| n + 1, 41)` against `apply<T>(f: fn(T) -> T, x: T)` takes `n`'s
+type from the `41`. Such closures are typed in written order among
+themselves; a generic struct literal's fields are treated the same way. Only
+the checking moves: the arguments are still evaluated in the order written.
 
 **Closures capture by value, taken when the closure is made.** Because `let`
 bindings are immutable, the vast majority of captures are trivially safe: the
@@ -784,7 +796,11 @@ implementations compares, and a generic type standing for a trait, for a bound
 or as a `dyn`, to what its implementation's methods compare of its own
 arguments. A call the compiler writes counts as one the program writes:
 `io.print(b)` and `"\(b)"` call `b`'s `show`, and a value becoming an `error`
-calls its `message`.
+calls its `message`. An `impl` block's parameter given one such type is one
+mistake however many calls reach it — every method of `impl<K> W<K>` that
+compares `K` shares that `K` — so it is reported once in each file, at the
+first call there, with the file's others labelled; a function's own parameter is chosen by each call, so
+each call that chooses one of the three is reported.
 
 Floating-point `==` follows IEEE-754, so `nan != nan`. The compiler emits a
 warning when both operands of `==` are statically known to be floats and neither
@@ -1807,7 +1823,11 @@ them.
 The walk handles primitives, slices, maps, optionals, tuples, and other types
 that derive the same trait; `Encode` writes a tuple as a JSON array of its
 elements in order, and `Decode` reads back an array of exactly its length.
-Where it cannot go — a function field, a `dyn Trait` — it says which field
+A struct, like a named payload, is read from an object, and its failures are
+worded one way: a key that is absent is `S.f: missing`, and one that is there
+with the wrong type — `null` included, unless the field is optional — says
+what was expected, as `S.f: expected a whole number` or `S.f: expected an
+array`. Where it cannot go — a function field, a `dyn Trait` — it says which field
 stopped it and what would fix it, and the hand-written implementation is
 still there to write. That one error is the only one: the method is still
 declared, so a call to it elsewhere is not refused again. `Debug` and `Hash` derive

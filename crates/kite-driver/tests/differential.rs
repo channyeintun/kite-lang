@@ -6507,6 +6507,114 @@ fn main() {
 "#,
         "true\n4\ns\n",
     ),
+    // A closure literal that needs what a later argument fixes is typed after
+    // the call's other arguments (§4.5): `r2(|| { return _, err }, 6)` was
+    // E0209 and `ap(|n| n + 1, 41)` E0211, though the `6` and the `41` fix
+    // `T`. The same holds for a generic struct literal's fields. The
+    // arguments are still evaluated in the order written.
+    (
+        "a-closure-learns-what-a-later-argument-fixes",
+        r#"use std/errors
+fn r2<T>(g: fn() -> (T, error), x: T) -> (T, error) {
+  return g()
+}
+fn ap<T>(f: fn(T) -> T, x: T) -> T {
+  return f(x)
+}
+fn three<T>(a: int, f: fn(T) -> int, b: T) -> int {
+  return a + f(b)
+}
+fn tick(label: str, n: int) -> int {
+  io.print(label)
+  return n
+}
+struct Job<T> {
+  run: fn() -> (T, error)
+  seed: T
+}
+struct Map2<A, B> {
+  f: fn(A) -> B
+  seed: A
+}
+struct Box2 {
+  n: int
+}
+impl Box2 {
+  fn with<T>(self, f: fn(T) -> int, x: T) -> int {
+    return f(x) + self.n
+  }
+}
+fn main() {
+  let (b, e) = r2(|| {
+    return _, errors.new("no")
+  }, 6)
+  if e != nil {
+    io.print(e.message())
+  } else {
+    io.print(b)
+  }
+  io.print(ap(|n| n + 1, 41))
+  io.print(ap(|s| "\(s)!", "hi"))
+  io.print(three(tick("first", 1), |t| t * 10, tick("third", 2)))
+  io.print(ap(|n| ap(|m| m - 1, n), 9))
+  io.print(Box2{ n: 10 }.with(|t| t * 3, 2))
+  let j = Job{ run: || {
+    return _, errors.new("job")
+  }, seed: 6 }
+  let (v, je) = j.run()
+  if je != nil {
+    io.print("\(je.message()) \(j.seed)")
+  } else {
+    io.print(v)
+  }
+  let m = Map2{ f: |a| a + 1, seed: 3 }
+  io.print(m.f(m.seed))
+}
+"#,
+        "no\n42\nhi!\nfirst\nthird\n21\n8\n16\njob 6\n4\n",
+    ),
+    // What E0114's notes tell the reader to write, written: a `var` copy and
+    // a captured `let` of the result; a copy made inside the closure; a
+    // `var` given its value where it is declared; a copy of a loop's or a
+    // pattern's binding. The notes said "declare it `var`" for each, which
+    // is E0211, E0110 or a parse error.
+    (
+        "e0114-notes-followed-compile",
+        r#"fn main() {
+  let xs = [1]
+  var copy = xs
+  copy.push(2)
+  let done = copy
+  let f = || {
+    io.print(done.len())
+  }
+  f()
+  let g = || {
+    let ys = [1]
+    let h = || {
+      var copy = ys
+      copy.push(2)
+      io.print(copy.len())
+    }
+    h()
+  }
+  g()
+  var zs: [int] = [1]
+  zs.push(2)
+  io.print(zs.len())
+  for ys in [[1]] {
+    var copy = ys
+    copy.push(2)
+    io.print(copy.len())
+  }
+  let (ws, n) = ([1], 2)
+  var wcopy = ws
+  wcopy.push(n)
+  io.print(wcopy.len())
+}
+"#,
+        "2\n2\n2\n2\n2\n",
+    ),
     // A named `async fn` used as a value is its starter, a function that
     // returns the task: passed where `fn(int) -> Task<int>` is wanted, bound
     // and called, or handed to `task.map`. It was typed `fn(int) -> int`, so
