@@ -139,6 +139,13 @@ fn edge_checks() -> [error] {
     out.push(same(math.asin(2.0), math.pi() / 2.0, "past one, asin answers for one"))
     // Near ±1, 1 − x² was computed after x² had rounded: 960 units out.
     out.push(test.is_true(math.abs(math.asin(0.9999999999) - 1.5707821846586878) < 0.0000000000000005, "asin near one, within two units"))
+    // acos was π/2 − asin(x), which cancels near 1: 25 million units out at
+    // 1 − 2⁻⁵³. Each bound here is five units in the last place.
+    out.push(test.is_true(math.abs(math.acos(0.9999999999999998) - 2.1073424255447017e-8) < 1.7e-23, "acos one unit below one"))
+    out.push(test.is_true(math.abs(math.acos(0.9999999999999) - 4.472831195534396e-7) < 2.7e-22, "acos near one"))
+    out.push(test.is_true(math.abs(math.acos(-0.9999999999) - 3.1415785114535844) < 2.3e-15, "acos near minus one"))
+    out.push(same(math.acos(1.0), 0.0, "acos(1)"))
+    out.push(same(math.acos(-1.0), math.pi(), "acos(-1)"))
     // atan2, C99's table: the sign of a zero decides the side of an axis.
     out.push(same(math.atan2(-0.0, -1.0), -math.pi(), "atan2(-0, -1)"))
     out.push(same(math.atan2(0.0, -1.0), math.pi(), "atan2(0, -1)"))

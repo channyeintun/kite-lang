@@ -1676,7 +1676,33 @@ pub fn asin(x: float) -> float {
 
 /// The arccosine, in `[0, π]`, with `asin`'s edges: past ±1 the answer is
 /// that of ±1, and a NaN answers a NaN.
+///
+/// ```kite
+/// assert(acos(1.0) == 0.0 && acos(-1.0) == pi(), "the ends")
+/// let near = acos(0.9999999999999998)
+/// assert(near > 2.10734242554e-8 && near < 2.10734242555e-8, "near 1")
+/// ```
 pub fn acos(x: float) -> float {
+    if !(x >= x) {
+        return x
+    }
+    if x >= 1.0 {
+        return 0.0
+    }
+    if x <= -1.0 {
+        return pi()
+    }
+    // π/2 − asin(x) is fine in the middle, but as x nears 1 both terms near
+    // π/2 and the subtraction cancels: acos(1 − 2⁻⁵³) came out 25 million
+    // units in the last place off. Past ±½ the half-angle form
+    // 2·atan(√((1 − x)/(1 + x))) has no subtraction to lose, since 1 − x and
+    // 1 + x are exact there.
+    if x > 0.5 {
+        return 2.0 * atan(sqrt((1.0 - x) / (1.0 + x)))
+    }
+    if x < -0.5 {
+        return pi() - 2.0 * atan(sqrt((1.0 + x) / (1.0 - x)))
+    }
     return pi() / 2.0 - asin(x)
 }
 
