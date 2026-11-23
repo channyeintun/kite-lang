@@ -145,7 +145,21 @@ codes! {
          integer type and one float, so a suffix names nothing. It used to be \
          consumed and thrown away, which made `300i8` read as a width the \
          compiler was checking when there was no `i8` for the value to \
-         overflow.";
+         overflow.\n\
+         \n\
+         Example:\n\
+         \n\
+         \x20   fn main() {\n\
+         \x20       let n = 1_000_    // E0004: a separator must sit between two digits\n\
+         \x20       io.print(n)\n\
+         \x20   }\n\
+         \n\
+         The fix is to remove the stray separator:\n\
+         \n\
+         \x20   fn main() {\n\
+         \x20       let n = 1_000\n\
+         \x20       io.print(n)\n\
+         \x20   }";
 
     E0006 = "E0006", "string interpolation nested too deeply",
         "A string may hold an interpolation, which may hold a string, which may hold another interpolation. The scanner follows that by calling itself, so the nesting in the file is stack depth in the compiler, and three bytes of source buy a level.\n\
@@ -276,7 +290,22 @@ codes! {
          links long, 1,024 in the compiler built for WebAssembly, which runs \
          on the JavaScript engine's stack. The parser reads a chain in a \
          loop, but the tree it builds is as deep as the chain is long, and \
-         every pass after the parser walks that tree by recursion.";
+         every pass after the parser walks that tree by recursion.\n\
+         \n\
+         Example, with the parentheses written out three hundred deep (the ceiling is 256), as machine-generated source can be:\n\
+         \n\
+         \x20   fn main() {\n\
+         \x20       let x = ((((((((( … 1 … )))))))))    // E0102: expression nested too deeply\n\
+         \x20       io.print(x)\n\
+         \x20   }\n\
+         \n\
+         The fix is to name the middle of the expression, so that no one expression nests that deep. A `let` for each part, or a function for a part that repeats, brings the depth back under the ceiling:\n\
+         \n\
+         \x20   fn main() {\n\
+         \x20       let inner = (((((1)))))\n\
+         \x20       let x = ((((inner))))\n\
+         \x20       io.print(x)\n\
+         \x20   }";
 
     E0110 = "E0110", "use of possibly-uninitialised binding",
         "A `let` declared without a value, `let x: int`, may be given one later, but only if the compiler can prove that exactly one assignment has happened on every path before the value is read. A read it cannot prove is refused, because there is no zero value to fall back on. The situations:\n\
@@ -368,7 +397,35 @@ codes! {
          warning under this code: the later value replaces the earlier, which \
          is never seen. A key is known when it is a literal or a constant, a \
          negated number, or a tuple of those; floats are compared by value, \
-         so `0.0` and `-0.0` are one key.";
+         so `0.0` and `-0.0` are one key.\n\
+         \n\
+         Example:\n\
+         \n\
+         \x20   fn total() -> int {\n\
+         \x20       return 1\n\
+         \x20   }\n\
+         \n\
+         \x20   fn total() -> int {    // E0112: `total` is already defined above\n\
+         \x20       return 2\n\
+         \x20   }\n\
+         \n\
+         \x20   fn main() {\n\
+         \x20       io.print(total())\n\
+         \x20   }\n\
+         \n\
+         The fix is to give the second one a name of its own, or to delete the one that was left behind by mistake:\n\
+         \n\
+         \x20   fn total() -> int {\n\
+         \x20       return 1\n\
+         \x20   }\n\
+         \n\
+         \x20   fn grand_total() -> int {\n\
+         \x20       return 2\n\
+         \x20   }\n\
+         \n\
+         \x20   fn main() {\n\
+         \x20       io.print(total() + grand_total())\n\
+         \x20   }";
 
     E0113 = "E0113", "wrong number of arguments",
         "Kite has no default arguments, no variadics, no named arguments and no overloading, so what is written at a call, a variant or a pattern has to match the declaration exactly. A function needing many optional inputs takes a struct, whose literal names every field. The situations:\n\
@@ -515,20 +572,40 @@ codes! {
          so an `||` at the start of a line is not the tail of the expression \
          above it — it is a closure with no parameters, which is what `||` \
          means where a value is expected:\n\n\
-         \x20   let ok = (c >= 48 && c <= 57)\n\
-         \x20       || (c >= 65 && c <= 90)     // a closure, discarded\n\n\
+         Example:\n\n\
+         \x20   fn main() {\n\
+         \x20       let c = 50\n\
+         \x20       let ok = (c >= 48 && c <= 57)\n\
+         \x20           || (c >= 65 && c <= 90)     // E0117: a closure, discarded\n\
+         \x20       io.print(ok)\n\
+         \x20   }\n\
+         \n\
          The first line is a complete statement and the answer is wrong with \
-         nothing said about it. Put the operator at the end of the line it \
-         continues.\n\n\
+         nothing said about it.\n\n\
+         The fix is to put the operator at the end of the line it \
+         continues:\n\n\
+         \x20   fn main() {\n\
+         \x20       let c = 50\n\
+         \x20       let ok = (c >= 48 && c <= 57) ||\n\
+         \x20           (c >= 65 && c <= 90)\n\
+         \x20       io.print(ok)\n\
+         \x20   }\n\
+         \n\
          The closure is one case of a wider rule: an expression statement \
          with no call and no `await` anywhere in it computes a value and \
          throws it away, so it is refused too. A line opening with `-` is a \
          negation, not a subtraction carried over from the line above; one \
          opening with `[` is a slice literal, not an index; and `done == true` \
          compares where `done = true` was meant:\n\n\
-         \x20   let n = 10\n\
-         \x20       - 2                         // n is 10; this line does nothing\n\
-         \x20   done == true                    // write `done = true`\n\n\
+         \x20   fn main() {\n\
+         \x20       var done = false\n\
+         \x20       let n = 10\n\
+         \x20           - 2                     // E0117: n is 10; this line does nothing\n\
+         \x20       done == true                // E0117: write `done = true`\n\
+         \x20       io.print(n)\n\
+         \x20       io.print(done)\n\
+         \x20   }\n\
+         \n\
          A statement holding a call, such as `f() + 1`, does something, and \
          is left alone.\n\n\
          An arm of a `match` statement is a statement as well, since its value \
@@ -537,8 +614,20 @@ codes! {
          that nothing happens, and are fine.\n\n\
          An index that can trap and an interpolation whose hole runs `show` \
          are not counted as effects, any more than an addition that can \
-         overflow is. To evaluate one for that alone, say so:\n\n\
-         \x20   _ = xs[i]                       // traps if `i` is out of range\n\n\
+         overflow is, so a lone `xs[i]` is refused:\n\n\
+         \x20   fn main() {\n\
+         \x20       let xs = [1, 2]\n\
+         \x20       let i = 1\n\
+         \x20       xs[i]                       // E0117: nothing is done with it\n\
+         \x20   }\n\
+         \n\
+         To evaluate one for that alone, say so:\n\n\
+         \x20   fn main() {\n\
+         \x20       let xs = [1, 2]\n\
+         \x20       let i = 1\n\
+         \x20       _ = xs[i]                   // traps if `i` is out of range\n\
+         \x20   }\n\
+         \n\
          An arm holds an expression, not an assignment, so there it is \
          `0 => { _ = xs[i] }`.";
 
@@ -560,7 +649,30 @@ codes! {
          There is no module-level `var` at all. A mutable binding two \
          functions can both reach is shared state neither signature mentions, \
          which is what `Share` and the closure capture rule exist to prevent. \
-         Put it in a struct and pass it to what changes it.";
+         Put it in a struct and pass it to what changes it.\n\
+         \n\
+         Example:\n\
+         \n\
+         \x20   fn limit() -> int {\n\
+         \x20       return 10\n\
+         \x20   }\n\
+         \n\
+         \x20   let max = limit()    // E0118: a call is not a constant\n\
+         \n\
+         \x20   fn main() {\n\
+         \x20       io.print(max)\n\
+         \x20   }\n\
+         \n\
+         The fix is to write what the compiler can work out, here the value itself; or to leave the call in the function that needs it:\n\
+         \n\
+         \x20   fn limit() -> int {\n\
+         \x20       return 10\n\
+         \x20   }\n\
+         \n\
+         \x20   fn main() {\n\
+         \x20       let max = limit()\n\
+         \x20       io.print(max)\n\
+         \x20   }";
 
     E0119 = "E0119", "constant defined in terms of itself",
         "A module-level constant's value is computed from the constants it names (§4.2), so a cycle among them has no value to compute. One report is made for the cycle, not one for each member, and the note lists the chain in the order it was followed, ending where it came back to where it began: `A → B → A`. The situations:\n\
@@ -1012,7 +1124,21 @@ codes! {
          A closure's body is a function of its own. Its `return` answers to the \
          closure's `-> T`, and where the body is an expression and nothing \
          states that type, a `return` inside it has nothing to be checked \
-         against — write the type.";
+         against — write the type.\n\
+         \n\
+         Example:\n\
+         \n\
+         \x20   fn main() {\n\
+         \x20       let double = |x| x * 2    // E0211: nothing says what `x` is\n\
+         \x20       io.print(double(4))\n\
+         \x20   }\n\
+         \n\
+         The fix is to annotate the parameter, since the closure is not handed to anything that would say:\n\
+         \n\
+         \x20   fn main() {\n\
+         \x20       let double = |x: int| x * 2\n\
+         \x20       io.print(double(4))\n\
+         \x20   }";
 
     E0212 = "E0212", "invalid cast",
         "`as` converts between `int` and `float`, and between nothing else: not `bool`, not `str`, not an optional, not a struct. Kite performs no implicit numeric conversion, so a conversion is always written, which means every place precision can be lost is a place someone chose. A cast from one type to a type with no conversion is this error. The situations:\n\
@@ -1049,7 +1175,27 @@ codes! {
          detail.\n\n\
          Functions and `dyn` values are excluded because they have no stable \
          identity to report — which is the same reason `==` is not defined on \
-         them.";
+         them.\n\
+         \n\
+         Example:\n\
+         \n\
+         \x20   fn main() {\n\
+         \x20       let a = [1]\n\
+         \x20       let b = a\n\
+         \x20       io.print(ptr.same(a, b))    // E0213: a slice has no identity\n\
+         \x20   }\n\
+         \n\
+         The fix is to ask about a type that has a cell, a struct here, or to compare the slices with `==` if their contents are what is meant:\n\
+         \n\
+         \x20   struct Box {\n\
+         \x20       n: int\n\
+         \x20   }\n\
+         \n\
+         \x20   fn main() {\n\
+         \x20       let a = Box{ n: 1 }\n\
+         \x20       let b = a\n\
+         \x20       io.print(ptr.same(a, b))\n\
+         \x20   }";
 
     E0214 = "E0214", "invalid type alias",
         "`type Name = T` gives `T` a second spelling. The two are \
@@ -1062,7 +1208,24 @@ codes! {
          A generic alias would need arguments substituted through it at every \
          use, which is a second instantiation path alongside the one structs \
          and enums already have. Kite has one. Write the generic type itself, \
-         or a struct that wraps it.";
+         or a struct that wraps it.\n\
+         \n\
+         Example:\n\
+         \n\
+         \x20   type A = B\n\
+         \x20   type B = A    // E0214: neither names a type\n\
+         \n\
+         \x20   fn main() {}\n\
+         \n\
+         The fix is to name a type at the end of the chain:\n\
+         \n\
+         \x20   type A = B\n\
+         \x20   type B = int\n\
+         \n\
+         \x20   fn main() {\n\
+         \x20       let n: A = 1\n\
+         \x20       io.print(n)\n\
+         \x20   }";
 
     E0220 = "E0220", "generic instantiation does not terminate",
         "Kite specialises generics: every set of type arguments a program uses \
@@ -1082,7 +1245,33 @@ codes! {
          asks for more than the compiler makes: a type argument nested more \
          than 256 levels deep or holding more than 65,536 parts, or more than \
          65,536 specialisations in all. The message says which, and only a \
-         runaway is said to instantiate itself without end.";
+         runaway is said to instantiate itself without end.\n\
+         \n\
+         Example:\n\
+         \n\
+         \x20   fn depth<T>(x: T, n: int) -> int {\n\
+         \x20       if n == 0 {\n\
+         \x20           return 0\n\
+         \x20       }\n\
+         \x20       return depth([x], n - 1)    // E0220: a new copy of `depth` at every level\n\
+         \x20   }\n\
+         \n\
+         \x20   fn main() {\n\
+         \x20       io.print(depth(1, 3))\n\
+         \x20   }\n\
+         \n\
+         The fix is to recurse at the same type:\n\
+         \n\
+         \x20   fn depth<T>(x: T, n: int) -> int {\n\
+         \x20       if n == 0 {\n\
+         \x20           return 0\n\
+         \x20       }\n\
+         \x20       return depth(x, n - 1)\n\
+         \x20   }\n\
+         \n\
+         \x20   fn main() {\n\
+         \x20       io.print(depth(1, 3))\n\
+         \x20   }";
 
     // ---- error handling ---------------------------------------------------
     E0301 = "E0301", "value used before its error was checked",
@@ -1093,7 +1282,41 @@ codes! {
          on a failure path is the zero value, which flows onward looking \
          valid. In Kite there is no value on that path at all.\n\n\
          Write `check err` to propagate, or test `err != nil` explicitly — in \
-         the branch where the error is nil, the value becomes readable.";
+         the branch where the error is nil, the value becomes readable.\n\
+         \n\
+         Example:\n\
+         \n\
+         \x20   fn half(n: int) -> (int, error) {\n\
+         \x20       if n % 2 != 0 {\n\
+         \x20           return 0, errors.new(\"odd\")\n\
+         \x20       }\n\
+         \x20       return n / 2, nil\n\
+         \x20   }\n\
+         \n\
+         \x20   fn main() {\n\
+         \x20       let (h, err) = half(4)\n\
+         \x20       io.print(h)    // E0301: `err` has not been checked yet\n\
+         \x20       if err != nil {\n\
+         \x20           return\n\
+         \x20       }\n\
+         \x20   }\n\
+         \n\
+         The fix is to check the error first, and read the value in the branch where it is nil:\n\
+         \n\
+         \x20   fn half(n: int) -> (int, error) {\n\
+         \x20       if n % 2 != 0 {\n\
+         \x20           return 0, errors.new(\"odd\")\n\
+         \x20       }\n\
+         \x20       return n / 2, nil\n\
+         \x20   }\n\
+         \n\
+         \x20   fn main() {\n\
+         \x20       let (h, err) = half(4)\n\
+         \x20       if err != nil {\n\
+         \x20           return\n\
+         \x20       }\n\
+         \x20       io.print(h)\n\
+         \x20   }";
 
     E0302 = "E0302", "error is never checked",
         "An `error` is a failure, and a failure has to be looked at. Kite keeps Go's `(T, error)` shape and takes away the habit that makes it unsafe: in Go a program can write `v, _ := f()`, or never test `err`, and carry on with a value from a call that failed. Here the compiler follows every error from where a call hands it over to where it is tested, passed on or returned, and an error that goes out of reach unlooked-at is this one. It is the most common error in the language, and it is almost always right. The situations:\n\
@@ -1227,13 +1450,28 @@ codes! {
          - A file that was found and could not be read; the operating \
          system's reason is in the message.\n\
          \n\
-         Example:\n\
+         Example, `main.kite` beside a file called `shapes.kite`:\n\
          \n\
+         \x20   // main.kite\n\
          \x20   use shape    // E0400: the file is shapes.kite\n\
+         \n\
+         \x20   fn main() {\n\
+         \x20       io.print(shape.area())\n\
+         \x20   }\n\
+         \n\
+         \x20   // shapes.kite\n\
+         \x20   pub fn area() -> int {\n\
+         \x20       return 1\n\
+         \x20   }\n\
          \n\
          The fix is the name that is there:\n\
          \n\
-         \x20   use shapes";
+         \x20   // main.kite\n\
+         \x20   use shapes\n\
+         \n\
+         \x20   fn main() {\n\
+         \x20       io.print(shapes.area())\n\
+         \x20   }";
 
     E0401 = "E0401", "private item",
         "Something is used outside its module that its module did not mark \
@@ -1268,16 +1506,26 @@ codes! {
          are as visible as the trait, so `s.go()` is refused while the \
          trait that declares `go` is not `pub`.\n\
          \n\
-         Example, with `m` declaring `fn hidden() -> int { return 1 }`:\n\
+         Example, `main.kite` and `m.kite` in one directory:\n\
          \n\
+         \x20   // main.kite\n\
          \x20   use m\n\
          \n\
          \x20   fn main() {\n\
          \x20       io.print(m.hidden())    // E0401: `hidden` is not `pub`\n\
          \x20   }\n\
          \n\
-         The fix is `pub fn hidden()` in `m`, or a `pub` function in `m` \
-         that does what is needed and keeps `hidden` to itself.";
+         \x20   // m.kite\n\
+         \x20   fn hidden() -> int {\n\
+         \x20       return 1\n\
+         \x20   }\n\
+         \n\
+         The fix is `pub fn hidden()` in `m`, or a `pub` function in `m` that does what is needed and keeps `hidden` to itself:\n\
+         \n\
+         \x20   // m.kite\n\
+         \x20   pub fn hidden() -> int {\n\
+         \x20       return 1\n\
+         \x20   }";
 
     E0403 = "E0403", "module name is reserved by the standard library",
         "A use site spells a module by the last segment of its `use` path, so \
@@ -1296,7 +1544,35 @@ codes! {
          library's while every other `errors.…` reached `util`. A `std` module \
          spelled as itself — `use std/json as json` — is the one spelling \
          that is its own.\n\n\
-         Rename the module, or spell it another way with `use … as …`.";
+         Rename the module: a `use` takes the name of the file or directory it reaches, so the file or directory is what is renamed. Where the clash is the name after `as`, as in `use util as errors`, choose another one.\n\
+         \n\
+         Example, `main.kite` beside a module file that took the standard library's name:\n\
+         \n\
+         \x20   // main.kite\n\
+         \x20   use crypto    // E0403: `crypto` is `std/crypto`'s name\n\
+         \n\
+         \x20   fn main() {\n\
+         \x20       io.print(1)\n\
+         \x20   }\n\
+         \n\
+         \x20   // crypto.kite\n\
+         \x20   pub fn one() -> int {\n\
+         \x20       return 1\n\
+         \x20   }\n\
+         \n\
+         The fix is to rename the file, and the `use` with it:\n\
+         \n\
+         \x20   // main.kite\n\
+         \x20   use keys\n\
+         \n\
+         \x20   fn main() {\n\
+         \x20       io.print(keys.one())\n\
+         \x20   }\n\
+         \n\
+         \x20   // keys.kite\n\
+         \x20   pub fn one() -> int {\n\
+         \x20       return 1\n\
+         \x20   }";
 
     E0404 = "E0404", "two modules of the same name",
         "A module is identified by where its source is, and a use site writes \
@@ -1321,7 +1597,37 @@ codes! {
          inside the program — reachable both by the name its manifest \
          declares and by a path from the program — would resolve its imports \
          one way or the other depending on which `use` came first. Reach it \
-         one way only.";
+         one way only.\n\
+         \n\
+         Example, `main.kite` importing two modules that are both called `util`:\n\
+         \n\
+         \x20   // main.kite\n\
+         \x20   use a/util\n\
+         \x20   use b/util    // E0404: `util` is already `a/util` here\n\
+         \n\
+         \x20   fn main() {\n\
+         \x20       io.print(util.one())\n\
+         \x20   }\n\
+         \n\
+         \x20   // a/util.kite\n\
+         \x20   pub fn one() -> int {\n\
+         \x20       return 1\n\
+         \x20   }\n\
+         \n\
+         \x20   // b/util.kite\n\
+         \x20   pub fn one() -> int {\n\
+         \x20       return 2\n\
+         \x20   }\n\
+         \n\
+         The fix is to give one of them a name of its own:\n\
+         \n\
+         \x20   // main.kite\n\
+         \x20   use a/util\n\
+         \x20   use b/util as other\n\
+         \n\
+         \x20   fn main() {\n\
+         \x20       io.print(util.one() + other.one())\n\
+         \x20   }";
 
     E0405 = "E0405", "a `kite.toml` that does not read",
         "The manifest, `kite.toml`, says where a package's dependencies are, so a build reads it before it can find any of them. One that does not read is reported at the line where it stops, and is the one error: the `use`s it leaves unresolvable are not reported as well (they used to be, as `cannot find module` at every `use` of a dependency, which is a diagnostic about the wrong file). The reader is a deliberate subset of TOML (tables, inline tables, quoted strings), and what is refused is named in the message. The situations:\n\
@@ -1365,20 +1671,25 @@ codes! {
          \x20   // a.kite\n\
          \x20   use b    // E0402: the chain is b → a\n\
          \n\
+         \x20   fn main() {\n\
+         \x20       io.print(b.one())\n\
+         \x20   }\n\
+         \n\
          \x20   // b.kite\n\
          \x20   use a    // the import that closes it\n\
          \n\
-         Every cycle can be broken by extracting what both modules need \
-         into a third module that imports neither, and having both import \
-         that:\n\
+         \x20   pub fn one() -> int {\n\
+         \x20       return 1\n\
+         \x20   }\n\
          \n\
-         \x20   // shared.kite holds what a and b both use\n\
-         \x20   // a.kite:  use shared        b.kite:  use shared\n\
+         The fix is to break the cycle by extracting what both modules need into a third module that imports neither, and having both import that. Here `b` needs nothing from `a`:\n\
          \n\
-         A cycle among packages — a `kite.toml` whose dependencies lead \
-         back to it — is this code too, at the program's manifest, naming \
-         the chain of packages (`app -> a -> b -> app`) as `kitec pkg` \
-         does when it refuses the same graph.";
+         \x20   // b.kite\n\
+         \x20   pub fn one() -> int {\n\
+         \x20       return 1\n\
+         \x20   }\n\
+         \n\
+         A cycle among packages — a `kite.toml` whose dependencies lead back to it — is this code too, at the program's manifest, naming the chain of packages (`app -> a -> b -> app`) as `kitec pkg` does when it refuses the same graph.";
 
     E0406 = "E0406", "implementation outside its type's module",
         "An `impl` block belongs to the module that declares its type — or, \
@@ -1393,7 +1704,38 @@ codes! {
          a call reached would depend on which happened to be loaded.\n\n\
          To give another module's type new behaviour, write a function that \
          takes it, or declare a trait of your own and implement that for it \
-         here.";
+         here.\n\
+         \n\
+         Example, `main.kite` giving the type of `m` a method:\n\
+         \n\
+         \x20   // main.kite\n\
+         \x20   use m\n\
+         \n\
+         \x20   impl m.Point {    // E0406: `Point` is declared in `m`\n\
+         \x20       fn norm(self) -> int {\n\
+         \x20           return 1\n\
+         \x20       }\n\
+         \x20   }\n\
+         \n\
+         \x20   fn main() {}\n\
+         \n\
+         \x20   // m.kite\n\
+         \x20   pub struct Point {\n\
+         \x20       pub x: int\n\
+         \x20   }\n\
+         \n\
+         The fix is a function that takes the type:\n\
+         \n\
+         \x20   // main.kite\n\
+         \x20   use m\n\
+         \n\
+         \x20   fn norm(p: m.Point) -> int {\n\
+         \x20       return p.x\n\
+         \x20   }\n\
+         \n\
+         \x20   fn main() {\n\
+         \x20       io.print(norm(m.Point{ x: 3 }))\n\
+         \x20   }";
 
     // ---- concurrency ------------------------------------------------------
     E0520 = "E0520", "type cannot be moved to another task",
@@ -1442,16 +1784,29 @@ codes! {
          \x20       var count: int\n\
          \x20   }\n\
          \n\
-         \x20   fn need<T: Share>(x: T) -> int { return 1 }\n\
+         \x20   fn need<T: Share>(x: T) -> int {\n\
+         \x20       return 1\n\
+         \x20   }\n\
          \n\
          \x20   fn main() {\n\
          \x20       io.print(need(Counter{ count: 0 }))    // E0520: `count` is `var`\n\
          \x20   }\n\
          \n\
-         The fix is to stop mutating, so that a new value is returned in \
-         place of the old one, and drop the `var`; or to wrap the counter \
-         in `sync.Mutex<Counter>`; or to send the task what it needs, a \
-         number or a string, and keep the counter where it is.";
+         The fix is to stop mutating, so that a new value is returned in place of the old one, and drop the `var`:\n\
+         \n\
+         \x20   struct Counter {\n\
+         \x20       count: int\n\
+         \x20   }\n\
+         \n\
+         \x20   fn need<T: Share>(x: T) -> int {\n\
+         \x20       return 1\n\
+         \x20   }\n\
+         \n\
+         \x20   fn main() {\n\
+         \x20       io.print(need(Counter{ count: 0 }))\n\
+         \x20   }\n\
+         \n\
+         Or wrap the counter in `sync.Mutex<Counter>`, or send the task what it needs, a number or a string, and keep the counter where it is.";
 
     E0521 = "E0521", "`await` outside an async function",
         "`await`, `task.yield`, `task.park` and `task.wait_host` suspend \
@@ -1471,16 +1826,24 @@ codes! {
          \n\
          Example:\n\
          \n\
-         \x20   async fn work() -> int { return 1 }\n\
+         \x20   async fn work() -> int {\n\
+         \x20       return 1\n\
+         \x20   }\n\
          \n\
          \x20   fn main() {\n\
          \x20       let n = await work()    // E0521: `main` is not `async`\n\
+         \x20       io.print(n)\n\
          \x20   }\n\
          \n\
          The fix is to declare the function that waits as `async`:\n\
          \n\
+         \x20   async fn work() -> int {\n\
+         \x20       return 1\n\
+         \x20   }\n\
+         \n\
          \x20   async fn main() {\n\
          \x20       let n = await work()\n\
+         \x20       io.print(n)\n\
          \x20   }";
 
     // ---- cryptography -----------------------------------------------------
@@ -1643,7 +2006,42 @@ codes! {
          This sees one call site. Aliasing arranged elsewhere — two fields \
          holding one reference — is not detected, and needs no detection to be \
          memory-safe; Kite has no borrowing and no lifetimes, and this rule is \
-         not the beginning of either.";
+         not the beginning of either.\n\
+         \n\
+         Example:\n\
+         \n\
+         \x20   struct Account {\n\
+         \x20       var balance: int\n\
+         \x20   }\n\
+         \n\
+         \x20   fn transfer(var from: Account, var to: Account, amount: int) {\n\
+         \x20       from.balance = from.balance - amount\n\
+         \x20       to.balance = to.balance + amount\n\
+         \x20   }\n\
+         \n\
+         \x20   fn main() {\n\
+         \x20       let a = Account{ balance: 100 }\n\
+         \x20       transfer(a, a, 50)    // E0800: `a` is both `from` and `to`\n\
+         \x20       io.print(a.balance)\n\
+         \x20   }\n\
+         \n\
+         The fix is to pass two distinct objects:\n\
+         \n\
+         \x20   struct Account {\n\
+         \x20       var balance: int\n\
+         \x20   }\n\
+         \n\
+         \x20   fn transfer(var from: Account, var to: Account, amount: int) {\n\
+         \x20       from.balance = from.balance - amount\n\
+         \x20       to.balance = to.balance + amount\n\
+         \x20   }\n\
+         \n\
+         \x20   fn main() {\n\
+         \x20       let a = Account{ balance: 100 }\n\
+         \x20       let b = Account{ balance: 0 }\n\
+         \x20       transfer(a, b, 50)\n\
+         \x20       io.print(a.balance)\n\
+         \x20   }";
 
     // ---- the compiler failing ---------------------------------------------
     E0900 = "E0900", "the compiler emitted an invalid module",
@@ -1658,7 +2056,15 @@ codes! {
          There is no source change that is the right fix. Please report it, \
          with the program if it can be shared: the validator's message \
          identifies the function, which is usually enough to find the bad \
-         lowering.";
+         lowering.\n\
+         \n\
+         This is not an error a program can provoke, so there is no example that raises it; the report has this shape:\n\
+         \n\
+         \x20   error[E0900]: the compiler emitted an invalid WebAssembly module\n\
+         \x20     = note: <the validator's message, naming the function>\n\
+         \x20     = note: this is a bug in Kite, not in this program — please report it, with the program if it can be shared\n\
+         \n\
+         There is nothing to fix in the source: it is a WebAssembly build that raises this, and the program is not what is wrong.";
 
     E0901 = "E0901", "internal compiler error",
         "This is a bug in Kite, not in the program being compiled. A stage of \
@@ -1672,7 +2078,14 @@ codes! {
          usually enough to find the stage at fault.\n\n\
          There is no source change that is the right fix, though rewriting the \
          construct the note points at may avoid it. Please report it, with \
-         the program if it can be shared.";
+         the program if it can be shared.\n\
+         \n\
+         This is not an error a program can provoke, so there is no example that raises it; the report has this shape, on the expression the stage stopped at:\n\
+         \n\
+         \x20   error[E0901]: internal compiler error in `main`\n\
+         \x20     = note: this is a bug in Kite, not in this program — please report it, with the program if it can be shared\n\
+         \n\
+         There is nothing to fix in the source; the function it names is where to look when reporting it.";
 
     E0902 = "E0902", "the program exceeds a limit of this target",
         "The program is valid Kite, and the target it is being compiled for \
@@ -1695,5 +2108,25 @@ codes! {
          `[Option<str>]`, which is wrapped first, is a statement of the function the literal is in, \
          and V8 may fail to compile a function of a hundred thousand of \
          those below either limit; split it. The native target has neither \
-         limit.";
+         limit.\n\
+         \n\
+         Example, a function of seventy thousand `let` lines (written out here as `…`), as a generator can produce:\n\
+         \n\
+         \x20   fn main() {\n\
+         \x20       let a0 = 0\n\
+         \x20       let a1 = 1\n\
+         \x20       …\n\
+         \x20       let a69999 = 69999    // E0902: a frame of 70006 registers, more than 65536\n\
+         \x20       io.print(a1)\n\
+         \x20   }\n\
+         \n\
+         The fix is to split the function, so that each has a frame of its own and none is near the limit. A function of a thousand `let` lines is fine:\n\
+         \n\
+         \x20   fn main() {\n\
+         \x20       let a0 = 0\n\
+         \x20       let a1 = 1\n\
+         \x20       …\n\
+         \x20       let a999 = 999\n\
+         \x20       io.print(a1)\n\
+         \x20   }";
 }
