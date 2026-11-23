@@ -140,7 +140,13 @@ module tested on its own is compiled as that file alone, so its fences and
 module's tests that need them belong in a test file that imports the module.
 ` ```kite ignore ` marks an illustration instead — a fence naming
 types the reader supplies, which most module headers do — and is not compiled.
-A fence tagged anything else is prose.
+A fence tagged anything else is prose, and what is inside it is text whatever it
+looks like: fences are read as CommonMark reads them, so one closes only on a
+fence of the same character at least as long as its opener (a ` ````text `
+fence can show a ` ```kite ` example without running it), and `~~~` fences and
+indented blocks are code too. `kitec doc` leaves code and `<https://…>` links
+as written, and backslash-escapes a `<` or `&` in the prose around them that a
+Markdown reader would take for HTML.
 
 ### 2.4 Literals
 

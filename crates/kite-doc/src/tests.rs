@@ -244,3 +244,39 @@ fn a_file_that_does_not_parse_says_so() {
     let (_, diags) = extract_diagnosed("m", "pub fn f() {\n}\n");
     assert!(!diags.has_errors());
 }
+
+/// Markdown's rules for what is code, which the escaping must follow: a code
+/// span may cross a line break, a fence closes only on a fence of its own
+/// character and at least its length, indented blocks and `~~~` fences are
+/// code, and `<https://…>` is a link and not a tag.
+#[test]
+fn escaping_follows_markdown_on_what_is_code() {
+    let doc = |text: &str| {
+        let src: String = text
+            .lines()
+            .map(|l| format!("///{}{}\n", if l.is_empty() { "" } else { " " }, l))
+            .collect();
+        markdown(&extract("m", &format!("{}pub fn f() {{\n}}\n", src)), true)
+    };
+    // A span over two lines keeps what it holds.
+    let out = doc("Adds `Option<int>\nor Box<T>` here, and <b> not.");
+    assert!(out.contains("Adds `Option<int>\nor Box<T>` here, and \\<b> not."), "{}", out);
+    // A four-backtick fence holding a three-backtick example is one block.
+    let out = doc("````text\n```kite\nlet a: Option<int> = nil\n```\n````\n\nAfter, a <b> tag.");
+    assert!(out.contains("```\n````\n\nAfter, a \\<b> tag.\n"), "{}", out);
+    assert!(!out.contains("```\n```\n"), "{}", out);
+    // An unclosed one is closed by a fence as long as its own.
+    let out = doc("````text\n```\nlet a: Option<int>");
+    assert!(out.contains("Option<int>\n````\n"), "{}", out);
+    // Tilde fences and indented blocks are code.
+    let out = doc("~~~\nlet w: Option<int> = nil\n~~~\n\nIndented:\n\n    let v: Option<int> = nil\n\nthen <b>.");
+    assert!(out.contains("~~~\nlet w: Option<int> = nil\n~~~"), "{}", out);
+    assert!(out.contains("\n    let v: Option<int> = nil\n"), "{}", out);
+    assert!(out.contains("then \\<b>."), "{}", out);
+    // An autolink is a link.
+    let out = doc("See <https://example.com/x> and <b>.");
+    assert!(out.contains("See <https://example.com/x> and \\<b>."), "{}", out);
+    // Four spaces under a list item are the item's own text, not code.
+    let out = doc("- item\n\n    more of <b> it");
+    assert!(out.contains("more of \\<b> it"), "{}", out);
+}

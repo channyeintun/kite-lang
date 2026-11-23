@@ -90,7 +90,12 @@ test functions. Two shapes, and they do not mix:
   parse error (`expected a declaration`). Put the statements inside an `fn`.
 
 ` ```kite ignore ` marks an illustration and is not compiled. A fence tagged
-anything else is prose. This is the same convention `std/*.kite` uses.
+anything else is prose, and everything inside it is text: a fence closes only
+on a fence of the same character at least as long as its opener, so a
+` ````text ` fence can hold a ` ```kite ` example that is shown and not run.
+`~~~` fences and indented blocks are code for `kitec doc` too, which leaves
+them, code spans (even over two lines) and `<https://…>` links as written. This
+is the same convention `std/*.kite` uses.
 
 ## 3. Semicolon insertion
 
