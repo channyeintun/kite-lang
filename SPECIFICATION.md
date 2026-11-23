@@ -940,6 +940,10 @@ if NotFound.is(err) {
 let missing = NotFound.as(err)      // Option<NotFound>
 ```
 
+Only a type that implements `Error` can be asked about, since no error carries
+any other: `Plain.is(err)` on a type without that `impl` is `E0205`, not a test
+that is always false.
+
 Each specialisation of a generic type is its own type, and an error carries the
 one it was made from. So `as` on a generic type is told which by the type it is
 used as — `let w: Option<Wrapped<int>> = Wrapped.as(err)` — and `is`, which has

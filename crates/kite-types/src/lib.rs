@@ -6764,6 +6764,31 @@ impl<'a> Checker<'a> {
             );
             return self.lit(ExprKind::Error, TyId::ERROR, span);
         }
+        // Only a type that implements `Error` is ever carried by one, so for
+        // any other `is` was always false and `as` always nil — which is what
+        // a forgotten `impl Error`, or the wrong type named, looked like.
+        if let Some(tr) = self.error_trait() {
+            if !self.type_implements(ty, tr) {
+                let name = self.types.name(ty);
+                self.diags.push(
+                    Diagnostic::error(
+                        codes::E0205,
+                        format!("`{}` has no `{}`: it does not implement `Error`", name, method_name),
+                    )
+                    .with_primary(p_span, "no error can carry this type")
+                    .with_note(
+                        "`is` and `as` ask which failure an error was, and only a type that \
+                         implements `Error` can be one",
+                    )
+                    .with_note(format!(
+                        "write `{} {{ fn message(self) -> str {{ … }} }}`, or name the type \
+                         the error was made from",
+                        self.impl_to_write("Error", ty)
+                    )),
+                );
+                return self.lit(ExprKind::Error, TyId::ERROR, span);
+            }
+        }
 
         // A nil error carries tag zero and no type's tag is zero, so this is
         // false rather than a trap — which is what lets it be written without

@@ -1,0 +1,26 @@
+// `T.is(err)` and `T.as(err)` ask which failure an error was, and only a type
+// that implements `Error` is ever carried by one. For any other type `is` was
+// always false and `as` always nil, which is what a forgotten `impl Error`
+// looked like.
+
+struct Plain {
+    x: int
+}
+
+struct NotFound {
+    path: str
+}
+
+impl Error for NotFound {
+    fn message(self) -> str {
+        return "no \(self.path)"
+    }
+}
+
+fn main() {
+    let e: error = NotFound{ path: "a" }
+    io.print(Plain.is(e)) //~ ERROR E0205
+    let p = Plain.as(e) //~ ERROR E0205
+    io.print(p == nil)
+    io.print(NotFound.is(e))
+}
