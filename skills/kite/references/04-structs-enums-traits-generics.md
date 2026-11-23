@@ -16,14 +16,14 @@ Everything here was checked against `target/release/kitec`. Where SPECIFICATION.
   *type names itself* at the front of the call: `User.decode(doc)`,
   `NotFound.is(err)`, `let s: Stack<int> = Stack.empty()`.
 - **`..base` in a struct literal comes FIRST**, not last: `P{ ..old, x: 1 }`.
-  `P{ x: 1, ..old }` is a parse error. Opposite of Rust. The base runs first and once,
-  then the fields in the order written (as do a variant's named payload fields).
-  The fields the base supplies are read before any written field runs, so a written
-  field whose call changes the base through a `var` parameter does not leak into the
-  copy. Every operand is fixed where it is written — a later `match` arm block that
-  assigns a local does not change an earlier argument, element or field that read it.
-  Compilers through 0.1.9 ran fields in declaration order and the base once per
-  field it supplied.
+  `P{ x: 1, ..old }` is a parse error. Opposite of Rust. The base runs first and
+  once, then the fields in the order written (as do a variant's named payload
+  fields). The fields the base supplies are read before any written field runs,
+  so a written field whose call changes the base through a `var` parameter does
+  not leak into the copy. Every operand is fixed where it is written — a later
+  `match` arm block that assigns a local does not change an earlier argument,
+  element or field that read it. Compilers through 0.1.9 ran fields in
+  declaration order and the base once per field it supplied.
 - **Struct fields and enum variants are newline-separated.** A comma between them
   is `E0100`, once per declaration, and `kitec fix` repairs every one: it
   removes a comma at the end of a line and turns one between two members on a
@@ -1515,12 +1515,13 @@ fn main() {
 }
 ```
 
-A closure's parameter types come from the parameter it is passed to, each one once
-the other arguments have fixed its type. `fold(items, 0, |acc, item| acc + item.price)`,
-`filter(xs, |n| n > 0)` and `apply([1, 2, 3], |n| "n\(n)")` below need no annotation:
-`T` is fixed by the slice, and `U` in `fn(T) -> U` — which only the closure could
-fix — is whatever it returns (a block body's `return`s say it). A parameter whose own
-type nothing fixes is still `E0211`, "cannot infer the type of `n`".
+A closure's parameter types come from the parameter it is passed to, each one
+once the other arguments have fixed its type.
+`fold(items, 0, |acc, item| acc + item.price)`, `filter(xs, |n| n > 0)` and
+`apply([1, 2, 3], |n| "n\(n)")` below need no annotation: `T` is fixed by the
+slice, and `U` in `fn(T) -> U` — which only the closure could fix — is whatever
+it returns (a block body's `return`s say it). A parameter whose own type nothing
+fixes is still `E0211`, "cannot infer the type of `n`".
 
 ```kite
 fn apply<T, U>(items: [T], f: fn(T) -> U) -> [U] {
@@ -2027,7 +2028,7 @@ orphan rule and the ban on extension methods are enforced (`E0406`, §8.2 and
 §10.2), a bound on a generic struct or enum holds wherever a value is built
 (§11), and a method may declare type parameters of its own.
 
-Two spec omissions worth knowing: `@derive(Encode)`/`@derive(Decode)` silently
-require `use std/json` in the deriving file, and `Decode` is emitted as an
-inherent associated function rather than a trait implementation, so there is no
-`Decode` trait to name in a bound.
+One spec omission worth knowing: `Decode` is emitted as an inherent associated
+function rather than a trait implementation, so there is no `Decode` trait to
+name in a bound. (`@derive(Encode)`/`@derive(Decode)` need no `use std/json`;
+see *`Encode` / `Decode`* above.)

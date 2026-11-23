@@ -71,7 +71,8 @@ functions are dropped before code generation.
 | `Share` | — (empty) | Nobody implements it. The compiler decides structurally: deeply immutable. Violations are `E0520`. |
 
 The four derivable traits are `Debug`, `Hash`, `Encode` and `Decode`.
-`Encode` is `json.Encode` and needs `use std/json`; `Decode` becomes an
+`Encode` is `json.Encode`, and deriving it needs no import — the example
+imports `std/json` for `json.stringify` and `json.parse`; `Decode` becomes an
 *associated function* `T.decode(doc) -> (T, error)` rather than a trait method,
 so it is called on the type and cannot be named in a bound.
 
@@ -149,11 +150,12 @@ fn main() {
 
 `map` `fold` `filter` `any` `all` `count` `find` `first` `last` `reversed`
 `concat` `take` `drop` `zip` `enumerate` `flatten` `position` `includes`
-`unique` `chunked` `sorted` `min_by` `max_by`
+`unique` `chunked` `sorted` `min_by` `max_by` `partition` `take_while`
+`drop_while` `windows` `flat_map` `index_of` `filled` `range`
 
 | Signature | Notes |
 |---|---|
-| `map<T, U>([T], fn(T) -> U) -> [U]` | Closure param **must** be annotated (see below). |
+| `map<T, U>([T], fn(T) -> U) -> [U]` | The slice fixes the closure's parameter, and `U` is what it returns (see below). |
 | `fold<T, A>([T], A, fn(A, T) -> A) -> A` | Left to right. |
 | `filter<T>([T], fn(T) -> bool) -> [T]` | |
 | `any` / `all` / `count` `<T>([T], fn(T) -> bool)` | `all` is vacuously true. |
@@ -170,12 +172,24 @@ fn main() {
 | `chunked<T>([T], int) -> [[T]]` | `size <= 0` gives an empty result. |
 | `sorted<T>([T], fn(T, T) -> bool) -> [T]` | Stable merge sort; takes a comparison, not an `Ord`. |
 | `min_by` / `max_by` `<T>([T], fn(T, T) -> bool) -> Option<T>` | Both take a *less-than*. |
+| `partition<T>([T], fn(T) -> bool) -> ([T], [T])` | Those it accepts, then the rest, each in order. |
+| `take_while` / `drop_while` `<T>([T], fn(T) -> bool) -> [T]` | From the start, for as long as the test holds. |
+| `windows<T>([T], int) -> [[T]]` | Every run of `size` neighbours, overlapping; empty when `size` is not in `1..=len`. |
+| `flat_map<T, U>([T], fn(T) -> [U]) -> [U]` | |
+| `index_of<T>([T], T) -> int` | The first equal item's position, or `-1`. |
+| `filled<T>(T, int) -> [T]` | `n` copies. |
+| `range(from, to) -> [int]` | `from` up to, not including, `to` — a range is not a value, so this is how one reaches `map`. |
 
 ### Maps
 
-The prelude has nothing for them. No `merge`, no `get_or`, no `map_values` — a
-map's whole surface is four methods and the index: `len`, `keys`, `values`,
-`remove`, `m[k]` (an `Option<V>`) and `m[k] = v`.
+A map has four methods and the index: `len`, `keys`, `values`, `remove`,
+`m[k]` (an `Option<V>`) and `m[k] = v`. The prelude adds
+`get_or(m, k, fallback) -> V`, `has_key(m, k) -> bool`,
+`merged(a, b) -> {K: V}` (a new map; `b` wins where both have a key, and keys
+keep the order they first appear in) and `entries(m) -> [(K, V)]`, in the
+map's order. On a map whose values are optional, a key present with `nil`
+reads as absent — `m[k]`, `has_key` and `get_or` cannot tell it from a missing
+one; `m.keys()` lists it.
 
 **A key goes with `m.remove(k)`**, on a `var` binding, a `var` field or an
 element of a `var` slice, and a key that is not there is not an error. There is no `delete` statement, and `m[k] = nil` is
@@ -194,13 +208,10 @@ Anything more is a loop you write, and the copy is visible in the code rather
 than hidden in a function:
 
 ```kite
-fn merged(a: { str: int }, b: { str: int }) -> { str: int } {
+fn doubled(m: { str: int }) -> { str: int } {
     var out: { str: int } = {}
-    for (k, v) in a {
-        out[k] = v
-    }
-    for (k, v) in b {
-        out[k] = v
+    for (k, v) in m {
+        out[k] = v * 2
     }
     return out
 }
@@ -209,7 +220,8 @@ fn main() {
     var counts = { "a": 1, "b": 2, "c": 3 }
     counts.remove("b")
     let both = merged(counts, { "d": 4 })
-    io.print("\(counts.len()) \(both.len()) \(or_else(both["d"], 0))")
+    io.print("\(counts.len()) \(both.len()) \(get_or(both, "d", 0))")
+    io.print("\(has_key(both, "b")) \(get_or(doubled(both), "c", 0))")
 }
 ```
 
@@ -219,12 +231,13 @@ because `{}` names no key or value type.
 ### Numbers
 
 `abs` `absf` `min` `max` `minf` `maxf` `clamp` `clampf` `approx_eq` `divides`
-`sum` `sumf`
+`sum` `sumf` `product` `productf`
 
 The `f` suffix is the float form: Kite has no overloading, so `min` is
 `(int, int)` and `minf` is `(float, float)`. `sum([int]) -> int`,
-`sumf([float]) -> float`. `approx_eq(a, b, tolerance) -> bool` lives here, not
-in `std/math`.
+`sumf([float]) -> float`, and `product`/`productf` multiply (1 for none; an
+`int` product that overflows traps, as `sum` does).
+`approx_eq(a, b, tolerance) -> bool` lives here, not in `std/math`.
 
 The float forms mind the edges as `std/math`'s do: `absf(-0.0)` is +0.0,
 `minf`/`maxf`/`clampf` carry a NaN whichever side it is on (and -0.0 is the
@@ -235,16 +248,34 @@ never for a NaN. `divides(x, 0)` answers rather than trapping: true only for
 ### Strings
 
 `contains` `starts_with` `ends_with` `split` `join` `replace` `words`
-`lower` `upper` `equal_ignoring_case` `pad_start`
+`lower` `upper` `equal_ignoring_case` `pad_start` `pad_end` `repeat`
+`trim_start` `trim_end` `lines` `strip_prefix` `strip_suffix` `split_once`
+`index_of_from` `last_index_of` `codes` `from_codes` `chars` `join_ints`
+`join_floats`
 
 All are functions over `str`, written on top of the five `str` methods.
 `split(s, "")` returns the whole string rather than looping. `lower`/`upper`
-are **ASCII only** and say so.
+are **ASCII only** and say so. `words` splits on any run of whitespace — tabs
+and newlines too. `pad_start(text, width, with)` and `pad_end` repeat a
+filler of several characters and cut it at the width (`pad_start("7", 4,
+"ab")` is `aba7`). `lines` ends a line at `\n`, `\r\n` or `\r`, and a final
+ending starts no empty line. `strip_prefix`/`strip_suffix` are nil when the
+affix is not there; `split_once(s, sep) -> Option<(str, str)>` cuts at the
+first `sep`. `index_of_from(s, needle, from)` and `last_index_of` answer `-1`
+when absent. `codes`/`from_codes` go between a string and its code points,
+`chars` gives one-character strings, and `join_ints(xs, sep)` and
+`join_floats` write numbers out, since a `[int]` has no text form of its own.
+
+**Build a string with `join`, not `+`.** A `str` is immutable, so
+`s = s + piece` in a loop copies everything built so far every time — quadratic.
+Push the pieces onto a `[str]` and `join(parts, "")` once.
 
 ### Optionals and parsing
 
 `or_else<T>(Option<T>, T) -> T` · `is_some<T>(Option<T>) -> bool` ·
-`parse_int(str) -> Option<int>` · `parse_float(str) -> Option<float>`
+`parse_int(str) -> Option<int>` · `parse_float(str) -> Option<float>` ·
+`parse_bool(str) -> Option<bool>` (exactly `"true"` or `"false"`) ·
+`parse_int_radix(str, base) -> Option<int>` (base 2 to 36, no prefix)
 
 `parse_int` accepts a leading `-` and digits, nothing else, and is nil past the
 range of an `int` rather than trapping. `parse_float` accepts a leading `-`,
@@ -260,7 +291,11 @@ Past the largest float it is nil; `-0` keeps its sign.
 
 These are the ordinary functions `@derive(Hash)` and `@derive(Debug)` are
 written in terms of, so a hand-written body gets the same answers. FNV-1a with
-the **32-bit** parameters, because Kite traps on integer overflow.
+the **32-bit** parameters, because Kite traps on integer overflow. `debug_str`
+quotes a string and escapes what would not show or would reorder the line around
+it — control characters, bidirectional controls such as U+202E and other
+invisible characters such as the zero-width space — as an escape (`\n`, `\t`,
+`\u{…}`), so `debug_str("x\u{202e}y")` is `"x\u{202e}y"`.
 
 ### A tour that compiles
 
@@ -629,13 +664,15 @@ arrays. `buffer.F64` is a flat `[float]` with a `stride` written down beside it.
 `push(b, values)` `set(b, record, field, value)` `column(b, field)`
 `extent(b, field)`. `push` and `set` **return a new buffer** — bind the result.
 Each is a copy of the whole buffer, so a loop of `push` is quadratic: build
-many records as rows with `from_records(stride, rows)`, or push the numbers
+many records as rows with `from_records(stride, rows)` (and take them back out
+with `records(b) -> [[float]]`), or push the numbers
 onto a `var` buffer's `values` field (`b.values.push(x)`, `stride` to a
 record), which writes in place like any slice in a field. The shape is
 checked: `push` of anything but exactly `stride` numbers, a field
 outside `0..stride` or a record outside `0..count(b)` traps with a message
 naming the mistake (a ragged push used to be accepted and shift every record
 after it, and a field past the stride read the next record).
+`map_column(b, field, fn(float) -> float)` rewrites one field of every record.
 
 ```kite
 use std/buffer
@@ -657,8 +694,10 @@ A named surface over the `draw.*` builtins, not a graphics library. There is no
 line, no path and no polygon, because the boundary has none and faking them
 would look wrong differently on each backend.
 
-`fill` `rounded` `circle` `ring` `circle_ring` `text` `font` `width_of`
-`line_height` `image` `clip` `unclip` `alpha` `opaque`
+`fill` `rounded` `circle` `ring` `circle_ring` `text` `text_centered`
+`font` `width_of` `line_height` `image` `clip` `unclip` `alpha` `opaque`, and
+two colour helpers: `rgb(r, g, b) -> int` (each part clamped to 0..255) and
+`mix(a, b, t) -> int` (a blend, `t` held to 0.0..1.0).
 
 ```kite
 use std/canvas
@@ -685,17 +724,20 @@ fn main() {
 Thin declared boundary over the host's primitives (WebCrypto in a browser or
 Node). No ECB, no CBC, no MD5, no SHA-1, no raw RSA. Nonces are generated,
 never passed, and so are salts — except that `derive`, for matching a
-derivation made elsewhere, takes one. Keys are opaque handles; a private half never crosses
-the boundary.
+derivation made elsewhere, takes one. Keys are opaque handles; a private half
+never crosses the boundary.
 
 Sync: `random(count) -> str` (lowercase hex), `token() -> str`,
-`equal(a, b) -> bool` (constant time).
-Async, each `-> (T, error)`: `sha256` `sha384` `sha512` `hmac(key, text)`
-`password_hash(password)` `password_verify(password, stored)`
-`generate_key` `import_key` `seal(key, plaintext)` `open(key, sealed)`
-`signing_key` `verify_key` `sign` `verify(public, text, signature)`
-`agreement_key` `exchange_key` `agree(key, their_public)`.
-Types: `Key`, `SigningKey`, `AgreementKey`.
+`equal(a, b) -> bool` (constant time), `random_int(below) -> int` (uniform over
+`0..below`), `hex_of(text) -> str` (its UTF-8 bytes) and
+`text_of_hex(hex) -> (str, error)`. Async, each `-> (T, error)`: `sha256`
+`sha384` `sha512` `hmac(key, text)` `hmac384` `hmac512`
+`derive(password, salt_hex, iterations)` (PBKDF2-SHA-256, 64 hex characters)
+`password_hash(password)` `password_verify(password, stored)` `generate_key`
+`import_key` `seal(key, plaintext)` `open(key, sealed)` `signing_key`
+`verify_key` `sign` `verify(public, text, signature)` `agreement_key`
+`exchange_key` `agree(key, their_public)`. Types: `Key`, `SigningKey`,
+`AgreementKey`.
 
 Comparing a value that came *straight* from a `crypto.` call with `==` is
 `E0600` — a **warning**, and detected syntactically, so binding it to a `let`
@@ -738,7 +780,10 @@ Find: `find(selector) -> Option<Element>` `find_in` `find_all -> [Element]`
 Read/write: `text` `set_text` `attribute -> Option<str>` `set_attribute`
 `remove_attribute` `value` `set_value` `checked` `set_checked` `set_style`
 `add_class` `remove_class` `has_class` `set_class`.
-Tree: `append` `insert_before` `remove` `same`.
+`has_attribute` `focus` `clear` (children and text).
+Tree: `append` `insert_before` `remove` `same` `parent -> Option<Element>`
+`closest(e, selector) -> Option<Element>` (this element or the nearest one
+above it that matches).
 Events: `on(target, name, fn(Event)) -> (Subscription, error)`, and on the
 event `target -> Option<Element>` `event_value` `key` `prevent_default`
 `stop_propagation`. Document: `title` `set_title`.
@@ -865,12 +910,16 @@ the start and nothing is generated.
 `wrap(err, context) -> error` (nil for nil, so it composes with `check`),
 `of(subject, problem)`, `chain(err) -> [str]` (outermost first),
 `root(err) -> error`, `mentions(err, needle) -> bool`,
-`message_or(err, absent) -> str`.
+`caused_by(err, needle) -> bool` (any message in the chain),
+`message_or(err, absent) -> str`, `join([error]) -> error` (nil when every one
+is nil, the one when one is not, otherwise one error whose message is theirs
+joined by `"; "`).
 
 `mentions` reads the **outermost message only** — it does not walk the chain.
 That is usually enough because `wrap` interpolates what it wrapped, so the outer
 message contains the inner one; an error joined with `errors.because` does not
-get that, and `mentions(because("outer", new("root")), "root")` is `false`.
+get that, and `mentions(because("outer", new("root")), "root")` is `false` —
+`caused_by` is the one that walks.
 
 ```kite
 use std/errors
@@ -898,7 +947,10 @@ There is no format-string language and there is not going to be one;
 interpolation already renders. What it cannot do is *align*.
 
 `pad(s, width)` `pad_left` `centre` `ellipsis(s, width)` `fixed(x, places)`
-`percent(part, whole)` `grouped(n)` `row(cells, widths)`
+`percent(part, whole)` `grouped(n)` `row(cells, widths)` `table(rows)` (every
+column padded to its widest cell, two spaces between) `signed(n)` (`+3`)
+`hex(n, width)` and `binary(n, width)` (zero-padded digits, a `-` before a
+negative one) `scientific(x, places)` (`1.50e+3`)
 
 Widths are **characters** (`s.len()`), not terminal columns: an ideograph or
 emoji counts one and draws two, a combining mark counts one and draws none, so
@@ -917,9 +969,14 @@ NaN are spelled as interpolation spells them, `inf`, `-inf` and `NaN`.
 
 Every fallible call returns `(T, error)`; there is no errno.
 `read(path) -> (str, error)` `write(path, body) -> error`
-`list(path) -> ([str], error)` `remove(path) -> error`
-`kind(path) -> Kind` (`File` | `Directory` | `Missing`) `exists` `is_file`
-`is_dir` `temp_dir() -> str`. A file may begin with any character: the host
+`list(path) -> ([str], error)` `remove(path) -> error` `kind(path) -> Kind`
+(`File` | `Directory` | `Missing`) `exists` `is_file` `is_dir`
+`temp_dir() -> str`, and `read_lines(path) -> ([str], error)` (split as `lines`
+splits) `write_lines(path, lines) -> error` `append(path, body) -> error`
+`read_or(path, fallback) -> str` `copy(from, to) -> error`
+`walk(path) -> ([str], error)` (every file below, sorted). Paths, as text:
+`join_path([str])` (one `/` between) `base_name` `dir_name` `extension` (without
+the dot; `""` for `.bashrc`). A file may begin with any character: the host
 marks failures and successes alike, so its answer is never confused with the
 file's first character.
 
@@ -970,7 +1027,9 @@ position and a reorder rewrites everything it moved past.
 `mount(into: dom.Element, [Node]) -> (Mounted, error)` ·
 `update(var view: Mounted, [Node]) -> error` ·
 `departed(view) -> [str]` — the keys removed by the last `update`, for dropping
-per-row state.
+per-row state. `render([Node]) -> str` writes a description out as HTML text,
+with no document — for a page rendered on a server or a view checked in a
+test — and `escape(text)` makes text safe in an element or a quoted attribute.
 
 **Write the handler where the control is.** It closes over what is in scope
 there, so nothing has to be encoded into `data-` attributes and parsed back:
@@ -1060,7 +1119,10 @@ lines, because only text crosses the boundary), `Response{ status, body }`,
 Client, all async `-> (Response, error)`: `get` `post` `put` `delete` `patch`
 `head` `options` `query` and `send(method, url, body, headers)`.
 Helpers: `ok(body)` `not_found()` `status(code, body)` `succeeded(r)`
-`header(r, name)`.
+`header(r, name)` `json(code, body)` (a JSON `Content-Type`)
+`redirect(location)` (a `303`). URLs: `encode_component(s)`
+`decode_component(s)` (a `+` stays a `+`), `form_decoded(text)` (a `+` is a
+space) and `query_string([Header]) -> str`.
 
 A `Response` carries the headers it arrived with, so `header` can be asked at
 any time and the host lets a request go the moment its body is read — the
@@ -1101,10 +1163,14 @@ Routing, all synchronous and testable with no port. Matching looks at the path
 alone — a `?query` or `#fragment` after it takes no part:
 `route(method, pattern, fn(Request) -> Response)` ·
 `serve([Route], Request) -> Response` · `matches(pattern, path)` ·
-`parameter(pattern, path, name) -> Option<str>` (still percent-encoded; a `:name`
-segment needs at least one character, so `/users/` is not `/users/:id`) ·
-`query_parameter(request, name) -> Option<str>` (decoded as a form is: `+` is a
-space, `%XX` UTF-8 bytes) · `request_header(request, name) -> Option<str>`.
+`parameter(pattern, path, name) -> Option<str>` (still percent-encoded; a
+`:name` segment needs at least one character, so `/users/` is not `/users/:id`)
+· `query_parameter(request, name) -> Option<str>` (decoded as a form is: `+` is
+a space, `%XX` UTF-8 bytes) · `query_parameters(request, name) -> [str]` (every
+value of a repeated one) · `form_parameter(request, name) -> Option<str>` (from
+a form-encoded body) · `cookie(request, name) -> Option<str>` ·
+`request_header(request, name) -> Option<str>` (the first line naming it) ·
+`request_headers(request, name) -> [str]` (every one).
 
 Server: `open(port) -> (Server, error)` async (port 0 asks the host to choose),
 `port_of` · `accept(server) -> (Incoming, error)` async ·
@@ -1113,14 +1179,14 @@ text**, because a newline in a value would otherwise become a separator; it
 refuses a name that is not a token, a line break in either, a NUL, another
 control character or a character past U+00FF in a value (percent-encode it
 first), a name that frames the message (`Content-Length`, `Transfer-Encoding`,
-`Connection`, `Keep-Alive`, `Upgrade`, `TE`, `Trailer`, `Proxy-Connection`: the host writes
-the length), and a
-status outside 200 to 599 (a 1xx is interim, never the last word) or a body on a 204 or 304 ·
+`Connection`, `Keep-Alive`, `Upgrade`, `TE`, `Trailer`, `Proxy-Connection`: the
+host writes the length), and a status outside 200 to 599 (a 1xx is interim,
+never the last word) or a body on a 204 or 304 ·
 `run(server, [Route]) -> (int, error)` sends the headers a handler added with
 `with_header(response, name, value)`, and answers 500 (and carries on) to a
-handler whose header or status `respond` would refuse · `serve_closed` · `shut`. Once a
-server is `shut` and nothing is waiting, `accept` answers with an error and
-`run` returns the count it answered.
+handler whose header or status `respond` would refuse · `serve_closed` · `shut`.
+Once a server is `shut` and nothing is waiting, `accept` answers with an error
+and `run` returns the count it answered.
 
 Server-sent events: `events(url)` / `events_named(url, names)` ·
 `listen(stream, name)` · `receive(stream) -> (Event, error)` · `pending` ·
@@ -1195,7 +1261,8 @@ touching the compiler.
 `call0`…`call4(target, name, …)` · `new0`…`new3(constructor, …)` ·
 `same(a, b)` `is_nothing` `kind_of` `instance_of` ·
 `of_str` `of_num` `of_bool` `of_int` and `as_str` `as_num` `as_bool` `as_int` ·
-`settle(promise, done, failed)` · `str_or` `num_or` `bool_or` ·
+`settle(promise, done, failed)` · `str_or` `num_or` `bool_or` `int_or` ·
+`has(target, name) -> bool` (readable and neither `null` nor `undefined`) ·
 `SAFE_INTEGER()`.
 
 **Keep `JsValue` out of your own public interface** — wrap it in a struct whose
@@ -1236,9 +1303,12 @@ Number(float), Text(str), Array([Json]), Object({ str: Json }) }`.
 
 `parse(input) -> (Json, error)` · `stringify(value) -> str` · `pretty` ·
 navigation `field(v, key)` `at(v, index)` `items(v) -> [Json]`
-`entries(v) -> { str: Json }` `is_null` · extraction `text` `number_of`
+`entries(v) -> { str: Json }` `keys(v) -> [str]` (in document order)
+`path(v, "users.0.name")` `is_null` · extraction `text` `number_of`
 `int_of` `bool_of` (each `-> Option<…>`) · with fallbacks `text_or(v, key, d)`
-`int_or` `bool_or` · `trait Encode { … }` for `@derive(Encode)`.
+`int_or` `float_or` `bool_or` · `parse_or(input, fallback) -> Json` ·
+`stringify_sorted(v)` (every object's keys sorted, for bytes that must be the
+same whenever the value is) · `trait Encode { … }` for `@derive(Encode)`.
 
 The navigation functions take `Option<Json>` and return `Option<Json>`, so they
 chain without unwrapping and a `Json` passes where an `Option<Json>` is wanted.
@@ -1248,16 +1318,16 @@ character in a string are errors — and each number is the float nearest what
 was written. `int_of` is nil unless the number is whole and below 2⁵³ in
 magnitude (a float holds every integer only there, so `9007199254740993` would
 read as a different number), so `@derive(Decode)` refuses `3.7` for an `int`
-field, and refuses `9007199254740993` saying it is not exact. `of_int(n) -> Json` is what `@derive(Encode)` writes for an `int`: a
-number inside that range, and outside it the decimal text as a string, which
-`int_of` reads back — so no `int` is silently changed in either direction.
-`parse` stops at 128 levels of nesting, and `stringify` and `pretty` trap past
-the same depth (`check_nesting(v) -> error` tests first), so everything `parse`
-returns can be written and no backend runs out of stack on the way. `stringify`
-writes a number
+field, and refuses `9007199254740993` saying it is not exact.
+`of_int(n) -> Json` is what `@derive(Encode)` writes for an `int`: a number
+inside that range, and outside it the decimal text as a string, which `int_of`
+reads back — so no `int` is silently changed in either direction. `parse` stops
+at 128 levels of nesting, and `stringify` and `pretty` trap past the same depth
+(`check_nesting(v) -> error` tests first), so everything `parse` returns can be
+written and no backend runs out of stack on the way. `stringify` writes a number
 that is whole and fits an `int` without a `.0`, and any other finite one as the
-float it is: 2⁶³ is `9223372036854775808.0`. JSON cannot spell an infinity or
-a NaN, so each is written `null`, as JavaScript's `JSON.stringify` does.
+float it is: 2⁶³ is `9223372036854775808.0`. JSON cannot spell an infinity or a
+NaN, so each is written `null`, as JavaScript's `JSON.stringify` does.
 
 ```kite
 use std/json
@@ -1287,8 +1357,14 @@ helpers are in the prelude. Nothing here needs compiler support.
 `powf` `cbrt` `hypot` `lerp` `sign(x) -> int` · `exp` `ln` ·
 `sin` `cos` `tan` `asin` `acos` `atan` `atan2` `degrees` `radians` ·
 constants as functions: `pi()` `e()` `tau()` `ln2()` ·
-integers: `max_int()` `min_int()` `checked_add(a, b) -> Option<int>`
-`wrapping_add(a, b) -> int`.
+`log2` `log10` `log(base, x)` `exp2` `sinh` `cosh` `tanh` `fract` `copysign` ·
+`inf()` `nan()` `is_nan` `is_inf` `is_finite` (a literal can write neither,
+and a NaN equals nothing, itself included) ·
+integers: `max_int()` `min_int()` `checked_add` `checked_sub` `checked_mul`
+`checked_pow(base, exponent)` (each `-> Option<int>`, nil when the answer does
+not fit) `wrapping_add` `wrapping_sub` `wrapping_mul` (the low 64 bits, in
+every build) `mod_floor(a, b)` (the remainder with `b`'s sign: `mod_floor(-1,
+5)` is 4) `gcd(a, b)`.
 
 `sqrt` is correctly rounded over the whole range; `trunc`, `floor`, `ceil` and
 `round` hand back a float that is already whole (anything from 2⁵²) rather than
@@ -1324,7 +1400,9 @@ something it is not. Messages are taken off a queue, not handed to a callback.
 
 `connect(url) -> (Socket, error)` async · `send(s, message) -> error` ·
 `receive(s) -> (str, error)` async · `pending(s) -> int` · `open(s) -> bool` ·
-`close(s)`. A closed socket stays closed; reopening is the program's decision.
+`close(s)` · `take(s) -> Option<str>` (a message that has already arrived,
+without waiting — for a program polling once a frame). A closed socket stays
+closed; reopening is the program's decision.
 
 ```kite
 use std/socket
@@ -1351,7 +1429,7 @@ pub async fn main() {
 }
 ```
 
-### sync — Mutex and Atomic
+### sync — Mutex, Atomic and Queue
 
 Not pointless without OS threads: Kite's tasks interleave at `await` and
 `task.yield`, so a read-modify-write spanning a yield is a lost update *today*.
@@ -1361,13 +1439,17 @@ Not pointless without OS threads: Kite's tasks interleave at `await` and
 async.
 `Atomic`: `atomic(value)` `load` `store(var a, v)` `add(var a, delta)`
 `compare_swap(var a, expect, next)` `swap(var a, next)`.
+`Queue<T>`: `queue()` `put(var q, value)` (never waits) `take(var q) -> T`
+async (waits for a value) `size(q)` — first in, first out, for handing values
+from one task to another.
 
 `Mutex<T>` has a `var` field and is `Share` **anyway**, whatever `T` is,
 because reaching the value requires the lock. `Atomic` gets the same pass. That
 exemption is the one carve-out in an otherwise structural rule, and it is made
 by *qualified* name — the checker tests for `sync.Mutex` and `sync.Atomic` and
 nothing else, so a hand-rolled lookalike, however identical, is judged
-structurally and fails `E0520`.
+structurally and fails `E0520`. A `Queue` is not exempt: it is handed between
+the tasks of a program as a `var` parameter.
 
 ### task — the concurrency library
 
@@ -1377,7 +1459,9 @@ value comes out. There is no spawn keyword.
 `both<A, B>(Task<A>, Task<B>) -> (A, B)` · `all<T>([Task<T>]) -> [T]` ·
 `race<T>([Task<T>]) -> T` · `sleep(ms)` · `timeout<T>(Task<T>, ms) -> Option<T>`
 · `parallel<T: Share, U: Share>([T], fn(T) -> U) -> [U]` ·
-`scope<T>([Task<T>]) -> [T]`. All async.
+`scope<T>([Task<T>]) -> [T]` · `map<T, U>([T], fn(T) -> Task<U>) -> [U]`
+(one task per item, all started before any is awaited, the results in the
+items' order). All async.
 
 ```kite
 use std/task
@@ -1463,7 +1547,8 @@ The diagnostic says `` `Task<int>` cannot be moved to another task `` and notes
 that two tasks holding one mutable value is a data race — true, and not the
 cause: nothing owning a suspended computation is `Share`, so no async mapper
 will ever pass. `parallel` is for work over values. To run async work
-concurrently, start the tasks yourself and hand the slice to `task.all`:
+concurrently, `task.map([1, 2, 3], fetch_one)` starts one task per item, or
+start the tasks yourself and hand the slice to `task.all`:
 
 ```kite
 use std/task
@@ -1533,6 +1618,8 @@ the same thing `vite-plugin-kite` does to build a page.
 
 `is_true(cond, what)` `is_false` `equal_int` `equal_str` `equal_bool`
 `equal_float(found, want, tolerance, what)` `equal_ints` `equal_strs`
+`equal_floats(found, want, tolerance, what)` `contains(found, needle, what)`
+`some(value, what)` (an optional holds a value)
 `failed(err, what)` `ok(err, what)` `fail(what)` — each returns `error`, so
 `check` makes a test read as a list of claims. `equal_float` passes equal
 floats whatever the tolerance, infinities included, and a NaN when a NaN was
@@ -1581,6 +1668,10 @@ stated.
 `bidi_runs(line) -> [Run]` (a `Run` has `body` and `rtl` — no offsets) ·
 `bidi_runs_with(line, base)` · `bidi_levels` · `bidi_visual` ·
 `is_combining(code)` · `join_arabic(run) -> str` ·
+`clusters(body) -> [str]` (what stays together: a character with its marks,
+a skin tone, an emoji joined by ZWJ, a flag, an Indic conjunct by GB9c) ·
+`cell_width(body) -> int` (terminal columns: 2 for wide characters and emoji,
+0 for marks and joiners, one per consonant of a conjunct) ·
 `line_break_class(code) -> LineBreak` · `break_opportunities(body) -> [bool]` ·
 `wrap(body, width: float, measure: fn(str) -> float) -> [str]` — greedy lines
 over those opportunities, measured by the caller (`canvas.width_of` on a
@@ -1595,8 +1686,8 @@ UAX #14 as of Unicode 15.0, LB1–LB31, with SA treated as AL, CB unimplemented,
 the later LB15a–d, LB20a and LB28a not implemented, East Asian Width read
 only for LB30's openers, and a skin tone kept with whatever it follows;
 `is_combining` is every `Mn` and `Me` of Unicode 15.1, and `bidi_class`
-answers NSM from it, but its other classes are a listed subset; Arabic joining to Presentation Forms-B with the
-lam-alef ligature, not HarfBuzz.
+answers NSM from it, but its other classes are a listed subset; Arabic joining
+to Presentation Forms-B with the lam-alef ligature, not HarfBuzz.
 
 ```kite
 use std/text
@@ -1626,7 +1717,12 @@ Durations are plain `int` milliseconds; there is no `Duration` type.
 `since(start)` · `show(ms)` ("1m 30s") · `clock(ms)` ·
 `struct Civil` and `civil_of(ms, east_minutes)` / `epoch_of(c, east_minutes)` ·
 `iso_day` `hhmm` `stamp` `weekday` — each takes an offset in minutes east of
-UTC · `is_leap(year)` `days_in_month` `month_start` `month_end`.
+UTC · `is_leap(year)` `days_in_month` `month_start` `month_end` ·
+`add_months(ms, n, east)` `start_of_day(ms, east)` `days_between(a, b, east)`
+(calendar days, not elapsed time) · `weekday_name(day)` `month_name(month)` ·
+`rfc3339(ms)` (UTC, `…Z`) `rfc3339_at(ms, east)` — RFC 3339 for the years
+0000 to 9999, and what the arithmetic gives outside them — and
+`parse_iso(s) -> Option<int>`.
 
 ```kite
 use std/time
@@ -1649,7 +1745,11 @@ fn main() {
 
 Same shape as `std/json`. `enum Toml`, `parse(input) -> (Toml, error)`,
 `emit(doc) -> str`, and dotted-path lookups `at(doc, path) -> Option<Toml>`,
-`text_at(doc, path, fallback)`, `int_at`, `float_at`, `bool_at`.
+`text_at(doc, path, fallback)`, `int_at`, `float_at`, `bool_at`,
+`texts_at(doc, path) -> [str]` (the strings of an array), `keys_at(doc, path)`
+(in document order; `""` is the document) and `at_path(doc, [str])` for a key
+that holds a dot. `set(doc, path, value) -> (Toml, error)` writes one, making
+the tables on the way.
 
 The subset is named: comments, bare/quoted/dotted keys, `[table]` and
 `[[array.of.tables]]` (with `[a.b]` and `[[a.b]]` inside an element), basic and
@@ -1663,9 +1763,9 @@ implemented** — a date is checked to be one of TOML's four forms and parses as
 the string it was written as, losslessly, rather than being half-mapped onto
 `std/time`. `emit` writes a string of one of those forms back bare, so a date
 stays a date for the next reader — which means a *quoted* `"1979-05-27"` comes
-out unquoted too. A document nesting deeper than 128 levels — each key segment, array
-and inline table counting one — is refused with an error, as `std/json` refuses
-one, so that input cannot choose how much stack a parse uses.
+out unquoted too. A document nesting deeper than 128 levels — each key segment,
+array and inline table counting one — is refused with an error, as `std/json`
+refuses one, so that input cannot choose how much stack a parse uses.
 
 ```kite
 use std/toml
@@ -1695,12 +1795,13 @@ Events and timers: `on(name, fn())` `on_passive` `after(ms, fn())`
 Geometry: `scroll_x` `scroll_y` `width` `height` `scroll_to`.
 Location: `origin` `path` `query` `hash` `set_hash` `go_to`
 `parameter(name) -> Option<str>` (decoded exactly as `http.query_parameter`
-decodes a request's) `escaped` `unescaped`.
+decodes a request's) `parameters() -> {str: str}` (each name's first value)
+`escaped` `unescaped`.
 History: `push(url)` `rewrite(url)` `back()` `own_scroll_restoration()`.
 Storage: `kept`/`keep`/`drop_kept` (local) and `cached`/`cache`/`drop_cached`
-(session). Misc: `epoch_ms` `timezone_offset` (the offset *now*; `timezone_offset_at(ms)` is the
-one for an instant) `epoch_of(iso)` `seems_online`
-`print_page` `register_worker(path)` `raw()`.
+(session). Misc: `epoch_ms` `timezone_offset` (the offset *now*;
+`timezone_offset_at(ms)` is the one for an instant) `epoch_of(iso)`
+`seems_online` `print_page` `register_worker(path)` `raw()`.
 
 Absent on purpose: anything that is a recipe rather than a platform fact —
 saving a blob through a synthetic anchor, uploading a file, reading a `<meta>`.
@@ -1763,7 +1864,8 @@ help: make the binding mutable
   │     ~~~
 ```
 
-`kitec fix cart.kite` applies that `help` in place, then checks the file again: it prints what is left and exits non-zero while errors remain.
+`kitec fix cart.kite` applies that `help` in place, then checks the file again:
+it prints what is left and exits non-zero while errors remain.
 
 ### Ranges
 

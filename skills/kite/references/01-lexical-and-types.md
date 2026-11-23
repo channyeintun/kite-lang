@@ -207,8 +207,8 @@ an index into the line above), `done == true` typed for `done = true`, a bare
 a `match` statement is a statement too, so `0 => 1` and `0 => { done == true }`
 are `E0117` there. An index or an interpolation is not counted as an effect even
 though one can trap and the other runs `show`: to keep one for that alone, write
-`_ = xs[i]` (as an arm, `0 => { _ = xs[i] }`; the note says so). `0 => ()` is fine:
-like `0 => {}`, it says nothing happens.
+`_ = xs[i]` (as an arm, `0 => { _ = xs[i] }`; the note says so). `0 => ()` is
+fine: like `0 => {}`, it says nothing happens.
 
 ```kite fails
 fn main() {
@@ -519,8 +519,12 @@ fn main() {
 One character per element, everywhere: `"😀".len()` is `1`, and indexing and
 length count Unicode scalar values, never bytes and never UTF-16 code units.
 A `str` has exactly **five** methods; everything else (`split`, `join`,
-`starts_with`, `replace`, `words`, `parse_int`, case folding) is a prelude
-function written in Kite on top of them.
+`starts_with`, `replace`, `words`, `parse_int`, ASCII `lower`/`upper`) is a
+prelude function written in Kite on top of them.
+
+A `str` is immutable, so `s = s + piece` in a loop copies all of `s` every time
+round, which is quadratic. Push the pieces onto a `[str]` and
+`join(parts, "")` once; that is linear.
 
 | Method | Meaning |
 |---|---|
@@ -624,8 +628,8 @@ fn main() {
 depth. The compiler copies each level out, changes the innermost and writes
 every level back — what you would otherwise write by hand — with the indices
 and the right-hand side evaluated once, first. So a copy of the outer slice
-taken before the write keeps its old contents: slices are values. Any `t op= v` —
-on a local, a field or an element — reads `t` after `v` has run: `c.n += f(c)`
+taken before the write keeps its old contents: slices are values. Any `t op= v`
+— on a local, a field or an element — reads `t` after `v` has run: `c.n += f(c)`
 adds to whatever `f` stored in `c.n`, unlike `c.n = c.n + f(c)`.
 
 ```kite
@@ -700,10 +704,11 @@ fn main() {
 }
 ```
 
-A literal that gives one key twice, `{"a": 1, "a": 2}`, keeps the later value under the key
-as first written (`{-0.0: 1, 0.0: 2}` holds `-0.0` with `2`; two NaN keys are two entries).
-Where both keys are literals or constants — negative numbers, floats and tuples of them
-included — it is the `E0112` warning, since the earlier value is never seen.
+A literal that gives one key twice, `{"a": 1, "a": 2}`, keeps the later value
+under the key as first written (`{-0.0: 1, 0.0: 2}` holds `-0.0` with `2`; two
+NaN keys are two entries). Where both keys are literals or constants — negative
+numbers, floats and tuples of them included — it is the `E0112` warning, since
+the earlier value is never seen.
 
 ### Maps iterate in pairs
 
@@ -902,8 +907,11 @@ fn main() {
 }
 ```
 
-An `Option<T>` also cannot be compared to a bare `T` — `xs.get(0) == 1` is
-`E0201`. Compare against `nil`, or use `or_else`.
+Nor do `assert(x != nil, …)` and `require(x != nil, …)` narrow what follows
+them: `x` is still an `Option` on the next line. Use the early-return guard.
+
+An `Option<T>` compares with a bare `T`, without narrowing: `xs.get(0) == 1`
+is true exactly when there is a first element and it is `1`.
 
 ## 10. Conditions are `bool`
 
@@ -1114,9 +1122,6 @@ The compiler is authoritative. Checked disagreements, all in this file's scope:
 2. `docs/05-grammar.ebnf` has no production for a pair-binding `for`. `ForHeader
    = Binding "in" Expr` covers it only because `Binding` admits a tuple; the
    grammar never says a map is what that iterates.
-3. SPECIFICATION.md §2.5 states the continuation rule as "ends in an operator".
-   A *leading* `.`, `else`, `)` or `]` also continues the previous line, with no
-   trailing operator at all.
 
 SPECIFICATION.md §3.2's "maps iterate in insertion order" is **correct** —
 including under `for (k, v) in m`. An earlier draft of this page claimed maps

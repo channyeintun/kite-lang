@@ -56,9 +56,9 @@ fn main() {
 
 Three things to read off it: `_` in the value slot of a `return` means *no value*
 (it is not a zero value); `check err` propagates; and `err` may be rebound in the
-same scope, which no other binding may be. Only the error slot of a pair, and only over
-an earlier `error`: `let x = 1` then `let (y, x) = (2, 3)` is `E0112`, and so is
-`let (a, a) = …` (or `for (k, k) in …`), which names one thing twice.
+same scope, which no other binding may be. Only the error slot of a pair, and
+only over an earlier `error`: `let x = 1` then `let (y, x) = (2, 3)` is `E0112`,
+and so is `let (a, a) = …` (or `for (k, k) in …`), which names one thing twice.
 
 `_` is only allowed beside an error that is not nil: `return _, nil` is `E0200`,
 because the caller would be allowed to read a value that does not exist. An error
@@ -411,18 +411,18 @@ results counts as reading all of it, so a `break` or `return` out of the walk
 drops the failures of the elements not yet reached, with no report.
 
 **A tuple, slice or optional of results is watched the same way** — the
-shapes `task.both`, `task.all` and `task.timeout` answer with. Bound to one name it is Unchecked
-(`rs.len()` does not count as reading it); taking it apart, or walking it with
-`for`, hands each failure to the name it lands in. `r.0` takes one element of a
-tuple and leaves the others owed — the tuple is settled once each has been taken,
-and taking it apart afterwards binds only the failures not yet taken. A
-projection of a tuple nobody holds, `(f(1), f(2)).0` or `pair().0`, throws the
-other elements away on the spot, so each failure among them is `E0302` there;
-bind the tuple and take it apart, with `_` for one you mean to drop. `rs[0]`
-on a slice, though, counts as reading the whole slice, since a slice cannot be
-followed element by element. Both results of
-`task.both` arrive together, so deal with both before any exit — a `check` on
-the first leaves the second behind:
+shapes `task.both`, `task.all` and `task.timeout` answer with. Bound to one name
+it is Unchecked (`rs.len()` does not count as reading it); taking it apart, or
+walking it with `for`, hands each failure to the name it lands in. `r.0` takes
+one element of a tuple and leaves the others owed — the tuple is settled once
+each has been taken, and taking it apart afterwards binds only the failures not
+yet taken. A projection of a tuple nobody holds, `(f(1), f(2)).0` or `pair().0`,
+throws the other elements away on the spot, so each failure among them is
+`E0302` there; bind the tuple and take it apart, with `_` for one you mean to
+drop. `rs[0]` on a slice, though, counts as reading the whole slice, since a
+slice cannot be followed element by element. Both results of `task.both` arrive
+together, so deal with both before any exit — a `check` on the first leaves the
+second behind:
 
 ```kite
 use std/task
@@ -463,8 +463,9 @@ async fn main() {
 ```
 
 Testing a `task.timeout` result against `nil` only asks whether the work came in
-time. Where it did, what it gave is still unread: after `if r == nil { return }`,
-`r` is the `error` (or the pair) and has to be tested (or taken apart) in turn:
+time. Where it did, what it gave is still unread: after
+`if r == nil { return }`, `r` is the `error` (or the pair) and has to be tested
+(or taken apart) in turn:
 
 ```kite
 use std/task
@@ -572,8 +573,9 @@ fn main() {
 ```
 
 Test it inside the body before the next write — `if e != nil { break }` — or
-keep the error inside the loop. A `for { }` is left only by `break`, so the retry
-loop `for { if err == nil { break } … err = attempt() }` needs nothing after it.
+keep the error inside the loop. A `for { }` is left only by `break`, so the
+retry loop `for { if err == nil { break } … err = attempt() }` needs nothing
+after it.
 
 ## `check`
 

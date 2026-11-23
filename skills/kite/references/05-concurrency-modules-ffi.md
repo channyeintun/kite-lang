@@ -44,8 +44,9 @@ wins.
 
 An `async fn` returns `Task<T>` where `T` is the declared return type. `await`
 suspends until the task has a value and unwraps it. There is no `spawn`, no
-channel type, no cancellation, and no executor to construct — `kitec run` and
-the generated web glue each supply a cooperative loop.
+channel type (a `sync.Queue` hands values across), no cancellation, and no
+executor to construct — `kitec run` and the generated web glue each supply a
+cooperative loop.
 
 ### Calling queues; awaiting runs
 
@@ -172,13 +173,13 @@ async fn main() {
 Note the shape of the type: `async fn fetch(id: int) -> (str, error)` produces
 `Task<(str, error)>`, and `await` on it yields the pair, which is then
 destructured. That type cannot be written, though: `(str, error)` written as a
-type is a plain tuple, not a result, so `var ts: [Task<(str, error)>] = []` refuses
-`ts.push(fetch(1))` (`E0200`). Let a value give the type instead — `var ts =
-[fetch(1)]`. The taint analysis (`E0302`) still applies across the `await` —
-and before it: a task whose result holds an error is watched like the error
-itself. Called as a bare statement, or bound and never awaited, it is `E0302`,
-since its body would run and fail with nobody to hear it. Await it, return it,
-or hand it to `task.all`; `_ = save()` drops one on purpose.
+type is a plain tuple, not a result, so `var ts: [Task<(str, error)>] = []`
+refuses `ts.push(fetch(1))` (`E0200`). Let a value give the type instead —
+`var ts = [fetch(1)]`. The taint analysis (`E0302`) still applies across the
+`await` — and before it: a task whose result holds an error is watched like the
+error itself. Called as a bare statement, or bound and never awaited, it is
+`E0302`, since its body would run and fail with nobody to hear it. Await it,
+return it, or hand it to `task.all`; `_ = save()` drops one on purpose.
 
 ```kite fails
 async fn save() -> error {
@@ -228,7 +229,7 @@ and needs `use std/task`.
 | `task.wait_host()` | 0 | Suspend until the host hands something back. `async` only, else `E0521`. |
 | `task.finished(t)` | 1 | `bool` — has the task produced a value? |
 | `task.get(t)` | 1 | `T` — the task's result slot, read without suspending. |
-| `time.now()` | 0 | `int` milliseconds. Virtual under the bytecode VM and the web glue. |
+| `time.now()` | 0 | `int` milliseconds. Virtual under the bytecode VM, natively and in the glue's batch `run`; the real clock under `resident`. |
 
 `task.get` is a raw slot read and **does not check**. On an unfinished task it
 yields `nil`, whatever `T` claims. The read itself does not trap and `io.print`
@@ -259,12 +260,50 @@ The library combinators, all `async`, all in `std/task`:
 | `all(tasks)` | `[Task<T>] -> [T]` | In the order given, not the order they finished. |
 | `race(tasks)` | `[Task<T>] -> T` | **The losers are not cancelled.** They keep running. A race of no tasks traps at the call. |
 | `timeout(work, ms)` | `Task<T>, int -> Option<T>` | `nil` on expiry, and only then: a task that finished in time is present even when its result is a nil `error`. The task itself is not stopped. |
-| `sleep(ms)` | `int -> ()` | Virtual clock: a sleeping program costs no real time under `kitec test`. |
+| `sleep(ms)` | `int -> ()` | Virtual clock: a sleeping program costs no real time under `kitec test`. The jump gives the host no turn, so a loop that sleeps waiting for host state to change never sees it change under the glue's `run`; under `resident` a sleep is a real timer. |
 | `parallel(items, f)` | `[T: Share], fn(T) -> U: Share -> [U]` | **Not parallel on any target.** See below. |
 | `scope(tasks)` | `[Task<T>] -> [T]` | `all` under a name that says a scope cannot be left with work running. |
+| `map(items, f)` | `[T], fn(T) -> Task<U> -> [U]` | One task per item, all started before any is awaited; results in the items' order. |
 
 There is no channel type. A `Task<T>` *is* the one-shot result channel, and it
-is awaited rather than received from.
+is awaited rather than received from. For a stream of values from one task to
+another, `std/sync`'s `Queue<T>` is first in, first out: `put(var q, v)` never
+waits and `await take(q)` waits for a value. A `Queue` is not `Share` — it is
+handed to both tasks as a `var` parameter.
+
+```kite
+use std/sync
+use std/task
+
+async fn produce(var q: sync.Queue<int>) {
+    for n in 1..4 {
+        sync.put(q, n * 10)
+        await task.sleep(1)
+    }
+}
+
+async fn consume(var q: sync.Queue<int>) -> int {
+    var total = 0
+    for i in 0..3 {
+        total = total + await sync.take(q)
+    }
+    return total
+}
+
+async fn double(n: int) -> int {
+    await task.sleep(n)
+    return n * 2
+}
+
+pub async fn main() {
+    var q: sync.Queue<int> = sync.queue()
+    let taker = consume(q)
+    let giver = produce(q)
+    await giver
+    io.print(await taker)
+    io.print(join_ints(await task.map([3, 1, 2], double), " "))
+}
+```
 
 A task carries which task it is, so `==` on two `Task`s is true only for the
 same task: two calls of one `async fn` are never equal, finished or not, and a
@@ -682,8 +721,8 @@ somebody else loaded first.
 `use dep/utils` and `use utils` are two different modules, and every segment is
 honoured when the files are found — and matched exactly, case included, on
 every system: on macOS `use Util` beside `util.kite` is `E0400` ("is there,
-spelled differently"), as it is on Linux. Two spellings coexist in one file as long as
-one is aliased:
+spelled differently"), as it is on Linux. Two spellings coexist in one file as
+long as one is aliased:
 
 ```kite ignore
 use utils                   // `utils.…` is this one
@@ -841,9 +880,10 @@ shortcut = "../shortcut"
   else — a misspelt `verison` or a `branch` is an error, not something dropped —
   and a `tag` goes only with `git`.
 - `tag` and `version` are mutually exclusive: a tag pins, a version resolves.
-- Package cycles are an error: `kitec pkg` names the chain (`a -> b -> a`), a package that
-  names itself is one, and no lockfile is written. `kitec run`/`check`/`build`/`test`
-  refuse the same program with `E0402` at the manifest, naming the same chain.
+- Package cycles are an error: `kitec pkg` names the chain (`a -> b -> a`), a
+  package that names itself is one, and no lockfile is written.
+  `kitec run`/`check`/`build`/`test` refuse the same program with `E0402` at the
+  manifest, naming the same chain.
 - Names — package and dependency alike — are identifiers: ASCII letters,
   digits and `_`, not starting with a digit, at most 64. The name is written in
   a `use`, so `kite-md` could never be imported, and it becomes a directory
