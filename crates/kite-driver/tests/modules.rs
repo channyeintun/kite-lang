@@ -794,6 +794,163 @@ fn a_nested_module_of_the_same_spelling_is_not_a_cycle() {
     assert_eq!(p.run(&main).expect("compiles"), "leaf\n");
 }
 
+// ---- a `use` is looked for outward, as far as the package's root -------------
+
+/// §13.1's own tree: `ui/` imports `config/` beside it. A module resolved
+/// `use` only from its own directory, so the example the section is built
+/// around was `cannot find module config` at `ui/app.kite`.
+#[test]
+fn the_specifications_tree_compiles() {
+    let p = Project::new("spec-tree");
+    p.file("kite.toml", "[package]\nname = \"myapp\"\nversion = \"0.1.0\"\n");
+    p.file("src/money.kite", "pub fn cents(n: int) -> int {\n  return n * 100\n}\n");
+    p.file(
+        "src/config/load.kite",
+        "pub fn load(path: str) -> (Config, error) {\n  return Config{ name: path }, nil\n}\n",
+    );
+    p.file("src/config/schema.kite", "pub struct Config {\n  pub name: str\n}\n");
+    p.file(
+        "src/ui/app.kite",
+        "use config\nuse money\n\npub struct App {\n  pub config: config.Config\n}\n\n\
+         pub fn run(a: App) {\n  io.print(\"\\(a.config.name) \\(money.cents(2))\")\n}\n",
+    );
+    p.file("src/ui/theme.kite", "pub fn dark() -> bool {\n  return true\n}\n");
+    let main = p.file(
+        "src/main.kite",
+        "use config\nuse money\nuse ui\n\n\
+         fn main() {\n  let err = start()\n  if err != nil {\n\
+         \x20   io.print(\"cannot start: \\(err.message())\")\n  }\n}\n\n\
+         fn start() -> error {\n  let (cfg, err) = config.load(\"app.toml\")\n  check err\n\
+         \x20 ui.run(ui.App{ config: cfg })\n  return nil\n}\n",
+    );
+    // One `config`, reached from two places: `main`'s `cfg` is the type
+    // `ui.App` holds.
+    assert_eq!(p.run(&main).expect("compiles"), "app.toml 200\n");
+}
+
+/// The nearest wins: a directory module's own `util/` over the `util.kite`
+/// beside it, and a one-file module's own neighbour over one further out.
+#[test]
+fn the_nearest_module_of_a_spelling_wins() {
+    let p = Project::new("nearest");
+    p.file("util.kite", "pub fn name() -> str {\n  return \"outer\"\n}\n");
+    p.file("a/a.kite", "use util\n\npub fn go() -> str {\n  return util.name()\n}\n");
+    p.file("a/util/util.kite", "pub fn name() -> str {\n  return \"a's own\"\n}\n");
+    p.file("b/b.kite", "use util\n\npub fn go() -> str {\n  return util.name()\n}\n");
+    let main = p.file(
+        "main.kite",
+        "use a\nuse b\nuse util\n\n\
+         fn main() {\n  io.print(a.go())\n  io.print(b.go())\n  io.print(util.name())\n}\n",
+    );
+    assert_eq!(p.run(&main).expect("compiles"), "a's own\nouter\nouter\n");
+}
+
+/// A `use` that finds nothing says every place it looked, nearest first.
+#[test]
+fn a_missing_module_names_every_place_it_was_looked_for() {
+    let p = Project::new("looked-everywhere");
+    p.file("a/b/b.kite", "use gone\n\npub fn go() -> int {\n  return 1\n}\n");
+    let main = p.file("main.kite", "use a/b\n\nfn main() {\n  io.print(b.go())\n}\n");
+    let said = p.run(&main).expect_err("no `gone` anywhere").replace('\\', "/");
+    assert!(said.contains("cannot find module `gone`"), "{}", said);
+    for place in ["a/b/gone`", "a/b/gone.kite`", "/a/gone`", "/a/gone.kite`"] {
+        assert!(said.contains(place), "{} is not among the places: {}", place, said);
+    }
+    let root = format!("{}/gone.kite`", p.dir.display()).replace('\\', "/");
+    assert!(said.contains(&root), "the entry's directory is the last place: {}", said);
+}
+
+/// The walk stops at a package's root. A dependency kept inside the program's
+/// own tree is still a package of its own, and its `use helper` does not reach
+/// the program's `helper.kite` a directory further out.
+#[test]
+fn a_dependency_inside_the_program_does_not_walk_out_into_it() {
+    let p = Project::new("dep-inside");
+    p.file(
+        "kite.toml",
+        "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n\
+         [dependencies]\nkx = { path = \"src/vendored/kx\" }\n",
+    );
+    p.file("src/vendored/kx/kite.toml", "[package]\nname = \"kx\"\nversion = \"1.0.0\"\n");
+    p.file(
+        "src/vendored/kx/greet.kite",
+        "use helper\n\npub fn hello() -> str {\n  return helper.who()\n}\n",
+    );
+    p.file("src/helper.kite", "pub fn who() -> str {\n  return \"the application\"\n}\n");
+    let main = p.file(
+        "src/main.kite",
+        "use helper\nuse kx/greet\n\nfn main() {\n  io.print(greet.hello())\n}\n",
+    );
+    let said = p.run(&main).expect_err("the package has no helper");
+    assert!(said.contains("cannot find module `helper`"), "{}", said);
+    assert!(said.contains("greet.kite"), "the error is in the package: {}", said);
+}
+
+/// Inside a dependency, its directory modules reach each other as the
+/// program's do.
+#[test]
+fn a_dependencys_directory_modules_reach_each_other() {
+    let p = Project::new("dep-siblings");
+    p.file("md/kite.toml", "[package]\nname = \"md\"\nversion = \"1.0.0\"\n");
+    p.file("md/parse/parse.kite", "pub fn word() -> str {\n  return \"parsed\"\n}\n");
+    p.file(
+        "md/render/render.kite",
+        "use parse\n\npub fn html() -> str {\n  return \"<p>\\(parse.word())</p>\"\n}\n",
+    );
+    p.file(
+        "app/kite.toml",
+        "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n[dependencies]\nmd = { path = \"../md\" }\n",
+    );
+    let main = p.file(
+        "app/main.kite",
+        "use md/render\n\nfn main() {\n  io.print(render.html())\n}\n",
+    );
+    assert_eq!(p.run(&main).expect("compiles"), "<p>parsed</p>\n");
+}
+
+/// Two directory modules that reach each other by the walk are a cycle, as
+/// any two modules that import each other are.
+#[test]
+fn sibling_directory_modules_importing_each_other_are_a_cycle() {
+    let p = Project::new("sibling-cycle");
+    p.file("one/a.kite", "use two\n\npub fn a() -> int {\n  return two.b()\n}\n");
+    p.file("two/b.kite", "use one\n\npub fn b() -> int {\n  return 2\n}\n");
+    let main = p.file("main.kite", "use one\n\nfn main() {\n  io.print(one.a())\n}\n");
+    let said = p.run(&main).expect_err("a cycle");
+    assert!(said.contains("E0402"), "{}", said);
+}
+
+/// Handed over by name, a module inside a package walks outward to the
+/// package's own modules and stops there.
+#[test]
+fn a_provided_module_walks_out_as_far_as_its_package() {
+    let mut provided = std::collections::HashMap::new();
+    provided.insert(
+        "kitex/sub/doc".to_string(),
+        "use helper\n\npub fn who() -> str {\n  return helper.who()\n}\n".to_string(),
+    );
+    provided.insert(
+        "kitex/helper".to_string(),
+        "pub fn who() -> str {\n  return \"the package\"\n}\n".to_string(),
+    );
+    let src = "use kitex/sub/doc\n\nfn main() {\n  io.print(doc.who())\n}\n";
+    let c = kite_driver::compile_provided("main.kite", src, Emit::Check, false, provided.clone());
+    assert!(!c.failed(), "{}", c.render_diagnostics());
+    let mut out = Vec::new();
+    c.run(&mut out).expect("the program runs");
+    assert_eq!(String::from_utf8(out).expect("utf-8"), "the package\n");
+
+    // Without the package's own, the application's is not the answer.
+    provided.remove("kitex/helper");
+    provided.insert(
+        "helper".to_string(),
+        "pub fn who() -> str {\n  return \"the application\"\n}\n".to_string(),
+    );
+    let c = kite_driver::compile_provided("main.kite", src, Emit::Check, false, provided);
+    assert!(c.failed(), "a package reached the application's `helper`");
+    assert!(c.render_diagnostics().contains("cannot find module `helper`"));
+}
+
 /// A diagnostic names a module by where it is, so two `util`s are told apart
 /// in what the compiler says as well as in what it does.
 #[test]

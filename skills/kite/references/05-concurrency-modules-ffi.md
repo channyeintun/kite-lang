@@ -15,8 +15,10 @@ The deltas that will catch you out, in the order you will hit them:
 4. **The file you hand `kitec` is a one-file module.** The directory it sits in
    is *not* a module: a sibling `.kite` file is reachable only through a `use`,
    exactly like any other module (§4).
-5. **`use` paths are relative to the importing file's own directory**, not to
-   the project root.
+5. **A `use` path is looked for beside the importing module, then outward**:
+   in its own directory first, then each enclosing one, stopping at the
+   package's root (the entry file's directory, or the dependency's own). The
+   nearest wins, so sibling directory modules reach each other.
 6. **A module is where its source is**, so `util` inside `a/` and `util` inside
    `b/` are two modules, and so are `dep/utils` and `utils` — but the standard
    library's twenty names, `io`, `draw`, `ptr` and `prelude` are reserved on
@@ -517,12 +519,22 @@ fn main() {
 }
 ```
 
-### Paths are relative to the importing file's directory
+### Paths are looked for beside the importer, then outward
 
-Not to the project root, and not to the entry file. A file at `src/a/x.kite`
-writing `use config` is asking for `src/a/config/` or `src/a/config.kite`. The
-`E0400` diagnostic prints both paths it tried, which is the fastest way to see
-this.
+A file at `src/a/x.kite` writing `use config` is asking for `src/a/config/` or
+`src/a/config.kite` first, then `src/config/` or `src/config.kite` — each
+enclosing directory in turn, nearest first, and **no further than the
+package's root**: the entry file's directory for the program (here `src/`),
+the dependency's own directory for a module inside a dependency. A directory
+module is measured from its own directory, so `src/ui/app.kite` writing `use
+config` finds `src/ui/config/` if there is one and `src/config/` beside `ui/`
+otherwise — which is how two sibling directory modules import each other. A
+dependency never walks out into the program that imports it.
+
+Whichever place it is found from, the module is where its source is: `use
+config` written in `src/ui/` and in `src/main.kite` reach the one module, with
+one set of types. The `E0400` diagnostic lists every place it tried, nearest
+first, which is the fastest way to see where it looked.
 
 The one exception is the first segment: if it names a declared dependency, the
 path roots there instead (§5).
@@ -726,7 +738,7 @@ the module's `pub fn` list before you touch the import.
 
 | Code | Meaning |
 |---|---|
-| `E0400` | Module not found. Prints the directory and the `.kite` file it looked for. Also used for `use std/<not-a-std-module>`, and then lists the whole standard library. |
+| `E0400` | Module not found. Lists every directory and `.kite` file it looked for, nearest first. Also used for `use std/<not-a-std-module>`, and then lists the whole standard library. |
 | `E0401` | The item is not `pub`, so it is visible only inside its own module. Applies to functions, types (in expressions and in signatures), enum variants, struct fields, methods and associated functions. |
 | `E0406` | An `impl` outside its type's module: an extension method, or an imported trait implemented for an imported type. |
 | `E0402` | Import cycle. The diagnostic prints the chain (`a → b`). Extract the shared part into a third module. |

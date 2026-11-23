@@ -1121,10 +1121,25 @@ impl Loader {
             if let Some(key) = provided {
                 return Some(Found::Provided { key, dir: None, package: Package::default() });
             }
+            // The same walk outward, through the keys alone. With no
+            // filesystem there is no manifest to say what is a package, so
+            // a key's first segment is its package — as a host hands them
+            // over, `name` beside the entry and `package/name` inside one —
+            // and the walk stops there rather than reach the program's own.
+            let mut prefix = scope.prefix.clone();
+            while prefix.contains('/') {
+                prefix = Loader::package_of(&prefix);
+                if let Some(key) = self.provided_key(&prefix, &path) {
+                    return Some(Found::Provided { key, dir: None, package: Package::default() });
+                }
+            }
             diags.push(
                 Diagnostic::error(codes::E0400, format!("cannot find module `{}`", path))
                     .with_primary(span, "no such module")
-                    .with_note("a module is a sibling file or directory of the importer"),
+                    .with_note(
+                        "a module is a file or directory beside the importer, or beside a \
+                         directory enclosing it within its package",
+                    ),
             );
             return None;
         };
@@ -1135,44 +1150,64 @@ impl Loader {
         // markdown/render` reaches inside the package rather than beside the
         // entry file — and a dependency wins over a sibling of the same name,
         // because what a package depends on is what it said.
-        let (mut at, package, rest) = match scope.package.dependencies.get(segments[0]) {
-            Some(root) => {
-                let dependencies = if self.files.is_dir(root) {
-                    self.package_dependencies(root, sources, diags)
-                } else {
-                    Rc::default()
-                };
-                let package = Package {
-                    label: self.label(segments[0]),
-                    root: Some(root.clone()),
-                    dependencies,
-                    manifest: Some(root.clone()),
-                };
-                (root.clone(), package, &segments[1..])
+        let mut tried: Vec<PathBuf> = Vec::new();
+        if let Some(root) = scope.package.dependencies.get(segments[0]) {
+            let dependencies = if self.files.is_dir(root) {
+                self.package_dependencies(root, sources, diags)
+            } else {
+                Rc::default()
+            };
+            let package = Package {
+                label: self.label(segments[0]),
+                root: Some(root.clone()),
+                dependencies,
+                manifest: Some(root.clone()),
+            };
+            let mut at = root.clone();
+            for part in &segments[1..] {
+                at = at.join(part);
             }
-            None => (base.clone(), scope.package.clone(), segments),
+            if let Some(key) = provided {
+                let dir = at.parent().map(Path::to_path_buf);
+                return Some(Found::Provided { key, dir, package });
+            }
+            if let Some(found) = self.found_at(at, &scope.prefix, segments, &package, &mut tried) {
+                return Some(found);
+            }
+        } else {
+            // **Beside the module's own files first, then each enclosing
+            // directory outward, as far as its package's root.** A module
+            // resolved `use` from its own directory only, so in §13.1's own
+            // tree `ui/` could not reach `config/` beside it — the example
+            // the section is built around did not compile. The nearest match
+            // wins, so a module's own `config/` is still its own. The walk
+            // stops at the package's root: the entry file's directory for the
+            // program, the dependency's own for a dependency — which is what
+            // keeps a dependency from resolving into the program importing it.
+            for (dir, prefix) in self.levels(base, scope) {
+                let mut at = dir.clone();
+                for part in segments {
+                    at = at.join(part);
+                }
+                if let Some(key) = self.provided_key(&prefix, &path) {
+                    let dir = at.parent().map(Path::to_path_buf);
+                    return Some(Found::Provided { key, dir, package: scope.package.clone() });
+                }
+                let package = scope.package.clone();
+                if let Some(found) = self.found_at(at, &prefix, segments, &package, &mut tried) {
+                    return Some(found);
+                }
+            }
+        }
+        let places: Vec<String> = tried.iter().map(|p| format!("`{}`", p.display())).collect();
+        let places = match places.split_last() {
+            Some((last, [])) => last.clone(),
+            Some((last, rest)) => format!("{} and {}", rest.join(", "), last),
+            None => String::new(),
         };
-        for part in rest {
-            at = at.join(part);
-        }
-        if let Some(key) = provided {
-            let dir = at.parent().map(Path::to_path_buf);
-            return Some(Found::Provided { key, dir, package });
-        }
-        // A directory is the canonical form; a single file is the same thing
-        // with one file in it, and is what most modules start as.
-        if self.files.is_dir(&at) {
-            let prefix = within(&scope.prefix, segments);
-            return Some(Found::Path { at, is_dir: true, package, prefix });
-        }
-        let as_file = at.with_extension("kite");
-        if self.files.is_file(&as_file) {
-            let prefix = within(&scope.prefix, &segments[..segments.len() - 1]);
-            return Some(Found::Path { at: as_file, is_dir: false, package, prefix });
-        }
         let mut missing = Diagnostic::error(codes::E0400, format!("cannot find module `{}`", path))
             .with_primary(span, "no such module")
-            .with_note(format!("looked for `{}` and `{}`", at.display(), as_file.display()));
+            .with_note(format!("looked for {}", places));
         // The manifest's own error is reported in the manifest, which is not
         // the file anyone looking at this `use` has open — an editor shows a
         // file's own diagnostics beside it. Said here as well, the reason is
@@ -1184,6 +1219,61 @@ impl Loader {
             ));
         }
         diags.push(missing);
+        None
+    }
+
+    /// Where a `use` written in `scope` is looked for, nearest first: the
+    /// module's own directory `base`, then each one enclosing it as far as its
+    /// package's root, each with the prefix a provided key would be spelled
+    /// under there.
+    ///
+    /// A module outside its package's root — which nothing loads — is looked
+    /// for beside itself only.
+    fn levels(&self, base: &Path, scope: &Scope) -> Vec<(PathBuf, String)> {
+        let mut out = vec![(base.to_path_buf(), scope.prefix.clone())];
+        let Some(root) = scope.package.root.as_deref() else {
+            return out;
+        };
+        if !base.starts_with(root) {
+            return out;
+        }
+        let mut dir = base;
+        let mut prefix = scope.prefix.clone();
+        while dir != root {
+            let Some(up) = dir.parent() else {
+                break;
+            };
+            dir = up;
+            prefix = Loader::package_of(&prefix);
+            out.push((dir.to_path_buf(), prefix.clone()));
+        }
+        out
+    }
+
+    /// The module at `at` — the directory, or failing that the `.kite` file
+    /// — or `None`, with both recorded in `tried`.
+    fn found_at(
+        &self,
+        at: PathBuf,
+        prefix: &str,
+        segments: &[&str],
+        package: &Package,
+        tried: &mut Vec<PathBuf>,
+    ) -> Option<Found> {
+        let package = package.clone();
+        // A directory is the canonical form; a single file is the same thing
+        // with one file in it, and is what most modules start as.
+        if self.files.is_dir(&at) {
+            let prefix = within(prefix, segments);
+            return Some(Found::Path { at, is_dir: true, package, prefix });
+        }
+        let as_file = at.with_extension("kite");
+        if self.files.is_file(&as_file) {
+            let prefix = within(prefix, &segments[..segments.len() - 1]);
+            return Some(Found::Path { at: as_file, is_dir: false, package, prefix });
+        }
+        tried.push(at);
+        tried.push(as_file);
         None
     }
 

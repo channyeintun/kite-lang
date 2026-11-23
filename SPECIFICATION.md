@@ -1921,6 +1921,17 @@ fn start() -> error {
 }
 ```
 
+**A `use` path is looked for beside the module that writes it, then
+outward.** The first place is the importing module's own directory — the
+directory a one-file module sits in, or a directory module itself — and then
+each directory enclosing it in turn, stopping at the root of the package the
+importing module belongs to: the entry file's directory for the program, the
+dependency's own directory for a module inside a dependency. The nearest match
+wins. So `ui/app.kite` above writing `use config` finds `ui/config/` if `ui`
+has one of its own and `config/` beside `ui/` otherwise, and a dependency never
+resolves a `use` into the program that imports it. A `use` that matches
+nowhere is `E0400`, and its note lists every place that was tried.
+
 **Neither form is a module until a `use` names it.** A `.kite` file nothing
 imports is not compiled, and two files sharing a directory share nothing by
 virtue of sitting there: `main.kite` above cannot see what `money.kite`
@@ -1948,7 +1959,8 @@ and with no diagnostic. An alias is a convenience for the file that writes it.
 
 **A module is where its source is.** Two `use` lines reach one module exactly
 when they reach one file or directory: `use utils` inside `a/` and `use utils`
-inside `b/` are two modules, and `use dep/utils` and `use utils` are two
+inside `b/` are two modules when each finds a `utils` of its own, and one when
+both find the `utils` beside them, and `use dep/utils` and `use utils` are two
 modules, because every segment is honoured when the files are found. A `use`
 that finds nothing is `E0400` — never answered by some other module that
 happens to be spelled alike. A first segment naming one of the importing
