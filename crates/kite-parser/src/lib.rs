@@ -1981,9 +1981,48 @@ impl<'a> Parser<'a> {
     /// still declared and nothing that uses it is reported as well. It was
     /// `expected a variant, found pub`, which says what was not written
     /// rather than why this cannot be.
+    ///
+    /// A run of them — `pub pub B`, or a `pub` on each of two lines — is one
+    /// mistake, reported once, so the fix removes the whole run and every
+    /// `pub` in it is read past here. It removed the first, and left a report
+    /// for the next that only a second `kitec fix` took.
     fn refuse_pub_on_variant(&mut self, enum_name: &Ident, enum_is_pub: bool, what: &str) {
         let at = self.span();
-        let next = self.tokens.get(self.pos + 1).map_or(at, |t| t.span);
+        let mut last = self.pos;
+        let mut j = self.pos + 1;
+        while let Some(t) = self.tokens.get(j) {
+            match t.kind {
+                T::Pub => last = j,
+                T::Newline => {}
+                _ => break,
+            }
+            j += 1;
+        }
+        let next = self.tokens.get(last + 1).map_or(at, |t| t.span);
+        // The cut never takes a comment: one between the `pub`s leaves the
+        // fix to the first, and `kitec fix` comes back for the rest. A run
+        // that is all its line holds goes with its line, so the `}` after it
+        // is not pulled up to the indentation the `pub` had.
+        let src = self.src;
+        let spaces_after = |i: usize| i + src[i..].bytes().take_while(|b| matches!(b, b' ' | b'\t')).count();
+        let run_end = self.tokens[last].span.end as usize;
+        let line_start = src[..at.start as usize].rfind('\n').map_or(0, |i| i + 1);
+        let line_end = src[run_end..].find('\n').map(|i| run_end + i);
+        let blank = |r: std::ops::Range<usize>| src[r].bytes().all(|b| matches!(b, b' ' | b'\t' | b'\r'));
+        let start = at.start as usize;
+        let gap = &src[run_end..(next.start as usize).max(run_end)];
+        let (whole_run, begin, end) = if src[start..run_end].contains("//") {
+            (false, start, spaces_after(at.end as usize))
+        } else if !gap.contains('\n') && !gap.contains("//") {
+            (true, start, (next.start as usize).max(run_end))
+        } else {
+            match line_end {
+                Some(e) if blank(line_start..start) && blank(run_end..e) => (true, line_start, e + 1),
+                _ => (true, start, spaces_after(run_end)),
+            }
+        };
+        let cut = Span::new(self.file, begin as u32, end as u32);
+        let each = whole_run && last > self.pos;
         let note = if enum_is_pub {
             format!("`{}` is `pub`, so its variants are visible wherever it is", enum_name.name)
         } else {
@@ -2001,12 +2040,14 @@ impl<'a> Parser<'a> {
                 )
                 .with_note(note)
                 .with_fix(Fix::replace(
-                    "remove `pub`",
-                    Span::new(self.file, at.start, next.start),
+                    if each { "remove each `pub`" } else { "remove `pub`" },
+                    cut,
                     "",
                 )),
         );
-        self.bump();
+        while self.pos <= last {
+            self.bump();
+        }
     }
 
     fn parse_variant(
@@ -2023,8 +2064,8 @@ impl<'a> Parser<'a> {
             self.skip_newlines();
             // `Circle(radius: float)` is named; `Number(float)` positional.
             // One token of lookahead past the first name decides — past a
-            // `pub`, which is refused.
-            let skip = (self.at(T::Pub) && self.peek_at(1) == T::Ident) as usize;
+            // `pub`, or a run of them, which is refused.
+            let skip = (0..).take_while(|&i| self.peek_at(i) == T::Pub).count();
             let named = self.peek_at(skip) == T::Ident && self.peek_at(skip + 1) == T::Colon;
             let payload = if named {
                 let mut fields = Vec::new();

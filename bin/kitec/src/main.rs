@@ -665,50 +665,88 @@ fn run_doc_tests(
 /// them back to front means no earlier edit moves a later one. Only fixes
 /// pointing into the file being compiled are applied: a suggestion about the
 /// standard library is not the user's to take.
+///
+/// **It repeats until a pass applies nothing** (§16: every machine-applicable
+/// suggestion). A fix can uncover another — a report that stood for the rest
+/// of a line is made again for what is left of it — and one pass left that
+/// error behind while saying it "cannot fix" it. An edit that overlaps one
+/// already taken in a pass waits for the next, which compiles the edited
+/// text afresh, so two fixes are never made to one stretch of text from one
+/// reading of it. The bound stops a fix that would never settle.
 fn fix_file(path: &str, src: &str) -> ExitCode {
-    let result = compile(path, src, kite_driver::Emit::Check);
-    let mut edits: Vec<(u32, u32, String)> = Vec::new();
-    let file = result
-        .sources
-        .iter()
-        .find(|(_, name)| name == path)
-        .map(|(id, _)| id);
-    // A file the lexer could not read whole is refused, as `kitec fmt`
-    // refuses it. Its diagnostics are about the tokens that survived — a `$`
-    // dropped from between `1` and `2` reads as a comma left out, and `1, $ 2`
-    // was the edit — so an edit made from them is made to a different file
-    // from the one on disk.
-    let lexical = result.diags.iter().find(|d| {
-        d.severity == kite_diag::Severity::Error
-            && d.code.is_some_and(|c| c.is_lexical())
-            && d.primary_span().is_some_and(|s| Some(s.file) == file)
-    });
-    if lexical.is_some() {
-        eprint!("{}", result.render_diagnostics());
-        return fail(&format!(
-            "cannot fix `{}`, which has lexical errors; they come first, and by hand",
-            path
-        ));
-    }
-    for d in result.diags.iter() {
-        for edit in d.fixes.iter().flat_map(|f| f.edits.iter()) {
-            if Some(edit.span.file) != file {
+    let mut out = src.to_string();
+    let mut applied = 0usize;
+    let mut passes = 0usize;
+    let mut unsettled = String::new();
+    let mut result = compile(path, &out, kite_driver::Emit::Check);
+    loop {
+        let file = result
+            .sources
+            .iter()
+            .find(|(_, name)| name == path)
+            .map(|(id, _)| id);
+        // A file the lexer could not read whole is refused, as `kitec fmt`
+        // refuses it. Its diagnostics are about the tokens that survived — a
+        // `$` dropped from between `1` and `2` reads as a comma left out, and
+        // `1, $ 2` was the edit — so an edit made from them is made to a
+        // different file from the one on disk.
+        let lexical = result.diags.iter().find(|d| {
+            d.severity == kite_diag::Severity::Error
+                && d.code.is_some_and(|c| c.is_lexical())
+                && d.primary_span().is_some_and(|s| Some(s.file) == file)
+        });
+        if lexical.is_some() {
+            if passes == 0 {
+                eprint!("{}", result.render_diagnostics());
+                return fail(&format!(
+                    "cannot fix `{}`, which has lexical errors; they come first, and by hand",
+                    path
+                ));
+            }
+            unsettled = "a fix left the file with lexical errors, so no more were made".to_string();
+            break;
+        }
+        let mut edits: Vec<(u32, u32, String)> = Vec::new();
+        for d in result.diags.iter() {
+            for edit in d.fixes.iter().flat_map(|f| f.edits.iter()) {
+                if Some(edit.span.file) != file {
+                    continue;
+                }
+                edits.push((edit.span.start, edit.span.end, edit.replacement.clone()));
+            }
+        }
+        if edits.is_empty() {
+            break;
+        }
+        if passes == FIX_PASSES {
+            unsettled = format!(
+                "`kitec fix` stops after {} rounds of fixes, and these were still being offered",
+                FIX_PASSES
+            );
+            break;
+        }
+        // Back to front: an edit near the end cannot move one before it. Of
+        // two starting together the longer goes first, so an insertion
+        // there lands before the text it would otherwise have replaced. The
+        // same edit asked twice (two uses of one `let`) is made once.
+        edits.sort_by(|a, b| b.0.cmp(&a.0).then(b.1.cmp(&a.1)).then(a.2.cmp(&b.2)));
+        edits.dedup();
+        let mut floor = u32::MAX;
+        for (start, end, replacement) in edits {
+            if end > floor {
                 continue;
             }
-            edits.push((edit.span.start, edit.span.end, edit.replacement.clone()));
+            out.replace_range(start as usize..end as usize, &replacement);
+            floor = start;
+            applied += 1;
         }
+        passes += 1;
+        result = compile(path, &out, kite_driver::Emit::Check);
     }
-    if edits.is_empty() {
+    if applied == 0 {
         eprintln!("nothing to fix in {}", path);
         eprint!("{}", result.render_diagnostics());
-        return still_failing(&result, path);
-    }
-    // Back to front: an edit near the end cannot move one before it.
-    edits.sort_by_key(|(start, _, _)| std::cmp::Reverse(*start));
-    let mut out = src.to_string();
-    let applied = edits.len();
-    for (start, end, replacement) in edits {
-        out.replace_range(start as usize..end as usize, &replacement);
+        return still_failing(&result, path, &unsettled);
     }
     match std::fs::write(path, &out) {
         Ok(()) => {
@@ -721,15 +759,19 @@ fn fix_file(path: &str, src: &str) -> ExitCode {
             // What is left is said, and the exit status says it too: the
             // fixes are the ones the compiler could make, and a file that
             // still does not compile is not one `kitec fix && ship` may pass.
-            let after = compile(path, &out, kite_driver::Emit::Check);
-            if after.diags.has_errors() {
-                eprint!("{}", after.render_diagnostics());
+            if result.diags.has_errors() {
+                eprint!("{}", result.render_diagnostics());
             }
-            still_failing(&after, path)
+            still_failing(&result, path, &unsettled)
         }
         Err(e) => fail(&format!("cannot write `{}`: {}", path, e)),
     }
 }
+
+/// How many times `kitec fix` compiles, applies and compiles again before it
+/// stops. A fix uncovers another one or two levels deep; one that is still
+/// being offered after this many is one that does not settle.
+const FIX_PASSES: usize = 8;
 
 /// How `kitec fix` ends: failing while the file still has errors.
 ///
@@ -737,14 +779,22 @@ fn fix_file(path: &str, src: &str) -> ExitCode {
 /// "cannot fix": it only leaves that file alone, as it leaves the standard
 /// library alone. Those are counted apart and the files named, so the way on
 /// is `kitec fix <that file>` and not a search for a fix that does not exist.
-fn still_failing(result: &kite_driver::Compilation, path: &str) -> ExitCode {
+///
+/// "Cannot fix" is said only of an error that carries no fix. One that still
+/// carries a fix into this file is there because `kitec fix` stopped before
+/// taking it, and `unsettled` says why.
+fn still_failing(result: &kite_driver::Compilation, path: &str, unsettled: &str) -> ExitCode {
     let own = result.sources.iter().find(|(_, name)| name == path).map(|(id, _)| id);
-    let (mut stuck, mut elsewhere) = (0usize, 0usize);
+    let (mut stuck, mut pending, mut elsewhere) = (0usize, 0usize, 0usize);
     let mut files: Vec<String> = Vec::new();
     for d in result.diags.iter().filter(|d| d.severity == kite_diag::Severity::Error) {
         let spans: Vec<_> = d.fixes.iter().flat_map(|f| f.edits.iter()).map(|e| e.span).collect();
-        if spans.is_empty() || spans.iter().any(|s| Some(s.file) == own) {
+        if spans.is_empty() {
             stuck += 1;
+            continue;
+        }
+        if spans.iter().any(|s| Some(s.file) == own) {
+            pending += 1;
             continue;
         }
         elsewhere += 1;
@@ -758,7 +808,7 @@ fn still_failing(result: &kite_driver::Compilation, path: &str) -> ExitCode {
         }
     }
     let plural = |n: usize| if n == 1 { "" } else { "s" };
-    if stuck == 0 && elsewhere == 0 {
+    if stuck == 0 && pending == 0 && elsewhere == 0 {
         return ExitCode::SUCCESS;
     }
     if elsewhere > 0 {
@@ -770,6 +820,15 @@ fn still_failing(result: &kite_driver::Compilation, path: &str) -> ExitCode {
             if elsewhere == 1 { "has" } else { "have" },
             if elsewhere == 1 { "its" } else { "their" },
             files.iter().map(|f| format!("`{}`", f)).collect::<Vec<_>>().join(", ")
+        );
+    }
+    if pending > 0 {
+        eprintln!(
+            "error: {} error{} still {} a fix that was not applied: {}",
+            pending,
+            plural(pending),
+            if pending == 1 { "carries" } else { "carry" },
+            unsettled
         );
     }
     if stuck == 0 {

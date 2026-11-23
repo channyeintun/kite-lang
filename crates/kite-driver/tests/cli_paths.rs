@@ -269,6 +269,51 @@ fn kitec_fix_finishes_the_job_and_reports_what_is_left() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A run of `pub`s before a variant is one report, and its fix removes the
+/// run: it removed the first, and `kitec fix` said "1 error left that
+/// `kitec fix` cannot fix" of the next, which a second run then fixed.
+/// "Cannot fix" is said only of an error that has no fix.
+#[test]
+fn kitec_fix_removes_a_run_of_pub_and_says_cannot_only_of_what_has_no_fix() {
+    for (name, src) in [
+        ("fix-pub-run", "pub enum K {\n    A\n    pub pub\n}\n\nfn main() {\n    io.print(1)\n}\n"),
+        ("fix-pub-run-b", "pub enum K {\n    A\n    pub pub B\n}\n\nfn main() {\n    io.print(1)\n}\n"),
+        ("fix-pub-lines", "enum K {\n    A,\n    pub\n    pub\n}\n\nfn main() {\n    io.print(1)\n}\n"),
+        (
+            "fix-pub-fields",
+            "enum E { A, pub pub B, pub C(pub pub x: int), D(pub pub int) }\n\nfn main() {\n    io.print(1)\n}\n",
+        ),
+    ] {
+        let dir = scratch(name, "t.kite", src);
+        let Some((ok, _, err)) = kitec_in(&dir, &["check", "t.kite"]) else { return };
+        assert!(!ok);
+        assert!(!err.contains("expected"), "{}: one report per run of `pub`: {}", name, err);
+        let Some((ok, _, err)) = kitec_in(&dir, &["fix", "t.kite"]) else { return };
+        assert!(ok, "{}: {}", name, err);
+        assert!(!err.contains("cannot fix"), "{}: {}", name, err);
+        let Some((ok, _, err)) = kitec_in(&dir, &["check", "t.kite"]) else { return };
+        assert!(ok, "{} still fails after kitec fix: {}", name, err);
+        let Some((ok, _, err)) = kitec_in(&dir, &["fmt", "--check", "t.kite"]) else { return };
+        assert!(ok || name == "fix-pub-fields", "{}: {}", name, err);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // Beside an error that has no fix, the fixes are made and only that
+    // error is counted as one `kitec fix` cannot fix.
+    let mixed = "enum K {\n    A\n    pub pub B\n}\n\nfn main() {\n    let a = 1\n    a = 2\n    a = 3\n    \
+                 let n: int = \"s\"\n    io.print(a + n)\n}\n";
+    let dir = scratch("fix-pub-mixed", "t.kite", mixed);
+    let Some((ok, _, err)) = kitec_in(&dir, &["fix", "t.kite"]) else { return };
+    assert!(!ok, "{}", err);
+    // The `pub`s, and `let` to `var` once although two assignments ask it.
+    assert!(err.contains("applied 2 fixes"), "{}", err);
+    assert!(err.contains("1 error left that `kitec fix` cannot fix"), "{}", err);
+    assert!(err.contains("E0200") && !err.contains("E0100") && !err.contains("E0114"), "{}", err);
+    let fixed = std::fs::read_to_string(dir.join("t.kite")).expect("read");
+    assert!(fixed.contains("\n    B\n") && fixed.contains("var a = 1"), "{}", fixed);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// A comma between two members on one line is fixed too: it becomes the line
 /// break it stands for. It had no fix — removing it alone gives `x: int y:
 /// int`, another error — so `kitec fix` left it, and on a one-line struct
