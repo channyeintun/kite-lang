@@ -317,6 +317,14 @@ Maps iterate in **insertion order**. Go randomises map iteration to prevent
 reliance on order; Kite instead guarantees an order, which is cheaper to reason
 about and removes an entire class of nondeterministic test failure.
 
+How fast a map is depends on the target today, and nothing else about it does.
+On the bytecode VM and natively a lookup, an insert and a removal cost about
+the same whatever the map's size: the entries are kept in insertion order with
+a hash index beside them, and the index is never observable. On `wasm32-gc` a
+map is still its entries alone — a lookup scans them and a write copies them —
+so there a loop over a map of `n` entries costs `n²`
+([roadmap, Phase 4](docs/06-roadmap.md)).
+
 **There is no fixed-length array.** A `[N]T` was listed here for a long time
 and never existed in the compiler, and the resolution was to strike it rather
 than build it — because this document already said twice that it should not be

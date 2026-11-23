@@ -749,6 +749,18 @@ thing the write barrier covers. `tests/differential.rs` runs
 `slices-are-values` and `slices-grow-in-place-natively` on all three backends,
 and natively again with a nursery of one page.
 
+A map is the same kind of object: room to spare, and the same owned flag
+for every map local a function writes into or removes from, passed to
+`kite_rt_map_set` and `kite_rt_map_remove`. Its first payload slot is the
+count of entries (which `len` reads inline), then the entries in insertion
+order, and — past eight of room — a hash index after them: bucket heads, and
+per slot the key's hash and the next slot in its bucket. The index holds hashes
+of content and slot numbers, never an address, so evacuation copies it with the
+entries and it is still right. A removal from an indexed map leaves a zeroed
+hole that every reader skips, until the holes outnumber the entries and the map
+closes up. The VM keeps the same index beside a vector of entries
+(`kite-vm`'s `map` module); the Wasm backend's maps have none yet.
+
 A variadic construction stages its operands in a fixed window of 4,096 words,
 `KITE_RT_STAGE`, before the runtime call that allocates. A slice or map
 literal longer than that is built a window at a time: the slice is allocated
