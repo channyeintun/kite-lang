@@ -547,3 +547,15 @@ fn absurd_nesting_is_refused_not_expanded() {
     let out = format(&nested(60)).expect("60 levels is within the ceiling");
     assert!(out.len() < 60 * 4 * 70 * 2, "{}", out.len());
 }
+
+/// A file with CRLF line endings comes out with LF ones throughout, the lines
+/// of a block string included. Those were copied as written, so the output
+/// held both kinds; a block string's line break is a line break however it was
+/// written (§2.4), so converting it changes nothing the program says.
+#[test]
+fn crlf_becomes_lf_inside_block_strings_too() {
+    let src = "fn main() {\r\n    let s = \"\"\"\r\n        a \\(1)\r\n        b\r\n        \"\"\"\r\n    io.print(s)\r\n}\r\n";
+    let out = idempotent(src);
+    assert!(!out.contains('\r'), "{:?}", out);
+    assert_eq!(out, src.replace("\r\n", "\n"));
+}

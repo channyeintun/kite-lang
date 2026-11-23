@@ -354,7 +354,7 @@ method lookup on that value: `let io = …` turns `io.print("hi")` into `E0205`.
 |---|---|
 | `io.print(v)` | `v` is `int`, `float`, `bool`, `str`, or any `Display`. Anything else is `E0200`. |
 | `io.error(v)` | Same, to the error stream. |
-| `io.read_line()` | `-> str` — one line, newline removed. **At end of input it returns `""`, and goes on returning it.** |
+| `io.read_line()` | `-> str` — one line, newline removed; bytes that are not UTF-8 read as U+FFFD. **At end of input it returns `""`, and goes on returning it.** |
 
 ### The whole command-line surface
 

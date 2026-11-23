@@ -511,12 +511,29 @@ impl<'a> Lexer<'a> {
             self.pos += 3;
             loop {
                 if self.pos >= self.limit {
-                    self.unterminated_string(start);
+                    self.unterminated_block_string(start);
                     return TokenKind::Str;
                 }
                 if self.at_block_delim() {
                     self.pos += 3;
                     return TokenKind::Str;
+                }
+                // A hole is skipped as a `"` string's is, so a string inside
+                // it — a block string included — is read as one: its `"""`
+                // is its own, not the end of this one (§2.4: a hole is an
+                // ordinary expression). `\\` is stepped over whole, so the
+                // `(` after an escaped backslash opens nothing; any other
+                // escape is left as it was read before holes were.
+                if self.bytes[self.pos] == b'\\' && self.pos + 1 < self.limit {
+                    match self.bytes[self.pos + 1] {
+                        b'(' => {
+                            self.pos += 1;
+                            self.skip_interpolation();
+                            continue;
+                        }
+                        b'\\' => self.pos += 1,
+                        _ => {}
+                    }
                 }
                 self.pos += 1;
             }
@@ -607,6 +624,22 @@ impl<'a> Lexer<'a> {
             Diagnostic::error(codes::E0001, "unterminated string literal")
                 .with_primary(span, "this string is never closed")
                 .with_note("a `\"` string may not span lines; use a `\"\"\"` block string"),
+        );
+    }
+
+    /// A `"""` with no `"""` after it. It has read everything to the end
+    /// of the file as its text, so this is the one error the file has: the
+    /// parser does not go on to report the braces it swallowed as unclosed.
+    fn unterminated_block_string(&mut self, start: usize) {
+        let end = (start + 3).min(self.limit);
+        let span = Span::new(self.file, start as u32, end as u32);
+        self.diags.push(
+            Diagnostic::error(codes::E0001, "unterminated block string")
+                .with_primary(span, "this block string is never closed")
+                .with_note(
+                    "a block string ends at the next `\"\"\"`, so everything after this one \
+                     was read as its text",
+                ),
         );
     }
 

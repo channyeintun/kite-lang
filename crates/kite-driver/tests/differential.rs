@@ -1265,6 +1265,22 @@ fn main() {
          \x20 io.print(ptr.same(a, step(a, true)))\n}\n",
     ),
     (
+        // A `remove` that finds nothing changes nothing (§3.2), identity
+        // included: the VM once made the entries unique before looking, so a
+        // miss gave the variable a fresh copy that `ptr.same` could see.
+        "map-remove-miss-keeps-identity",
+        "struct B {\n  var m: {str: int}\n}\n\
+         fn drop_it(var m: {str: int}, k: str) -> {str: int} {\n  m.remove(k)\n  return m\n}\n\
+         fn main() {\n\
+         \x20 let m = {\"a\": 1}\n  var p = m\n  p.remove(\"absent\")\n\
+         \x20 io.print(ptr.same(m, p))\n\
+         \x20 io.print(ptr.same(m, drop_it(m, \"absent\")))\n\
+         \x20 var b = B{ m: m }\n  b.m.remove(\"absent\")\n  io.print(ptr.same(m, b.m))\n\
+         \x20 let e: {str: int} = {}\n  var q = e\n  q.remove(\"x\")\n  io.print(ptr.same(e, q))\n\
+         \x20 var ms = [m]\n  ms[0].remove(\"absent\")\n  io.print(ptr.same(m, ms[0]))\n\
+         \x20 p.remove(\"a\")\n  io.print(ptr.same(m, p))\n  io.print(m.len())\n  io.print(p.len())\n}\n",
+    ),
+    (
         "tuple-bindings",
         "fn pair() -> (int, str) {\n  return (7, \"seven\")\n}\n\
          fn main() {\n  let (n, name) = pair()\n  io.print(n)\n  io.print(name)\n\
@@ -4888,6 +4904,118 @@ fn a_race_of_no_tasks_names_the_mistake() {
 /// lowered to run once runs once on all three. These pin what the language
 /// says the program prints.
 const EXPECTED: &[(&str, &str, &str)] = &[
+    (
+        // §2.4: the closing line's indentation comes off each line, as much
+        // of it as the line starts with. A tab where the delimiter has spaces
+        // is not that indentation and stays — with a hole and without.
+        "a-dedent-takes-off-the-closing-lines-indentation-only",
+        "fn main() {\n  let n = 1\n\
+         \x20 let a = \"\"\"\n\tx\n      y\n  z\n        w\n        \"\"\"\n\
+         \x20 let b = \"\"\"\n\tx\\(n)\n      y\n        \"\"\"\n\
+         \x20 io.print(\"[\\(a)]\")\n  io.print(\"[\\(b)]\")\n}\n",
+        "[\tx\ny\nz\nw]\n[\tx1\ny]\n",
+    ),
+    (
+        // A hole is an ordinary expression (§2.4), and that includes a block
+        // string: the lexer ended the outer one at the inner one's `"""`.
+        "a-block-string-in-a-hole-of-a-block-string",
+        "fn wrap(s: str) -> str {\n  return \"(\\(s))\"\n}\n\
+         fn main() {\n  io.print(\"\"\"p \\(\"\"\"in\"\"\") q\"\"\")\n\
+         \x20 io.print(\"\"\"p \\(wrap(\"\"\"a\"b\"\"\")) q\"\"\")\n\
+         \x20 io.print(\"\"\"x\\\\(y\"\"\")\n  let n = 3\n\
+         \x20 let block = \"\"\"\n    first \\(wrap(\"\"\"(\\(n))\"\"\"))\n    second\n    \"\"\"\n\
+         \x20 io.print(block)\n}\n",
+        "p in q\np (a\"b) q\nx\\(y\nfirst ((3))\nsecond\n",
+    ),
+    (
+        // Writing to a key that is already there changes the value and keeps
+        // the stored key. `-0.0 == 0.0`, so the two keys are one, and Wasm
+        // alone wrote the new key over the old: iterating the map printed
+        // `-0.0` there and `0.0` on the VM and natively.
+        "an-equal-key-keeps-the-stored-one",
+        "fn z() -> float {\n  return -0.0\n}\n\
+         fn main() {\n  var m = {0.0: \"first\"}\n  m[-0.0] = \"second\"\n\
+         \x20 m[1.5] = \"third\"\n  m[1.5] = \"fourth\"\n\
+         \x20 for (k, v) in m {\n    io.print(\"\\(k) -> \\(v)\")\n  }\n  io.print(m.len())\n\
+         \x20 var n = {-0.0: 1}\n  n[0.0] = 2\n\
+         \x20 for (k, v) in n {\n    io.print(\"\\(k) -> \\(v)\")\n  }\n\
+         \x20 let l = {0.0: \"a\", z(): \"b\"}\n\
+         \x20 for (k, v) in l {\n    io.print(\"\\(k) -> \\(v)\")\n  }\n}\n",
+        "0.0 -> second\n1.5 -> fourth\n2\n-0.0 -> 2\n0.0 -> b\n",
+    ),
+    (
+        // §4.2 allows an operator applied to constants, and `as` is one
+        // (§5.1): a constant's cast folds by the rule the same cast in a body
+        // runs by, truncating and saturating.
+        "a-cast-in-a-constant-folds-as-it-runs",
+        "let A = 3 as float\nlet B = -7.9 as int\nlet C = (A * 2.0) as int + 1\n\
+         let D = \"\\(2 as float)\"\nlet E = 1e300 as int\n\
+         fn main() {\n  io.print(A)\n  io.print(B)\n  io.print(C)\n  io.print(D)\n  io.print(E)\n\
+         \x20 io.print(-7.9 as int)\n  io.print(1e300 as int)\n}\n",
+        "3.0\n-7\n7\n2.0\n9223372036854775807\n-7\n9223372036854775807\n",
+    ),
+    (
+        // §5.4: a window clamps, so `..=max_int` is to the end. Its `+ 1`
+        // trapped in a debug build and wrapped to an empty window in a
+        // release one; it saturates now, which is the same in both, and an
+        // end bound for reuse still runs after the sequence and the start.
+        "an-inclusive-window-to-max-int-clamps",
+        "fn big() -> int {\n  io.print(\"end\")\n  return 9223372036854775807\n}\n\
+         fn seq() -> [int] {\n  io.print(\"seq\")\n  return [1, 2, 3, 4]\n}\n\
+         fn from() -> int {\n  io.print(\"start\")\n  return 1\n}\n\
+         fn main() {\n  let xs = [1, 2, 3, 4]\n  let end = 9223372036854775807\n\
+         \x20 io.print(xs[1..=end].len())\n  io.print(\"abcd\"[1..=end])\n\
+         \x20 io.print(xs[1..=9223372036854775807].len())\n\
+         \x20 io.print(seq()[from()..=big()].len())\n\
+         \x20 io.print(xs[..=end].len())\n  io.print(xs[1..=2].len())\n  io.print(\"abcd\"[0..=1])\n\
+         \x20 let two = 2\n  io.print(xs[1..=two - 1].len())\n}\n",
+        "3\nbcd\n3\nseq\nstart\nend\n3\n4\n2\nab\n1\n",
+    ),
+    (
+        // §5.3: a struct literal's fields and a variant's named payload run in
+        // the order written, and `..base` runs first and once. They ran in
+        // declaration order, and the base ran again for every field it
+        // supplied — in a generic function, a closure and across `await` too.
+        "constructor-fields-run-in-the-order-written",
+        "struct Box<T> {\n  a: T\n  b: T\n  label: str\n}\n\
+         enum Shape {\n  Rect(w: int, h: int)\n  Dot\n}\n\
+         fn say(s: str) -> str {\n  io.print(s)\n  return s\n}\n\
+         fn n(x: int) -> int {\n  io.print(\"n \\(x)\")\n  return x\n}\n\
+         fn base<T>(v: T) -> Box<T> {\n  io.print(\"base\")\n  return Box{ a: v, b: v, label: \"base\" }\n}\n\
+         fn rebox<T>(v: T, w: T) -> Box<T> {\n  return Box{ ..base(v), b: w }\n}\n\
+         async fn later(x: int) -> int {\n  io.print(\"later \\(x)\")\n  return x\n}\n\
+         async fn main() {\n\
+         \x20 let r = rebox(1, 2)\n  io.print(\"\\(r.a) \\(r.b) \\(r.label)\")\n\
+         \x20 let f = |k: int| Box{ label: say(\"closure\"), b: n(k), a: n(k + 1) }\n\
+         \x20 let g = f(5)\n  io.print(\"\\(g.a) \\(g.b)\")\n\
+         \x20 let t = later(9)\n  let u = later(8)\n\
+         \x20 let h = Box{ b: await t, a: await u, label: \"x\" }\n  io.print(\"\\(h.a) \\(h.b)\")\n\
+         \x20 let all = Box{ ..base(\"q\"), label: say(\"l\"), b: say(\"b\"), a: say(\"a\") }\n\
+         \x20 io.print(all.label)\n\
+         \x20 let s = Rect(h: n(1), w: n(2))\n\
+         \x20 match s {\n    Rect(w, h) => io.print(\"\\(w)x\\(h)\"),\n    Dot => io.print(\"dot\"),\n  }\n}\n",
+        "base\n1 2 base\nclosure\nn 5\nn 6\n6 5\nlater 9\nlater 8\n8 9\nbase\nl\nb\na\nl\nn 1\nn 2\n2x1\n",
+    ),
+    (
+        // §2.4, in a file written with CRLF line endings: a line break in the
+        // source is a line break however it was written, so no line of a
+        // block string ends in `\r` — with a hole, without one, in a
+        // constant, and with the closing delimiter at the end of a line of
+        // text. Spaces after an opening `"""` go with its line break (`t`):
+        // they once kept it, and the string began with a newline.
+        "block-strings-in-a-crlf-file",
+        "let K = \"\"\"\r\n  k1\r\n  k2\r\n  \"\"\"\r\n\
+         fn codes(s: str) -> str {\r\n  var out = \"\"\r\n  for i in 0..s.len() {\r\n\
+         \x20   out = out + \" \\(s.code_at(i))\"\r\n  }\r\n  return out\r\n}\r\n\
+         fn main() {\r\n  let n = 7\r\n\
+         \x20 let a = \"\"\"\r\n    a\r\n    b\r\n    \"\"\"\r\n\
+         \x20 let h = \"\"\"\r\n    n=\\(n)\r\n    m\r\n    \"\"\"\r\n\
+         \x20 let t = \"\"\" \r\n    sp\r\n    \"\"\"\r\n\
+         \x20 let u = \"\"\"\r\n    x\r\n    y\"\"\"\r\n\
+         \x20 io.print(codes(a))\r\n  io.print(codes(h))\r\n  io.print(codes(t))\r\n\
+         \x20 io.print(codes(u))\r\n  io.print(codes(K))\r\n}\r\n",
+        " 97 10 98\n 110 61 55 10 109\n 115 112\n 32 32 32 32 120 10 32 32 32 32 121\n 107 49 10 107 50\n",
+    ),
     (
         "defer-runs-per-registration",
         "fn note(s: str) {\n  io.print(s)\n}\n\

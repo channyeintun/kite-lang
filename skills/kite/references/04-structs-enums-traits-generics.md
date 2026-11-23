@@ -16,7 +16,10 @@ Everything here was checked against `target/release/kitec`. Where SPECIFICATION.
   *type names itself* at the front of the call: `User.decode(doc)`,
   `NotFound.is(err)`, `let s: Stack<int> = Stack.empty()`.
 - **`..base` in a struct literal comes FIRST**, not last: `P{ ..old, x: 1 }`.
-  `P{ x: 1, ..old }` is a parse error. Opposite of Rust.
+  `P{ x: 1, ..old }` is a parse error. Opposite of Rust. The base runs first and once,
+  then the fields in the order written (as do a variant's named payload fields).
+  Compilers through 0.1.9 ran fields in declaration order and the base once per
+  field it supplied.
 - **Struct fields and enum variants are newline-separated.** A comma between them
   is `E0100`. Commas are for *literals* and *patterns*, not declarations.
 - **A `match` arm block of more than one statement produces `()`.** Kite has no

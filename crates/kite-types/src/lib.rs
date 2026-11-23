@@ -8199,47 +8199,103 @@ impl<'a> Checker<'a> {
         self.expect_ty(start_e.ty, TyId::INT, start_e.span, None);
         let end_e = self.expr(end, Some(TyId::INT));
         self.expect_ty(end_e.ty, TyId::INT, end_e.span, None);
+        let (mut seq, mut start_e, mut end_e) = (seq, start_e, end_e);
 
         // `a..=b` is `a..b + 1`, written out here so that no backend has to
-        // know there are two kinds of range. The `+` is the one the user would
-        // have written: it traps on overflow in a debug build and wraps in a
-        // release one, exactly as §3.1 says every other `+` does. A `b` of
-        // `max_int` is the only input that can tell, and it is not a window
-        // anyone asks for.
-        let end_e = if inclusive {
-            let one = hir::Expr { kind: ExprKind::Int(1), ty: TyId::INT, span: range_span };
-            let op = if self.release { hir::BinOp::AddIntWrap } else { hir::BinOp::AddInt };
-            hir::Expr {
-                kind: ExprKind::Binary { op, lhs: Box::new(end_e), rhs: Box::new(one) },
-                ty: TyId::INT,
-                span: range_span,
-            }
-        } else {
-            end_e
-        };
-
-        if seq.ty == TyId::STR {
-            return hir::Expr {
-                kind: ExprKind::StrOp {
-                    op: kite_hir::StrKind::Slice,
-                    args: vec![seq, start_e, end_e],
-                },
-                ty: TyId::STR,
-                span,
+        // know there are two kinds of range — but a `+ 1` that saturates. A
+        // window clamps to the sequence (§5.4), so `xs[1..=max_int]` is the
+        // rest of `xs`; the `+` the user would have written trapped there in
+        // a debug build and wrapped to an empty window in a release one.
+        //
+        // The end is read twice, to compare and to add, so an end that is not
+        // a local or a literal is bound to a hidden local first — and then so
+        // are the sequence and the start before it, which were written first
+        // and so run first. The common `xs[a..=b]` binds nothing.
+        let mut binds: Vec<(u32, hir::Expr)> = Vec::new();
+        if inclusive {
+            let one = |at: Span| hir::Expr { kind: ExprKind::Int(1), ty: TyId::INT, span: at };
+            end_e = match end_e.kind {
+                ExprKind::Int(b) => hir::Expr { kind: ExprKind::Int(b.saturating_add(1)), ..end_e },
+                _ => {
+                    if !matches!(end_e.kind, ExprKind::Local(_)) {
+                        seq = self.bind_for_reuse(seq, &mut binds);
+                        start_e = self.bind_for_reuse(start_e, &mut binds);
+                        end_e = self.bind_for_reuse(end_e, &mut binds);
+                    }
+                    let max = hir::Expr { kind: ExprKind::Int(i64::MAX), ty: TyId::INT, span: range_span };
+                    let at_max = hir::Expr {
+                        kind: ExprKind::Binary {
+                            op: hir::BinOp::EqInt,
+                            lhs: Box::new(end_e.clone()),
+                            rhs: Box::new(max),
+                        },
+                        ty: TyId::BOOL,
+                        span: range_span,
+                    };
+                    let next = hir::Expr {
+                        kind: ExprKind::Binary {
+                            op: hir::BinOp::AddInt,
+                            lhs: Box::new(end_e.clone()),
+                            rhs: Box::new(one(range_span)),
+                        },
+                        ty: TyId::INT,
+                        span: range_span,
+                    };
+                    hir::Expr {
+                        kind: ExprKind::If {
+                            cond: Box::new(at_max),
+                            then: Box::new(end_e),
+                            else_: Box::new(next),
+                        },
+                        ty: TyId::INT,
+                        span: range_span,
+                    }
+                }
             };
         }
 
-        if self.types.slice_elem(seq.ty).is_some() {
+        let window = if seq.ty == TyId::STR {
+            Some(hir::Expr {
+                kind: ExprKind::StrOp {
+                    op: kite_hir::StrKind::Slice,
+                    args: vec![seq.clone(), start_e, end_e],
+                },
+                ty: TyId::STR,
+                span,
+            })
+        } else if self.types.slice_elem(seq.ty).is_some() {
             let ty = seq.ty;
-            return hir::Expr {
+            Some(hir::Expr {
                 kind: ExprKind::SliceRange {
-                    base: Box::new(seq),
+                    base: Box::new(seq.clone()),
                     start: Box::new(start_e),
                     end: Box::new(end_e),
                 },
                 ty,
                 span,
-            };
+            })
+        } else {
+            None
+        };
+        if let Some(window) = window {
+            // Innermost last: the first bound is the outermost `match`, so it
+            // is evaluated first.
+            return binds.into_iter().rev().fold(window, |body, (id, value)| {
+                let ty = body.ty;
+                hir::Expr {
+                    kind: ExprKind::Match {
+                        scrutinee: Box::new(value),
+                        arms: vec![hir::MatchArm {
+                            pattern: hir::Pattern::Binding { local: hir::LocalId(id), unwrap: false },
+                            guard: None,
+                            body,
+                            span,
+                        }],
+                    },
+                    ty,
+                    span,
+                }
+            });
         }
 
         let found = self.types.with_article(seq.ty);
@@ -8702,6 +8758,29 @@ impl<'a> Checker<'a> {
         hir::Stmt::Block(hir::Block { stmts })
     }
 
+    /// An operand that is about to be read more than once, bound to a hidden
+    /// local in `binds` (the caller wraps the expression in a binding `match`
+    /// for each, first bound outermost, so they run in the order bound). A
+    /// literal or a local is left where it is: reading one twice is free.
+    fn bind_for_reuse(&mut self, e: hir::Expr, binds: &mut Vec<(u32, hir::Expr)>) -> hir::Expr {
+        if matches!(
+            e.kind,
+            ExprKind::Int(_)
+                | ExprKind::Float(_)
+                | ExprKind::Str(_)
+                | ExprKind::Bool(_)
+                | ExprKind::Nil
+                | ExprKind::Local(_)
+                | ExprKind::Error
+        ) {
+            return e;
+        }
+        let (ty, at) = (e.ty, e.span);
+        let id = self.synthetic_local("window", ty, at);
+        binds.push((id, e));
+        hir::Expr { kind: ExprKind::Local(hir::LocalId(id)), ty, span: at }
+    }
+
     /// Bind a read to a new hidden local and answer the local.
     fn copy_of(&mut self, read: hir::Expr, stmts: &mut Vec<hir::Stmt>, span: Span) -> u32 {
         let id = self.synthetic_local("held", read.ty, span);
@@ -9103,6 +9182,9 @@ impl<'a> Checker<'a> {
         };
 
         let mut slots: Vec<Option<hir::Expr>> = (0..field_tys.len()).map(|_| None).collect();
+        // The order the payload was written in, which is the order it runs
+        // in: `V(b: f(), a: g())` calls `f` first, as a call's arguments do.
+        let mut order: Vec<u32> = Vec::with_capacity(field_tys.len());
         for (i, a) in args.iter().enumerate() {
             let index = match arg_names.get(i).and_then(|n| n.as_ref()) {
                 None => i,
@@ -9128,6 +9210,9 @@ impl<'a> Checker<'a> {
             };
             let want = field_tys[index];
             let e = self.expr(a, Some(want));
+            if slots[index].is_none() {
+                order.push(index as u32);
+            }
             slots[index] = Some(self.accept(e, want, Some(decl_span)));
         }
 
@@ -9150,7 +9235,7 @@ impl<'a> Checker<'a> {
         let _ = path_span;
 
         hir::Expr {
-            kind: ExprKind::EnumNew { enum_id: eid, variant: vi, fields },
+            kind: ExprKind::EnumNew { enum_id: eid, variant: vi, fields, order: in_written_order(order) },
             ty: enum_ty,
             span,
         }
@@ -11002,8 +11087,10 @@ impl<'a> Checker<'a> {
             }
         }
 
-        // Resolve each written field to its declared position.
+        // Resolve each written field to its declared position, and keep the
+        // order they were written in: that is the order they run in (§5.3).
         let mut given: Vec<Option<hir::Expr>> = (0..field_count).map(|_| None).collect();
+        let mut order: Vec<u32> = Vec::with_capacity(field_count);
         for init in &lit.fields {
             let found = self
                 .types
@@ -11048,8 +11135,18 @@ impl<'a> Checker<'a> {
             // mismatch — its registers are untyped — and Wasm rejected it.
             let value = self.coerce(value, Some(ty));
             self.expect_ty(value.ty, ty, value.span, Some(decl_span));
+            if given[index].is_none() {
+                order.push(index as u32);
+            }
             given[index] = Some(value);
         }
+
+        // `..base` is written first, so it runs first, and once: it is bound
+        // to a hidden local, and every gap reads its field from that. Each
+        // gap used to evaluate the base again, so `P{ ..make(), x: 1 }`
+        // called `make` once per field it did not name, in declaration order
+        // among the written ones.
+        let holder = base.as_ref().map(|b| (self.synthetic_local("base", struct_ty, b.span), b.span));
 
         // Fill the gaps from `..base`, or report them.
         let mut fields = Vec::with_capacity(field_count);
@@ -11057,19 +11154,16 @@ impl<'a> Checker<'a> {
         for (i, slot) in given.into_iter().enumerate() {
             match slot {
                 Some(e) => fields.push(e),
-                None if base.is_some() => {
+                None if holder.is_some() => {
+                    let (id, at) = holder.expect("a base");
                     let ty = self.types.struct_def(sid).fields[i].ty;
-                    // Each gap re-reads the base. Evaluating it once and
-                    // projecting is a MIR concern, not a semantic one.
-                    let base_expr = self.clone_base_read(lit, struct_ty);
+                    let read = hir::Expr { kind: ExprKind::Local(hir::LocalId(id)), ty: struct_ty, span: at };
                     fields.push(hir::Expr {
-                        kind: ExprKind::FieldGet {
-                            base: Box::new(base_expr),
-                            index: i as u32,
-                        },
+                        kind: ExprKind::FieldGet { base: Box::new(read), index: i as u32 },
                         ty,
                         span: lit.span,
                     });
+                    order.push(i as u32);
                 }
                 None => missing.push(self.types.struct_def(sid).fields[i].name.clone()),
             }
@@ -11100,18 +11194,29 @@ impl<'a> Checker<'a> {
             return self.lit(ExprKind::Error, TyId::ERROR, lit.span);
         }
 
-        hir::Expr {
-            kind: ExprKind::StructNew { struct_id: sid, fields },
+        let order = in_written_order(order);
+        let built = hir::Expr {
+            kind: ExprKind::StructNew { struct_id: sid, fields, order },
             ty: struct_ty,
             span: lit.span,
-        }
-    }
-
-    /// Re-read the `..base` expression for a gap in a functional update.
-    fn clone_base_read(&mut self, lit: &ast::StructLit, struct_ty: TyId) -> hir::Expr {
-        match &lit.base {
-            Some(b) => self.expr(b, Some(struct_ty)),
-            None => self.lit(ExprKind::Error, TyId::ERROR, lit.span),
+        };
+        // The base is bound the way a `match` binds its subject: evaluated
+        // once, put in the local, and then the literal is built.
+        match (base, holder) {
+            (Some(b), Some((id, _))) => hir::Expr {
+                kind: ExprKind::Match {
+                    scrutinee: Box::new(b),
+                    arms: vec![hir::MatchArm {
+                        pattern: hir::Pattern::Binding { local: hir::LocalId(id), unwrap: false },
+                        guard: None,
+                        body: built,
+                        span: lit.span,
+                    }],
+                },
+                ty: struct_ty,
+                span: lit.span,
+            },
+            _ => built,
         }
     }
 
@@ -13966,6 +14071,17 @@ fn expr_defers(e: &ast::Expr) -> bool {
     found
 }
 
+/// A constructor's evaluation order as `StructNew` and `EnumNew` carry it:
+/// empty when the fields were written in declaration order, so the common
+/// case is the same HIR it always was.
+fn in_written_order(order: Vec<u32>) -> Vec<u32> {
+    if order.iter().enumerate().all(|(i, &at)| i as u32 == at) {
+        Vec::new()
+    } else {
+        order
+    }
+}
+
 /// A block string's body, with the indentation the closing delimiter sets
 /// removed from every line.
 ///
@@ -13975,7 +14091,16 @@ fn expr_defers(e: &ast::Expr) -> bool {
 /// opening delimiter and the one before the closing delimiter belong to the
 /// syntax rather than to the text, so both go.
 pub(crate) fn dedent_block(body: &str) -> String {
-    let body = body.strip_prefix("\r\n").or_else(|| body.strip_prefix('\n')).unwrap_or(body);
+    // A line break in the source is a line break, written LF or CRLF, so a
+    // block string's text never holds the `\r` of a Windows line ending — the
+    // parser's `dedent_parts` makes a string with holes in it agree.
+    let body = body.replace("\r\n", "\n");
+    // Spaces after the opening delimiter go with its line break: they cannot
+    // be seen, and keeping them kept the break as well.
+    let body = match body.find('\n') {
+        Some(at) if body[..at].chars().all(|c| c == ' ' || c == '\t') => &body[at + 1..],
+        _ => body.as_str(),
+    };
     // Everything after the last line break is the closing delimiter's own
     // indentation.
     let (text, indent) = match body.rfind('\n') {
@@ -13987,8 +14112,10 @@ pub(crate) fn dedent_block(body: &str) -> String {
         // indentation to take off.
         return body.to_string();
     }
+    // As much of that indentation as each line starts with comes off, and
+    // nothing else: the parser's `dedent_parts` does the same.
     text.split('\n')
-        .map(|line| line.strip_prefix(indent).unwrap_or(line.trim_start_matches([' ', '\t'])))
+        .map(|line| &line[line.bytes().zip(indent.bytes()).take_while(|(a, b)| a == b).count()..])
         .collect::<Vec<_>>()
         .join("\n")
 }
@@ -14331,18 +14458,37 @@ pub(crate) fn decode_escapes_into(inner: &str, span: Span, diags: &mut DiagBag) 
             Some('\\') => out.push('\\'),
             Some('"') => out.push('"'),
             Some('\'') => out.push('\''),
+            // `\u{` hex digits `}`, as the grammar has it. The loop used to
+            // stop at the end of the string as if it were the `}`, so
+            // `"\u{41"` was `A`; and `from_str_radix` takes a leading `+`,
+            // so `\u{+41}` was too. Neither is the escape, so both are E0003.
             Some('u') => {
                 let mut hex = String::new();
-                if chars.next() == Some('{') {
+                let mut closed = false;
+                let opened = chars.next() == Some('{');
+                if opened {
                     for c in chars.by_ref() {
                         if c == '}' {
+                            closed = true;
                             break;
                         }
                         hex.push(c);
                     }
                 }
-                match u32::from_str_radix(&hex, 16).ok().and_then(char::from_u32) {
+                let digits = !hex.is_empty() && hex.chars().all(|c| c.is_ascii_hexdigit());
+                let value = if closed && digits { u32::from_str_radix(&hex, 16).ok() } else { None };
+                match value.and_then(char::from_u32) {
                     Some(c) => out.push(c),
+                    None if !opened => diags.push(
+                        Diagnostic::error(codes::E0003, "invalid unicode escape")
+                            .with_primary(span, "this `\\u` is not followed by `{`")
+                            .with_note("a unicode escape is hex digits between braces: `\\u{41}`"),
+                    ),
+                    None if !closed => diags.push(
+                        Diagnostic::error(codes::E0003, "unclosed unicode escape")
+                            .with_primary(span, "this `\\u{` is never closed")
+                            .with_note("a unicode escape is hex digits between braces: `\\u{41}`"),
+                    ),
                     None => diags.push(
                         Diagnostic::error(codes::E0003, "invalid unicode escape")
                             .with_primary(span, format!("`\\u{{{}}}` is not a character", hex)),

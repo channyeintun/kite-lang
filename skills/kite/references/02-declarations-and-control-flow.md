@@ -133,7 +133,7 @@ pub let MAX_BODY: int = 1 << 20
 ```
 
 The right-hand side has to be one the compiler can work out: a literal, an operator applied
-to constants, an interpolation whose holes are all constants, or another constant —
+to constants (`as` included: `let HALF = 1 as float / 2.0`), an interpolation whose holes are all constants, or another constant —
 including an imported one, `limits.MAX_BODY`. A **call is not** (`E0118`), even one that
 would always return the same answer. The types are `bool`, `int`, `float` and `str`; a
 slice or map constant would be an allocation, so it stays an ordinary `let` inside the

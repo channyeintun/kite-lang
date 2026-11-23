@@ -1433,12 +1433,16 @@ impl<'a> Vm<'a> {
                             found: self.regs[slot].type_name(),
                         });
                     };
-                    let entries = Rc::make_mut(entries);
                     // Removing what is not there is not a mistake — a caller
                     // dropping state for a row that never had any is the
-                    // ordinary case, not a special one.
+                    // ordinary case, not a special one. A miss changes
+                    // nothing, so it is looked for before the entries are
+                    // made unique: copying a shared map on a miss would give
+                    // the variable a fresh identity, and `ptr.same` would see
+                    // a change that native and Wasm (which return the map
+                    // itself on a miss) do not.
                     if let Some(i) = entries.iter().position(|(ek, _)| *ek == k) {
-                        entries.remove(i);
+                        Rc::make_mut(entries).remove(i);
                     }
                 }
 
@@ -2085,6 +2089,10 @@ impl<'a> Vm<'a> {
                 Ok(Value::Unit)
             }
 
+            // There is no JavaScript here to hand the closure to, and running
+            // it instead would be running code the program meant for later.
+            Native::JsFunc => Err(Trap::NoHostFunction { name: "js.func".to_string() }),
+
             // A task's resume closure, handed over by the state machine the
             // compiler wrote. The scheduler owns it from here.
             Native::TaskSpawn => {
@@ -2174,11 +2182,17 @@ impl<'a> Vm<'a> {
             Native::IoReadLine => {
                 #[cfg(not(target_arch = "wasm32"))]
                 {
-                    let mut line = String::new();
-                    let read = std::io::stdin().read_line(&mut line).unwrap_or(0);
+                    use std::io::BufRead;
+                    // Bytes, then a lossy decode: a line that is not UTF-8
+                    // reads with U+FFFD where the bad bytes were, because
+                    // reading it as text failed into the end-of-input `""`
+                    // and a reading loop stopped at it.
+                    let mut line = Vec::new();
+                    let read = std::io::stdin().lock().read_until(b'\n', &mut line).unwrap_or(0);
                     if read == 0 {
                         return Ok(Value::Str(Rc::from("")));
                     }
+                    let line = String::from_utf8_lossy(&line);
                     let trimmed = line.trim_end_matches('\n').trim_end_matches('\r');
                     Ok(Value::Str(Rc::from(trimmed)))
                 }

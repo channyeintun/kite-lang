@@ -193,7 +193,10 @@ fn set(ml: MapLayout, keys: KeyEquality<'_>) -> Function {
     f.instruction(&Instruction::End);
 
     // Both arrays copied into ones as long as the old, or one longer when the
-    // key was not there, and the entry written at `pos`.
+    // key was not there, and the entry written at `pos` — the key only when
+    // it is new. A key that is already there keeps the one stored, as the VM
+    // and native do: `-0.0` equals `0.0`, and writing it over the stored key
+    // changed what iterating the map printed on this backend alone.
     for (field_index, array, fresh, written) in [
         (0, ml.keys, new_keys, key),
         (1, ml.values, new_values, value),
@@ -214,10 +217,19 @@ fn set(ml: MapLayout, keys: KeyEquality<'_>) -> Function {
             array_type_index_dst: array,
             array_type_index_src: array,
         });
+        if field_index == 0 {
+            f.instruction(&Instruction::LocalGet(pos));
+            f.instruction(&Instruction::LocalGet(len));
+            f.instruction(&Instruction::I32GeU);
+            f.instruction(&Instruction::If(BlockType::Empty));
+        }
         f.instruction(&Instruction::LocalGet(fresh));
         f.instruction(&Instruction::LocalGet(pos));
         f.instruction(&Instruction::LocalGet(written));
         f.instruction(&Instruction::ArraySet(array));
+        if field_index == 0 {
+            f.instruction(&Instruction::End);
+        }
     }
     f.instruction(&Instruction::LocalGet(new_keys));
     f.instruction(&Instruction::LocalGet(new_values));

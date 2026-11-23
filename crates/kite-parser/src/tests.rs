@@ -597,6 +597,18 @@ fn a_hole_may_contain_a_string_with_parens() {
     assert_eq!(expr_sexp(r#""\(f(")("))""#), r#"(str (call f ")("))"#);
 }
 
+/// A hole is an ordinary expression (§2.4), so a block string may hold one
+/// whose own `"""` — or lone `"` — would otherwise end it, and a block string
+/// inside a hole of a block string lexes. It was "unterminated
+/// interpolation".
+#[test]
+fn a_hole_in_a_block_string_may_hold_a_block_string() {
+    assert_eq!(expr_sexp(r#""""p \("""in""") q""""#), r#"(str "p " """in""" " q")"#);
+    assert_eq!(expr_sexp(r#""""p \(f("""a"b(""")) q""""#), r#"(str "p " (call f """a"b(""") " q")"#);
+    // An escaped backslash before a paren opens nothing, in a block too.
+    assert_eq!(expr_sexp(r#""""x\\(y""""#), r#""""x\\(y""""#);
+}
+
 /// Section 2.1: identifiers are compared after NFC normalisation, so two
 /// spellings a reader cannot tell apart are one name. `café` here is written
 /// once with U+00E9 and once with `e` followed by the combining acute U+0301.
@@ -812,6 +824,17 @@ fn a_block_string_with_holes_is_dedented() {
     // indentation to take off, and only the opening line break goes.
     let src = "\"\"\"\n    a \\(n)\n    b\"\"\"";
     assert_eq!(expr_sexp(src), r#"(str "    a " n "\n    b")"#);
+    // Spaces after the opening delimiter go with its line break, and a CRLF
+    // is a line break: no piece holds the `\r`, with the closing delimiter on
+    // its own line or not.
+    let src = "\"\"\"  \r\n        hello \\(n)\r\n        world\r\n        \"\"\"";
+    assert_eq!(expr_sexp(src), r#"(str "hello " n "\n" "world")"#);
+    let src = "\"\"\"\r\n    a \\(n)\r\n    b\"\"\"";
+    assert_eq!(expr_sexp(src), r#"(str "    a " n "\n    b")"#);
+    // What comes off is the closing line's indentation, as much of it as a
+    // line starts with: a tab where the delimiter has spaces stays.
+    let src = "\"\"\"\n\ta \\(n)\n  b\n    \"\"\"";
+    assert_eq!(expr_sexp(src), r#"(str "\ta " n "\n" "b")"#);
 }
 
 // ---- depth -------------------------------------------------------------------
@@ -992,6 +1015,20 @@ fn braces_left_open_at_the_end_are_one_error() {
     let p = parse_src("fn main() {\n    let x = 1\n    if x > 0 {\n        io.print(x)\n\n}\n");
     assert_eq!(p.codes(), vec!["E0101"], "{}", p.render());
     assert!(p.render().contains("3 │     if x > 0 {"), "{}", p.render());
+}
+
+/// A `"""` that is never closed reads the rest of the file, the braces that
+/// close `main` with it. That is one mistake: the lexer's E0001, with a note
+/// about block strings, and not an E0101 for the braces it swallowed too.
+#[test]
+fn an_open_block_string_at_the_end_is_one_error() {
+    let p = parse_src("fn main() {\n    let s = \"\"\"\n        abc\n    io.print(s)\n}\n");
+    assert_eq!(p.codes(), vec!["E0001"], "{}", p.render());
+    assert!(p.render().contains("block string is never closed"), "{}", p.render());
+    assert!(!p.render().contains("may not span lines"), "{}", p.render());
+    // A closed one before the end still leaves an open brace to report.
+    let p = parse_src("fn main() {\n    let s = \"\"\"\n        abc\n        \"\"\"\n");
+    assert_eq!(p.codes(), vec!["E0101"], "{}", p.render());
 }
 
 /// Code that is not indented says nothing about where a brace went missing,

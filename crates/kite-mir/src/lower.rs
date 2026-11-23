@@ -884,12 +884,12 @@ impl<'a> FnLowerer<'a> {
                 let e2 = self.operand(end);
                 Rvalue::SliceRange { base: b, start: s, end: e2 }
             }
-            hir::ExprKind::EnumNew { enum_id, variant, fields } => {
-                let fields = fields.iter().map(|a| self.operand(a)).collect();
+            hir::ExprKind::EnumNew { enum_id, variant, fields, order } => {
+                let fields = self.operands_in_order(fields, order);
                 Rvalue::EnumNew { enum_id: *enum_id, variant: *variant, fields }
             }
-            hir::ExprKind::StructNew { struct_id, fields } => {
-                let fields = fields.iter().map(|a| self.operand(a)).collect();
+            hir::ExprKind::StructNew { struct_id, fields, order } => {
+                let fields = self.operands_in_order(fields, order);
                 Rvalue::StructNew { struct_id: *struct_id, fields }
             }
             hir::ExprKind::FieldGet { base, index } => {
@@ -898,6 +898,31 @@ impl<'a> FnLowerer<'a> {
             }
             _ => Rvalue::Use(self.operand(e)),
         }
+    }
+
+    /// A constructor's fields as operands in declaration order, each worked
+    /// out in `order` — the order they were written — or in declaration order
+    /// when `order` is empty.
+    ///
+    /// Each compound field goes into a temporary as it is evaluated, so only
+    /// the evaluation moves; a field that is a plain local is read when the
+    /// value is built, as [`Self::operand`] reads one for a call's arguments
+    /// too. That is the same value unless a later field assigns the local,
+    /// which only a `match` arm block can do — `Q{ y: a, u: match a { _ =>
+    /// { a = 7 } } }` reads `a` as 7 — and that holds for every operand list
+    /// this lowering builds, not only a reordered one.
+    fn operands_in_order(&mut self, fields: &[hir::Expr], order: &[u32]) -> Vec<Operand> {
+        if order.is_empty() {
+            return fields.iter().map(|a| self.operand(a)).collect();
+        }
+        let mut out: Vec<Option<Operand>> = vec![None; fields.len()];
+        for &i in order {
+            out[i as usize] = Some(self.operand(&fields[i as usize]));
+        }
+        out.into_iter()
+            .zip(fields)
+            .map(|(op, f)| op.unwrap_or_else(|| self.operand(f)))
+            .collect()
     }
 
     /// Lower to a simple operand, introducing a temporary if the expression is

@@ -168,8 +168,13 @@ Interpolation calls `Display.show` on the operand: a hole is an ordinary
 expression, evaluated where it stands, and holds exactly one.
 
 A block string is dedented the same way with holes in it as without: the line
-break after the opening `"""` goes, the closing delimiter's line goes, and that
-line's indentation comes off the front of every line.
+break after the opening `"""` goes (with any spaces or tabs before it), the
+closing delimiter's line goes, and that line's indentation comes off the front
+of every line — as much of it as the line begins with, character for
+character, so a line indented less loses what it has and a tab where the
+delimiter's line has spaces is kept. A line break in the source is a line
+break whether the file writes it LF or CRLF, so a block string's lines are
+joined by `\n` alone and never end in a `\r` that was not written as `\r`.
 
 `int`, `float`, `bool` and `str` render themselves; every other type renders
 through its own `Display`. Because a hole is an expression,
@@ -732,6 +737,11 @@ All fields must be given unless `..base` is used. There are no zero values in
 Kite — a struct literal that omits a field without `..` is a compile error. This
 removes Go's most common production bug, where a forgotten field silently
 becomes `0`, `""`, or `nil`.
+
+The fields of a struct literal, and the named payload of a variant such as
+`Rect(h: f(), w: g())`, are evaluated in the order they are written, not the
+order they are declared in. `..base` is written first, so it is evaluated
+first, and once; the fields it supplies are read from that one value.
 
 ### 5.4 Slices and maps
 

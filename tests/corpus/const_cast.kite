@@ -1,0 +1,14 @@
+// `as` is an operator, so a constant may cast between `int` and `float`; a
+// cast to anything else is refused as it is in a body, with the same code.
+// An alias is the type it names, in a constant as in a body.
+
+type Meters = float
+
+let HALF = 1 as float / 2.0
+let SPAN = 3 as Meters
+let TEXT = "7" as int //~ ERROR E0212
+let WORD = 7 as str //~ ERROR E0212
+
+fn main() {
+    io.print("\(HALF)\(SPAN)\(TEXT)\(WORD)")
+}

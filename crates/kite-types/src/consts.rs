@@ -289,6 +289,50 @@ impl<'a> Eval<'a> {
                 }
             },
 
+            // `as` is an operator (§5.1), so `let A = 3 as float` is an
+            // operator applied to a constant. It folds by the rule a body's
+            // cast runs by: an `int` becomes the nearest `float`, and a
+            // `float` is truncated towards zero, saturating, with NaN as zero
+            // — which is what Rust's own `as` does.
+            ast::Expr::Cast { expr, ty, span } => {
+                let v = self.eval(expr)?;
+                let to = self.cast_target(ty).unwrap_or("");
+                match (&v, to) {
+                    (ConstValue::Int(i), "int") => Some(ConstValue::Int(*i)),
+                    (ConstValue::Int(i), "float") => Some(ConstValue::Float(*i as f64)),
+                    (ConstValue::Float(f), "float") => Some(ConstValue::Float(*f)),
+                    (ConstValue::Float(f), "int") => {
+                        self.diags.push(
+                            Diagnostic::warning(codes::E0212, "this cast discards the fractional part")
+                                .with_primary(*span, "truncated towards zero")
+                                .with_note(
+                                    "a value too large for an `int` saturates rather than \
+                                     trapping, and a NaN becomes zero",
+                                ),
+                        );
+                        Some(ConstValue::Int(*f as i64))
+                    }
+                    (_, "int" | "float" | "bool" | "str") => {
+                        self.diags.push(
+                            Diagnostic::error(
+                                codes::E0212,
+                                format!("cannot cast `{}` to `{}`", v.type_name(), to),
+                            )
+                            .with_primary(*span, "`as` converts between `int` and `float`, and nothing else")
+                            .with_note(
+                                "there is no conversion between other types: a `str` is not a \
+                                 number and a number is not a `str`",
+                            ),
+                        );
+                        None
+                    }
+                    _ => {
+                        self.not_constant(*span, "a cast to a type other than `int` or `float`");
+                        None
+                    }
+                }
+            }
+
             ast::Expr::Call { span, .. } => {
                 self.not_constant(*span, "a call");
                 None
@@ -432,6 +476,38 @@ impl<'a> Eval<'a> {
             .with_primary(span, "no such operation on these types")
             .with_note("Kite has no operator overloading and no implicit conversion"),
         );
+    }
+
+    /// The built-in type a cast in a constant converts to: one written out,
+    /// or one reached through type aliases, since an alias is the type it
+    /// names — `3 as Meters` with `type Meters = float` is accepted in a body,
+    /// so it folds here too. `None` for any other type.
+    fn cast_target(&self, ty: &ast::Type) -> Option<&'static str> {
+        let ast::Type::Path(written) = ty else { return None };
+        let mut path = written;
+        let &at = self.stack.last()?;
+        let mut module = self.resolved.module_of_item(self.resolved.consts[at as usize].decl_index);
+        // Each step follows one alias; a chain longer than the number of
+        // types is a cycle, which the checker reports where it expands it.
+        for _ in 0..=self.resolved.types.len() {
+            if !path.args.is_empty() {
+                return None;
+            }
+            if path.is_simple() {
+                if let Some(b) = ["int", "float", "bool", "str"].into_iter().find(|b| *b == path.name()) {
+                    return Some(b);
+                }
+            }
+            let decl = self.resolved.type_decl(self.resolved.type_by_name_in(module, &path.text())?);
+            let ast::Item::TypeAlias(a) = &self.file.items[decl.decl_index] else { return None };
+            let ast::Type::Path(next) = &a.ty else { return None };
+            if !a.generics.is_empty() {
+                return None;
+            }
+            module = self.resolved.module_of_item(decl.decl_index);
+            path = next;
+        }
+        None
     }
 
     fn not_constant(&mut self, span: Span, what: &str) {

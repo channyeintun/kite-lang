@@ -238,9 +238,22 @@ fn faithful(src: &str, tokens: &[Token], out: &str, splits: &HashSet<u32>) -> bo
     before.len() == after.len()
         && before.iter().zip(&after).all(|(a, b)| {
             a.kind == b.kind
-                && src[a.span.start as usize..a.span.end as usize]
+                && token_text(&src[a.span.start as usize..a.span.end as usize], a.kind)
                     == out[b.span.start as usize..b.span.end as usize]
         })
+}
+
+/// A token as the formatter writes it: as written, except that a string's
+/// CRLF line breaks become LF. A line break in a block string is a line break
+/// however it was written (`§2.4`), so this changes nothing the program
+/// says, and the rest of the file's line endings are already LF once it has
+/// been laid out — leaving these kept a file with two kinds in it.
+fn token_text(text: &str, kind: T) -> std::borrow::Cow<'_, str> {
+    if kind == T::Str && text.contains("\r\n") {
+        std::borrow::Cow::Owned(text.replace("\r\n", "\n"))
+    } else {
+        std::borrow::Cow::Borrowed(text)
+    }
 }
 
 /// Whether two tokens written with nothing between them would lex as
@@ -452,7 +465,7 @@ impl Formatter<'_> {
             if split {
                 self.out.push_str("> =");
             } else {
-                self.out.push_str(text);
+                self.out.push_str(&token_text(text, token.kind));
             }
 
             if matches!(token.kind, T::LBrace | T::LBracket | T::LParen) {
