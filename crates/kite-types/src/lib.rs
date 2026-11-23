@@ -3375,6 +3375,27 @@ impl<'a> Checker<'a> {
                 self.copies.extend(inside);
                 self.restore_taint(taint);
             }
+            // No `break` reaches out of it, so no state does either: what is
+            // declared outside it is left only by the `return`s in the body,
+            // each of which answered for it on its own path. Taking the state
+            // it was entered in for what follows, as a loop with a header
+            // must, made `for { if err == nil { return } … }` look as if it
+            // fell out with `err` unread.
+            (ast::ForHeader::Loop, None) => {
+                let taint = (0..self.taint.len())
+                    .map(|i| {
+                        if self.declared_inside(i as u32, f.span) { self.taint[i] } else { Taint::Clean }
+                    })
+                    .collect();
+                let inside: Vec<(u32, u32)> = self
+                    .copies
+                    .iter()
+                    .copied()
+                    .filter(|p| self.declared_inside(p.0, f.span) && self.declared_inside(p.1, f.span))
+                    .collect();
+                self.copies = inside.into_iter().collect();
+                self.restore_taint(taint);
+            }
             (_, _) if !runs => {
                 let (taint, copies) = edges.head.unwrap_or(entry);
                 self.merge_loop_taint(&taint, &copies);

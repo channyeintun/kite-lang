@@ -1312,7 +1312,8 @@ the join, which ends because the lattice has height two and a state can only get
 worse. What follows a loop is reached from its top and from every `break` —
 except after a `for { }`, which has no header to leave from and is left only by
 `break`, so `for { if err == nil { break } … }` leaves only where `err` was
-tested.
+tested, and one with no `break` has nothing after it: its only ways out are
+the `return`s in its body, each of which answers for what it leaves behind.
 
 In practice:
 

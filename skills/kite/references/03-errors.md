@@ -583,7 +583,8 @@ fn main() {
 Test it inside the body before the next write — `if e != nil { break }` — or
 keep the error inside the loop. A `for { }` is left only by `break`, so the
 retry loop `for { if err == nil { break } … err = attempt() }` needs nothing
-after it.
+after it; written with `return` in place of `break` and no `break` at all,
+nothing follows the loop, so only the `return`s have to answer for `err`.
 
 ## `check`
 
