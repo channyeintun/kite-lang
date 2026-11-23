@@ -665,6 +665,79 @@ fn main() {
     );
 }
 
+/// A key or an index computed between a read of a field and the write after
+/// it is linear on all three backends, however it is computed, as long as
+/// nothing that computes it can write in place or run code it cannot see: a
+/// string method (`trim`, `slice`, `len`, `index_of`, `code_at`), a builtin
+/// that runs nothing (`text.from_code`), a rendered number, a function of
+/// the program's, a prelude function and a method. A string method or a
+/// builtin there counted as able to write in place, so the read of the
+/// field counted as keeping it and the next write copied the whole map or
+/// slice: at forty thousand, `self.counts[w.trim()] = …` took 10 s on the VM
+/// and Wasm and 7 s natively, and this program at fifty thousand would take
+/// minutes.
+#[test]
+fn a_key_or_index_computed_between_field_writes_is_linear() {
+    let src = r#"struct Counter {
+    var counts: { str: int }
+    var xs: [int]
+}
+
+struct K {
+    n: int
+}
+
+impl K {
+    fn name(self) -> str {
+        return "m\(self.n)"
+    }
+}
+
+fn key(i: int) -> str {
+    return "u\(i)"
+}
+
+fn idx(i: int, n: int) -> int {
+    return i % n
+}
+
+impl Counter {
+    fn add(var self, w: str) {
+        self.counts[w.trim()] = or_else(self.counts[w.trim()], 0) + 1
+    }
+
+    fn lowered(var self, w: str) {
+        self.counts[lower(w)] = or_else(self.counts[lower(w)], 0) + 1
+    }
+}
+
+fn main() {
+    let n = 50000
+    var c = Counter{ counts: { }, xs: [0] }
+    for i in 0..n {
+        c.add(" w\(i % (n / 2)) ")
+        c.lowered("L\(i)")
+        if c.counts["s\(i)".slice(0, 9)] == nil {
+            c.counts[text.from_code(65 + i % 26) + "\(i)"] = i
+        }
+        if c.counts[key(i)] == nil && c.counts[K{ n: i }.name()] == nil {
+            c.counts[key(i)] = i
+        }
+        c.xs.push(c.xs["k\(i)".len() % c.xs.len()] + c.xs[idx(i, c.xs.len())])
+        c.xs[("k\(i)".index_of("1") + 1) % c.xs.len()] += "k\(i)".code_at(0)
+    }
+    io.print("\(c.counts.len()) \(c.xs.len()) \(or_else(c.counts["w7"], -1))")
+}
+"#;
+    agrees_within(
+        "computed-key-through-a-field",
+        src,
+        "175000 50001 2\n",
+        Duration::from_secs(20),
+        true,
+    );
+}
+
 /// `toml.parse` is linear in the shapes that were quadratic: forty thousand
 /// sections, forty thousand dotted keys under one table, one inline table of
 /// forty thousand keys, and — linear already, kept so — forty thousand plain
