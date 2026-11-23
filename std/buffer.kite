@@ -28,13 +28,30 @@ pub fn count(b: F64) -> int {
     return b.values.len() / b.stride
 }
 
+// The shape is checked, with `require`, everywhere it is used. The slice
+// underneath only knows its own length, so a field past the stride, or a
+// negative one, is a valid index into the *neighbouring* record, and a push
+// of the wrong length shifts every record after it: both were silent wrong
+// answers, and a trap that names the mistake is the better failure.
+
+fn check_field(b: F64, field: int) {
+    require(field >= 0 && field < b.stride, "buffer: field \(field) is outside a record of \(b.stride)")
+}
+
+fn check_record(b: F64, record: int) {
+    require(record >= 0 && record < count(b), "buffer: record \(record) is outside a buffer of \(count(b))")
+}
+
 /// One number of one record.
 pub fn get(b: F64, record: int, field: int) -> float {
+    check_record(b, record)
+    check_field(b, field)
     return b.values[record * b.stride + field]
 }
 
 /// A whole record, as a slice of `stride` numbers.
 pub fn record(b: F64, index: int) -> [float] {
+    check_record(b, index)
     var out: [float] = []
     for i in 0..b.stride {
         out.push(b.values[index * b.stride + i])
@@ -44,12 +61,17 @@ pub fn record(b: F64, index: int) -> [float] {
 
 /// A buffer with one record appended. Buffers are values, like slices: this
 /// produces a new one rather than editing the one it was given.
+///
+/// `values` must be exactly one record, `stride` numbers long.
 pub fn push(b: F64, values: [float]) -> F64 {
+    require(values.len() == b.stride, "buffer: pushed \(values.len()) numbers into records of \(b.stride)")
     return F64{ values: concat(b.values, values), stride: b.stride }
 }
 
 /// A buffer with one number replaced.
 pub fn set(b: F64, record: int, field: int, value: float) -> F64 {
+    check_record(b, record)
+    check_field(b, field)
     var out = b.values
     out[record * b.stride + field] = value
     return F64{ values: out, stride: b.stride }
@@ -58,6 +80,7 @@ pub fn set(b: F64, record: int, field: int, value: float) -> F64 {
 /// Every value of one field, across every record — the column form, which is
 /// what a bounds check or a sum wants.
 pub fn column(b: F64, field: int) -> [float] {
+    check_field(b, field)
     var out: [float] = []
     for i in 0..count(b) {
         out.push(get(b, i, field))

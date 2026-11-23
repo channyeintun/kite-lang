@@ -4351,6 +4351,52 @@ fn main() {
 }
 ",
     ),
+    // A `buffer.F64` checks its shape. A push of the wrong length was
+    // accepted and shifted every record after it, and a field past the
+    // stride read the neighbouring record: both silent, on every backend.
+    (
+        "a-ragged-buffer-push-traps",
+        "\
+use std/buffer
+
+fn main() {
+  var b = buffer.f64(2)
+  b = buffer.push(b, [1.0, 2.0])
+  io.print(buffer.count(b))
+  b = buffer.push(b, [1.0, 2.0, 3.0])
+  io.print(\"after\")
+}
+",
+    ),
+    (
+        "a-buffer-field-outside-the-stride-traps",
+        "\
+use std/buffer
+
+fn main() {
+  var b = buffer.f64(2)
+  b = buffer.push(b, [1.0, 2.0])
+  b = buffer.push(b, [3.0, 4.0])
+  io.print(buffer.get(b, 0, 1))
+  io.print(buffer.get(b, 0, 2))
+  io.print(\"after\")
+}
+",
+    ),
+    (
+        "a-negative-buffer-field-traps",
+        "\
+use std/buffer
+
+fn main() {
+  var b = buffer.f64(2)
+  b = buffer.push(b, [1.0, 2.0])
+  b = buffer.push(b, [3.0, 4.0])
+  b = buffer.set(b, 1, -1, 9.0)
+  io.print(buffer.get(b, 0, 1))
+}
+",
+    ),
     // A shift count outside 0..=63 traps in a debug build. Wasm took it
     // modulo 64 while the other two trapped.
     (

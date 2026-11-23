@@ -622,6 +622,10 @@ arrays. `buffer.F64` is a flat `[float]` with a `stride` written down beside it.
 `f64(stride)` `count(b)` `get(b, record, field)` `record(b, i)`
 `push(b, values)` `set(b, record, field, value)` `column(b, field)`
 `extent(b, field)`. `push` and `set` **return a new buffer** — bind the result.
+The shape is checked: `push` of anything but exactly `stride` numbers, a field
+outside `0..stride` or a record outside `0..count(b)` traps with a message
+naming the mistake (a ragged push used to be accepted and shift every record
+after it, and a field past the stride read the next record).
 
 ```kite
 use std/buffer
