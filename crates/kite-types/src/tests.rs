@@ -546,6 +546,17 @@ fn a_backslash_ending_a_line_is_named_not_printed() {
     assert!(said[1].2.contains("remove the `\\`"), "{}", c.render());
 }
 
+/// The same `\` before a Windows line break, `\r\n`, is the same one report:
+/// the string goes on past it as past a `\` and a `\n`, where it used to end
+/// at the `\n` and take the next line for code — five reports of one slip.
+#[test]
+fn a_backslash_ending_a_crlf_line_is_one_report() {
+    let c = body("  let a = \"x\\\r\ny\"\r\n  io.print(a)");
+    let codes: Vec<&str> = c.diags.iter().filter_map(|d| d.code.map(|c| c.0)).collect();
+    assert_eq!(codes, vec!["E0003"], "{}", c.render());
+    assert_eq!(c.sources.span_text(c.diags.iter().next().unwrap().labels[0].span), "\\");
+}
+
 // ---- cascade suppression --------------------------------------------------
 
 /// One mistake must yield one diagnostic. `TyId::ERROR` satisfies every

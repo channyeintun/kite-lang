@@ -591,6 +591,14 @@ impl<'a> Lexer<'a> {
                     if self.peek() == Some(b'(') {
                         self.skip_interpolation();
                     } else {
+                        // A `\` ending a line is stepped over with the whole
+                        // line break, `\r\n` as `\n`: it is one mistake, which
+                        // the checker names, and the string goes on as it does
+                        // after a `\` and a `\n`, rather than ending at the
+                        // `\n` and taking the next line for code.
+                        if self.src[self.pos..].starts_with("\r\n") {
+                            self.pos += 1;
+                        }
                         self.bump();
                     }
                 }
