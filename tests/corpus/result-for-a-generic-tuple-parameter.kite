@@ -1,0 +1,22 @@
+// A fallible call's result where the tuple `(T, error)` is wanted is refused
+// once, as it is against `(int, error)`: its value says what `T` is, so the
+// one report is "expected the tuple, found the result of a fallible call",
+// not E0209 `cannot infer T` and then "expected `(T, error)`, found
+// `(int, error)`".
+
+fn p(i: int) -> (int, error) {
+    return i, nil
+}
+
+fn show_pair<T: Display>(r: (T, error)) -> str {
+    return "pair"
+}
+
+fn show_int(r: (int, error)) -> str {
+    return "pair"
+}
+
+fn main() {
+    io.print(show_pair(p(1))) //~ ERROR E0200
+    io.print(show_int(p(1))) //~ ERROR E0200
+}

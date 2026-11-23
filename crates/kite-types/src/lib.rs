@@ -10981,6 +10981,15 @@ impl<'a> Checker<'a> {
             // fallibility form is a type of its own, so it is descended into
             // like any other, or a `retry` helper could never be called.
             (TyKind::Fallible(d), TyKind::Fallible(a)) => self.unify(d, a, generics, subst, span),
+            // A fallible call's result where the tuple `(T, error)` is
+            // wanted never converts (§7.3), but its value still says what `T`
+            // is: solved, the mismatch is the one report, "expected the tuple
+            // `(int, error)`, found the result of a fallible call", with how
+            // to take it apart — not `cannot infer T` and then "expected
+            // `(T, error)`, found `(int, error)`".
+            (TyKind::Tuple(ds), TyKind::Fallible(a)) if ds.len() == 2 && ds[1] == TyId::ERR => {
+                self.unify(ds[0], a, generics, subst, span)
+            }
             // A `T` argument for an `Option<T>` parameter solves through the
             // same subsumption that lets the value be passed at all.
             (TyKind::Optional(d), _) => self.unify(d, actual, generics, subst, span),
