@@ -1467,14 +1467,13 @@ unsafe fn map_entries(p: *const u8) -> impl DoubleEndedIterator<Item = usize> {
     (0..map_used(p)).filter(move |&i| !holes || !map_is_hole(p, i))
 }
 
-/// The room a map is given when `n` entries no longer fit: twice as many,
-/// so that a loop of inserts copies each entry a constant number of times.
-fn map_room_for_growth(n: usize) -> usize {
-    if n <= MAP_SMALL / 2 {
-        MAP_SMALL
-    } else {
-        (2 * n).next_power_of_two().max(2 * MAP_SMALL)
-    }
+/// The room a full map of `room` is given: twice as much, a power of two, so
+/// that a loop of inserts copies each entry a constant number of times. It
+/// once took twice the entries plus the new one, rounded up — which for a
+/// full map of a power of two is four times the room, and with the index
+/// sixteen words an entry.
+fn map_room_for_growth(room: usize) -> usize {
+    (2 * room).next_power_of_two().max(MAP_SMALL)
 }
 
 /// Exactly enough room for `n` entries, as a literal needs: an indexed map's
@@ -2212,7 +2211,7 @@ pub extern "C" fn kite_rt_map_set(m: u64, key: u64, key_kind: u64, value: u64, o
             m as *mut u8
         } else {
             let grown = if found.is_none() && used == room {
-                map_room_for_growth(map_live(m as *const u8) + 1)
+                map_room_for_growth(room)
             } else {
                 room
             };
@@ -3693,6 +3692,18 @@ pub fn jit_symbols() -> Vec<(&'static str, *const u8)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A full map grows to twice its room, always a power of two (an
+    /// indexed map's bucket mask needs one), and always to more than it had.
+    #[test]
+    fn a_full_map_doubles_its_room() {
+        assert_eq!(map_room_for_growth(0), MAP_SMALL);
+        assert_eq!(map_room_for_growth(5), 16);
+        assert_eq!(map_room_for_growth(MAP_SMALL), 16);
+        for k in 4..24 {
+            assert_eq!(map_room_for_growth(1 << k), 2 << k);
+        }
+    }
 
     /// A stack, laid out by hand, one word per slot. Addresses grow with the
     /// index, as a real stack's do towards its base.
