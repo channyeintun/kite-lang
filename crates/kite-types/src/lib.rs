@@ -1601,8 +1601,12 @@ impl<'a> Checker<'a> {
             }
 
             ast::Stmt::Expr(e) => {
-                self.inert_closure(e);
                 let expr = self.expr(e, None);
+                // Asked after the expression is checked, so one already wrong
+                // for another reason is not reported a second time.
+                if !self.types.is_poisoned(expr.ty) {
+                    self.inert_statement(e);
+                }
                 self.dropped_error(&expr);
                 let flow = if expr.ty == TyId::NEVER { Flow::Diverges } else { Flow::Falls };
                 Some((hir::Stmt::Expr(expr), flow))
@@ -7567,25 +7571,60 @@ impl<'a> Checker<'a> {
     /// percent-encoder in this repository's own site encoded the letters.
     ///
     /// `&&` cannot do this — it may not begin an expression, so it is a parse
-    /// error — which is why this is about `||` alone.
+    /// error.
+    ///
+    /// The closure is the loudest case of a wider one: any expression
+    /// statement with no call, no `await` and nothing else that acts in it is
+    /// computed and thrown away. A `-` opening a line is a negation, not a
+    /// subtraction carried over; a `[` opening one is a slice literal, not an
+    /// index; `done == true` is a comparison where `=` was meant. Each is a
+    /// complete statement with a wrong answer and nothing said, so each is
+    /// the same error. A call anywhere in the expression — `f() + 1`
+    /// included — is something happening, and is left alone.
     ///
     /// [§2.5]: ../../../SPECIFICATION.md#25-semicolon-insertion
-    fn inert_closure(&mut self, e: &ast::Expr) {
-        let ast::Expr::Closure { span, .. } = e else {
+    fn inert_statement(&mut self, e: &ast::Expr) {
+        if let ast::Expr::Closure { span, .. } = e {
+            self.diags.push(
+                Diagnostic::error(codes::E0117, "this closure is built and thrown away")
+                    .with_primary(*span, "nothing calls it, so nothing in it happens")
+                    .with_note(
+                        "an `||` opening a line is a closure with no parameters, not the \
+                         continuation of the line above",
+                    )
+                    .with_note(
+                        "a statement continues onto the next line when it *ends* in an \
+                         operator — put the `||` at the end of the line it continues",
+                    ),
+            );
             return;
-        };
-        self.diags.push(
-            Diagnostic::error(codes::E0117, "this closure is built and thrown away")
-                .with_primary(*span, "nothing calls it, so nothing in it happens")
+        }
+        if expr_acts(e) {
+            return;
+        }
+        let mut d = Diagnostic::error(codes::E0117, "this statement has no effect")
+            .with_primary(e.span(), "computed and thrown away");
+        d = match e {
+            ast::Expr::Binary { op: ast::BinaryOp::Eq, .. } => d.with_note(
+                "`==` compares and gives back a `bool`; to assign, write `=`",
+            ),
+            ast::Expr::Unary { op: ast::UnaryOp::Neg, .. } => d.with_note(
+                "a line that begins with `-` is a statement of its own, not the \
+                 continuation of the line above; a statement continues onto the next \
+                 line when it *ends* in an operator, so put the `-` there",
+            ),
+            ast::Expr::Slice { .. } | ast::Expr::Paren { .. } | ast::Expr::Tuple { .. } => d
                 .with_note(
-                    "an `||` opening a line is a closure with no parameters, not the \
-                     continuation of the line above",
-                )
-                .with_note(
-                    "a statement continues onto the next line when it *ends* in an \
-                     operator — put the `||` at the end of the line it continues",
+                    "a line that begins with `[` or `(` is a statement of its own, not an \
+                     index or a call on the line above; keep it on that line",
                 ),
-        );
+            ast::Expr::Path(_) => d.with_note("naming a value does nothing; a call needs `()`"),
+            _ => d.with_note(
+                "nothing in it calls a function or awaits a task, so its value is the \
+                 only thing it makes — bind it with `let`, or return it",
+            ),
+        };
+        self.diags.push(d);
     }
 
     /// An error thrown away by leaving a call as a bare statement.
@@ -13536,6 +13575,80 @@ fn visit_expr_stmts(e: &ast::Expr, closures: bool, f: &mut dyn FnMut(&ast::Stmt)
             }
         }
     }
+}
+
+/// Whether evaluating an expression can do anything besides produce its
+/// value: whether it calls something, awaits something, or holds a statement
+/// that might. A closure's body does not run where the closure is built, so
+/// it does not count. An expression the parser could not read counts, so that
+/// nothing is reported twice.
+fn expr_acts(e: &ast::Expr) -> bool {
+    use ast::Expr as E;
+    match e {
+        E::Call { .. } | E::Await { .. } | E::Error(_) => true,
+        E::Int(_)
+        | E::ImpliedInt { .. }
+        | E::Float(_)
+        | E::Str(_)
+        | E::Char(_)
+        | E::Bool { .. }
+        | E::Nil(_)
+        | E::Path(_)
+        | E::SelfExpr(_)
+        | E::Closure { .. } => false,
+        E::Interpolated { parts, .. } => parts.iter().any(|p| match p {
+            ast::StrPart::Hole(h) => expr_acts(h),
+            ast::StrPart::Text(_) => false,
+        }),
+        E::Unary { operand, .. } => expr_acts(operand),
+        E::Binary { lhs, rhs, .. } => expr_acts(lhs) || expr_acts(rhs),
+        E::Field { base, .. } => expr_acts(base),
+        E::Index { base, index, .. } => expr_acts(base) || expr_acts(index),
+        E::Range { start, end, .. } => expr_acts(start) || expr_acts(end),
+        E::Cast { expr, .. } | E::Paren { inner: expr, .. } => expr_acts(expr),
+        E::Tuple { elems, .. } | E::Slice { elems, .. } => elems.iter().any(expr_acts),
+        E::Map { entries, .. } => entries.iter().any(|m| expr_acts(&m.key) || expr_acts(&m.value)),
+        E::StructLit(l) => {
+            l.base.as_deref().is_some_and(expr_acts) || l.fields.iter().any(|f| expr_acts(&f.value))
+        }
+        E::If { cond, then, else_, .. } => {
+            expr_acts(cond)
+                || block_acts(then)
+                || match &**else_ {
+                    ast::ElseBranch::Block(b) => block_acts(b),
+                    ast::ElseBranch::If(i) => if_acts(i),
+                }
+        }
+        E::Match(m) => {
+            expr_acts(&m.scrutinee)
+                || m.arms.iter().any(|a| {
+                    a.guard.as_ref().is_some_and(expr_acts)
+                        || match &a.body {
+                            ast::MatchBody::Expr(e) => expr_acts(e),
+                            ast::MatchBody::Block(b) => block_acts(b),
+                        }
+                })
+        }
+    }
+}
+
+/// As [`expr_acts`], for a block: anything but an inert expression statement
+/// may act.
+fn block_acts(b: &ast::Block) -> bool {
+    b.stmts.iter().any(|s| match s {
+        ast::Stmt::Expr(e) => expr_acts(e),
+        _ => true,
+    })
+}
+
+fn if_acts(i: &ast::IfStmt) -> bool {
+    expr_acts(&i.cond)
+        || block_acts(&i.then)
+        || match i.else_.as_deref() {
+            None => false,
+            Some(ast::ElseBranch::Block(b)) => block_acts(b),
+            Some(ast::ElseBranch::If(i)) => if_acts(i),
+        }
 }
 
 /// Whether a statement registers a `defer` for the function it is in.

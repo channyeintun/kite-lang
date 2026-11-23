@@ -182,7 +182,18 @@ codes! {
          \x20       || (c >= 65 && c <= 90)     // a closure, discarded\n\n\
          The first line is a complete statement and the answer is wrong with \
          nothing said about it. Put the operator at the end of the line it \
-         continues.";
+         continues.\n\n\
+         The closure is one case of a wider rule: an expression statement \
+         with no call and no `await` anywhere in it computes a value and \
+         throws it away, so it is refused too. A line opening with `-` is a \
+         negation, not a subtraction carried over from the line above; one \
+         opening with `[` is a slice literal, not an index; and `done == true` \
+         compares where `done = true` was meant:\n\n\
+         \x20   let n = 10\n\
+         \x20       - 2                         // n is 10; this line does nothing\n\
+         \x20   done == true                    // write `done = true`\n\n\
+         A statement holding a call, such as `f() + 1`, does something, and \
+         is left alone.";
 
     E0118 = "E0118", "module-level binding is not a constant",
         "A `let` at the top of a module names a value the compiler works out \

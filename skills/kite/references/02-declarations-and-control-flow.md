@@ -18,8 +18,8 @@ Everything below is checked against `target/release/kitec`, not against the pros
   block holds a statement the arm is `()`.
 - **`;` is not a token.** Newlines end statements. A statement continues only when the
   previous line *ends* in an operator, an open delimiter, or a comma. A line that *starts*
-  with `||` is a zero-parameter closure, silently discarded — `E0117` exists to catch
-  exactly that.
+  with `||` is a zero-parameter closure, and one that starts with `-` is a negation; both
+  are statements that do nothing, which is `E0117`.
 - **`xs[a..b]` clamps; `xs[i]` traps.** A window may run off the end; an element may not.
 - **Map indexing always yields `Option<V>`** — never a zero value, and `io.print` will not
   take it.
@@ -1192,7 +1192,7 @@ fn main() {
 | `E0113` | wrong number of arguments, or named arguments |
 | `E0114` | assignment to an immutable binding, field, or receiver |
 | `E0115` | `break`/`continue` outside a loop |
-| `E0117` | statement has no effect (the `\|\|` continuation trap) |
+| `E0117` | statement has no effect (a leading `\|\|` or `-`, `==` for `=`) |
 | `E0200` | type mismatch |
 | `E0201` | operator applied to mismatched types; float `==` warning |
 | `E0202` | condition must be `bool` |

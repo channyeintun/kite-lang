@@ -180,8 +180,9 @@ the language.
 
 Statements are newline-terminated. Semicolons are never written. A statement
 continues onto the next line when the line ends in an operator, an open
-delimiter, or a comma. The same rule as Swift and Kotlin, and unambiguous here
-because a statement never begins with `(` or `[`. `>` and `>>` continue a line
+delimiter, or a comma. The same rule as Swift and Kotlin. A line that begins
+with `(` or `[` starts a statement of its own — `(g)()` is a call — so it is
+never an index into, or a call on, the line above. `>` and `>>` continue a line
 as the other operators do, and the `>` that closes `Option<int>` ends one;
 `return` is not an operator, and a line ending in it ends there.
 
@@ -199,6 +200,13 @@ The first line is already a complete statement. `&&` cannot do this, because it
 may not begin an expression and so is a syntax error; `||` can, and it is the
 one continuation a reader coming from another language writes by habit. It is
 rejected as `E0117` rather than allowed to be quietly wrong.
+
+The same holds for every expression statement that does nothing. One with no
+call and no `await` anywhere in it computes a value and throws it away, so it is
+`E0117` too: a line opening with `-` (a negation, not a subtraction carried
+over), one opening with `[` (a slice literal, not an index), and `done == true`
+written for `done = true`. A statement that holds a call, such as `f() + 1`, is
+something happening and is left alone.
 
 ---
 

@@ -1,0 +1,28 @@
+// An expression statement with no call and no `await` in it does nothing,
+// and is refused: each of these is a typo with a silently wrong answer.
+fn one() -> int {
+    return 1
+}
+
+fn main() {
+    let n = 10
+    -2 //~ ERROR E0117
+    var done = false
+    done == true //~ ERROR E0117
+    let rows = [[1, 2, 3], [4]]
+    let first = rows
+    [1] //~ ERROR E0117
+    n + 1 //~ ERROR E0117
+    "s" //~ ERROR E0117
+    n //~ ERROR E0117
+    if done {
+        1 //~ ERROR E0117
+    }
+    // Anything holding a call does something, and is left alone.
+    one() + 1
+    let g = one
+    (g)()
+    // One already wrong for another reason is reported once.
+    n == "s" //~ ERROR E0201
+    io.print("\(n) \(done) \(first.len())")
+}

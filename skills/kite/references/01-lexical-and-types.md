@@ -10,7 +10,7 @@ the disagreement is called out inline.
 |---|---|
 | `;` ends a statement | `;` is not a token at all — `E0002 invalid character` |
 | A continued line may start with `\|\|` | It parses as a zero-argument closure and is discarded — `E0117` |
-| …or with `-` | It is a fresh statement negating a number. **No diagnostic**, silently wrong answer |
+| …or with `-` | It is a fresh statement negating a number, which does nothing — `E0117`, as is any statement with no call or `await` in it |
 | Struct fields are comma-separated | They are **newline**-separated; a `,` after a field is `E0100` (reported once; the fields are kept) |
 | `let f: float = 3` | `E0200`. No implicit numeric conversion, not even for literals. Write `3.0` |
 | `a & b == c` is `a & (b == c)` | Bitwise binds **tighter** than comparison, so it is `(a & b) == c` |
@@ -192,18 +192,20 @@ fn main() {
 plain `E0100 expected an expression`. So is a leading `*`, `+`, `==`, or any
 other operator that is **only** infix.
 
-`-` is the exception, and it is worse than `||`: it is also a prefix operator,
-so a leading `-` starts a fresh statement that is a negated number, computes
-nothing, and gets **no diagnostic at all**. E0117 is raised by `inert_closure`
-in `crates/kite-types`, which fires on a closure expression statement and
-nothing else, so it never sees this. The line below checks clean and prints
-`10`.
+`-` is also a prefix operator, so a leading `-` starts a fresh statement that is
+a negated number and computes nothing. That is `E0117` too: an expression
+statement with no call and no `await` anywhere in it does nothing, and is
+refused whatever its shape — a leading `-`, a leading `[` (a slice literal, not
+an index into the line above), `done == true` typed for `done = true`, a bare
+`n + 1`. A statement holding a call, such as `f() + 1`, is left alone.
 
-```kite
+```kite fails
 fn main() {
+    var done = false
     let n = 10
-        - 2
-    io.print(n)     // 10, not 8 — the `- 2` is a separate, inert statement
+        - 2 //~ E0117
+    done == true //~ E0117
+    io.print("\(n) \(done)")
 }
 ```
 
@@ -1051,9 +1053,7 @@ The compiler is authoritative. Checked disagreements, all in this file's scope:
    grammar never says a map is what that iterates.
 3. SPECIFICATION.md §2.5 states the continuation rule as "ends in an operator".
    A *leading* `.`, `else`, `)` or `]` also continues the previous line, with no
-   trailing operator at all. §2.5 also says `||` is the only continuation that
-   is quietly wrong; a leading `-` is quietly wrong too, and unlike `||` it is
-   not diagnosed.
+   trailing operator at all.
 
 SPECIFICATION.md §3.2's "maps iterate in insertion order" is **correct** —
 including under `for (k, v) in m`. An earlier draft of this page claimed maps
@@ -1073,7 +1073,7 @@ were not iterable at all; that was wrong.
 | `E0100` | unexpected token |
 | `E0110` | use of possibly-uninitialised binding |
 | `E0112` | duplicate definition |
-| `E0117` | statement has no effect (the leading-`\|\|` trap) |
+| `E0117` | statement has no effect (a leading `\|\|` or `-`, `==` for `=`) |
 | `E0200` | type mismatch (also: no `char`, no narrowing here, not indexable) |
 | `E0201` | cannot apply operator to these types |
 | `E0202` | condition must be `bool` |
