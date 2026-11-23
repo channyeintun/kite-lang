@@ -718,6 +718,11 @@ so `r(|| { return _, errors.new("no") }, 6)` against
 type from the `41`. Such closures are typed in written order among
 themselves; a generic struct literal's fields are treated the same way. Only
 the checking moves: the arguments are still evaluated in the order written.
+Where the argument that would fix such a closure's parameter is itself an
+error, that error is the one reported, not an E0211 beside it. Only a closure
+waits: a `nil` passed where the type is still open — `first(nil, 3)` against
+`first<T>(a: Option<T>, b: T)` — is [E0204](#16-diagnostics); a binding gives it
+a type (`let none: Option<int> = nil`, then `first(none, 3)`).
 
 **Closures capture by value, taken when the closure is made.** Because `let`
 bindings are immutable, the vast majority of captures are trivially safe: the

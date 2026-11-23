@@ -5404,6 +5404,12 @@ impl<'a> Checker<'a> {
         // written, and diagnostics are put in source order afterwards.
         let mut hargs: Vec<Option<hir::Expr>> = Vec::with_capacity(args.len());
         let mut waiting = Vec::new();
+        // A `nil` for a parameter whose type is still open — `first(nil, 3)`
+        // against `first<T>(a: Option<T>, b: T)` — has no type where it
+        // stands, and only a closure waits (§4.5), so it is an error. It is
+        // reported once the other arguments are typed, so that what it says
+        // is true of this call: what they made the parameter, if anything.
+        let mut open_nils = Vec::new();
         for (i, a) in args.iter().enumerate() {
             // What a hint stands in for counts as fixed, as it does for the
             // argument's own wanted type.
@@ -5414,12 +5420,72 @@ impl<'a> Checker<'a> {
                 hargs.push(None);
                 continue;
             }
+            if let (ast::Expr::Nil(span), Some(d)) = (a, sig_params.get(i).copied()) {
+                if self.apply_subst_opt(d, &known).is_none() {
+                    open_nils.push((i, *span, d));
+                    hargs.push(Some(self.lit(ExprKind::Error, TyId::ERROR, *span)));
+                    continue;
+                }
+            }
             let e = self.check_arg(a, sig_params.get(i).copied(), generics, subst, hints, decl_span, crosses);
             hargs.push(Some(e));
         }
         for i in waiting {
-            let e = self.check_arg(&args[i], sig_params.get(i).copied(), generics, subst, hints, decl_span, crosses);
+            let declared = sig_params.get(i).copied();
+            // A closure still waiting once the other arguments are typed,
+            // where one of them is an error, waits on that error: the
+            // argument that would have fixed its parameter is the one that
+            // went wrong, and has said so. It is checked with what is still
+            // open taken as the error type, so its body's own mistakes are
+            // reported and E0211 for a type nothing could give is not.
+            let known: Vec<Option<TyId>> =
+                subst.iter().zip(hints.iter().chain(std::iter::repeat(&None))).map(|(s, h)| s.or(*h)).collect();
+            let starved = hargs.iter().flatten().any(|e| self.made_of_error(e.ty))
+                && self.closure_waits(&args[i], declared, &known);
+            let e = if starved {
+                let mut open: Vec<Option<TyId>> = known.iter().map(|k| k.or(Some(TyId::ERROR))).collect();
+                self.check_arg(&args[i], declared, generics, &mut open, &[], decl_span, crosses)
+            } else {
+                self.check_arg(&args[i], declared, generics, subst, hints, decl_span, crosses)
+            };
             hargs[i] = Some(e);
+        }
+        for (i, span, d) in open_nils {
+            let shown = self.types.name(d);
+            match self.apply_subst_opt(d, subst) {
+                // The arguments after it fixed an optional: a binding of that
+                // type is a `nil` the call can take.
+                Some(t) if matches!(self.types.kind(t), TyKind::Optional(_)) => {
+                    let name = self.types.name(t);
+                    self.diags.push(
+                        Diagnostic::error(codes::E0204, "cannot infer a type for `nil`")
+                            .with_primary(
+                                span,
+                                format!("`{}` is not known yet here: only a later argument makes it `{}`", shown, name),
+                            )
+                            .with_note(format!(
+                                "give the `nil` its type first — `let none: {} = nil` — and pass `none`",
+                                name
+                            )),
+                    );
+                }
+                // They fixed something `nil` is not a value of: that is the
+                // mistake, said as it is said anywhere else.
+                Some(t) => {
+                    let e = self.expr(&args[i], Some(t));
+                    hargs[i] = Some(e);
+                }
+                None => {
+                    self.diags.push(
+                        Diagnostic::error(codes::E0204, "cannot infer a type for `nil`")
+                            .with_primary(span, format!("nothing in this call says what `{}` is", shown))
+                            .with_note(
+                                "a `nil` cannot say its own type: pass a binding that has one, as `none` \
+                                 after `let none: Option<int> = nil`",
+                            ),
+                    );
+                }
+            }
         }
         let hargs: Vec<hir::Expr> = hargs.into_iter().flatten().collect();
         for (slot, hint) in subst.iter_mut().zip(hints) {
@@ -8107,6 +8173,13 @@ impl<'a> Checker<'a> {
         // pin. (An empty `[]` or a `nil` is poison too, but there the missing
         // pin is the cause, and E0209's note is the fix.)
         let mut poisoned = Vec::new();
+        // Whether a field that is not a closure was poison with nothing said
+        // about it here — `seed: nope`, whose name the resolver has already
+        // reported. A parameter it would have fixed is left open by that
+        // error, which has its report: neither E0209 nor a closure's E0211
+        // waiting on it is another one. (`nil` and `[]` say here that they
+        // cannot be typed, so they are not this.)
+        let mut reported_before = false;
         // A closure field that waits on what a later field fixes is tried
         // after the fields that do not, as a call's argument is:
         // `Job{ run: || { return _, err }, seed: 6 }` learns `T` from `seed`.
@@ -8125,10 +8198,15 @@ impl<'a> Checker<'a> {
                 continue;
             }
             self.field_closure_context(init, declared, &subst);
+            let before = self.diags.error_count();
             let v = self.expr(&init.value, None);
             self.closure_context = None;
-            if matches!(init.value, ast::Expr::Closure { .. }) && self.made_of_error(v.ty) {
-                poisoned.push((init, declared));
+            if matches!(init.value, ast::Expr::Closure { .. }) {
+                if self.made_of_error(v.ty) {
+                    poisoned.push((init, declared));
+                }
+            } else if self.made_of_error(v.ty) && self.diags.error_count() == before {
+                reported_before = true;
             }
             self.unify(declared, v.ty, &generics, &mut subst, v.span);
         }
@@ -8144,6 +8222,7 @@ impl<'a> Checker<'a> {
                 // checked the closure again against it, where `n` is the error
                 // type and says nothing — so a program with no diagnostic
                 // reached code generation holding `<error>`.
+                _ if reported_before => return None,
                 _ => {
                     // The trial's diagnostics were discarded, so a closure
                     // field that went wrong is checked again to say what it

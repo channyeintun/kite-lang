@@ -1820,6 +1820,25 @@ mod tests {
         assert!(!text.contains("does not take type arguments") && !text.contains("`nil`"), "{}", text);
     }
 
+    /// `first(nil, 3)` stays an error — only a closure waits for a later
+    /// argument — but it no longer says there is no expected type and tells
+    /// the reader to annotate a binding that does not exist: it names what
+    /// the later argument made the parameter, and the binding it suggests,
+    /// passed, compiles.
+    #[test]
+    fn a_nil_before_the_argument_that_types_it_says_what_to_write() {
+        let decl = "fn first<T>(a: Option<T>, b: T) -> T {\n  return b\n}\n";
+        let c = compile("t.kite", &format!("{}fn main() {{\n  io.print(first(nil, 3))\n}}\n", decl), Emit::Check);
+        let codes: Vec<&str> = c.diags.iter().filter_map(|d| d.code.map(|x| x.0)).collect();
+        assert_eq!(codes, vec!["E0204"], "{}", c.render_diagnostics());
+        let text = c.render_diagnostics();
+        assert!(!text.contains("no expected type"), "{}", text);
+        assert!(text.contains("`let none: Option<int> = nil` — and pass `none`"), "{}", text);
+        let fixed = format!("{}fn main() {{\n  let none: Option<int> = nil\n  io.print(first(none, 3))\n}}\n", decl);
+        let c = compile("t.kite", &fixed, Emit::Check);
+        assert!(!c.failed(), "{}", c.render_diagnostics());
+    }
+
     /// A default method that asks of `Self` what its trait does not declare
     /// is not told to "add the bound: `Self: Display`", which no program
     /// can write.
