@@ -850,11 +850,11 @@ fn a_repeated_request_header_arrives_joined_with_a_comma() {
     assert_eq!(out, "1 [1, 2]\n", "{}", out);
 }
 
-/// A 1xx is not a final answer, and a 204 or a 304 has no body: `run` answers
+/// A 1xx is not a final answer, and a 204, a 205 or a 304 has no body: `run` answers
 /// 500 to a handler that builds one, instead of sending an interim response
 /// that leaves the connection's next answer paired with the wrong request.
 #[test]
-fn a_final_status_is_200_to_599_and_204_and_304_carry_no_body() {
+fn a_final_status_is_200_to_599_and_204_205_and_304_carry_no_body() {
     if !node_available() {
         eprintln!("skipping: node is not installed");
         return;
@@ -869,6 +869,9 @@ fn a_final_status_is_200_to_599_and_204_and_304_carry_no_body() {
          fn full(request: http.Request) -> http.Response {\n\
          \x20   return http.status(304, \"stale\")\n\
          }\n\
+         fn reset(request: http.Request) -> http.Response {\n\
+         \x20   return http.status(205, \"content after a 205\")\n\
+         }\n\
          async fn main() {\n\
          \x20   let (server, err) = await http.open(0)\n\
          \x20   if err != nil {\n        io.print(err.message())\n        return\n    }\n\
@@ -877,16 +880,17 @@ fn a_final_status_is_200_to_599_and_204_and_304_carry_no_body() {
          \x20       http.route(\"GET\", \"/100\", hundred),\n\
          \x20       http.route(\"GET\", \"/204\", empty),\n\
          \x20       http.route(\"GET\", \"/304\", full),\n\
+         \x20       http.route(\"GET\", \"/205\", reset),\n\
          \x20   ]\n\
          \x20   let (n, rerr) = await http.run(server, routes)\n\
          \x20   if rerr != nil {\n        io.print(rerr.message())\n    }\n\
          }\n";
     let client = client_with(
-        r#"  for (const p of ["/100", "/204", "/304"]) {
+        r#"  for (const p of ["/100", "/204", "/304", "/205"]) {
     const r = await fetch(`http://127.0.0.1:${port}${p}`);
     console.log(p + " " + r.status);
   }"#,
     );
     let out = serve_under_node("final-status", src, &client);
-    assert_eq!(out, "/100 500\n/204 204\n/304 500\n", "{}", out);
+    assert_eq!(out, "/100 500\n/204 204\n/304 500\n/205 500\n", "{}", out);
 }

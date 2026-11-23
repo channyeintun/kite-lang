@@ -150,7 +150,7 @@ pub fn not_found() -> Response {
 
 /// A response with any status code. Nothing is checked here, so that a
 /// handler can be tested whatever it builds; [`respond`] refuses a code outside
-/// 200 to 599 (a 1xx is never the last word) and a body on a 204 or a 304,
+/// 200 to 599 (a 1xx is never the last word) and a body on a 204, 205 or a 304,
 /// and [`run`] answers 500 in its place.
 pub fn status(code: int, body: str) -> Response {
     return Response{ status: code, body: body, headers: "", outgoing: [] }
@@ -1314,7 +1314,7 @@ fn sendable_status(code: int) -> bool {
 }
 
 /// Why a response cannot be sent for its status and body, or nil: a status that
-/// is not a final one, or a body on a 204 or a 304, which by definition have
+/// is not a final one, or a body on a 204, 205 or a 304, which by definition have
 /// none (the host would drop it, and the program should hear that it was not
 /// sent).
 ///
@@ -1323,12 +1323,13 @@ fn sendable_status(code: int) -> bool {
 /// assert(status_refused(status(100, "")) != nil, "an interim one is not final")
 /// assert(status_refused(status(204, "")) == nil, "no content, and none given")
 /// assert(status_refused(status(304, "stale")) != nil, "a body where there is none")
+/// assert(status_refused(status(205, "reset")) != nil, "a reset carries none either")
 /// ```
 fn status_refused(response: Response) -> error {
     if !sendable_status(response.status) {
         return errors.new("http.respond: `\(response.status)` is not a status HTTP sends (200 to 599)")
     }
-    if (response.status == 204 || response.status == 304) && response.body.len() > 0 {
+    if (response.status == 204 || response.status == 205 || response.status == 304) && response.body.len() > 0 {
         return errors.new("http.respond: a \(response.status) has no body, and this one has \(response.body.len()) characters")
     }
     return nil
@@ -1421,8 +1422,8 @@ fn has_nul(text: str) -> bool {
 /// that way.
 ///
 /// A handler's headers — those it added with [`with_header`] — are sent. One
-/// the host would refuse, or a status outside 200 to 599 or a body on a 204 or
-/// 304 (see [`respond`]),
+/// the host would refuse, or a status outside 200 to 599 or a body on a 204,
+/// 205 or 304 (see [`respond`]),
 /// makes the answer a 500 and the server carries on.
 ///
 /// Shutting the server is how this ends well: once it is shut and every

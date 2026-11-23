@@ -2946,7 +2946,7 @@ Existing functions that answer differently:
   stride and a record outside the buffer.
 - **The web modules.** `http.respond` and `http.run` refuse a header name that
   is not a token, a value the host cannot carry, the framing headers, a status
-  outside 200 to 599 and a body on a 204 or 304; `run` sends the headers
+  outside 200 to 599 and a body on a 204, 205 or 304; `run` sends the headers
   `with_header` added and answers 500 to a handler whose response it cannot
   send, and carries on; a `:name` route segment needs a character;
   `send_with` refuses a value it cannot send. `window.parameter` decodes as
