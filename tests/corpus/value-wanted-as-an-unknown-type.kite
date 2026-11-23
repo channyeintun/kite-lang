@@ -1,0 +1,38 @@
+// A written type built around an unknown name is the error type whole, and a
+// value wanted as it is not told anything more: `W{ v: nil }`, `(1, nil)`,
+// `id(nil)`, a closure and a unit variant each got a second report — E0209,
+// E0204 for the `nil`, E0211 — of the one unknown name, because the
+// annotation that would have typed them was that error. And a generic
+// variant whose closure payload cannot be typed says so (E0211), rather than
+// passing `check` as it once did, or saying only "cannot infer `T`".
+
+struct W<T> {
+    v: T
+}
+
+enum M<T> {
+    S(v: T)
+    N
+}
+
+enum E<T> {
+    B(f: fn(T) -> T)
+    C
+}
+
+fn id<T>(x: T) -> T {
+    return x
+}
+
+fn take(w: W<Nope>) { //~ ERROR E0204
+}
+
+fn main() {
+    let w: W<Nope> = W{ v: nil } //~ ERROR E0204
+    let t: (int, Nope) = (1, nil) //~ ERROR E0204
+    let o: Option<Nope> = id(nil) //~ ERROR E0204
+    let f: fn(Nope) -> int = |x| 1 //~ ERROR E0204
+    let m: M<Nope> = N //~ ERROR E0204
+    take(W{ v: nil })
+    let b = B(f: |n| [n]) //~ ERROR E0211
+}

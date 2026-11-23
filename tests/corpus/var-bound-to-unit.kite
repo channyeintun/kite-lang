@@ -1,0 +1,13 @@
+// A `var` given a value of type `()` is refused as a `let` is. It was the
+// error type with nothing said, so `seed * 2` passed `check` and the
+// program reached code generation holding a value of no type.
+
+fn tick() {
+}
+
+fn main() {
+    var seed = () //~ ERROR E0200
+    seed = seed * 2
+    var t = tick() //~ ERROR E0200
+    let u = tick() //~ ERROR E0200
+}

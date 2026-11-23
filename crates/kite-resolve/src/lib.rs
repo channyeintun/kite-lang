@@ -479,6 +479,12 @@ pub struct Modules {
     /// way. That `use` has its error; a name qualified by one of these is not
     /// a second — see [`Modules::is_unresolved`].
     pub unresolved: HashSet<(String, String)>,
+    /// Whether the standard library's module `module` declares a public
+    /// `member`, asked only for the note on a name like `json` that no `use`
+    /// brought in: the resolver does not hold the embedded sources, and
+    /// `json.parse` with no `use std/json` is a missing `use`, which saying
+    /// `cannot find json` alone did not tell the reader.
+    pub std_declares: Option<fn(&str, &str) -> bool>,
 }
 
 impl Modules {
@@ -2576,6 +2582,24 @@ impl<'a> FnResolver<'a> {
         }
         let spelled = p.text();
         let imported = self.map.modules.aliases.get(&(self.module.clone(), spelled.clone()));
+        // `errors.wrap`, `json.parse`, `text.clusters` with no `use`: the
+        // name is a standard-library module this file did not import, and
+        // that module has the member written. The fix is the `use`.
+        let declares = self.map.modules.std_declares;
+        let own = self.find_fn(&spelled).is_some() || self.find_const(&spelled).is_some() || self.find_type(&spelled).is_some();
+        // Imported under another name, the note below says that name.
+        let renamed = self.imported_as(&spelled).is_some();
+        if imported.is_none() && !own && !renamed && declares.is_some_and(|has| has(&spelled, &name.name)) {
+            return Some(
+                Diagnostic::error(codes::E0111, format!("cannot find `{}`", spelled))
+                    .with_primary(p.span, "not found in this scope")
+                    .with_note(format!(
+                        "`{}.{}` is in the standard library's `{}` module, which this file does \
+                         not import: add `use std/{}`",
+                        spelled, name.name, spelled, spelled
+                    )),
+            );
+        }
         let module = match imported {
             Some(module) => module.clone(),
             None if BUILTIN_MODULES.contains(&spelled.as_str()) => spelled.clone(),

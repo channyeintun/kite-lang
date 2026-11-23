@@ -891,7 +891,12 @@ fn run_passes(
     // recovers, so later passes can report their own findings on the parts that
     // did parse. Code generation does not, because its input would be poisoned.
     let unresolved = std::mem::take(&mut loader.unresolved);
-    let module_map = kite_resolve::Modules { of_item: item_modules, aliases, unresolved };
+    let module_map = kite_resolve::Modules {
+        of_item: item_modules,
+        aliases,
+        unresolved,
+        std_declares: Some(modules::std_declares),
+    };
     let resolved = kite_resolve::resolve_modules(&ast, module_map, diags);
     let mut solved = kite_types::Solved::default();
     let mut hir = kite_types::check_recording(&ast, &resolved, sources, diags, release, &mut solved);
@@ -953,6 +958,22 @@ fn run_passes(
         return (hir.to_string(), None, None, None, index);
     }
     if diags.has_errors() {
+        return (String::new(), None, None, None, index);
+    }
+    // **No error type reaches code generation.** The checker gives a value
+    // the error type only where it reported something; one that survives
+    // into a program with no diagnostic is the checker's own mistake, and
+    // lowering it was an invalid Wasm module, a segfault, or a VM trap far
+    // from the cause. So it is named here, at the expression, instead.
+    if let Some((function, span)) = kite_hir::mono::error_typed(&mut hir) {
+        diags.push(
+            Diagnostic::error(kite_diag::codes::E0901, format!("internal compiler error in `{}`", function))
+                .with_primary(span, "the checker left this without a type, and reported nothing")
+                .with_note(
+                    "this is a bug in Kite, not in this program — please report it, \
+                     with the program if it can be shared",
+                ),
+        );
         return (String::new(), None, None, None, index);
     }
 
@@ -1802,6 +1823,153 @@ mod tests {
         assert!(text.contains("unknown type `Nope`"), "{}", text);
         assert!(text.contains("cannot find `Nope` in module `sync`"), "{}", text);
         assert!(!text.contains("does not take type arguments") && !text.contains("`nil`"), "{}", text);
+
+        // Qualified by a name that is no imported module, with arguments:
+        // it said nothing, and the program ran.
+        let c = compile(
+            "t.kite",
+            "fn g(x: bogus.Thing<int>) {\n}\nfn main() {\n  let e: bogus.Thing<int> = nil\n  let b: sync.Nope<str> = nil\n}\n",
+            Emit::Check,
+        );
+        let codes: Vec<&str> = c.diags.iter().filter_map(|d| d.code.map(|x| x.0)).collect();
+        assert_eq!(codes, vec!["E0204", "E0204", "E0204"], "{}", c.render_diagnostics());
+        let text = c.render_diagnostics();
+        assert!(text.contains("unknown type `bogus.Thing`") && text.contains("unknown type `sync.Nope`"), "{}", text);
+
+        // A built-in type is declared — by the compiler — and takes none.
+        let c = compile("t.kite", "fn main() {\n  let a: int<str> = 1\n}\n", Emit::Check);
+        let text = c.render_diagnostics();
+        assert!(text.contains("`int` does not take type arguments"), "{}", text);
+        assert!(!text.contains("unknown type") && !text.contains("similar type"), "{}", text);
+    }
+
+    /// Three notes that now name a fix that compiles: a module's trait
+    /// written as a type is `dyn` *of that path*; a built-in type where a
+    /// `dyn` is wanted is told it meets the trait only as a bound (§9); a
+    /// struct missing the `Hash` a bound wants is told to derive it.
+    #[test]
+    fn notes_about_traits_name_what_compiles() {
+        let note_then_fix = |src: &str, note: &str, fixed: &str| {
+            let c = compile("t.kite", src, Emit::Check);
+            let codes = c.diags.iter().filter(|d| d.severity == kite_diag::Severity::Error).count();
+            assert_eq!(codes, 1, "{}", c.render_diagnostics());
+            assert!(c.render_diagnostics().contains(note), "{}", c.render_diagnostics());
+            let c = compile("t.kite", fixed, Emit::Check);
+            assert!(!c.failed(), "{}", c.render_diagnostics());
+        };
+        note_then_fix(
+            "use std/json\nfn f(x: json.Encode) -> int {\n  return 1\n}\nfn main() {\n}\n",
+            "write `dyn json.Encode` for a trait object",
+            "use std/json\nfn f(x: dyn json.Encode) -> int {\n  return 1\n}\nfn main() {\n}\n",
+        );
+        note_then_fix(
+            "fn main() {\n  let b: dyn Debug = 5\n  io.print(b.debug())\n}\n",
+            "take a `T: Debug` parameter instead",
+            "fn show<T: Debug>(x: T) -> str {\n  return x.debug()\n}\nfn main() {\n  io.print(show(5))\n}\n",
+        );
+        let keyed = "fn keyed<K: Hash, V>(m: {K: V}) -> int {\n  return m.len()\n}\n\
+                     fn main() {\n  io.print(keyed({P{ a: 1 }: 1}))\n}\n";
+        note_then_fix(
+            &format!("struct P {{\n  a: int\n}}\n{}", keyed),
+            "write `@derive(Hash)` above the declaration of `P`",
+            &format!("@derive(Hash)\nstruct P {{\n  a: int\n}}\n{}", keyed),
+        );
+    }
+
+    /// A standard-library module written without its `use` is told the
+    /// `use`, in one wording for every module and for a type as for a
+    /// function; and the program with that `use` added compiles.
+    #[test]
+    fn a_std_module_used_without_its_use_says_which_use() {
+        for (module, member) in [("errors", "wrap(e, \"x\")"), ("json", "parse(\"1\")"), ("text", "clusters(\"ab\")")] {
+            let body = format!(
+                "fn f() -> error {{\n  return errors.new(\"boom\")\n}}\nfn main() {{\n  let e = f()\n  if e != nil {{\n    \
+                 io.print(e.message())\n  }}\n  _ = {}.{}\n}}\n",
+                module, member
+            );
+            let c = compile("t.kite", &body, Emit::Check);
+            let text = c.render_diagnostics();
+            let codes: Vec<&str> = c.diags.iter().filter_map(|d| d.code.map(|x| x.0)).collect();
+            assert_eq!(codes, vec!["E0111"], "{}", text);
+            assert!(
+                text.contains(&format!("which this file does not import: add `use std/{}`", module)),
+                "{}",
+                text
+            );
+            let c = compile("t.kite", &format!("use std/{}\n{}", module, body), Emit::Check);
+            assert!(!c.failed(), "{}", c.render_diagnostics());
+        }
+        let c = compile("t.kite", "fn f(j: json.Json) {\n}\nfn main() {\n}\n", Emit::Check);
+        assert!(c.render_diagnostics().contains("add `use std/json`"), "{}", c.render_diagnostics());
+    }
+
+    /// A note never says to write an `impl` the orphan rule refuses:
+    /// `io.print(j)` for a `json.Json` said to write `impl Display for
+    /// json.Json`, which is E0406. It says to hold the value in a struct of
+    /// the file's own, and that, written, compiles.
+    #[test]
+    fn a_note_for_another_modules_type_offers_no_orphan_impl() {
+        let c = compile(
+            "t.kite",
+            "use std/json\nfn main() {\n  let (j, e) = json.parse(\"1\")\n  if e == nil {\n    io.print(j)\n  }\n}\n",
+            Emit::Check,
+        );
+        let text = c.render_diagnostics();
+        assert!(c.failed(), "{}", text);
+        assert!(!text.contains("write `impl Display for json.Json"), "{}", text);
+        assert!(text.contains("hold the value in a struct of this module's own"), "{}", text);
+        let c = compile(
+            "t.kite",
+            "use std/json\nstruct Shown {\n  j: json.Json\n}\nimpl Display for Shown {\n  fn show(self) -> str {\n    \
+             return json.stringify(self.j)\n  }\n}\nfn main() {\n  let (j, e) = json.parse(\"1\")\n  if e == nil {\n    \
+             io.print(Shown{ j: j })\n  }\n}\n",
+            Emit::Check,
+        );
+        assert!(!c.failed(), "{}", c.render_diagnostics());
+    }
+
+    /// `<error>` is the checker's name for a type that failed, and is never
+    /// in a message: a type or a value built around a reported name is that
+    /// one report, wherever it is used afterwards.
+    #[test]
+    fn no_message_names_the_error_type() {
+        let programs = [
+            "fn main() {\n  let c = 3 as Option<Box<int>>\n}\n",
+            "fn main() {\n  let xs: [Nope] = nil\n  io.print(xs.len() + 1)\n}\n",
+            "struct W<T> {\n  v: T\n}\nfn f(w: W<Nope>) -> int {\n  return w + 1\n}\nfn main() {\n}\n",
+            "fn main() {\n  var x = [nope]\n  io.print(x.foo)\n}\n",
+            "fn main() {\n  var x = (1, nope)\n  return x\n}\n",
+            "fn take(n: int) -> int {\n  return n\n}\nfn main() {\n  let m = {\"a\": nope}\n  io.print(take(m))\n}\n",
+            "fn f(n: Int) -> Int {\n  if n == 0 {\n    return 1\n  }\n}\nfn main() {\n}\n",
+            "fn f() -> (Nope, error) {\n  return nil\n}\nstruct S {\n  a: (Nope, error)\n}\nfn main() {\n  let s = S{ a: nil }\n}\n",
+            // E0114's note names the field's type as it is written.
+            "struct S {\n  a: [Nope]\n}\nfn f(s: S) {\n  var t = s\n  t.a = []\n}\nfn main() {\n}\n",
+        ];
+        for src in programs {
+            let c = compile("t.kite", src, Emit::Check);
+            let text = c.render_diagnostics();
+            assert!(c.failed(), "{}", src);
+            assert!(!text.contains("<error>"), "{}\n{}", src, text);
+        }
+    }
+
+    /// `first(nil, 3)` stays an error — only a closure waits for a later
+    /// argument — but it no longer says there is no expected type and tells
+    /// the reader to annotate a binding that does not exist: it names what
+    /// the later argument made the parameter, and the binding it suggests,
+    /// passed, compiles.
+    #[test]
+    fn a_nil_before_the_argument_that_types_it_says_what_to_write() {
+        let decl = "fn first<T>(a: Option<T>, b: T) -> T {\n  return b\n}\n";
+        let c = compile("t.kite", &format!("{}fn main() {{\n  io.print(first(nil, 3))\n}}\n", decl), Emit::Check);
+        let codes: Vec<&str> = c.diags.iter().filter_map(|d| d.code.map(|x| x.0)).collect();
+        assert_eq!(codes, vec!["E0204"], "{}", c.render_diagnostics());
+        let text = c.render_diagnostics();
+        assert!(!text.contains("no expected type"), "{}", text);
+        assert!(text.contains("`let none: Option<int> = nil` — and pass `none`"), "{}", text);
+        let fixed = format!("{}fn main() {{\n  let none: Option<int> = nil\n  io.print(first(none, 3))\n}}\n", decl);
+        let c = compile("t.kite", &fixed, Emit::Check);
+        assert!(!c.failed(), "{}", c.render_diagnostics());
     }
 
     /// A default method that asks of `Self` what its trait does not declare

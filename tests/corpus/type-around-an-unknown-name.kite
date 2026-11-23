@@ -1,0 +1,33 @@
+// A type written around a name that was reported — `[Nope]`, `Wrap<Nope>`,
+// `Option<Box<int>>` with no `Box` — is that one report. It was a type made
+// of the error type, and each later use printed it: "cannot cast `int` to
+// `Option<<error>>`", "expected `[<error>]`, found `nil`", "`+` cannot be
+// applied to `Wrap<<error>>` and `int`" — the same cause again, in words
+// with the compiler's internals in them.
+
+struct Wrap<T> {
+    v: T
+}
+
+fn take(n: int) -> int {
+    return n
+}
+
+fn add(w: Wrap<Nope>) -> int { //~ ERROR E0204
+    return w + 1
+}
+
+fn field(f: fn(Nope) -> int) { //~ ERROR E0204
+    let b = f.foo
+}
+
+fn pass(m: { str: Nope }) -> int { //~ ERROR E0204
+    return take(m)
+}
+
+fn main() {
+    let c = 3 as Option<Box<int>> //~ ERROR E0204
+    let xs: [Nope] = nil //~ ERROR E0204
+    let t: (int, Nope) = nil //~ ERROR E0204
+    io.print(xs.len() + t)
+}

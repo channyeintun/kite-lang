@@ -1,0 +1,19 @@
+// A closure field whose parameter nothing fixes solves its struct's
+// parameter only to something made of that unknown — `|n| [n]` makes `T` a
+// slice of nothing — and that is not a solution. The closure's own E0211 is
+// the one report; taking the poison as the answer accepted the program, and
+// the backends lowered `<error>` (an invalid Wasm module, a segfault).
+
+struct One<T> {
+    run: fn(T) -> T
+}
+
+struct Job<T> {
+    run: fn(T) -> T
+}
+
+fn main() {
+    let a = One{ run: |n| [n] } //~ ERROR E0211
+    let b = Job{ run: |n| { return n, nil } } //~ ERROR E0211
+    let c = One{ run: |n| { return [n] } } //~ ERROR E0211
+}

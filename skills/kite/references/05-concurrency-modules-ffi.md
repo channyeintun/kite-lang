@@ -662,7 +662,7 @@ pub fn go() -> bool {
 ```
 
 ```kite ignore
-// src/main.kite — error[E0111]: cannot find `json`, until it says `use std/json`
+// src/main.kite — error[E0111]: cannot find `json`, whose note says to add `use std/json`
 use other
 
 fn main() {

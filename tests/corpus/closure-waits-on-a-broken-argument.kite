@@ -1,0 +1,36 @@
+// A closure typed after the argument that fixes its parameter, where that
+// argument is itself an error, has nothing to learn: the argument's own error
+// is the one report, and E0211 for the closure is not another (§16, one
+// error per cause). The same for a generic struct literal whose fixing field
+// names nothing. A `nil` for a parameter only a later argument fixes is
+// still refused (only a closure waits), and says what that argument made it.
+
+fn ap<T>(f: fn(T) -> T, x: T) -> T {
+    return f(x)
+}
+
+fn apply2<T>(f: fn(T) -> T, x: T, g: fn(T) -> T) -> T {
+    return x
+}
+
+fn first<T>(a: Option<T>, b: T) -> T {
+    return b
+}
+
+struct Job<T> {
+    run: fn(T) -> T
+    seed: T
+}
+
+struct Seed<T> {
+    seed: T
+}
+
+fn main() {
+    io.print(ap(|n| n + 1, nope)) //~ ERROR E0111
+    io.print(ap(|n| n + true, 1 + "s")) //~ ERROR E0201
+    io.print(apply2(|n| n + "x", 1 + true, |m| m - "y")) //~ ERROR E0201
+    let j = Job{ run: |n| n + 1, seed: nope } //~ ERROR E0111
+    let s = Seed{ seed: nope } //~ ERROR E0111
+    io.print(first(nil, 3)) //~ ERROR E0204
+}
