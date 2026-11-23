@@ -105,6 +105,15 @@ fn checks() -> [error] {
     out.push(test.failed(empty, "an empty name"))
     let (_, nul) = http.sending_pairs([http.Header{ name: "x-user", value: "ada\0evil" }])
     out.push(test.failed(nul, "a NUL byte in a value"))
+    let (_, euro) = http.sending_pairs([http.Header{ name: "x-price", value: "5\u{20AC}" }])
+    out.push(test.failed(euro, "a character past U+00FF in a value"))
+    let (_, bell) = http.sending_pairs([http.Header{ name: "x-price", value: "a\u{7}b" }])
+    out.push(test.failed(bell, "a control character in a value"))
+    let (latin, latin_err) = http.sending_pairs([http.Header{ name: "x-name", value: "caf\u{E9}\tok" }])
+    out.push(test.ok(latin_err, "Latin-1 and a tab are carried"))
+    if latin_err == nil {
+        out.push(test.equal_str(latin.headers, "x-name: caf\u{E9}\tok", "as written"))
+    }
 
     // ---- components, query strings, forms, cookies ----
     let wild = "a b&c=d/é😀+~"

@@ -479,7 +479,7 @@ fn a_response_header_name_must_be_a_token_and_a_value_has_no_nul() {
     let out = serve_under_node("header-names", src, &client);
     assert_eq!(
         out,
-        "cookie null\nbody colon=true nul=true http.respond: `1000` is not a status HTTP sends (100 to 599)\n",
+        "cookie null\nbody colon=true nul=true http.respond: `1000` is not a status HTTP sends (200 to 599)\n",
         "{}",
         out
     );
@@ -761,4 +761,132 @@ process.stdout.write(out + (code === 0 ? "" : "exited with " + code + "\n"));
          run returned after 2\n\
          accept after shut: http.accept: the server is shut\n"
     );
+}
+
+/// A handler cannot set a header that frames the message: `run` answers 500 to
+/// it, and the next request on the connection is answered by its own handler.
+///
+/// A `Content-Length` shorter than the body made the rest of the body the next
+/// response on a keep-alive connection, so body data could cross into HTTP
+/// structure.
+#[test]
+fn a_handler_cannot_set_a_header_that_frames_the_message() {
+    if !node_available() {
+        eprintln!("skipping: node is not installed");
+        return;
+    }
+    let src = "use std/http\n\
+         fn page(request: http.Request) -> http.Response {\n\
+         \x20   let body = \"ok\\r\\nHTTP/1.1 200 OK\\r\\ncontent-length: 4\\r\\n\\r\\nEVIL\"\n\
+         \x20   return http.with_header(http.ok(body), \"Content-Length\", \"2\")\n\
+         }\n\
+         fn chunked(request: http.Request) -> http.Response {\n\
+         \x20   return http.with_header(http.ok(\"x\"), \"transfer-encoding\", \"gzip\")\n\
+         }\n\
+         fn other(request: http.Request) -> http.Response {\n\
+         \x20   return http.ok(\"real\")\n\
+         }\n\
+         async fn main() {\n\
+         \x20   let (server, err) = await http.open(0)\n\
+         \x20   if err != nil {\n        io.print(err.message())\n        return\n    }\n\
+         \x20   io.print(\"listening \\(http.port_of(server))\")\n\
+         \x20   let routes = [\n\
+         \x20       http.route(\"GET\", \"/page\", page),\n\
+         \x20       http.route(\"GET\", \"/chunked\", chunked),\n\
+         \x20       http.route(\"GET\", \"/other\", other),\n\
+         \x20   ]\n\
+         \x20   let (n, rerr) = await http.run(server, routes)\n\
+         \x20   if rerr != nil {\n        io.print(rerr.message())\n    }\n\
+         }\n";
+    let client = client_with(
+        r#"  const a = await fetch(`http://127.0.0.1:${port}/page`);
+  console.log("page " + a.status);
+  const c = await fetch(`http://127.0.0.1:${port}/chunked`);
+  console.log("chunked " + c.status);
+  const o = await fetch(`http://127.0.0.1:${port}/other`);
+  console.log("other " + o.status + " " + (await o.text()));"#,
+    );
+    let out = serve_under_node("framing", src, &client);
+    assert_eq!(out, "page 500\nchunked 500\nother 200 real\n", "{}", out);
+}
+
+/// A header sent twice reaches the program as one line joined with a comma,
+/// which is what `request_headers`' documentation says of the Node host.
+///
+/// The documentation said "every value ... sent more than once", which only a
+/// host that keeps each line could give; Node has already joined them.
+#[test]
+fn a_repeated_request_header_arrives_joined_with_a_comma() {
+    if !node_available() {
+        eprintln!("skipping: node is not installed");
+        return;
+    }
+    let src = "use std/http\n\
+         fn who(request: http.Request) -> http.Response {\n\
+         \x20   let all = http.request_headers(request, \"x-dup\")\n\
+         \x20   return http.ok(\"\\(all.len()) [\\(join(all, \"|\"))]\")\n\
+         }\n\
+         async fn main() {\n\
+         \x20   let (server, err) = await http.open(0)\n\
+         \x20   if err != nil {\n        io.print(err.message())\n        return\n    }\n\
+         \x20   io.print(\"listening \\(http.port_of(server))\")\n\
+         \x20   let (n, rerr) = await http.run(server, [http.route(\"GET\", \"/who\", who)])\n\
+         \x20   if rerr != nil {\n        io.print(rerr.message())\n    }\n\
+         }\n";
+    let client = client_with(
+        r#"  const http = await import("node:http");
+  const text = await new Promise((resolve, reject) => {
+    const req = http.request({ port, path: "/who", headers: { "x-dup": ["1", "2"] } }, (res) => {
+      let body = "";
+      res.on("data", (c) => { body += c; });
+      res.on("end", () => resolve(body));
+    });
+    req.on("error", reject);
+    req.end();
+  });
+  console.log(text);"#,
+    );
+    let out = serve_under_node("repeated-header", src, &client);
+    assert_eq!(out, "1 [1, 2]\n", "{}", out);
+}
+
+/// A 1xx is not a final answer, and a 204 or a 304 has no body: `run` answers
+/// 500 to a handler that builds one, instead of sending an interim response
+/// that leaves the connection's next answer paired with the wrong request.
+#[test]
+fn a_final_status_is_200_to_599_and_204_and_304_carry_no_body() {
+    if !node_available() {
+        eprintln!("skipping: node is not installed");
+        return;
+    }
+    let src = "use std/http\n\
+         fn hundred(request: http.Request) -> http.Response {\n\
+         \x20   return http.status(100, \"continue body\")\n\
+         }\n\
+         fn empty(request: http.Request) -> http.Response {\n\
+         \x20   return http.status(204, \"\")\n\
+         }\n\
+         fn full(request: http.Request) -> http.Response {\n\
+         \x20   return http.status(304, \"stale\")\n\
+         }\n\
+         async fn main() {\n\
+         \x20   let (server, err) = await http.open(0)\n\
+         \x20   if err != nil {\n        io.print(err.message())\n        return\n    }\n\
+         \x20   io.print(\"listening \\(http.port_of(server))\")\n\
+         \x20   let routes = [\n\
+         \x20       http.route(\"GET\", \"/100\", hundred),\n\
+         \x20       http.route(\"GET\", \"/204\", empty),\n\
+         \x20       http.route(\"GET\", \"/304\", full),\n\
+         \x20   ]\n\
+         \x20   let (n, rerr) = await http.run(server, routes)\n\
+         \x20   if rerr != nil {\n        io.print(rerr.message())\n    }\n\
+         }\n";
+    let client = client_with(
+        r#"  for (const p of ["/100", "/204", "/304"]) {
+    const r = await fetch(`http://127.0.0.1:${port}${p}`);
+    console.log(p + " " + r.status);
+  }"#,
+    );
+    let out = serve_under_node("final-status", src, &client);
+    assert_eq!(out, "/100 500\n/204 204\n/304 500\n", "{}", out);
 }

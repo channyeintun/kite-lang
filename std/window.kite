@@ -329,8 +329,19 @@ pub fn escaped(text: str) -> str {
 }
 
 /// The other direction, `+` read as a space the way a form encodes one.
+///
+/// Decoded by [`http.form_decoded`], as [`parameter`] and the server are, so a
+/// page and the server it talks to read one text one way: a bad escape stays
+/// as written and the rest is decoded, and bytes that are not UTF-8 become
+/// U+FFFD. `decodeURIComponent` gave the whole text back undecoded for one bad
+/// escape, and threw on a lone `%E9`.
+///
+/// ```kite ignore
+/// assert(unescaped("a%zz+b%41") == "a%zz bA", "one bad escape does not undo the rest")
+/// assert(unescaped("%C3%A9") == "é", "UTF-8")
+/// ```
 pub fn unescaped(text: str) -> str {
-    return through("decodeURIComponent", replace(text, "+", " "))
+    return http.form_decoded(text)
 }
 
 /// One of the global encoding functions, answering with its input unchanged if

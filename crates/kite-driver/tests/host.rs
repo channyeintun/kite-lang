@@ -576,6 +576,47 @@ fn crypto_hmac_variants_derive_and_random_int() {
     );
 }
 
+/// A stored hash whose salt or digest is not hex is an error, not a match and
+/// not a quiet "no".
+///
+/// The host reads a pair that is not hex as zero, so a stored salt of `zz`
+/// verified exactly as the salt `00` does.
+#[test]
+fn a_damaged_stored_hash_is_an_error_and_never_a_match() {
+    if !node_available() {
+        eprintln!("skipping: node is not on PATH");
+        return;
+    }
+    let out = run_under_node(
+        "verify_damaged",
+        "use std/crypto\n\
+         async fn verdict(stored: str) -> str {\n\
+         \x20 let (ok, err) = await crypto.password_verify(\"x\", stored)\n\
+         \x20 if err != nil { return \"error: \\(err.message())\" }\n\
+         \x20 return \"\\(ok)\"\n}\n\
+         async fn main() {\n\
+         \x20 let (d, err) = await crypto.derive(\"x\", \"00\", 1)\n\
+         \x20 if err != nil { return }\n\
+         \x20 io.print(await verdict(\"pbkdf2$1$00$\\(d)\"))\n\
+         \x20 io.print(await verdict(\"pbkdf2$1$zz$\\(d)\"))\n\
+         \x20 io.print(await verdict(\"pbkdf2$1$0$\\(d)\"))\n\
+         \x20 io.print(await verdict(\"pbkdf2$1$00$\\(upper(d))\"))\n\
+         \x20 io.print(await verdict(\"pbkdf2$1$00$\\(d.slice(0, 62))\"))\n\
+         \x20 io.print(await verdict(\"pbkdf2$1$00$zz\\(d.slice(2, 64))\"))\n}\n",
+    );
+    assert_eq!(
+        out,
+        "true\n\
+         error: crypto: stored hash's salt is not hex\n\
+         error: crypto: stored hash's salt is not hex\n\
+         true\n\
+         error: crypto: stored hash's digest is not 64 hex characters\n\
+         error: crypto: stored hash's digest is not 64 hex characters\n",
+        "{}",
+        out
+    );
+}
+
 /// Sealed text opens back to the plaintext, and stops opening the moment a
 /// character changes or the key is wrong — an authentication failure is an
 /// error, not a wrong answer. Importing the same hex twice gives keys that
@@ -1879,6 +1920,32 @@ fn window_decodes_rounds_and_dates_as_documented() {
     );
 }
 
+/// `window.unescaped` decodes as `http.form_decoded` and `window.parameter`
+/// do: a bad escape stays and the rest is decoded, and a lone `%E9` is U+FFFD.
+///
+/// It called `decodeURIComponent`, which gave the whole text back undecoded for
+/// one bad escape (and for `%E9`), so one page read one text two ways.
+#[test]
+fn window_unescaped_decodes_as_the_server_does() {
+    if !node_available() {
+        eprintln!("skipping: node is not on PATH");
+        return;
+    }
+    let src = "use std/window\n\
+        use std/http\n\n\
+        fn main() {\n\
+        \x20 for s in [\"a+b%20c\", \"100%\", \"a%zz+b%41\", \"%E9\", \"%C3%A9\"] {\n\
+        \x20   io.print(\"\\(window.unescaped(s) == http.form_decoded(s)) [\\(window.unescaped(s))]\")\n\
+        \x20 }\n\
+        }\n";
+    let out = run_runner_under_node("window_unescaped", src, WINDOW_RUNNER, &[]);
+    assert_eq!(
+        out,
+        "true [a b c]\ntrue [100%]\ntrue [a%zz bA]\ntrue [\u{fffd}]\ntrue [\u{e9}]\n",
+        "{}",
+        out
+    );
+}
 
 // ---- the typed door --------------------------------------------------------
 

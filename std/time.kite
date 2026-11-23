@@ -253,9 +253,19 @@ pub fn rfc3339(ms: int) -> str {
 /// Unlike [`stamp`], this names the offset, so what it writes is the instant
 /// and not only a reading of the clock on the wall.
 ///
+/// It is RFC 3339 for the years 0000 to 9999 (as read in the zone given) and
+/// for an offset strictly inside a day, `east_minutes` from -1439 to 1439.
+/// Outside that range it writes what the arithmetic gives — `10000-01-01…`,
+/// `-0001-…`, `+24:00` — which is not RFC 3339 and which [`parse_iso`] refuses,
+/// so check an instant that did not come from a clock before writing it out.
+///
 /// ```kite
 /// assert(rfc3339_at(1_754_697_600_000, 420) == "2025-08-09T07:00:00+07:00", "east")
 /// assert(rfc3339_at(1_754_697_600_000, -90) == "2025-08-08T22:30:00-01:30", "west")
+/// let last = 253_402_300_799_000
+/// assert(rfc3339(last) == "9999-12-31T23:59:59Z", "the last second RFC 3339 can write")
+/// assert(parse_iso(rfc3339(last)) == last, "and it reads back")
+/// assert(parse_iso(rfc3339(last + 1000)) == nil, "the next is year 10000, which does not")
 /// ```
 pub fn rfc3339_at(ms: int, east_minutes: int) -> str {
     var out = stamp(ms, east_minutes)
