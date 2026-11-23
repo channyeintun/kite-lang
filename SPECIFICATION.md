@@ -2228,9 +2228,14 @@ needs no `extern`.
 
 A runtime that answers a host function itself — the bytecode VM and the native
 runtime both answer `@host("fs")` — holds the declaration to what it reads and
-returns. A parameter declared as other than what the host reads, or a result
-declared as other than what it answers, is a trap before the call is made, in
-the same words on both.
+returns. A parameter declared as other than what the host reads, a parameter
+the host does not read at all, or a result declared as other than what it
+answers, is a trap before the call is made, in the same words on both. What no
+host could answer is refused before anything runs: a host call answers with
+one value when it is made, so an `extern fn` returns neither `(T, error)`
+(`E0204`) nor a task — it cannot be `async` (`E0100`). The Kite function
+wrapping a declaration is the one that turns the host's answer into an
+`error`, or waits.
 
 **`std/js` declares nothing.** It is a fixed set of about thirty primitives
 through which any host object can be reached:

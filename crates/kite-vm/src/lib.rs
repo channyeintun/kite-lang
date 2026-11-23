@@ -797,9 +797,12 @@ pub trait Host {
 /// reads and answers — `kite-rt`'s `host_params`, in the same order and the
 /// same words, so a wrong declaration traps alike on both backends.
 ///
-/// Extra declared parameters are ignored, as they are there: a host reads
-/// what it reads.
-fn check_host_signature(name: &str, declared: &[u8], wants: &[u8], op: &'static str) -> Result<(), Trap> {
+/// **As many parameters as the host reads, no more.** An extra declared
+/// parameter was ignored, so `temp_path(42)` ran and the `42` went nowhere —
+/// a declaration saying something the host does not do. And a parameter of
+/// the wrong type said `` `fs.kind` received a `not a str` ``, naming a
+/// function the program never called and a type that is not one.
+fn check_host_signature(name: &str, declared: &[u8], wants: &[u8], _op: &'static str) -> Result<(), Trap> {
     let split = |sig: &[u8]| -> (Vec<u8>, Option<u8>) {
         match sig.iter().position(|c| *c == b':') {
             Some(at) => (sig[..at].to_vec(), sig.get(at + 1).copied()),
@@ -808,9 +811,20 @@ fn check_host_signature(name: &str, declared: &[u8], wants: &[u8], op: &'static 
     };
     let (want_params, want_ret) = split(wants);
     let (have_params, have_ret) = split(declared);
-    for (i, want) in want_params.iter().enumerate() {
-        if have_params.get(i) != Some(want) {
-            return Err(Trap::TypeConfusion { op, found: not_a(*want) });
+    if have_params.len() != want_params.len() {
+        return Err(Trap::Failed { message: host_arity(name, have_params.len(), want_params.len()) });
+    }
+    for (i, (have, want)) in have_params.iter().zip(&want_params).enumerate() {
+        if have != want {
+            return Err(Trap::Failed {
+                message: format!(
+                    "`{}` declares parameter {} as {}, and the host reads {}",
+                    name,
+                    i + 1,
+                    type_name_of(*have),
+                    type_name_of(*want)
+                ),
+            });
         }
     }
     if have_ret != want_ret {
@@ -826,6 +840,19 @@ fn check_host_signature(name: &str, declared: &[u8], wants: &[u8], op: &'static 
     Ok(())
 }
 
+/// The trap for a host declaration with the wrong number of parameters —
+/// `kite-rt`'s words too.
+fn host_arity(name: &str, have: usize, want: usize) -> String {
+    let plural = |n: usize| if n == 1 { "" } else { "s" };
+    format!(
+        "`{}` is declared with {} parameter{}, and the host reads {}",
+        name,
+        have,
+        plural(have),
+        want
+    )
+}
+
 /// A signature code as the type it stands for.
 fn type_name_of(code: u8) -> &'static str {
     match code {
@@ -835,19 +862,6 @@ fn type_name_of(code: u8) -> &'static str {
         b'b' => "bool",
         b'u' => "()",
         _ => "reference",
-    }
-}
-
-/// What a trap says a wrongly declared parameter was — `kite-rt` writes
-/// `not a ` before the type's name, the way this VM's own checks do.
-fn not_a(code: u8) -> &'static str {
-    match code {
-        b's' => "not a str",
-        b'i' => "not a int",
-        b'f' => "not a float",
-        b'b' => "not a bool",
-        b'u' => "not a ()",
-        _ => "not a reference",
     }
 }
 

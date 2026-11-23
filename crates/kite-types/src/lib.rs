@@ -389,6 +389,24 @@ pub fn check_recording(
             }
             if let Some(r) = &e.ret {
                 check_host_type(ret, r.span(), &types, diags);
+                // **A host answers with one value.** `-> (int, error)` was read
+                // as `-> int` — its value type — and the `error` half was
+                // never there, so a caller's `check` tested a nil the host
+                // could not have sent.
+                if r.is_fallible() {
+                    diags.push(
+                        Diagnostic::error(
+                            codes::E0204,
+                            "a host function cannot return `(T, error)`",
+                        )
+                        .with_primary(r.span(), "a host answers with one value")
+                        .with_note(
+                            "a failure the host reports comes back inside that value, and the \
+                             Kite function wrapping the declaration makes it an `error` — as \
+                             `std/fs` does",
+                        ),
+                    );
+                }
             }
             extern_of_sig.push(Some(externs.len() as u32));
             externs.push(hir::ExternDef {

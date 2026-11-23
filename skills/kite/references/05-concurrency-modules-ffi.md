@@ -1142,6 +1142,14 @@ fn main() {
 `std/socket` and `std/crypto` are built from it. Drawing does not use it at all
 — the drawing calls are compiler builtins.
 
+A host answers with one value when it is called, so an `extern fn` cannot
+return `(T, error)` (`E0204`) and cannot be `async` (`E0100`); the Kite function
+wrapping it makes the `error`, or waits. Where `kitec run` answers a host
+itself (`@host("fs")`, on the VM and natively), a declaration whose parameters
+are not exactly what the host reads — one too many included — or whose result
+is not what it answers traps before the call, in the same words on both:
+``error: `fs.read_text` declares parameter 1 as int, and the host reads str``.
+
 A program that `check`s fine will still **trap at run time under a host that
 supplies no such namespace**, and traps are not catchable:
 

@@ -2894,14 +2894,32 @@ fn split_sig(sig: &[u8]) -> (&[u8], &[u8]) {
 /// Check a declaration against what the host implements, trapping on a
 /// mismatch, and hand back how many parameters the host reads.
 fn host_params(name: &str, declared: &[u8], wants: &[u8], op: &str) -> usize {
+    let _ = op;
     let (want_params, want_ret) = split_sig(wants);
     let (have_params, have_ret) = split_sig(declared);
-    // A parameter the host reads must be declared, and declared as what the
-    // host reads it as — the VM's check, in the VM's words. Extra declared
-    // parameters are ignored there, and so here.
-    for (i, want) in want_params.iter().enumerate() {
-        if have_params.get(i) != Some(want) {
-            trap(&format!("`{}` received a `not a {}`", op, sig_type_name(*want)));
+    // As many parameters as the host reads, each declared as what the host
+    // reads it as — the VM's check, in the VM's words. An extra one was
+    // ignored, so a declaration could say the host takes a value it never
+    // reads.
+    if have_params.len() != want_params.len() {
+        let plural = if have_params.len() == 1 { "" } else { "s" };
+        trap(&format!(
+            "`{}` is declared with {} parameter{}, and the host reads {}",
+            name,
+            have_params.len(),
+            plural,
+            want_params.len()
+        ));
+    }
+    for (i, (have, want)) in have_params.iter().zip(want_params).enumerate() {
+        if have != want {
+            trap(&format!(
+                "`{}` declares parameter {} as {}, and the host reads {}",
+                name,
+                i + 1,
+                sig_type_name(*have),
+                sig_type_name(*want)
+            ));
         }
     }
     // The VM would hand back a value of the host's type whatever the
@@ -3397,8 +3415,6 @@ mod tests {
     fn a_host_declaration_that_does_not_match_is_a_trap() {
         // Matching: nothing to say.
         assert_eq!(host_params("fs.write_text", b"ss:s", b"ss:s", "fs.write"), 2);
-        // Extra declared parameters are ignored, as the VM ignores them.
-        assert_eq!(host_params("fs.temp_path", b"i:s", b":s", "fs.temp_path"), 0);
         if std::env::var_os("KITE_RT_TEST_CHILD").is_some() {
             host_params("fs.read_text", b"i:s", b"s:s", "fs.read");
             unreachable!("an int was accepted as a path");
@@ -3406,8 +3422,24 @@ mod tests {
         let out = in_a_child("tests::a_host_declaration_that_does_not_match_is_a_trap");
         assert_eq!(out.status.code(), Some(1));
         let stderr = String::from_utf8_lossy(&out.stderr);
-        // The VM's words for the same mistake.
-        assert!(stderr.contains("error: `fs.read` received a `not a str`"), "{}", stderr);
+        // The VM's words for the same mistake, naming what was declared.
+        let said = "error: `fs.read_text` declares parameter 1 as int, and the host reads str";
+        assert!(stderr.contains(said), "{}", stderr);
+    }
+
+    /// A parameter the host does not read is a declaration saying something
+    /// the host does not do. It was ignored, here and on the VM alike.
+    #[test]
+    fn a_host_declaration_with_a_parameter_too_many_is_a_trap() {
+        if std::env::var_os("KITE_RT_TEST_CHILD").is_some() {
+            host_params("fs.temp_path", b"i:s", b":s", "fs.temp_path");
+            unreachable!("a parameter the host never reads was accepted");
+        }
+        let out = in_a_child("tests::a_host_declaration_with_a_parameter_too_many_is_a_trap");
+        assert_eq!(out.status.code(), Some(1));
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        let said = "error: `fs.temp_path` is declared with 1 parameter, and the host reads 0";
+        assert!(stderr.contains(said), "{}", stderr);
     }
 
     /// The host's answers, and above all its failures, in the encoding

@@ -1341,11 +1341,25 @@ impl<'a> Parser<'a> {
             return Some(Item::Error(start));
         }
         let is_pub = self.eat(T::Pub);
+        let async_at = self.span();
         let is_async = self.eat(T::Async);
 
         let derives = match attribute {
             Some(Attribute::Host(host)) => {
-                return self.parse_extern(is_pub, host, start).map(Item::Extern)
+                // `async` was read and dropped, so the call was not a task and
+                // the declaration said something no one did.
+                if is_async {
+                    self.diags.push(
+                        Diagnostic::error(codes::E0100, "an `extern fn` cannot be `async`")
+                            .with_primary(async_at, "a host call is answered when it is made")
+                            .with_note(
+                                "a host that finishes later answers now with something to wait \
+                                 on, and the Kite function wrapping the declaration is the one \
+                                 that is `async`",
+                            ),
+                    );
+                }
+                return self.parse_extern(is_pub, host, start).map(Item::Extern);
             }
             Some(Attribute::Derive(names)) => names,
             None => Vec::new(),
