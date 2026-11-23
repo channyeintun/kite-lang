@@ -188,3 +188,17 @@ fn importing_a_module_costs_nothing_until_it_is_called() {
         assert_eq!(size, hello, "`use std/{}` costs {} bytes", m, size as isize - hello as isize);
     }
 }
+
+/// The grapheme cluster table is paid for by what clusters, and by nothing
+/// else in `std/text`. `clusters` follows UAX #29 as of Unicode 17.0 over one
+/// Grapheme_Cluster_Break table of 1,345 runs: a program that calls it is
+/// 12,806 bytes today (8,348 when it read only the mark table), and one that
+/// calls only `is_combining`, which shares no table with it, is 4,669 bytes,
+/// as it was before the cluster table existed.
+#[test]
+fn the_grapheme_table_is_paid_for_only_by_clustering() {
+    let marks = size_of("marks", "use std/text\n\nfn main() {\n  io.print(text.is_combining(0x301))\n}\n");
+    assert!(marks < 5120, "is_combining alone costs {} bytes, budget 5120", marks);
+    let clusters = size_of("clusters", "use std/text\n\nfn main() {\n  io.print(text.clusters(\"ab\").len())\n}\n");
+    assert!(clusters < 16384, "clusters costs {} bytes, budget 16384", clusters);
+}
