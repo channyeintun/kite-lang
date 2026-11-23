@@ -955,18 +955,26 @@ impl<'a> FnLowerer<'a> {
     ///
     /// Which locals a later operand writes is found in one walk from the
     /// last operand back, so a list of many plain reads is linear to lower.
+    /// The walk stops at the first operand that names a local: what that
+    /// operand and those before it write is asked of nothing. Walking them
+    /// too made a left-deep chain quadratic — `1 + 1 + …` asked each link
+    /// about all of its left operand, which is every link before it.
     fn operand_refs(&mut self, es: &[&hir::Expr]) -> Vec<Operand> {
         // By operand: whether some operand after it writes it, for a local.
         let mut spill = vec![false; es.len()];
-        let mut written: HashSet<hir::LocalId> = HashSet::new();
-        for (i, e) in es.iter().enumerate().rev() {
-            if let hir::ExprKind::Local(l) = e.kind {
-                spill[i] = written.contains(&l);
+        if let Some(first) = es.iter().position(|e| matches!(e.kind, hir::ExprKind::Local(_))) {
+            let mut written: HashSet<hir::LocalId> = HashSet::new();
+            for (i, e) in es.iter().enumerate().skip(first).rev() {
+                if let hir::ExprKind::Local(l) = e.kind {
+                    spill[i] = written.contains(&l);
+                }
+                if i > first {
+                    e.each_write(&mut |l| {
+                        written.insert(l);
+                        false
+                    });
+                }
             }
-            e.each_write(&mut |l| {
-                written.insert(l);
-                false
-            });
         }
         let mut out = Vec::with_capacity(es.len());
         for (i, e) in es.iter().enumerate() {

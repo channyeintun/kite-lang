@@ -292,6 +292,28 @@ fn a_long_literal_of_plain_reads_is_compiled_in_linear_time() {
     assert!(took < Duration::from_secs(20), "compiling took {:?}", took);
 }
 
+/// A left-deep chain as long as the parser takes is lowered in time in
+/// proportion to it, however many there are. Finding what later operands
+/// write walked the first operand too, which nothing asks about: each link
+/// of `1 + 1 + …` walked every link before it, so sixty chains of 8,000
+/// took over half a minute to compile, against two seconds.
+#[test]
+fn a_long_left_deep_chain_is_lowered_in_linear_time() {
+    let _turn = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+    let sum = vec!["1"; 8000].join(" + ");
+    let fns: String = (0..60).map(|i| format!("fn f{}() -> int {{\n  return {}\n}}\n", i, sum)).collect();
+    let calls: Vec<String> = (0..60).map(|i| format!("f{}()", i)).collect();
+    let src = format!("{}fn main() {{\n  io.print({})\n}}\n", fns, calls.join(" + "));
+    let started = Instant::now();
+    // On the stack `kitec` gives the compiler: a chain this long nests as
+    // deep, and a test thread's stack is smaller.
+    kite_driver::on_compiler_stack(move || {
+        compiled("left-deep-chains", &src, Emit::Check);
+    });
+    let took = started.elapsed();
+    assert!(took < Duration::from_secs(10), "compiling took {:?}", took);
+}
+
 /// Checking is linear in the arms of a generated `match` and in the links of
 /// a field-access chain — the one place here where it is checking that is
 /// timed, since that is where the cost was. Each `match` arm was looked up
