@@ -372,11 +372,28 @@ fn a_derive_reaches_the_prelude_past_a_module_spelled_like_its_spelling() {
     assert_eq!(out, "P{ name: \"a\" }\n2\n");
 }
 
+/// `Debug` and `Hash` derive for a generic type, bounding by the trait each
+/// parameter a field reaches and no other; a field the walk cannot go into
+/// is named. They were refused for every generic type, even one with no
+/// field of a parameter's type.
 #[test]
-fn a_derive_on_a_generic_type_says_why_not() {
-    let text = errors_of("@derive(Debug)\nstruct Box<T> {\n    value: T\n}\nfn main() {\n}\n");
+fn a_derive_on_a_generic_type_bounds_the_parameters_it_walks() {
+    let out = run(
+        "@derive(Debug, Hash)\n\
+         struct Tagged<T> {\n    id: int\n}\n\
+         @derive(Debug)\n\
+         struct Pair<A, B> {\n    a: A\n    b: [B]\n}\n\
+         fn main() {\n\
+         \x20   let t: Tagged<fn()> = Tagged{ id: 3 }\n\
+         \x20   io.print(t.debug())\n\
+         \x20   io.print(Pair{ a: 1, b: [\"x\"] }.debug())\n\
+         }\n",
+    );
+    assert_eq!(out, "Tagged{ id: 3 }\nPair{ a: 1, b: [\"x\"] }\n");
+    let text = errors_of("@derive(Debug)\nstruct Cb<T> {\n    f: fn(T) -> int\n}\nfn main() {\n}\n");
+    assert!(text.contains("this is the field it stopped at"), "{}", text);
+    let text = errors_of("@derive(Encode)\nstruct Box<T> {\n    value: T\n}\nfn main() {\n}\n");
     assert!(text.contains("generic type"), "{}", text);
-    assert!(text.contains("bound on every one"), "{}", text);
 }
 
 #[test]

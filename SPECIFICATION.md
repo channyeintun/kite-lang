@@ -1607,8 +1607,13 @@ than a silent replacement.
 
 The walk handles primitives, slices, maps, optionals, tuples, and other types
 that derive the same trait. Where it cannot go — a function field, a `dyn
-Trait`, a type parameter — it says which field stopped it and what would fix
-it, and the hand-written implementation is still there to write.
+Trait` — it says which field stopped it and what would fix it, and the
+hand-written implementation is still there to write. `Debug` and `Hash` derive
+for a generic type as well: a field of a parameter's type is walked through
+the parameter's own method, and the derived `impl` bounds that parameter by
+the trait, `impl<T: Debug> Debug for Box<T>`. `Encode` and `Decode` derive only
+for a type without parameters, because `Decode` builds each field through an
+associated function, which no bound can reach.
 
 `Decode` is an **associated function**, not a trait method: it produces the
 implementing type, and a trait method cannot say that without `Self` in return

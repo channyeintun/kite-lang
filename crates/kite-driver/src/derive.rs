@@ -142,7 +142,9 @@ struct Decl<'a> {
     module: String,
     kind: Shape<'a>,
     derives: Vec<(Derivable, Span)>,
-    generic: bool,
+    /// The type's parameters, in order, each with its declared bounds as
+    /// written.
+    params: Vec<(String, Vec<String>)>,
 }
 
 /// What a program already wrote by hand for its types, keyed by each type's
@@ -216,11 +218,15 @@ pub fn expand(
     let mut decls: Vec<Decl> = Vec::new();
     for (i, item) in items.iter().enumerate() {
         let module = item_modules.get(i).cloned().unwrap_or_default();
-        let (name, derives, kind, generic) = match item {
-            Item::Struct(s) => (&s.name, &s.derives, Shape::Struct(s), !s.generics.is_empty()),
-            Item::Enum(e) => (&e.name, &e.derives, Shape::Enum(e), !e.generics.is_empty()),
+        let (name, derives, kind, generics) = match item {
+            Item::Struct(s) => (&s.name, &s.derives, Shape::Struct(s), &s.generics),
+            Item::Enum(e) => (&e.name, &e.derives, Shape::Enum(e), &e.generics),
             _ => continue,
         };
+        let params = generics
+            .iter()
+            .map(|g| (g.name.name.clone(), g.bounds.iter().map(path_text).collect()))
+            .collect();
         let bare = name.name.rsplit('.').next().unwrap_or(&name.name).to_string();
         let mut wanted = Vec::new();
         for d in derives {
@@ -258,7 +264,7 @@ pub fn expand(
             module,
             kind,
             derives: wanted,
-            generic,
+            params,
         });
     }
     if decls.is_empty() {
@@ -386,6 +392,8 @@ pub fn expand(
                 module,
                 followed: 0,
                 trait_,
+                params: decls[index].params.iter().map(|(n, _)| n.clone()).collect(),
+                used: HashSet::new(),
                 next: 0,
                 avoid,
                 diags,
@@ -519,6 +527,11 @@ struct Writer<'a, 'd> {
     /// How many aliases deep the walk is.
     followed: usize,
     trait_: Derivable,
+    /// The deriving type's parameters, which a field may name.
+    params: Vec<String>,
+    /// Those the walk reached, each of which the generated `impl` bounds by
+    /// the trait: a `T` field is rendered by `T`'s own `debug`.
+    used: HashSet<String>,
     next: usize,
     /// Names the generated code must not bind: see [`names_in`].
     avoid: HashSet<String>,
@@ -569,7 +582,11 @@ impl<'a> Writer<'a, '_> {
     }
 
     fn item(&mut self, decl: &Decl, at: Span) -> String {
-        if decl.generic {
+        // `Debug` and `Hash` walk a parameter through the trait's own method,
+        // which the generated `impl` bounds it by. `Encode` could too, but
+        // `Decode` is an associated function a bound cannot reach, and the
+        // two are one feature.
+        if !decl.params.is_empty() && matches!(self.trait_, Derivable::Encode | Derivable::Decode) {
             self.failed = true;
             self.diags.push(
                 Diagnostic::error(
@@ -578,20 +595,13 @@ impl<'a> Writer<'a, '_> {
                 )
                 .with_primary(at, "asked for here")
                 .with_note(format!(
-                    "`{}` has type parameters, and a derived body would need a bound on every \
-                     one of them",
+                    "`{}` has type parameters, and `Decode` builds a value of one through an \
+                     associated function, which no bound can reach; `Encode` and `Decode` \
+                     derive only for a type without parameters (`Debug` and `Hash` derive for \
+                     either)",
                     decl.bare
                 ))
-                // An `impl` is for every instantiation at once (E0208 refuses
-                // one for a single one), so the way in is a bound.
-                .with_note(format!(
-                    "write the implementation by hand, for every `{}` at once and with a bound: \
-                     `impl<T: {}> {} for {}<T>`",
-                    decl.bare,
-                    self.trait_.name(),
-                    self.trait_.name(),
-                    decl.bare
-                )),
+                .with_note("write the implementation by hand"),
             );
             return String::new();
         }
@@ -683,11 +693,79 @@ impl<'a> Writer<'a, '_> {
                 body.push(format!("    return {}", out));
             }
         }
-        wrap_impl(&decl.bare, Some("Debug"), "fn debug(self) -> str", &body)
+        let (head, target) = self.header(decl);
+        wrap_impl(&target, Some(&format!("{}Debug", head)), "fn debug(self) -> str", &body)
+    }
+
+    /// For a generic type, the generated `impl`'s parameter list — each of
+    /// the type's parameters, with the bounds it was declared with and, if
+    /// the walk reached it, the trait being derived — and the type at those
+    /// parameters. `impl<T: Debug> Debug for Box<T>`, so a `Box<int>` is
+    /// `Debug` and a `Box<fn()>` is not.
+    fn header(&self, decl: &Decl) -> (String, String) {
+        if decl.params.is_empty() {
+            return (String::new(), decl.bare.clone());
+        }
+        let mut list = Vec::new();
+        for (name, bounds) in &decl.params {
+            let mut bounds = bounds.clone();
+            if self.used.contains(name) && !bounds.iter().any(|b| b == self.trait_.name()) {
+                bounds.push(self.trait_.name().to_string());
+            }
+            list.push(if bounds.is_empty() { name.clone() } else { format!("{}: {}", name, bounds.join(" + ")) });
+        }
+        let names: Vec<&str> = decl.params.iter().map(|(n, _)| n.as_str()).collect();
+        (format!("<{}> ", list.join(", ")), format!("{}<{}>", decl.bare, names.join(", ")))
+    }
+
+    /// A field typed by one of the deriving type's own parameters, which is
+    /// walked through the trait's method and bounded by it.
+    fn param_field(&mut self, ty: &Type) -> Option<String> {
+        let Type::Path(p) = ty else { return None };
+        if !p.args.is_empty() || p.segments.len() != 1 || self.lookup != self.module {
+            return None;
+        }
+        let name = &p.segments[0].name;
+        self.params.contains(name).then(|| name.clone())
+    }
+
+    /// Every one of the deriving type's parameters a type mentions: a field of
+    /// type `Box<T>` is walked through `Box<T>`'s own method, which needs
+    /// whatever `Box`'s does of `T`.
+    fn mark_params(&mut self, ty: &Type) {
+        if self.lookup != self.module {
+            return;
+        }
+        match ty {
+            Type::Path(p) => {
+                if p.args.is_empty() && p.segments.len() == 1 && self.params.contains(&p.segments[0].name) {
+                    self.used.insert(p.segments[0].name.clone());
+                }
+                for a in &p.args {
+                    self.mark_params(a);
+                }
+            }
+            Type::Optional { inner, .. } => self.mark_params(inner),
+            Type::Slice { elem, .. } => self.mark_params(elem),
+            Type::Map { key, value, .. } => {
+                self.mark_params(key);
+                self.mark_params(value);
+            }
+            Type::Tuple { elems, .. } => {
+                for e in elems {
+                    self.mark_params(e);
+                }
+            }
+            Type::Fn { .. } | Type::Dyn { .. } | Type::Error(_) => {}
+        }
     }
 
     /// A value of `ty`, held in `expr`, rendered for a programmer.
     fn debug_of(&mut self, ty: &Type, expr: &str, depth: usize, out: &mut Lines) -> String {
+        if let Some(param) = self.param_field(ty) {
+            self.used.insert(param);
+            return format!("{}.debug()", expr);
+        }
         if let Some((module, target)) = self.through_alias(ty) {
             return self.in_alias(module, ty, |w| w.debug_of(target, expr, depth, out));
         }
@@ -813,10 +891,15 @@ impl<'a> Writer<'a, '_> {
             }
         }
         body.push(format!("    return {}", h));
-        wrap_impl(&decl.bare, Some("Hash"), "fn hash(self) -> int", &body)
+        let (head, target) = self.header(decl);
+        wrap_impl(&target, Some(&format!("{}Hash", head)), "fn hash(self) -> int", &body)
     }
 
     fn hash_of(&mut self, ty: &Type, expr: &str, depth: usize, out: &mut Lines) -> String {
+        if let Some(param) = self.param_field(ty) {
+            self.used.insert(param);
+            return format!("{}.hash()", expr);
+        }
         if let Some((module, target)) = self.through_alias(ty) {
             return self.in_alias(module, ty, |w| w.hash_of(target, expr, depth, out));
         }
@@ -1317,7 +1400,16 @@ impl<'a> Writer<'a, '_> {
     /// A field whose type is another declared type: recurse through its own
     /// derived method, having first checked that it has one.
     fn recurse(&mut self, name: &str, expr: &str, ty: &Type) -> String {
-        let checked = self.recurse_type_name(name, ty);
+        // A generic type is found by its declaration's name, `Box` for a
+        // `Box<T>`, and its arguments are what its own method needs.
+        let base = match ty {
+            Type::Path(p) if !p.args.is_empty() => {
+                self.mark_params(ty);
+                p.segments.iter().map(|s| s.name.as_str()).collect::<Vec<_>>().join(".")
+            }
+            _ => name.to_string(),
+        };
+        let checked = self.recurse_type_name(&base, ty);
         if checked.is_empty() {
             return "\"\"".to_string();
         }
@@ -1591,6 +1683,8 @@ fn quote(text: &str) -> String {
 
 fn wrap_impl(type_name: &str, trait_path: Option<&str>, signature: &str, body: &[String]) -> String {
     let head = match trait_path {
+        // A generic type's arrives with its parameter list in front.
+        Some(t) if t.starts_with('<') => format!("impl{} for {} {{", t, type_name),
         Some(t) => format!("impl {} for {} {{", t, type_name),
         None => format!("impl {} {{", type_name),
     };

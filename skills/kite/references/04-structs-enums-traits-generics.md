@@ -1969,6 +1969,27 @@ fn main() {
 }
 ```
 
+`Debug` and `Hash` derive for a generic type too. A field typed by one of its
+parameters is walked through that parameter's own method, and the generated
+`impl` bounds the parameter by the trait — `impl<T: Debug> Debug for Box<T>` —
+so a `Box<int>` is `Debug` and a `Box<[int]>` is not (`E0208` where it is
+used). A parameter no field reaches gets no bound. `Encode` and `Decode` still
+refuse a generic type (`E0702`).
+
+```kite
+@derive(Debug, Hash)
+struct Box<T> {
+    value: T
+    tags: [str]
+}
+
+fn main() {
+    let b = Box{ value: 3, tags: ["a"] }
+    io.print(b.debug())
+    io.print(b.hash() == Box{ value: 3, tags: ["a"] }.hash())
+}
+```
+
 Deriving a trait the type also implements by hand is `E0701`
 ("`U` already implements `Debug`"), and so is an inherent method with the name
 the derive writes: `@derive(Debug)` beside `impl U { fn debug(self) -> str }` is

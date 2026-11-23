@@ -5160,6 +5160,51 @@ fn main() {
 "#,
         "1\n2\ntrue\n3\n4\n11\n",
     ),
+    // `@derive(Debug, Hash)` on a generic type: a parameter no field reaches
+    // takes no bound, one a field reaches is walked through its own method,
+    // and a recursive generic enum and a field of a generic derived type
+    // walk too. Every generic type was refused.
+    (
+        "a-generic-type-derives-debug-and-hash",
+        r#"@derive(Debug, Hash)
+struct Tagged<T> {
+  id: int
+}
+
+@derive(Debug, Hash)
+struct Pair<A, B: Display> {
+  a: A
+  b: [B]
+  note: Option<A>
+}
+
+@derive(Debug, Hash)
+enum Tree<T> {
+  Leaf(T)
+  Node(left: Tree<T>, right: Tree<T>)
+}
+
+@derive(Debug)
+struct Holder {
+  p: Pair<int, str>
+}
+
+fn main() {
+  let t: Tagged<fn()> = Tagged{ id: 3 }
+  io.print(t.debug())
+  let u: Tagged<str> = Tagged{ id: 3 }
+  io.print(t.hash() == u.hash())
+  let p = Pair{ a: 1, b: ["x", "y"], note: nil }
+  io.print(p.debug())
+  io.print(p.hash() == Pair{ a: 1, b: ["x", "y"], note: nil }.hash())
+  io.print(p.hash() == Pair{ a: 2, b: ["x", "y"], note: nil }.hash())
+  let tree = Node(left: Leaf("a"), right: Node(left: Leaf("b"), right: Leaf("c")))
+  io.print(tree.debug())
+  io.print(Holder{ p: p }.debug())
+}
+"#,
+        "Tagged{ id: 3 }\ntrue\nPair{ a: 1, b: [\"x\", \"y\"], note: nil }\ntrue\nfalse\nNode(left: Leaf(\"a\"), right: Node(left: Leaf(\"b\"), right: Leaf(\"c\")))\nHolder{ p: Pair{ a: 1, b: [\"x\", \"y\"], note: nil } }\n",
+    ),
     // The built-in types meet the prelude's `Display`, `Debug` and `Hash`
     // bounds, and a call through one is what `@derive` and interpolation do
     // with a field of that type. They met none, so the specification's own
