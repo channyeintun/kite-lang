@@ -2260,6 +2260,46 @@ fn a_spelling_taken_is_named_as_its_use_wrote_it() {
     assert_eq!(p.run(&main).expect("each its own name"), "6\n");
 }
 
+/// Inside `ui/widgets/`, a `use view` of a file of `ui` is E0404 whose note
+/// moves `view.kite` into `ui/view/` — and that move compiles. Where
+/// `view.kite` imports `widgets` itself the move ends in an import cycle, so
+/// the note says the two depend on each other instead of naming it.
+#[test]
+fn a_file_of_the_directory_around_is_moved_only_where_that_compiles() {
+    let p = Project::new("member-moved-out");
+    let main = p.file("main.kite", "use ui\n\nfn main() {\n  io.print(ui.top())\n}\n");
+    p.file("ui/top.kite", "use widgets\n\npub fn top() -> int {\n  return widgets.w().n\n}\n");
+    p.file("ui/view.kite", "pub struct View {\n  pub n: int\n}\n");
+    p.file(
+        "ui/widgets/w.kite",
+        "use view\n\npub fn w() -> view.View {\n  return view.View{ n: 3 }\n}\n",
+    );
+    let said = p.run(&main).expect_err("a file of ui, imported from inside it");
+    assert!(said.contains("move `view.kite` into a directory of its own, `ui/view/`"), "{}", said);
+    // The note, done.
+    std::fs::remove_file(p.dir.join("ui/view.kite")).expect("remove");
+    p.file("ui/view/view.kite", "pub struct View {\n  pub n: int\n}\n");
+    p.file(
+        "ui/top.kite",
+        "use widgets\nuse view\n\npub fn top() -> int {\n  return widgets.w().n\n}\n",
+    );
+    assert_eq!(p.run(&main).expect("the move compiles"), "3\n");
+
+    let p = Project::new("member-imports-back");
+    let main = p.file("main.kite", "use ui\n\nfn main() {\n  io.print(ui.top())\n}\n");
+    p.file(
+        "ui/view.kite",
+        "use widgets\n\npub struct View {\n  pub n: int\n}\n\npub fn top() -> int {\n  return widgets.w().n\n}\n",
+    );
+    p.file(
+        "ui/widgets/w.kite",
+        "use view\n\npub fn w() -> view.View {\n  return view.View{ n: 3 }\n}\n",
+    );
+    let said = p.run(&main).expect_err("two modules that import each other");
+    assert!(said.contains("`view.kite` imports `widgets` itself"), "{}", said);
+    assert!(!said.contains("move `view.kite`"), "{}", said);
+}
+
 /// A block string that never closes reads the rest of the file as its text, so
 /// a `\(a)` after it is some later line and not a hole its author wrote. It
 /// named the very binding being defined, and was `cannot find `a`` as a second

@@ -1825,12 +1825,34 @@ impl Loader {
                         directory
                     ))
                 } else if owner.starts_with(&inside) {
-                    d.with_note(format!(
-                        "this module is inside `{0}`, which imports it, so it cannot import `{0}` \
-                         back; move `{1}.kite` into a directory of its own, `{0}/{1}/`, and write \
-                         `use {1}` in both",
-                        directory, stem
-                    ))
+                    // Moved to a directory of its own, the file is still
+                    // beside this module, and a `use` of it there still
+                    // reaches here: then the two import each other, which no
+                    // move undoes, and the note says so instead of a recipe
+                    // that ends in E0402.
+                    let here = owner[inside.len()..].to_string();
+                    let back = self.files.read(&file).ok().is_some_and(|text| {
+                        text.lines().any(|line| {
+                            let mut words = line.split_whitespace();
+                            words.next() == Some("use") && words.next() == Some(here.as_str())
+                        })
+                    });
+                    if back {
+                        d.with_note(format!(
+                            "this module is inside `{0}`, which imports it, so it cannot import \
+                             `{0}` back; and `{1}.kite` imports `{2}` itself, so the two depend on \
+                             each other wherever `{1}.kite` is — what both need has to be in a \
+                             module that imports neither",
+                            directory, stem, here
+                        ))
+                    } else {
+                        d.with_note(format!(
+                            "this module is inside `{0}`, which imports it, so it cannot import \
+                             `{0}` back; move `{1}.kite` into a directory of its own, `{0}/{1}/`, \
+                             and write `use {1}` in both",
+                            directory, stem
+                        ))
+                    }
                 } else {
                     // The directory, as this module reaches it: the path it
                     // wrote, less the file's own segment.
