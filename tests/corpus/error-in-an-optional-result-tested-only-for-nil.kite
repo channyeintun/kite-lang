@@ -79,6 +79,45 @@ async fn matched_and_tested() {
     }
 }
 
+// Where a condition proves the result nil there is no failure to look at,
+// whether the test stands alone, is one side of `&&`, or is a guard.
+async fn nil_on_one_side_of_and(late: bool) {
+    let r = await task.timeout(save(), 100)
+    if r == nil && late {
+        return
+    }
+    if r != nil {
+        if r != nil {
+            io.print(r.message())
+        }
+    }
+}
+
+async fn nil_in_a_guard() {
+    let r = await task.timeout(save(), 100)
+    match 0 {
+        _ if r == nil => io.print("late"),
+        _ => {
+            if r != nil {
+                if r != nil {
+                    io.print(r.message())
+                }
+            }
+        },
+    }
+}
+
+// `||` that held proves neither side: the result may be there, unread.
+async fn nil_on_one_side_of_or(late: bool) {
+    let r = await task.timeout(save(), 100)
+    if r == nil || late {
+        return //~ ERROR E0302
+    }
+    if r != nil {
+        io.print(r.message())
+    }
+}
+
 async fn main() {
     await only_nil_tested()
     await present_and_unread()
@@ -87,4 +126,7 @@ async fn main() {
     await the_error_tested_too()
     await the_pair_taken_apart()
     await matched_and_tested()
+    await nil_on_one_side_of_and(true)
+    await nil_in_a_guard()
+    await nil_on_one_side_of_or(true)
 }

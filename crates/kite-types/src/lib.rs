@@ -3717,12 +3717,12 @@ impl<'a> Checker<'a> {
     /// *else*. The branch's state is thrown away or joined at the end, so
     /// nothing here has to be undone.
     fn enter_branch(&mut self, narrowing: Option<(u32, bool)>, cond: &ast::Expr, in_then: bool) {
+        // Where an optional result is nil there is no failure in it to look
+        // at; where it is present, the failure is still unread.
+        for id in self.nil_results(cond, in_then) {
+            self.inspect(id);
+        }
         if let Some((id, is_eq)) = narrowing {
-            // Where an optional result is nil there is no failure in it to
-            // look at; where it is present, the failure is still unread.
-            if is_eq == in_then && self.optional_result(id) {
-                self.inspect(id);
-            }
             if is_eq != in_then {
                 if let TyKind::Optional(inner) = *self.types.kind(self.locals[id as usize].ty) {
                     self.narrowed.insert(id, inner);
@@ -3731,6 +3731,35 @@ impl<'a> Checker<'a> {
         }
         let facts = self.error_facts(cond, in_then);
         self.assume_error_facts(&facts);
+    }
+
+    /// The optional results — what `task.timeout` answers with — that a
+    /// condition proves nil when it comes out `truth`, by the same logic as
+    /// [`Checker::error_facts`]. A nil test of one does not read the failure
+    /// it may hold, so this is what settles it on the side where there is
+    /// none: `if r == nil && late { return }` and a guard `_ if r == nil`
+    /// as surely as a plain `if r == nil`.
+    fn nil_results(&self, cond: &ast::Expr, truth: bool) -> Vec<u32> {
+        match cond {
+            ast::Expr::Paren { inner, .. } => self.nil_results(inner, truth),
+            ast::Expr::Unary { op: ast::UnaryOp::Not, operand, .. } => {
+                self.nil_results(operand, !truth)
+            }
+            ast::Expr::Binary { op: ast::BinaryOp::And, lhs, rhs, .. } if truth => {
+                let mut ids = self.nil_results(lhs, true);
+                ids.extend(self.nil_results(rhs, true));
+                ids
+            }
+            ast::Expr::Binary { op: ast::BinaryOp::Or, lhs, rhs, .. } if !truth => {
+                let mut ids = self.nil_results(lhs, false);
+                ids.extend(self.nil_results(rhs, false));
+                ids
+            }
+            _ => match self.nil_test(cond) {
+                Some((id, is_eq)) if is_eq == truth && self.optional_result(id) => vec![id],
+                _ => Vec::new(),
+            },
+        }
     }
 
     /// Start checking something only to learn its type.
@@ -9697,6 +9726,9 @@ impl<'a> Checker<'a> {
                 }
                 let facts = self.error_facts(g, false);
                 self.assume_error_facts(&facts);
+                for id in self.nil_results(g, false) {
+                    self.inspect(id);
+                }
                 // What the arm's own pattern bound is out of scope in the
                 // next one; a failure it alone held unread is still `open`.
                 for i in 0..self.taint.len() {
@@ -9712,6 +9744,9 @@ impl<'a> Checker<'a> {
             if let Some(g) = &arm.guard {
                 let facts = self.error_facts(g, true);
                 self.assume_error_facts(&facts);
+                for id in self.nil_results(g, true) {
+                    self.inspect(id);
+                }
             }
 
             // In a `match` statement the arms' values are thrown away, so one
@@ -12941,11 +12976,6 @@ impl<'a> Checker<'a> {
         }
     }
 
-    /// A builtin named where a value is expected.
-    ///
-    /// Permanent rather than pending: a builtin has no body to take a
-    /// reference to, and several of them choose what to do from the type of
-    /// the argument they are given — so there is no one function to hand over.
     /// Whether a builtin that suspends — `task.yield`, `task.park`,
     /// `task.wait_host` — may be written here, reporting `E0521` if not.
     ///
@@ -12976,6 +13006,11 @@ impl<'a> Checker<'a> {
         true
     }
 
+    /// A builtin named where a value is expected.
+    ///
+    /// Permanent rather than pending: a builtin has no body to take a
+    /// reference to, and several of them choose what to do from the type of
+    /// the argument they are given — so there is no one function to hand over.
     fn builtin_not_a_value(&mut self, span: Span) {
         self.diags.push(
             Diagnostic::error(codes::E0200, "a builtin is not a value")
