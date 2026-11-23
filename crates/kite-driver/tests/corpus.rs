@@ -364,3 +364,126 @@ fn a_body_cut_short_after_a_return_is_not_unreachable_code() {
     let codes: Vec<&str> = result.diags.iter().filter_map(|d| d.code.map(|c| c.0)).collect();
     assert_eq!(codes, vec!["E0101"], "{}", result.render_diagnostics());
 }
+
+/// A character Kite does not have is one diagnostic, from the lexer through
+/// the type checker: a `;` is read as the line break it stood for, so the
+/// statement after it on the line is declared, and a run of `?` is one
+/// report, with nothing said about the gap it leaves.
+///
+/// Here rather than in `tests/corpus`: `kitec fmt` refuses a file with a
+/// lexical error, and the tree's Kite is always formatted.
+#[test]
+fn a_character_kite_does_not_have_is_one_diagnostic() {
+    let cases = [
+        "fn main() {\n    let a = 1; let b = 2\n    io.print(a + b)\n}\n",
+        "fn main() {\n    let a = 1;\n    io.print(a)\n}\n",
+        "fn main() {\n    let m = {\"a\": 1}\n    io.print(m[\"a\"] ?? 0)\n}\n",
+        "fn main() {\n    let a = 1 $ 2\n    io.print(a)\n}\n",
+    ];
+    for src in cases {
+        let result = compile(Path::new("t.kite"), src, Emit::Check);
+        let errors: Vec<String> = actual(&result).into_values().flatten().collect();
+        assert_eq!(errors, vec!["E0002".to_string()], "{}\n{}", src, result.render_diagnostics());
+    }
+}
+
+/// A type that does not parse and leaves a bracket open is one diagnostic,
+/// and the declaration it is in is kept: a parameter's, a return type's, a
+/// payload's, an `impl` header's, a closure's. Each was an error at every use
+/// of the name the declaration lost.
+///
+/// Here rather than in `tests/corpus` for the reason above: `kitec fmt`
+/// indents what follows an unclosed bracket.
+#[test]
+fn a_type_that_does_not_parse_keeps_its_declaration() {
+    let cases = [
+        (
+            "fn total(xs: [int) -> int {\n    return xs.len()\n}\n\n\
+             fn main() {\n    io.print(total([1]))\n    io.print(total([2]))\n}\n",
+            1,
+        ),
+        (
+            "fn first() -> [int {\n    return [1]\n}\n\n\
+             fn main() {\n    io.print(first().len())\n    io.print(first().len())\n}\n",
+            1,
+        ),
+        (
+            "enum Path {\n    Step(int, [int))\n    Stop\n}\n\n\
+             fn main() {\n    match Path.Stop {\n        Step(_, _) => io.print(1),\n        \
+             Stop => io.print(2),\n    }\n}\n",
+            2,
+        ),
+        (
+            "struct Box<T> {\n    v: T\n}\n\nimpl Box<1.5> {\n    fn get(self) -> int {\n        \
+             return 1\n    }\n}\n\nfn main() {\n    io.print(Box{ v: 1 }.get())\n}\n",
+            5,
+        ),
+        (
+            "use std/task\n\nasync fn save() ->> error {\n    return nil\n}\n\n\
+             async fn main() {\n    let r = await task.timeout(save(), 10)\n    io.print(r == nil)\n}\n",
+            3,
+        ),
+        (
+            "fn main() {\n    let g = |x: int| -> [int { return [x] }\n    io.print(g(1))\n}\n",
+            2,
+        ),
+        // The `>` left out took the next parameter's name for a type
+        // argument; the parameter is still there.
+        (
+            "struct Box<T> {\n    v: T\n}\n\nfn wait(work: Box<int, ms: int) -> int {\n    \
+             return ms\n}\n\nfn main() {\n    io.print(wait(Box{ v: 1 }, 2))\n}\n",
+            5,
+        ),
+        // The type left out, and its `)` taken for the list's: the second
+        // `)` is the same mistake, and the result type is still read.
+        (
+            "fn send(id: int, message: )) -> int {\n    return id\n}\n\nfn main() {\n    \
+             io.print(send(1, \"a\") + 1)\n}\n",
+            1,
+        ),
+        // A closure whose parameter type could not be read is no function
+        // type to print: it was `fn(<error>) -> int` in what refused it.
+        (
+            "fn main() {\n    let f = |x: [1]| 1\n    io.print(f)\n}\n",
+            2,
+        ),
+    ];
+    for (src, line) in cases {
+        let result = compile(Path::new("t.kite"), src, Emit::Check);
+        let errors: Vec<(u32, String)> = actual(&result)
+            .into_iter()
+            .flat_map(|(line, codes)| codes.into_iter().map(move |c| (line, c)))
+            .collect();
+        assert_eq!(
+            errors,
+            vec![(line, "E0100".to_string())],
+            "{}\n{}",
+            src,
+            result.render_diagnostics()
+        );
+    }
+}
+
+/// A statement written as an arm and ended by its line break, not a `,`, has
+/// the whole statement in its note's block; and one that was itself cut short
+/// — a `(` left open — leaves the match with arms unread, which is not also
+/// a match missing the arms it took.
+///
+/// Here rather than in `tests/corpus`: the corpus pins codes, not notes, and
+/// `kitec fmt` indents what follows an unclosed bracket.
+#[test]
+fn an_arm_that_is_a_statement_ended_by_its_line_is_shown_whole() {
+    let src = "fn main() {\n    match 1 {\n        0 => let y = 5\n        _ => {},\n    }\n}\n";
+    let result = compile(Path::new("t.kite"), src, Emit::Check);
+    let codes: Vec<&str> = result.diags.iter().filter_map(|d| d.code.map(|c| c.0)).collect();
+    assert_eq!(codes, vec!["E0100"], "{}", result.render_diagnostics());
+    let shown =
+        result.diags.iter().flat_map(|d| &d.notes).any(|n| n.contains("`=> { let y = 5 }`"));
+    assert!(shown, "{}", result.render_diagnostics());
+
+    let src = "fn main() {\n    match 1 {\n        4 => let q = (1,\n        5 => io.print(2),\n        \
+               _ => {},\n    }\n}\n";
+    let result = compile(Path::new("t.kite"), src, Emit::Check);
+    let codes: Vec<&str> = result.diags.iter().filter_map(|d| d.code.map(|c| c.0)).collect();
+    assert!(!codes.contains(&"E0210"), "{}", result.render_diagnostics());
+}

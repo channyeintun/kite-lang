@@ -1,0 +1,16 @@
+// A statement written as an arm is one E0100, whose note puts it in a block;
+// the arm keeps its pattern and the arms after it are still read.
+fn main() {
+    var s = 0
+    let xs = [1, 2]
+    let n = 1
+    match n {
+        0 => s = 5, //~ ERROR E0100
+        1 => s += 1, //~ ERROR E0100
+        2 => let y = 5, //~ ERROR E0100
+        3 => for x in xs { io.print(x) }, //~ ERROR E0100
+        4 => _ = s, //~ ERROR E0100
+        _ => { },
+    }
+    io.print(s)
+}

@@ -725,6 +725,13 @@ pub struct MatchArm {
     pub span: Span,
 }
 
+/// What follows an arm's `=>`.
+///
+/// An arm written as an `if` with no `else` — `0 => if c { f() }` — is kept
+/// as the block `0 => { if c { f() } }` would be, but with the `if`'s own
+/// span, which no block written with braces can have: see
+/// [`Block::unbraced_if`]. In a `match` statement it is a statement, as that
+/// block is; where the arm's value is wanted, it has none on one path.
 #[derive(Debug)]
 pub enum MatchBody {
     Expr(Expr),
@@ -736,6 +743,17 @@ impl MatchBody {
         match self {
             MatchBody::Expr(e) => e.span(),
             MatchBody::Block(b) => b.span,
+        }
+    }
+}
+
+impl Block {
+    /// The `if` with no `else` that an arm was written as, if this is the
+    /// block the parser keeps it in (see [`MatchBody`]).
+    pub fn unbraced_if(&self) -> Option<&IfStmt> {
+        match self.stmts.as_slice() {
+            [Stmt::If(i)] if i.span == self.span && i.else_.is_none() => Some(i),
+            _ => None,
         }
     }
 }

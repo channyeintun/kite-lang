@@ -2200,6 +2200,23 @@ fn a_module_that_imports_itself_is_told_so() {
     assert!(said.contains("module `ui` imports itself"), "{}", said);
 }
 
+/// A file importing itself under the name of one of its own functions —
+/// `use main` in `main.kite` — is the one E0402: `main.helper()` below it is
+/// the refused `use`'s spelling, not the function `main`, which was `fn()
+/// has no methods` once more.
+#[test]
+fn a_self_import_named_as_a_function_is_one_error() {
+    let p = Project::new("self-import-fn");
+    let main = p.file(
+        "main.kite",
+        "use main\n\nfn helper() -> int {\n  return 1\n}\n\nfn main() {\n  io.print(main.helper())\n  main.main()\n}\n",
+    );
+    let said = p.run(&main).expect_err("a cycle of one");
+    assert!(said.contains("module `main` imports itself"), "{}", said);
+    assert!(!said.contains("E0205") && !said.contains("E0111"), "{}", said);
+    assert!(said.contains("1 previous error"), "{}", said);
+}
+
 /// A module is named in `E0111` and `E0204` the way the `use` that brought it
 /// in writes it. The title and the note said `money`; the label under the
 /// member said `src/money`, its identity below the package's `kite.toml`,
@@ -2218,6 +2235,95 @@ fn a_missing_member_names_its_module_as_the_use_writes_it() {
     assert!(said.contains("`money` declares nothing public of this name"), "{}", said);
     assert!(said.contains("`money` declares no public type of this name"), "{}", said);
     assert!(!said.contains("src/money"), "{}", said);
+}
+
+/// E0404's note names the module that holds a spelling as its `use` wrote it
+/// (`lib/util`), not by its identity below `kite.toml` (`src/lib/util`); and
+/// the fix it names compiles.
+#[test]
+fn a_spelling_taken_is_named_as_its_use_wrote_it() {
+    let p = Project::new("spelling-taken-as-written");
+    p.file("kite.toml", "[package]\nname = \"app\"\nversion = \"0.1.0\"\n");
+    p.file("src/util.kite", "pub fn twice(n: int) -> int {\n  return n * 2\n}\n");
+    p.file("src/lib/util.kite", "pub fn twice(n: int) -> int {\n  return n + n\n}\n");
+    let main = p.file(
+        "src/three.kite",
+        "use lib/util\nuse util\n\nfn main() {\n  io.print(util.twice(1))\n}\n",
+    );
+    let said = p.run(&main).expect_err("one spelling, two modules");
+    assert!(said.contains("`util` is `lib/util` in this module"), "{}", said);
+    assert!(!said.contains("src/lib/util"), "{}", said);
+    let main = p.file(
+        "src/three.kite",
+        "use lib/util as lu\nuse util\n\nfn main() {\n  io.print(util.twice(1) + lu.twice(2))\n}\n",
+    );
+    assert_eq!(p.run(&main).expect("each its own name"), "6\n");
+}
+
+/// Inside `ui/widgets/`, a `use view` of a file of `ui` is E0404 whose note
+/// moves `view.kite` into `ui/view/` — and that move compiles. Where
+/// `view.kite` imports `widgets` itself the move ends in an import cycle, so
+/// the note says the two depend on each other instead of naming it.
+#[test]
+fn a_file_of_the_directory_around_is_moved_only_where_that_compiles() {
+    let p = Project::new("member-moved-out");
+    let main = p.file("main.kite", "use ui\n\nfn main() {\n  io.print(ui.top())\n}\n");
+    p.file("ui/top.kite", "use widgets\n\npub fn top() -> int {\n  return widgets.w().n\n}\n");
+    p.file("ui/view.kite", "pub struct View {\n  pub n: int\n}\n");
+    p.file(
+        "ui/widgets/w.kite",
+        "use view\n\npub fn w() -> view.View {\n  return view.View{ n: 3 }\n}\n",
+    );
+    let said = p.run(&main).expect_err("a file of ui, imported from inside it");
+    assert!(said.contains("move `view.kite` into a directory of its own, `ui/view/`"), "{}", said);
+    // The note, done.
+    std::fs::remove_file(p.dir.join("ui/view.kite")).expect("remove");
+    p.file("ui/view/view.kite", "pub struct View {\n  pub n: int\n}\n");
+    p.file(
+        "ui/top.kite",
+        "use widgets\nuse view\n\npub fn top() -> int {\n  return widgets.w().n\n}\n",
+    );
+    assert_eq!(p.run(&main).expect("the move compiles"), "3\n");
+
+    let p = Project::new("member-imports-back");
+    let main = p.file("main.kite", "use ui\n\nfn main() {\n  io.print(ui.top())\n}\n");
+    p.file(
+        "ui/view.kite",
+        "use widgets\n\npub struct View {\n  pub n: int\n}\n\npub fn top() -> int {\n  return widgets.w().n\n}\n",
+    );
+    p.file(
+        "ui/widgets/w.kite",
+        "use view\n\npub fn w() -> view.View {\n  return view.View{ n: 3 }\n}\n",
+    );
+    let said = p.run(&main).expect_err("two modules that import each other");
+    assert!(said.contains("`view.kite` imports `widgets` itself"), "{}", said);
+    assert!(!said.contains("move `view.kite`"), "{}", said);
+
+    // The same by the longer path, which reaches `widgets` from the root.
+    p.file(
+        "ui/view.kite",
+        "use ui/widgets\n\npub struct View {\n  pub n: int\n}\n\npub fn top() -> int {\n  return widgets.w().n\n}\n",
+    );
+    let said = p.run(&main).expect_err("two modules that import each other");
+    assert!(said.contains("`view.kite` imports `widgets` itself"), "{}", said);
+
+    // And through a third module: moved, `view` → `helper` → `widgets` →
+    // `view` would be the cycle.
+    let p = Project::new("member-reaches-back");
+    let main = p.file("main.kite", "use ui\n\nfn main() {\n  io.print(ui.top())\n}\n");
+    p.file(
+        "ui/view.kite",
+        "use helper\n\npub struct View {\n  pub n: int\n}\n\npub fn top() -> int {\n  return helper.h()\n}\n",
+    );
+    p.file("ui/helper/h.kite", "use widgets\n\npub fn h() -> int {\n  return widgets.w().n\n}\n");
+    p.file(
+        "ui/widgets/w.kite",
+        "use view\n\npub fn w() -> view.View {\n  return view.View{ n: 3 }\n}\n",
+    );
+    let said = p.run(&main).expect_err("a chain that leads back");
+    let through = "`view.kite` reaches `widgets` through the modules it imports";
+    assert!(said.contains(through), "{}", said);
+    assert!(!said.contains("move `view.kite`"), "{}", said);
 }
 
 /// A block string that never closes reads the rest of the file as its text, so

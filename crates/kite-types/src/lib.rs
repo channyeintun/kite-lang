@@ -1583,7 +1583,14 @@ impl<'a> Checker<'a> {
         // reported already, and whether the rest would have returned is not
         // something to guess at in a second diagnostic.
         let cut_short = matches!(body.and_then(|b| b.stmts.last()), Some(ast::Stmt::Error(_)));
-        if body.is_some() && sig.ret != TyId::UNIT && flow == Flow::Falls && !cut_short {
+        // Nor is it where the return type is one the parser could not read:
+        // whether it wanted a value at all is not known.
+        if body.is_some()
+            && sig.ret != TyId::UNIT
+            && sig.ret != TyId::ERROR
+            && flow == Flow::Falls
+            && !cut_short
+        {
             self.diags.push(
                 Diagnostic::error(codes::E0203, "not every path returns a value")
                     .with_primary(
@@ -1592,7 +1599,12 @@ impl<'a> Checker<'a> {
                     )
                     .with_secondary(
                         sig.name_span,
-                        format!("`{}` declared here", self.types.name(sig.ret)),
+                        // A result type that was itself reported has no name.
+                        if self.types.holds_error(sig.ret) {
+                            "a result declared here".to_string()
+                        } else {
+                            format!("`{}` declared here", self.types.name(sig.ret))
+                        },
                     ),
             );
         }
@@ -1860,7 +1872,17 @@ impl<'a> Checker<'a> {
                 self.expect_ty(init.ty, a, init.span, v.ty.as_ref().map(|t| t.span()));
                 a
             }
-            None if init.ty == TyId::UNIT || init.ty == TyId::NEVER => TyId::ERROR,
+            // As for `let`: `var seed = ()` was the error type with nothing
+            // said, and the program reached code generation holding it.
+            None if init.ty == TyId::UNIT => {
+                self.diags.push(
+                    Diagnostic::error(codes::E0200, "cannot bind a value of type `()`")
+                        .with_primary(init.span, "this expression produces no value")
+                        .with_note("a function without a declared return type returns `()`"),
+                );
+                TyId::ERROR
+            }
+            None if init.ty == TyId::NEVER => TyId::ERROR,
             None => init.ty,
         };
         self.locals[local_id as usize].ty = ty;
@@ -2886,7 +2908,7 @@ impl<'a> Checker<'a> {
         match &r.value {
             None => {
                 let ret = self.learn_ret(sig.ret, TyId::UNIT);
-                if ret != TyId::UNIT {
+                if ret != TyId::UNIT && ret != TyId::ERROR {
                     self.diags.push(
                         Diagnostic::error(codes::E0203, "missing return value")
                             .with_primary(r.span, format!("expected a `{}`", self.types.name(ret)))
@@ -2984,9 +3006,15 @@ impl<'a> Checker<'a> {
                 let value = self.coerce(value, want);
                 let ret = self.learn_ret(sig.ret, value.ty);
                 if ret == TyId::UNIT {
+                    // A value whose own error was reported has no type to name.
+                    let what = if self.types.is_poisoned(value.ty) {
+                        "a value is returned here".to_string()
+                    } else {
+                        format!("this is {}", self.types.with_article(value.ty))
+                    };
                     self.diags.push(
                         Diagnostic::error(codes::E0200, "returning a value from a `()` function")
-                            .with_primary(value.span, format!("this is {}", self.types.with_article(value.ty)))
+                            .with_primary(value.span, what)
                             .with_secondary(sig.name_span, "no return type declared here"),
                     );
                 } else {
@@ -2996,6 +3024,10 @@ impl<'a> Checker<'a> {
                 Some((self.returning(ret, r.span), Flow::Diverges))
             }
             Some(ast::ReturnValue::Pair { value, error, span }) => {
+                // A return type that did not parse may have been a pair's.
+                if !sig.fallible && sig.ret == TyId::ERROR {
+                    return None;
+                }
                 if !sig.fallible {
                     self.diags.push(
                         Diagnostic::error(
@@ -3045,6 +3077,9 @@ impl<'a> Checker<'a> {
             // `return _, err` — the failure arm. There is deliberately no
             // value on this path, which is what stops Go's zero-value leak.
             Some(ast::ReturnValue::Fail { error, span }) => {
+                if !sig.fallible && sig.ret == TyId::ERROR {
+                    return None;
+                }
                 if !sig.fallible {
                     self.diags.push(
                         Diagnostic::error(
@@ -4297,7 +4332,20 @@ impl<'a> Checker<'a> {
 
     /// `expected` is a hint, not a constraint — it steers literal typing and
     /// improves messages. The caller still checks the result.
+    /// Check an expression. A value whose type is built from the error type
+    /// — `[nope]`, `(1, nope)`, a closure returning one — is the error type
+    /// whole: the name it was built around has its report, and each later
+    /// use of a `[<error>]` printed that, a second report of the one cause
+    /// with the compiler's internals in its words.
     fn expr(&mut self, e: &ast::Expr, expected: Option<TyId>) -> hir::Expr {
+        let mut out = self.expr_of(e, expected);
+        if out.ty != TyId::ERROR && self.types.holds_error(out.ty) {
+            out.ty = TyId::ERROR;
+        }
+        out
+    }
+
+    fn expr_of(&mut self, e: &ast::Expr, expected: Option<TyId>) -> hir::Expr {
         match e {
             ast::Expr::Int(span) => {
                 let text = self.text(*span);
@@ -4530,7 +4578,7 @@ impl<'a> Checker<'a> {
                 Some(want) if matches!(self.types.kind(want), TyKind::Optional(_)) => {
                     hir::Expr { kind: ExprKind::Nil, ty: want, span: *span }
                 }
-                Some(want) if !self.types.is_poisoned(want) => {
+                Some(want) if !self.types.is_poisoned(want) && !self.types.holds_error(want) => {
                     let name = self.types.name(want);
                     self.diags.push(
                         Diagnostic::error(
@@ -4703,9 +4751,13 @@ impl<'a> Checker<'a> {
                 // as for a slice or a map literal: `(4, 1)` for an
                 // `Option<(Option<int>, int)>` wraps its `4` as it would for
                 // the bare tuple, and the whole is wrapped after.
+                // A wanted type that was itself reported (`(int, Nope)` is the
+                // error type whole) steers each element as the error type, so
+                // a `nil` in it is not a second report of that one cause.
                 let hint: Option<Vec<TyId>> = expected.and_then(|e| {
                     match self.types.kind(self.types.present(e)) {
                         TyKind::Tuple(ts) if ts.len() == elems.len() => Some(ts.clone()),
+                        TyKind::Error => Some(vec![TyId::ERROR; elems.len()]),
                         _ => None,
                     }
                 });
@@ -4775,11 +4827,19 @@ impl<'a> Checker<'a> {
                     TyKind::Fn { params, ret } => {
                         Some((params.iter().map(|p| Some(*p)).collect(), Some(*ret)))
                     }
+                    // Wanted as a type that was itself reported — `fn(Nope)
+                    // -> int` is the error type whole — its parameters are
+                    // the error type, not E0211 a second time for one cause.
+                    TyKind::Error => Some((vec![Some(TyId::ERROR); params.len()], Some(TyId::ERROR))),
                     _ => None,
                 }
             }),
         };
 
+        // Wanted where the type is one already reported — a parameter whose
+        // type the parser could not read — the closure is not known to be
+        // anything, and nothing more is said of what it cannot be.
+        let unknown = wanted.is_none() && expected == Some(TyId::ERROR);
         let mut param_ids = Vec::with_capacity(params.len());
         for (i, p) in params.iter().enumerate() {
             let annotated = p.ty.as_ref().map(|t| self.resolve_type(t));
@@ -4791,6 +4851,7 @@ impl<'a> Checker<'a> {
                 }
                 (Some(a), None) => a,
                 (None, Some(c)) => c,
+                (None, None) if unknown => TyId::ERROR,
                 (None, None) => {
                     self.diags.push(
                         Diagnostic::error(
@@ -4867,6 +4928,7 @@ impl<'a> Checker<'a> {
             // nothing to check them against, so the closure returns unit.
             ret: expected_ret.unwrap_or(match body {
                 ast::ClosureBody::Expr(_) => TyId::ERROR,
+                ast::ClosureBody::Block(_) if unknown => TyId::ERROR,
                 ast::ClosureBody::Block(_) => TyId::UNIT,
             }),
             // A closure cannot be `async`: it has no signature of its own to
@@ -5008,10 +5070,16 @@ impl<'a> Checker<'a> {
             }
         }
 
-        let ty = self.types.fn_of(
-            param_ids.iter().map(|id| self.locals[*id as usize].ty).collect(),
-            ret,
-        );
+        // A closure with a parameter or result type the parser could not
+        // read is not known to be any function: `fn(<error>) -> int` was
+        // printed in whatever its use was then refused for.
+        let unread = params.iter().any(|p| matches!(p.ty, Some(ast::Type::Error(_))))
+            || matches!(ret_ty, Some(ast::Type::Error(_)));
+        let ty = if unread {
+            TyId::ERROR
+        } else {
+            self.types.fn_of(param_ids.iter().map(|id| self.locals[*id as usize].ty).collect(), ret)
+        };
         let func = self.lift(&captures, &param_ids, hir_body, ret, span);
         let capture_exprs = captures
             .iter()
@@ -5150,7 +5218,10 @@ impl<'a> Checker<'a> {
     fn cast(&mut self, expr: &ast::Expr, ty: &ast::Type, span: Span) -> hir::Expr {
         let value = self.expr(expr, None);
         let to = self.resolve_type(ty);
-        if self.types.is_poisoned(value.ty) || self.types.is_poisoned(to) {
+        // A target built around a name that was reported — `Option<Box<int>>`
+        // with no `Box` — is as poisoned as the bare error: "cannot cast
+        // `int` to `Option<<error>>`" was the same cause twice.
+        if self.types.is_poisoned(value.ty) || self.types.holds_error(value.ty) || self.types.holds_error(to) {
             return self.lit(ExprKind::Error, TyId::ERROR, span);
         }
         if !self.types.is_numeric(value.ty) || !self.types.is_numeric(to) {
@@ -5456,7 +5527,7 @@ impl<'a> Checker<'a> {
         }
         let hargs =
             self.check_args(&sig_params, &generics, &mut subst, &hints, args, Some(decl_span));
-        if self.unsolved_by_error(&hargs, &subst) {
+        if self.unsolved_by_error(&hargs, &sig_params, ret, &subst) {
             return self.lit(ExprKind::Error, TyId::ERROR, span);
         }
 
@@ -5510,6 +5581,12 @@ impl<'a> Checker<'a> {
         // written, and diagnostics are put in source order afterwards.
         let mut hargs: Vec<Option<hir::Expr>> = Vec::with_capacity(args.len());
         let mut waiting = Vec::new();
+        // A `nil` for a parameter whose type is still open — `first(nil, 3)`
+        // against `first<T>(a: Option<T>, b: T)` — has no type where it
+        // stands, and only a closure waits (§4.5), so it is an error. It is
+        // reported once the other arguments are typed, so that what it says
+        // is true of this call: what they made the parameter, if anything.
+        let mut open_nils = Vec::new();
         for (i, a) in args.iter().enumerate() {
             // What a hint stands in for counts as fixed, as it does for the
             // argument's own wanted type.
@@ -5520,12 +5597,77 @@ impl<'a> Checker<'a> {
                 hargs.push(None);
                 continue;
             }
+            if let (ast::Expr::Nil(span), Some(d)) = (a, sig_params.get(i).copied()) {
+                if self.apply_subst_opt(d, &known).is_none() {
+                    open_nils.push((i, *span, d));
+                    hargs.push(Some(self.lit(ExprKind::Error, TyId::ERROR, *span)));
+                    continue;
+                }
+            }
             let e = self.check_arg(a, sig_params.get(i).copied(), generics, subst, hints, decl_span, crosses);
             hargs.push(Some(e));
         }
         for i in waiting {
-            let e = self.check_arg(&args[i], sig_params.get(i).copied(), generics, subst, hints, decl_span, crosses);
+            let declared = sig_params.get(i).copied();
+            // A closure still waiting once the other arguments are typed,
+            // where one of them is an error, waits on that error: the
+            // argument that would have fixed its parameter is the one that
+            // went wrong, and has said so. It is checked with what is still
+            // open taken as the error type, so its body's own mistakes are
+            // reported and E0211 for a type nothing could give is not.
+            let known: Vec<Option<TyId>> =
+                subst.iter().zip(hints.iter().chain(std::iter::repeat(&None))).map(|(s, h)| s.or(*h)).collect();
+            let starved = hargs.iter().flatten().any(|e| self.made_of_error(e.ty))
+                && self.closure_waits(&args[i], declared, &known);
+            let e = if starved {
+                let mut open: Vec<Option<TyId>> = known.iter().map(|k| k.or(Some(TyId::ERROR))).collect();
+                self.check_arg(&args[i], declared, generics, &mut open, &[], decl_span, crosses)
+            } else {
+                self.check_arg(&args[i], declared, generics, subst, hints, decl_span, crosses)
+            };
             hargs[i] = Some(e);
+        }
+        for (i, span, d) in open_nils {
+            let shown = self.types.name(d);
+            match self.apply_subst_opt(d, subst) {
+                // They fixed something `nil` is not a value of: that is the
+                // mistake, said as it is said anywhere else.
+                Some(t) if !matches!(self.types.kind(t), TyKind::Optional(_) | TyKind::Err) => {
+                    let e = self.expr(&args[i], Some(t));
+                    hargs[i] = Some(e);
+                }
+                // The arguments after it fixed a type `nil` is a value of — an
+                // optional, or `error`. The `nil` still does not wait for them
+                // (only a closure does), so it stays an error, and the call's
+                // placeholder with it: a binding of that type is a `nil` the
+                // call can take. (Accepting it here, where `first(nil, opt)`
+                // is refused, also let a closure that waited on the `nil`
+                // pass with its parameter never typed.)
+                Some(t) => {
+                    let name = self.types.name(t);
+                    self.diags.push(
+                        Diagnostic::error(codes::E0204, "cannot infer a type for `nil`")
+                            .with_primary(
+                                span,
+                                format!("`{}` is not known yet here: only a later argument makes it `{}`", shown, name),
+                            )
+                            .with_note(format!(
+                                "give the `nil` its type first — `let none: {} = nil` — and pass `none`",
+                                name
+                            )),
+                    );
+                }
+                None => {
+                    self.diags.push(
+                        Diagnostic::error(codes::E0204, "cannot infer a type for `nil`")
+                            .with_primary(span, format!("nothing in this call says what `{}` is", shown))
+                            .with_note(
+                                "a `nil` cannot say its own type: pass a binding that has one, as `none` \
+                                 after `let none: Option<int> = nil`",
+                            ),
+                    );
+                }
+            }
         }
         let hargs: Vec<hir::Expr> = hargs.into_iter().flatten().collect();
         for (slot, hint) in subst.iter_mut().zip(hints) {
@@ -5569,7 +5711,7 @@ impl<'a> Checker<'a> {
         // result is still the callee's to learn — which the closure's
         // type then solves, as any other argument's does.
         if want.is_none() && matches!(a, ast::Expr::Closure { .. }) {
-            if let Some(TyKind::Fn { params, ret }) = declared.map(|d| self.types.kind(d).clone()) {
+            if let Some(TyKind::Fn { params, ret }) = declared.map(|d| self.types.kind(self.fn_place(d)).clone()) {
                 let params = params.iter().map(|p| self.apply_subst_opt(*p, subst)).collect();
                 let fallible = self.types.fallible_value(ret).is_some();
                 let ret = self.apply_subst_opt(ret, subst);
@@ -5621,7 +5763,7 @@ impl<'a> Checker<'a> {
         if self.apply_subst_opt(d, known).is_some() {
             return false;
         }
-        let TyKind::Fn { params: wanted, ret: wanted_ret } = self.types.kind(d).clone() else {
+        let TyKind::Fn { params: wanted, ret: wanted_ret } = self.types.kind(self.fn_place(d)).clone() else {
             return false;
         };
         let param_waits = params.iter().enumerate().any(|(i, p)| {
@@ -5633,6 +5775,17 @@ impl<'a> Checker<'a> {
                 if (self.types.fallible_value(wanted_ret).is_some() || block_returns_pair(b))
                     && !block_returns_value(b));
         param_waits || ret_waits
+    }
+
+    /// The function type a closure placed where `declared` is wanted is
+    /// typed as: the place is looked through `Option` (§4.5), so a closure
+    /// passed for `f: Option<fn(T) -> T>` waits for `T` and is told what of
+    /// it is known, exactly as one passed for `f: fn(T) -> T` is.
+    fn fn_place(&self, declared: TyId) -> TyId {
+        match *self.types.kind(declared) {
+            TyKind::Optional(inner) if matches!(self.types.kind(inner), TyKind::Fn { .. }) => inner,
+            _ => declared,
+        }
     }
 
     /// A function handed to another task takes its captures with it, so each
@@ -7138,7 +7291,7 @@ impl<'a> Checker<'a> {
             args,
             Some(decl_span),
         ));
-        if self.unsolved_by_error(&hargs, &subst) {
+        if self.unsolved_by_error(&hargs, &raw_params, raw_ret, &subst) {
             return self.lit(ExprKind::Error, TyId::ERROR, span);
         }
         let targs = self.finish_subst(&generics, &subst, span);
@@ -7430,7 +7583,10 @@ impl<'a> Checker<'a> {
     /// it. Only free functions used to be wrapped, so `await p.later()` was
     /// refused and `p.later() + 1` added to a task.
     fn call_result(&mut self, callee: u32, ret: TyId, span: Span) -> TyId {
-        if !self.sigs[callee as usize].is_async {
+        // A result type the parser could not read is not known to be a task
+        // of anything, and a `Task<…>` of the error said so once more at
+        // every call.
+        if !self.sigs[callee as usize].is_async || ret == TyId::ERROR {
             return ret;
         }
         let task = self.types.task_of(ret, span);
@@ -7454,6 +7610,9 @@ impl<'a> Checker<'a> {
         subst: &mut Vec<Option<TyId>>,
         span: Span,
     ) -> Vec<Option<TyId>> {
+        if want == TyId::ERROR {
+            return self.hints_from_poison(subst);
+        }
         let want = if is_async {
             match self.types.task_payload(want) {
                 Some(value) => value,
@@ -7465,6 +7624,17 @@ impl<'a> Checker<'a> {
         let before = subst.clone();
         self.unify(ret, want, generics, subst, span);
         self.soften_seeds(ret, want, &before, subst)
+    }
+
+    /// What a call is told when the type its result is wanted as was itself
+    /// reported — `let o: Option<Nope> = id(nil)`, written around an unknown
+    /// name, resolves to the error type whole. Every parameter the
+    /// arguments leave open is taken as the error type, so a `nil` or a
+    /// closure that the annotation would have typed is not a second report
+    /// of the one cause (`cannot infer a type for nil` beside `unknown type
+    /// Nope`).
+    fn hints_from_poison(&self, subst: &[Option<TyId>]) -> Vec<Option<TyId>> {
+        subst.iter().map(|s| if s.is_none() { Some(TyId::ERROR) } else { None }).collect()
     }
 
     /// Take out of `subst` what the expected type settled only up to an
@@ -7552,6 +7722,9 @@ impl<'a> Checker<'a> {
         let Some(want) = expected else { return Vec::new() };
         if subst.iter().all(|s| s.is_some()) {
             return Vec::new();
+        }
+        if want == TyId::ERROR {
+            return self.hints_from_poison(subst);
         }
         // An `async` method's call is the task of its result, as a function's
         // is; see `seed_result`.
@@ -7787,6 +7960,13 @@ impl<'a> Checker<'a> {
             });
             match wanted {
                 Some(w) if method_name == "as" => w,
+                // Used as a type the parser could not read, which would have
+                // said: that is the one mistake, and what the call was handed
+                // is not known to be read or not.
+                None if expected == Some(TyId::ERROR) => {
+                    self.unread();
+                    return self.lit(ExprKind::Error, TyId::ERROR, span);
+                }
                 _ => {
                     let d = Diagnostic::error(
                         codes::E0209,
@@ -7854,6 +8034,10 @@ impl<'a> Checker<'a> {
                         param,
                         last_segment(&self.types.trait_def(bound).name),
                         self.types.name(arg)
+                    ),
+                    None if !self.may_implement_here(ty, Some(tr)) => format!(
+                        "{}; or name the type the error was made from",
+                        self.not_implementable_here("Error", ty)
                     ),
                     None => format!(
                         "write `{} {{ fn message(self) -> str {{ … }} }}`, or name the type \
@@ -8112,7 +8296,7 @@ impl<'a> Checker<'a> {
 
         let hargs =
             self.check_args(&raw_params, &generics, &mut subst, &hints, args, Some(decl_span));
-        if self.unsolved_by_error(&hargs, &subst) {
+        if self.unsolved_by_error(&hargs, &raw_params, raw_ret, &subst) {
             return self.lit(ExprKind::Error, TyId::ERROR, span);
         }
         if subst.iter().take(block).any(|s| s.is_none()) {
@@ -8202,6 +8386,13 @@ impl<'a> Checker<'a> {
         // pin. (An empty `[]` or a `nil` is poison too, but there the missing
         // pin is the cause, and E0209's note is the fix.)
         let mut poisoned = Vec::new();
+        // Whether a field that is not a closure was poison with nothing said
+        // about it here — `seed: nope`, whose name the resolver has already
+        // reported. A parameter it would have fixed is left open by that
+        // error, which has its report: neither E0209 nor a closure's E0211
+        // waiting on it is another one. (`nil` and `[]` say here that they
+        // cannot be typed, so they are not this.)
+        let mut reported_before = false;
         // A closure field that waits on what a later field fixes is tried
         // after the fields that do not, as a call's argument is:
         // `Job{ run: || { return _, err }, seed: 6 }` learns `T` from `seed`.
@@ -8220,10 +8411,19 @@ impl<'a> Checker<'a> {
                 continue;
             }
             self.field_closure_context(init, declared, &subst);
-            let v = self.expr(&init.value, None);
+            // A field whose type the parser could not read wants a value it
+            // cannot say anything about, which a closure is told (see
+            // [`Self::closure`]).
+            let unread = (declared == TyId::ERROR).then_some(TyId::ERROR);
+            let before = self.diags.error_count();
+            let v = self.expr(&init.value, unread);
             self.closure_context = None;
-            if matches!(init.value, ast::Expr::Closure { .. }) && self.made_of_error(v.ty) {
-                poisoned.push((init, declared));
+            if matches!(init.value, ast::Expr::Closure { .. }) {
+                if self.made_of_error(v.ty) {
+                    poisoned.push((init, declared));
+                }
+            } else if self.made_of_error(v.ty) && self.diags.error_count() == before {
+                reported_before = true;
             }
             self.unify(declared, v.ty, &generics, &mut subst, v.span);
         }
@@ -8232,16 +8432,31 @@ impl<'a> Checker<'a> {
         let mut args = Vec::with_capacity(count);
         for (i, s) in subst.iter().enumerate() {
             match s {
-                Some(t) => args.push(*t),
-                None => {
+                Some(t) if !self.made_of_error(*t) => args.push(*t),
+                // A parameter solved only to something made of the error type
+                // is not solved: `One{ run: |n| [n] }` makes `T` a `[<error>]`
+                // out of the `n` nothing fixed, and taking that as the answer
+                // checked the closure again against it, where `n` is the error
+                // type and says nothing — so a program with no diagnostic
+                // reached code generation holding `<error>`.
+                _ if reported_before => return None,
+                // Wanted as a type that was itself reported — `let w:
+                // W<Nope> = W{ v: nil }`, where `W<Nope>` is the error type
+                // whole — the annotation that would have said is that error.
+                _ if expected == Some(TyId::ERROR) => return None,
+                _ => {
                     // The trial's diagnostics were discarded, so a closure
                     // field that went wrong is checked again to say what it
                     // was; only its errors are kept, and only if it has any.
                     if !poisoned.is_empty() {
+                        // Against what is really solved: told `n` is the
+                        // `[<error>]` it made, the closure says nothing again.
+                        let solved: Vec<Option<TyId>> =
+                            subst.iter().map(|s| s.filter(|t| !self.made_of_error(*t))).collect();
                         let again = self.begin_trial();
                         for &(init, declared) in &poisoned {
-                            self.field_closure_context(init, declared, &subst);
-                            self.expr(&init.value, None);
+                            self.field_closure_context(init, declared, &solved);
+                            self.expr(&init.value, (declared == TyId::ERROR).then_some(TyId::ERROR));
                             self.closure_context = None;
                         }
                         let found = std::mem::replace(self.diags, DiagBag::new()).take();
@@ -8252,6 +8467,20 @@ impl<'a> Checker<'a> {
                             }
                             return None;
                         }
+                    }
+                    // A field that is itself an error (`seed: nope`) reports
+                    // that error in the real check, against this poison.
+                    if let Some(t) = s {
+                        args.push(*t);
+                        continue;
+                    }
+                    // A field whose type the parser could not read may be
+                    // the one that pinned it: that was reported where the
+                    // type is written.
+                    let fields: Vec<TyId> =
+                        self.types.struct_def(template).fields.iter().map(|f| f.ty).collect();
+                    if fields.iter().any(|&t| self.made_of_error(t)) {
+                        return None;
                     }
                     let name = self.types.struct_def(template).name.clone();
                     self.diags.push(
@@ -8279,7 +8508,7 @@ impl<'a> Checker<'a> {
     /// `T` a `bool`.
     fn field_closure_context(&mut self, init: &ast::FieldInit, declared: TyId, subst: &[Option<TyId>]) {
         if matches!(init.value, ast::Expr::Closure { .. }) {
-            if let TyKind::Fn { params, ret } = self.types.kind(declared).clone() {
+            if let TyKind::Fn { params, ret } = self.types.kind(self.fn_place(declared)).clone() {
                 let params = params.iter().map(|p| self.apply_subst_opt(*p, subst)).collect();
                 let fallible = self.types.fallible_value(ret).is_some();
                 let ret = self.apply_subst_opt(ret, subst);
@@ -8911,7 +9140,8 @@ impl<'a> Checker<'a> {
         sig: &Signature,
     ) -> Option<(hir::Stmt, Flow)> {
         let bare_error = sig.ret == TyId::ERR;
-        if !sig.fallible && !bare_error {
+        // A return type that did not parse was reported where it is written.
+        if !sig.fallible && !bare_error && sig.ret != TyId::ERROR {
             self.diags.push(
                 Diagnostic::error(codes::E0303, "`check` outside a fallible function")
                     .with_primary(span, "this would return an error")
@@ -10335,9 +10565,24 @@ impl<'a> Checker<'a> {
         // A trial pass, as for struct literals: its diagnostics belong to the
         // real check against the specialisation, not to inference.
         let trial = self.begin_trial();
+        // As for a struct literal: a closure payload that went wrong in the
+        // trial is the cause of a parameter left open, and says so itself
+        // (`B(f: |n| [n])` is E0211 for `n`, not "cannot infer `T`"); a
+        // payload that is an error already reported (`B(f: nope)`) has its
+        // report, and E0209 beside it is not another.
+        let mut poisoned = Vec::new();
+        let mut reported_before = false;
         for (i, a) in args.iter().enumerate() {
             let Some(d) = declared.get(i).copied() else { continue };
+            let before = self.diags.error_count();
             let v = self.expr(a, None);
+            if self.made_of_error(v.ty) {
+                if matches!(a, ast::Expr::Closure { .. }) {
+                    poisoned.push(a);
+                } else if self.diags.error_count() == before {
+                    reported_before = true;
+                }
+            }
             self.unify(d, v.ty, &generics, &mut subst, v.span);
         }
         self.end_trial(trial);
@@ -10345,8 +10590,28 @@ impl<'a> Checker<'a> {
         let mut solved = Vec::with_capacity(count);
         for (i, s) in subst.iter().enumerate() {
             match s {
-                Some(t) => solved.push(*t),
-                None => {
+                Some(t) if !self.made_of_error(*t) => solved.push(*t),
+                _ if reported_before || expected == Some(TyId::ERROR) => return None,
+                _ => {
+                    if !poisoned.is_empty() {
+                        let again = self.begin_trial();
+                        for a in &poisoned {
+                            self.expr(a, None);
+                        }
+                        let found = std::mem::replace(self.diags, DiagBag::new()).take();
+                        self.end_trial(again);
+                        if found.iter().any(|d| d.severity == kite_diag::Severity::Error) {
+                            for d in found {
+                                self.diags.push(d);
+                            }
+                            return None;
+                        }
+                    }
+                    // A field whose type the parser could not read may be
+                    // the one that pinned it, and was reported there.
+                    if declared.iter().any(|&t| self.made_of_error(t)) {
+                        return None;
+                    }
                     // A unit variant of a generic enum says nothing about the
                     // parameter — `Maybe.None` could be any `Maybe<T>` — so the
                     // binding has to.
@@ -10945,6 +11210,15 @@ impl<'a> Checker<'a> {
                 self.if_expr(&i.cond, &i.then, else_, i.span, expected)
             }
             [ast::Stmt::Match(m)] if !discard && match_is_value(m) => self.match_expr(m, expected),
+            // `0 => if c { 1 },` where the arm's value is wanted.
+            _ if !discard && b.unbraced_if().is_some() => {
+                self.diags.push(
+                    Diagnostic::error(codes::E0100, "`if` used as a value needs an `else`")
+                        .with_primary(b.span, "this `if` produces no value on one path")
+                        .with_note("every branch of a value `if` must yield a value"),
+                );
+                self.lit(ExprKind::Error, TyId::ERROR, b.span)
+            }
             _ => {
                 let sig = self.current_signature();
                 let (block, flow) = self.block(b, &sig);
@@ -10995,7 +11269,7 @@ impl<'a> Checker<'a> {
                             format!("conflicting types for `{}`", name),
                         )
                         .with_primary(span, format!("here `{}` would be `{}`", name, b))
-                        .with_note(format!("an earlier argument already made it `{}`", a)),
+                        .with_note(format!("another argument already made it `{}`", a)),
                     );
                 }
                 Some(_) => {}
@@ -11010,6 +11284,15 @@ impl<'a> Checker<'a> {
             // fallibility form is a type of its own, so it is descended into
             // like any other, or a `retry` helper could never be called.
             (TyKind::Fallible(d), TyKind::Fallible(a)) => self.unify(d, a, generics, subst, span),
+            // A fallible call's result where the tuple `(T, error)` is
+            // wanted never converts (§7.3), but its value still says what `T`
+            // is: solved, the mismatch is the one report, "expected the tuple
+            // `(int, error)`, found the result of a fallible call", with how
+            // to take it apart — not `cannot infer T` and then "expected
+            // `(T, error)`, found `(int, error)`".
+            (TyKind::Tuple(ds), TyKind::Fallible(a)) if ds.len() == 2 && ds[1] == TyId::ERR => {
+                self.unify(ds[0], a, generics, subst, span)
+            }
             // A `T` argument for an `Option<T>` parameter solves through the
             // same subsumption that lets the value be passed at all.
             (TyKind::Optional(d), _) => self.unify(d, actual, generics, subst, span),
@@ -11188,31 +11471,33 @@ impl<'a> Checker<'a> {
     }
 
     /// Whether a type parameter a call left unsolved was left so by an
-    /// argument that is already an error.
+    /// argument that is already an error, or by a parameter or a result
+    /// whose declared type is one (the parser could not read it, and kept
+    /// the function).
     ///
     /// That argument has been reported — most often it is something the
     /// parser could not read — and it is what would have said what the
     /// parameter is. The call is then an error too, and says nothing more:
     /// `cannot infer T` was the same mistake again, and a result typed as the
     /// bare `T` went on to be refused wherever it was used.
-    fn unsolved_by_error(&self, args: &[hir::Expr], subst: &[Option<TyId>]) -> bool {
-        subst.iter().any(Option::is_none) && args.iter().any(|a| self.made_of_error(a.ty))
+    fn unsolved_by_error(
+        &self,
+        args: &[hir::Expr],
+        params: &[TyId],
+        ret: TyId,
+        subst: &[Option<TyId>],
+    ) -> bool {
+        subst.iter().any(Option::is_none)
+            && (args.iter().any(|a| self.made_of_error(a.ty))
+                || params.iter().any(|&p| self.made_of_error(p))
+                || self.made_of_error(ret))
     }
 
     /// Whether `ty` is the error type or is built from it, as the type of
     /// `[P{ x 1 }]` is — or of `|n| 1` where nothing fixed `n`, which E0211
     /// has reported: `cannot infer T` beside it was the same cause twice.
     fn made_of_error(&self, ty: TyId) -> bool {
-        match self.types.kind(ty) {
-            TyKind::Error => true,
-            TyKind::Slice(e) | TyKind::Optional(e) | TyKind::Fallible(e) => self.made_of_error(*e),
-            TyKind::Map(k, v) => self.made_of_error(*k) || self.made_of_error(*v),
-            TyKind::Tuple(es) => es.iter().any(|e| self.made_of_error(*e)),
-            TyKind::Fn { params, ret } => {
-                params.iter().any(|p| self.made_of_error(*p)) || self.made_of_error(*ret)
-            }
-            _ => false,
-        }
+        self.types.holds_error(ty)
     }
 
     /// The solved type arguments, reporting any parameter nothing pinned down.
@@ -11265,6 +11550,33 @@ impl<'a> Checker<'a> {
         let base = shown.split('<').next().unwrap_or(&shown);
         let params = params.join(", ");
         format!("impl<{}> {} for {}<{}>", params, trait_name, base, params)
+    }
+
+    /// Whether this module may write `impl <tr> for <ty>`: it declares the
+    /// type or the trait (§8.2, the rule E0406 holds an `impl` to). A note
+    /// that says to write one the rule refuses ends in another error.
+    fn may_implement_here(&self, ty: TyId, tr: Option<hir::TraitId>) -> bool {
+        let here = |ti: u32| {
+            let decl = self.resolved.types[ti as usize].decl_index;
+            self.resolved.module_of_item(decl) == self.module
+        };
+        self.type_index_of(ty).is_some_and(here) || tr.and_then(|t| self.trait_index_of(t)).is_some_and(here)
+    }
+
+    /// The note for a type another module declares, where the `impl` that
+    /// would fix it is that module's (or the trait's) to write.
+    fn not_implementable_here(&self, trait_name: &str, ty: TyId) -> String {
+        let trait_name = trait_name.strip_prefix("prelude.").unwrap_or(trait_name);
+        format!(
+            "`{}` and `{}` are both declared outside this module, so `impl {} for {}` cannot \
+             be written here (E0406); hold the value in a struct of this module's own and \
+             implement `{}` for that",
+            self.types.name(ty),
+            trait_name,
+            trait_name,
+            self.types.name(ty),
+            trait_name
+        )
     }
 
     /// Every bound must hold for the type chosen.
@@ -11343,6 +11655,22 @@ impl<'a> Checker<'a> {
                         self.types.with_article(*t),
                         written_trait(&self.types.trait_def(tr).name)
                     )),
+                    _ if self.type_index_of(*t).is_some() && !self.may_implement_here(*t, Some(*bound)) => {
+                        d.with_note(self.not_implementable_here(&bn, *t))
+                    }
+                    // `Hash` and `Debug` derive: the one line that makes a
+                    // map key of `P` is `@derive(Hash)`, and a bare `impl
+                    // Hash for P` header was not a fix that compiles.
+                    _ if self.type_index_of(*t).is_some() && (bn == "Hash" || bn == "Debug") => {
+                        let method = if bn == "Hash" { "fn hash(self) -> int" } else { "fn debug(self) -> str" };
+                        d.with_note(format!(
+                            "write `@derive({})` above the declaration of `{}`, or `{} {{ {} {{ … }} }}`",
+                            bn,
+                            last_segment(self.types.name(*t).split('<').next().unwrap_or_default()),
+                            self.impl_to_write(&bn, *t),
+                            method
+                        ))
+                    }
                     _ if self.type_index_of(*t).is_some() => {
                         d.with_note(format!("write `{}`", self.impl_to_write(&bn, *t)))
                     }
@@ -12174,6 +12502,14 @@ impl<'a> Checker<'a> {
                 v.span,
             )
         };
+        // Against a value whose type is already an error, the specialisation
+        // is not known: what a field holds of the enum's parameters is not a
+        // bare `T` to be refused wherever it is used, but unknown as well.
+        let field_tys = if self.types.is_poisoned(scrut) {
+            field_tys.into_iter().map(|t| if self.mentions_param(t) { TyId::ERROR } else { t }).collect()
+        } else {
+            field_tys
+        };
 
         let sub = match args {
             None | Some(ast::PatternArgs::Positional(_)) if field_tys.is_empty() => {
@@ -12990,7 +13326,14 @@ impl<'a> Checker<'a> {
                     "fields are immutable unless marked `var`; write `var {}: {}` on `{}`, or \
                      build a new value with `{}{{ ..old, {}: new }}`",
                     name.name,
-                    self.types.name(ty),
+                    // A field type written around a reported name has no
+                    // name of its own; the declaration's own words do.
+                    if self.types.holds_error(ty) {
+                        let written = self.text(decl_span);
+                        written.split_once(':').map_or(written, |(_, t)| t.trim()).to_string()
+                    } else {
+                        self.types.name(ty)
+                    },
                     sname,
                     sname,
                     name.name
@@ -13799,6 +14142,9 @@ impl<'a> Checker<'a> {
                 );
             }
         }
+        if !self.may_implement_here(ty, self.display_trait()) {
+            return self.not_implementable_here("Display", ty);
+        }
         format!("write `{} {{ fn show(self) -> str {{ … }} }}`", self.impl_to_write("Display", ty))
     }
 
@@ -14106,14 +14452,33 @@ impl<'a> Checker<'a> {
             d = d.with_secondary(b, format!("`{}` required here", self.types.name(expected)));
         }
         if let TyKind::Dyn(tr) = *self.types.kind(expected) {
+            // §9: a built-in type meets the prelude's bounds and is not a
+            // `dyn` of any trait, so `let b: dyn Debug = 5` is refused by
+            // design; the note says so, and what does take an `int`.
+            if kite_hir::mono::primitive_trait(self.types, found, tr).is_some() {
+                let tn = written_trait(&self.types.trait_def(tr).name);
+                d = d.with_note(format!(
+                    "`{}` meets `{}` as a bound, but a built-in type is not a `dyn` of any \
+                     trait: take a `T: {}` parameter instead, or hold the value in a struct \
+                     that implements `{}`",
+                    self.types.name(found),
+                    tn,
+                    tn,
+                    tn
+                ));
+            }
             if self.type_index_of(found).is_some() {
                 let note = match self.unmet_bound_note(found, tr) {
                     Some(bounded) => bounded,
                     None => {
                         let (tn, fname) =
                             (written_trait(&self.types.trait_def(tr).name), self.types.name(found));
-                        let header = self.impl_to_write(&tn, found);
-                        format!("`{}` does not implement `{}`; write `{}` to use it here", fname, tn, header)
+                        if self.may_implement_here(found, Some(tr)) {
+                            let header = self.impl_to_write(&tn, found);
+                            format!("`{}` does not implement `{}`; write `{}` to use it here", fname, tn, header)
+                        } else {
+                            format!("`{}` does not implement `{}`: {}", fname, tn, self.not_implementable_here(&tn, found))
+                        }
                     }
                 };
                 d = d.with_note(note);
@@ -14125,6 +14490,9 @@ impl<'a> Checker<'a> {
         if expected == TyId::ERR && self.type_index_of(found).is_some() {
             match self.error_trait().and_then(|tr| self.unmet_bound_note(found, tr)) {
                 Some(bounded) => d = d.with_note(bounded),
+                None if !self.may_implement_here(found, self.error_trait()) => {
+                    d = d.with_note(self.not_implementable_here("Error", found));
+                }
                 None => {
                     d = d.with_note(format!(
                         "a type may stand here once it implements `Error`: write \
@@ -14207,16 +14575,7 @@ impl<'a> Checker<'a> {
 
     /// Whether a type is, or is built from, one that failed to check.
     fn mentions_error(&self, ty: TyId) -> bool {
-        match self.types.kind(ty) {
-            _ if ty == TyId::ERROR => true,
-            TyKind::Slice(e) | TyKind::Optional(e) | TyKind::Fallible(e) => self.mentions_error(*e),
-            TyKind::Map(k, v) => self.mentions_error(*k) || self.mentions_error(*v),
-            TyKind::Tuple(es) => es.iter().any(|e| self.mentions_error(*e)),
-            TyKind::Fn { params, ret } => {
-                params.iter().any(|p| self.mentions_error(*p)) || self.mentions_error(*ret)
-            }
-            _ => false,
-        }
+        self.types.holds_error(ty)
     }
 
     fn arity_error(
@@ -14896,6 +15255,12 @@ fn check_impl_headers(
         if bare && (count == 0 || own.len() == count) {
             continue;
         }
+        // A type argument the parser could not read has been reported, and
+        // what it was to be is not known; refusing the block made every
+        // call of its methods one more error.
+        if target.args.iter().any(|a| matches!(a, ast::Type::Error(_))) {
+            continue;
+        }
         let written: Vec<Option<&str>> = target
             .args
             .iter()
@@ -15254,6 +15619,12 @@ fn resolve_named_ty(
                 .iter()
                 .map(|a| resolve_named_ty(a, resolved, module, type_ids, generics, types, diags))
                 .collect();
+            // A type written around a name that was reported is the error
+            // type whole, not `Wrap<<error>>`: every later use of a value of
+            // it would otherwise print that, a second report of one cause.
+            if args.contains(&TyId::ERROR) {
+                return TyId::ERROR;
+            }
             // `Task<T>` is the compiler's, like `Option<T>`: a program may
             // name one but cannot declare one, and there is nothing useful a
             // hand-written `Task` could be.
@@ -15297,10 +15668,38 @@ fn resolve_named_ty(
                     if p.segments.len() > 1 && resolved.modules.is_unresolved(module, &p.segments[0].name) {
                         return TyId::ERROR;
                     }
-                    if p.segments.len() == 1 && p.name() != "Self" {
+                    // A built-in type or a type parameter is declared, just
+                    // not by the program: `int<str>` was "unknown type `int`"
+                    // with "a similar type is in scope: `int`".
+                    let builtin = p.segments.len() == 1
+                        && (Types::primitive_from_name(p.name()).is_some()
+                            || p.name() == "Self"
+                            || generics.iter().any(|(n, _)| n == p.name()));
+                    if builtin {
+                        diags.push(
+                            Diagnostic::error(
+                                codes::E0204,
+                                format!("`{}` does not take type arguments", p.name()),
+                            )
+                            .with_primary(p.span, "type arguments are not accepted here"),
+                        );
+                    } else if p.segments.len() == 1 {
                         diags.push(unknown_type_here(p, resolved, module, generics));
-                    } else if let Some(d) = resolved.missing_type_member(module, &p.segments, codes::E0204) {
-                        diags.push(d);
+                    } else {
+                        // Qualified by a module that has no such type, or by
+                        // a name that is no module the file imports: each
+                        // is the same one E0204 it is without the arguments.
+                        // The second said nothing, and `bogus.Thing<int>`
+                        // was accepted.
+                        match resolved.missing_type_member(module, &p.segments, codes::E0204) {
+                            Some(d) => diags.push(d),
+                            None => match std_type_unimported(p, resolved, module) {
+                                Some(d) => diags.push(d),
+                                None => {
+                                    resolve_ty(t, types, diags);
+                                }
+                            },
+                        }
                     }
                     TyId::ERROR
                 }
@@ -15339,12 +15738,14 @@ fn resolve_named_ty(
                         diags.push(
                             Diagnostic::error(
                                 codes::E0204,
-                                format!("`{}` is a trait, not a type", p.name()),
+                                format!("`{}` is a trait, not a type", p.text()),
                             )
                             .with_primary(p.span, "traits name behaviour, not values")
+                            // As written: `mine.Debug` is `dyn mine.Debug`,
+                            // and `dyn Debug` would be the prelude's.
                             .with_note(format!(
                                 "write `dyn {}` for a trait object, or use it as a bound",
-                                p.name()
+                                p.text()
                             )),
                         );
                         TyId::ERROR
@@ -15381,22 +15782,37 @@ fn resolve_named_ty(
                         diags.push(d);
                         TyId::ERROR
                     }
-                    None => resolve_ty(t, types, diags),
+                    None => match std_type_unimported(p, resolved, module) {
+                        Some(d) => {
+                            diags.push(d);
+                            TyId::ERROR
+                        }
+                        None => resolve_ty(t, types, diags),
+                    },
                 },
             }
         }
         ast::Type::Slice { elem, .. } => {
             let e = resolve_named_ty(elem, resolved, module, type_ids, generics, types, diags);
+            if e == TyId::ERROR {
+                return TyId::ERROR;
+            }
             types.slice_of(e)
         }
         ast::Type::Map { key, value, .. } => {
             let k = resolve_named_ty(key, resolved, module, type_ids, generics, types, diags);
             let v = resolve_named_ty(value, resolved, module, type_ids, generics, types, diags);
+            if k == TyId::ERROR || v == TyId::ERROR {
+                return TyId::ERROR;
+            }
             check_map_key(types, k, key.span(), diags);
             types.map_of(k, v)
         }
         ast::Type::Optional { inner, .. } => {
             let i = resolve_named_ty(inner, resolved, module, type_ids, generics, types, diags);
+            if i == TyId::ERROR {
+                return TyId::ERROR;
+            }
             types.optional_of(i)
         }
         ast::Type::Tuple { elems, .. } => {
@@ -15404,6 +15820,11 @@ fn resolve_named_ty(
                 .iter()
                 .map(|e| resolve_named_ty(e, resolved, module, type_ids, generics, types, diags))
                 .collect();
+            // A signature's `-> (T, error)` is resolved by its value type, so
+            // a fallible function stays fallible; this is only ever a tuple.
+            if es.contains(&TyId::ERROR) {
+                return TyId::ERROR;
+            }
             if es.is_empty() {
                 TyId::UNIT
             } else {
@@ -15419,6 +15840,9 @@ fn resolve_named_ty(
                 Some(r) => resolve_named_ty(r, resolved, module, type_ids, generics, types, diags),
                 None => TyId::UNIT,
             };
+            if r == TyId::ERROR || ps.contains(&TyId::ERROR) {
+                return TyId::ERROR;
+            }
             let r = fallible_form(r, types);
             types.fn_of(ps, r)
         }
@@ -15450,6 +15874,29 @@ fn resolve_named_ty(
         },
         other => resolve_ty(other, types, diags),
     }
+}
+
+/// The `E0204` for `json.Json` written with no `use std/json`: the
+/// qualifier is a standard-library module the file did not import, and that
+/// module declares the type. It says the `use` to add, in the words the
+/// `E0111` for `json.parse` uses.
+fn std_type_unimported(p: &ast::TypePath, resolved: &ResolveMap, module: &str) -> Option<Diagnostic> {
+    let [head, member] = &p.segments[..] else { return None };
+    let has = resolved.modules.std_declares?;
+    if !has(&head.name, &member.name) || resolved.imported_as(module, &head.name).is_some() {
+        return None;
+    }
+    Some(
+        Diagnostic::error(codes::E0204, format!("unknown type `{}`", p.text()))
+            .with_primary(p.span, "no type of this name is in scope")
+            .with_note(format!(
+                "`{}` is in the standard library's `{}` module, which this file does not \
+                 import: add `use std/{}`",
+                p.text(),
+                head.name,
+                head.name
+            )),
+    )
 }
 
 /// A map compares its keys with `==`, so a key type is one `==` is defined
@@ -16016,7 +16463,8 @@ fn if_is_value(i: &ast::IfStmt) -> bool {
 fn match_is_value(m: &ast::MatchExpr) -> bool {
     m.arms.iter().all(|a| match &a.body {
         ast::MatchBody::Expr(_) => true,
-        ast::MatchBody::Block(b) => block_is_value(b),
+        // Written as an expression, so taken as a value where one is wanted.
+        ast::MatchBody::Block(b) => block_is_value(b) || b.unbraced_if().is_some(),
     })
 }
 
@@ -16314,6 +16762,21 @@ fn params_in(types: &Types, ty: TyId, out: &mut Vec<u32>) {
     }
 }
 
+/// Whether `ty` is the error type or is built from it by a slice, a map, an
+/// optional, a tuple or a function type, as its printed name would show.
+fn built_from_error(types: &Types, ty: TyId) -> bool {
+    match types.kind(ty) {
+        TyKind::Error => true,
+        TyKind::Slice(e) | TyKind::Optional(e) | TyKind::Fallible(e) => built_from_error(types, *e),
+        TyKind::Map(k, v) => built_from_error(types, *k) || built_from_error(types, *v),
+        TyKind::Tuple(es) => es.iter().any(|e| built_from_error(types, *e)),
+        TyKind::Fn { params, ret } => {
+            params.iter().any(|p| built_from_error(types, *p)) || built_from_error(types, *ret)
+        }
+        _ => false,
+    }
+}
+
 /// Whether `==` is defined on a type once its parameters are chosen — taking
 /// each parameter to be something comparable, which the parameter's own
 /// callers are then held to.
@@ -16438,7 +16901,13 @@ fn check_compared_params(
             let Some(at) = facts.compared[call.callee].get(i).copied().flatten() else {
                 continue;
             };
-            if types.is_poisoned(*t) || equatable_given_params(types, *t, &mut Vec::new()) {
+            // A type built from one the parser could not read — the closure
+            // `|x: :| x` is a `fn(<error>) -> <error>` — was reported where
+            // it is written, and is not printed in a message.
+            if types.is_poisoned(*t)
+                || built_from_error(types, *t)
+                || equatable_given_params(types, *t, &mut Vec::new())
+            {
                 continue;
             }
             let block = resolved.fns[call.callee]
@@ -16653,6 +17122,31 @@ pub(crate) fn decode_escapes_into(
             Some('(') => {
                 out.push('\\');
                 out.push('(');
+            }
+            // A `\` ending a line, which the label cannot show as written:
+            // the line break in it broke the message across two lines.
+            Some('\n' | '\r') => {
+                let note = if source.starts_with("\"\"\"") {
+                    "a line break in a block string is part of its text already; remove the `\\`"
+                } else {
+                    "a `\"` string may not span lines: write `\\n` for a line break in its text, or \
+                     use a `\"\"\"` block string"
+                };
+                diags.push(
+                    Diagnostic::error(codes::E0003, "invalid escape sequence")
+                        .with_primary(at(1), "a `\\` at the end of a line is not an escape")
+                        .with_note(note),
+                );
+            }
+            Some(other) if other.is_control() => {
+                diags.push(
+                    Diagnostic::error(codes::E0003, "invalid escape sequence")
+                        .with_primary(
+                            at(1 + other.len_utf8()),
+                            format!("a `\\` before U+{:04X} is not an escape", other as u32),
+                        )
+                        .with_note("valid escapes: \\n \\t \\r \\0 \\\\ \\\" \\' \\u{...}"),
+                );
             }
             Some(other) => {
                 diags.push(

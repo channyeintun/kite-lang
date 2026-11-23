@@ -86,12 +86,12 @@ codes! {
     E0002 = "E0002", "invalid character in source",
         "The lexer found a character that cannot begin any Kite token. It skips the character and reports it where it stands. The ones that come in by habit:\n\
          \n\
-         - `;`. Kite has no semicolons: a statement ends at its line break (§3), so the `;` is deleted.\n\
+         - `;`. Kite has no semicolons: a statement ends at its line break (§3), so the `;` is read as one, and what follows it on the line is the next statement.\n\
          - `#` for a comment. Write `//`.\n\
          - `?`, `~`, a backtick and `\\`. None is an operator or a delimiter in Kite.\n\
          - A character that only looks like one: a curly quote in place of `\"`, an en dash in place of `-`. These arrive by copy and paste from a document or a web page; retype them.\n\
          \n\
-         An identifier may use any Unicode letter, so a name in another script is not this error. A parse error beside it — `expected a line break` after a stray character in the middle of a line — is the gap the skipped character left; removing the character removes both.\n\
+         An identifier may use any Unicode letter, so a name in another script is not this error. A run of one character, such as `??`, is one report. The gap a skipped character leaves — `let a = 1 $ 2` is two values side by side once the `$` is gone — is not reported again: removing the character is the whole fix.\n\
          \n\
          Example:\n\
          \n\
@@ -114,6 +114,7 @@ codes! {
          - An unknown letter or character: `\"C:\\path\"`, `\"\\d\"`, `\"\\e\"`. A backslash that is meant as one is written twice: `\"C:\\\\path\"`.\n\
          - `\\u` not followed by `{`: `\"\\u0041\"`. A unicode escape is hex digits between braces, `\"\\u{41}\"`.\n\
          - A `\\u{` that is never closed: `\"\\u{41\"`.\n\
+         - A `\\` at the end of a line, meant to continue the string on the next: a `\"` string may not span lines, so write `\\n` for the line break, or use a `\"\"\"` block string, where a line break is text already.\n\
          - A `\\u{…}` that holds no character: no digits, a digit that is not hexadecimal, a value past `10FFFF`, or one in the surrogate range `D800` to `DFFF`.\n\
          \n\
          Example:\n\
@@ -1663,7 +1664,8 @@ codes! {
         "This is a bug in Kite, not in the program being compiled. A stage of \
          the compiler found something an earlier stage promised it would never \
          see — a `break` with no loop to leave, an `await` the state-machine \
-         transform did not remove — and stopped rather than guess.\n\n\
+         transform did not remove, a value the checker left without a type \
+         and reported nothing about — and stopped rather than guess.\n\n\
          Guessing is what it used to do. The `break` was dropped and the \
          program ran on as if it had not been written; the `await` crashed \
          the compiler. Stopping with this names the function, which is \

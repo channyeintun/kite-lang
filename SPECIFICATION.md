@@ -718,6 +718,11 @@ so `r(|| { return _, errors.new("no") }, 6)` against
 type from the `41`. Such closures are typed in written order among
 themselves; a generic struct literal's fields are treated the same way. Only
 the checking moves: the arguments are still evaluated in the order written.
+Where the argument that would fix such a closure's parameter is itself an
+error, that error is the one reported, not an E0211 beside it. Only a closure
+waits: a `nil` passed where the type is still open — `first(nil, 3)` against
+`first<T>(a: Option<T>, b: T)` — is [E0204](#16-diagnostics); a binding gives it
+a type (`let none: Option<int> = nil`, then `first(none, 3)`).
 
 **Closures capture by value, taken when the closure is made.** Because `let`
 bindings are immutable, the vast majority of captures are trivially safe: the
@@ -1680,8 +1685,9 @@ A `match` in statement position discards its arms' values, so its arms need not
 agree in type: `0 => io.print("zero")` beside `_ => count()`, where `count`
 returns an `int`, is fine. Each arm is in statement position too: a `match` or
 `if` written as an arm discards its own branches' values, so they need not
-agree either, and an arm that does nothing — `0 => 1`, or `{ done == true }` —
-is [E0117](#16-diagnostics), exactly as the same line on its own is; `0 => ()`
+agree either and an `if` there needs no `else`; an arm that does nothing —
+`0 => 1`, or `{ done == true }` — is [E0117](#16-diagnostics), exactly as the
+same line on its own is; `0 => ()`
 says that nothing happens, as `0 => {}` does, and is fine. An arm
 whose value is an `error` is still one dropped ([E0302](#16-diagnostics)), as a
 bare call's would be. A `match` used as a value needs every arm to produce the

@@ -1,0 +1,63 @@
+// A type that does not parse is one E0100, and the declaration it is written
+// in is kept with an error type: nothing that uses the name is reported again.
+// (Those that leave a bracket open are in `corpus.rs`: `kitec fmt` indents
+// what follows an unclosed bracket.)
+struct Box<T> {
+    v: T
+}
+
+struct P {
+    x: [1.5] //~ ERROR E0100
+    y: int
+}
+
+enum Shape {
+    Dot(at: (int, 2)) //~ ERROR E0100
+    Line(int, int)
+}
+
+type Grid = [[1]] //~ ERROR E0100
+
+// A generic declaration whose field could not be read is not also a type
+// argument that nothing pins down.
+struct Cell<T> {
+    v: (T, 1) //~ ERROR E0100
+}
+
+enum Slot<T> {
+    Full(at: (T, 1)) //~ ERROR E0100
+    Empty
+}
+
+fn later() -> (, error) { //~ ERROR E0100
+    check errors.new("x")
+    return 1, nil
+}
+
+fn same<T>(a: T, b: T) -> bool {
+    return a == b
+}
+
+fn main() {
+    var out: [1.5] = [] //~ ERROR E0100
+    out.push(1.5)
+    let seen: { str: } = { } //~ ERROR E0100
+    io.print(out.len() + seen.len())
+    let p = P{ x: [], y: 2 }
+    io.print(p.y)
+    let g: Grid = []
+    io.print(g.len())
+    let (n, e) = later()
+    if e == nil {
+        io.print(n)
+    }
+    let f = |a: [1.5], b: int| b //~ ERROR E0100
+    io.print(f([], 2))
+    io.print(same(f, f))
+    let c = Cell{ v: (1, 1) }
+    let s = Slot.Full(at: (1, 1))
+    match Shape.Dot(at: (1, 2)) {
+        Dot(at) => io.print(1),
+        Line(_, _) => io.print(2),
+    }
+}

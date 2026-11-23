@@ -591,6 +591,14 @@ impl<'a> Lexer<'a> {
                     if self.peek() == Some(b'(') {
                         self.skip_interpolation();
                     } else {
+                        // A `\` ending a line is stepped over with the whole
+                        // line break, `\r\n` as `\n`: it is one mistake, which
+                        // the checker names, and the string goes on as it does
+                        // after a `\` and a `\n`, rather than ending at the
+                        // `\n` and taking the next line for code.
+                        if self.src[self.pos..].starts_with("\r\n") {
+                            self.pos += 1;
+                        }
                         self.bump();
                     }
                 }
@@ -720,10 +728,35 @@ impl<'a> Lexer<'a> {
 
         let ch = self.char_at(start).unwrap_or('\u{fffd}');
         self.pos += ch.len_utf8();
+        // A `;` is read as the line break it was meant to be, so what follows
+        // it on the line is the next statement, as the note says, and is not
+        // reported again for standing where a line break was wanted.
+        if ch == ';' {
+            let span = Span::new(self.file, start as u32, self.pos as u32);
+            self.diags.push(
+                Diagnostic::error(codes::E0002, "invalid character `;` in source")
+                    .with_primary(span, "Kite has no `;`")
+                    .with_note(
+                        "a line break ends a statement; this `;` is read as one, so what follows \
+                         it on the line is read as the next statement",
+                    ),
+            );
+            self.pending_newline = true;
+            return None;
+        }
+        // `??`, `~~`: a run of one character is one mistake, and one report.
+        while self.char_at(self.pos) == Some(ch) {
+            self.pos += ch.len_utf8();
+        }
         let span = Span::new(self.file, start as u32, self.pos as u32);
+        let run = &self.src[start..self.pos];
+        let title = if run.len() == ch.len_utf8() {
+            format!("invalid character `{}` in source", ch)
+        } else {
+            format!("invalid characters `{}` in source", run)
+        };
         self.diags.push(
-            Diagnostic::error(codes::E0002, format!("invalid character `{}` in source", ch))
-                .with_primary(span, "not part of any Kite token"),
+            Diagnostic::error(codes::E0002, title).with_primary(span, "not part of any Kite token"),
         );
         None
     }

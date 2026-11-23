@@ -747,6 +747,66 @@ pub fn specialise_equality(program: &mut Program) {
     program.types = types;
 }
 
+/// The first expression, in each function's order, whose type is
+/// made of the error type, with the function it is in.
+///
+/// The checker gives the error type only where it has reported something, so
+/// a program with no diagnostic never holds one. When one does, a backend
+/// would lower `<error>` as some representation or other — an invalid Wasm
+/// module, a segfault — far from the checker's mistake. The driver asks this
+/// before lowering and names the place instead.
+pub fn error_typed(program: &mut Program) -> Option<(String, kite_span::Span)> {
+    let Program { fns, types, .. } = program;
+    let mut seen: HashMap<TyId, bool> = HashMap::new();
+    let mut holds = |ty: TyId| *seen.entry(ty).or_insert_with(|| types.holds_error(ty));
+    for f in fns.iter_mut() {
+        // Expressions only: every read of a local is one, with its type. A
+        // local nothing reads may keep the error type harmlessly — a variant
+        // in an or-pattern that the resolver first took for a binding is one.
+        if let Some(span) = error_typed_block(&mut f.body, &mut holds) {
+            return Some((f.name.clone(), span));
+        }
+    }
+    None
+}
+
+fn error_typed_block(block: &mut Block, holds: &mut impl FnMut(TyId) -> bool) -> Option<kite_span::Span> {
+    for stmt in &mut block.stmts {
+        for expr in stmt_exprs(stmt) {
+            if let Some(span) = error_typed_expr(expr, holds) {
+                return Some(span);
+            }
+        }
+        for inner in stmt_blocks(stmt) {
+            if let Some(span) = error_typed_block(inner, holds) {
+                return Some(span);
+            }
+        }
+    }
+    None
+}
+
+fn error_typed_expr(expr: &mut Expr, holds: &mut impl FnMut(TyId) -> bool) -> Option<kite_span::Span> {
+    // The one place the error type is meant: the value half of a failure
+    // return (`check err`, `return _, err`) is a `nil` of the error type,
+    // because there is no value there to have a type.
+    let placeholder = matches!(expr.kind, ExprKind::Nil) && expr.ty == TyId::ERROR;
+    if !placeholder && holds(expr.ty) {
+        return Some(expr.span);
+    }
+    for child in expr_children(&mut expr.kind) {
+        if let Some(span) = error_typed_expr(child, holds) {
+            return Some(span);
+        }
+    }
+    for block in expr_blocks(&mut expr.kind) {
+        if let Some(span) = error_typed_block(block, holds) {
+            return Some(span);
+        }
+    }
+    None
+}
+
 fn specialise_block(block: &mut Block, types: &mut Types) {
     for stmt in &mut block.stmts {
         for inner in stmt_blocks(stmt) {
