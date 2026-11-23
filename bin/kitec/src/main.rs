@@ -160,6 +160,21 @@ fn command() -> ExitCode {
             _ if a.starts_with('-') => {
                 return fail(&format!("unknown option `{}`", a));
             }
+            // `kitec file.kite` is `kitec run file.kite`, so a word in the
+            // command's place is read as a path. One that names nothing on
+            // disk and cannot be a path — no `/`, no `.` — is a command
+            // misspelt, and says so rather than "cannot read ./frobnicate".
+            _ if command.is_none()
+                && path.is_none()
+                && !a.contains(['/', '\\', '.'])
+                && !std::path::Path::new(a).exists() =>
+            {
+                return fail(&format!(
+                    "unknown command `{}`\n\ncommands: run, check, build, test, fmt, doc, fix, \
+                     bundle, pkg (`kitec --help` lists them)",
+                    a
+                ));
+            }
             _ if path.is_none() => {
                 path = Some(a.clone());
                 i += 1;
