@@ -584,6 +584,34 @@ fn a_literal_that_holds_failures_is_not_called_a_call() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A method call that fails on a local whose name is a module this file
+/// imports, or a builtin one, says the local hides the module — only where
+/// the module has the member: `text.foo()` gets no such note.
+#[test]
+fn a_local_that_hides_a_module_says_so() {
+    let dir = scratch(
+        "local-hides-module",
+        "t.kite",
+        "use std/text\n\nfn main() {\n    let text = \"ab\"\n    io.print(text.clusters(text).len())\n    \
+         io.print(text.foo())\n    let io = 3\n    io.print(1)\n}\n",
+    );
+    let Some((ok, _, err)) = kitec_in(&dir, &["check", "t.kite"]) else { return };
+    assert!(!ok, "{}", err);
+    assert_eq!(err.matches("this local `text` hides the module `text`").count(), 1, "{}", err);
+    assert!(err.contains("`str` has no method `foo`"), "{}", err);
+    assert!(err.contains("this local `io` hides the module `io`; to use the module, rename the local"), "{}", err);
+    let _ = std::fs::remove_dir_all(&dir);
+    // The recipe: the local renamed, the call is the module's.
+    let dir = scratch(
+        "local-hides-module-fixed",
+        "t.kite",
+        "use std/text\n\nfn main() {\n    let s = \"ab\"\n    io.print(text.clusters(s).len())\n}\n",
+    );
+    let Some((ok, _, err)) = kitec_in(&dir, &["check", "t.kite"]) else { return };
+    assert!(ok, "{}", err);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// Calling a local that hides a prelude function says so, as a module's
 /// constant of that name does.
 #[test]

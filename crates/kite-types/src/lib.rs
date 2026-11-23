@@ -6009,7 +6009,12 @@ impl<'a> Checker<'a> {
                     Some(Res::Variant(ti, vi)) => {
                         self.variant_value(ti, vi, args, arg_names, *fspan, span, expected)
                     }
-                    _ => self.method_call(base, name, args, span, expected),
+                    _ => {
+                        let from = self.diags.len();
+                        let call = self.method_call(base, name, args, span, expected);
+                        self.note_hidden_module(base, &name.name, from);
+                        call
+                    }
                 };
             }
         }
@@ -8687,6 +8692,40 @@ impl<'a> Checker<'a> {
                     Some(Some(TypeTarget::Trait(tr))) if self.types.trait_def(*tr).method(method).is_some()
                 )
         })
+    }
+
+    /// A method call on a local that failed (an `E0205` among the reports
+    /// from `from` on), where the local's name is also a module this file
+    /// imports, or a builtin one such as `io`, and that module has the member
+    /// written: `let text = "ab"` and then `text.clusters(text)` most likely
+    /// meant the module, which the local hides. Said only when the module has
+    /// the member — `text.foo()` gets no such note.
+    fn note_hidden_module(&mut self, base: &ast::Expr, member: &str, from: usize) {
+        let ast::Expr::Path(p) = base else { return };
+        if !p.is_simple() || !matches!(self.resolved.lookup_use(p.span), Some(Res::Local(_))) {
+            return;
+        }
+        let local = p.text();
+        let dotted = format!("{}.{}", local, member);
+        let canonical = self.resolved.modules.canonical(&self.module, &dotted);
+        let imported = self.resolved.modules.aliases.contains_key(&(self.module.clone(), local.clone()));
+        let written = imported
+            && (self.resolved.fn_by_name_in(&self.module, &dotted).is_some_and(|f| self.resolved.fns[f as usize].is_pub)
+                || self.resolved.const_by_name_in(&self.module, &dotted).is_some_and(|c| self.resolved.consts[c as usize].is_pub)
+                || self.resolved.type_by_name_in(&self.module, &dotted).is_some_and(|t| self.resolved.type_decl(t).is_pub));
+        if !written && BuiltinFn::from_path(&canonical).is_none() {
+            return;
+        }
+        for i in from..self.diags.len() {
+            let Some(d) = self.diags.get_mut(i) else { continue };
+            if d.code == Some(codes::E0205) {
+                d.notes.push(format!(
+                    "this local `{0}` hides the module `{0}`; to use the module, rename the local",
+                    local
+                ));
+                return;
+            }
+        }
     }
 
     /// Whether a trait is `Share`, the one bound nobody implements.
