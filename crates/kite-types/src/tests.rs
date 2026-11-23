@@ -519,6 +519,44 @@ fn an_invalid_escape_is_underlined_where_it_is_written() {
     assert_eq!(spans, vec!["\\y", "\\q", "\\u{110000}", "\\z", "\\w", "\\u{"], "{}", c.render());
 }
 
+/// A `\` that ends a line is named as one, not printed with the line break
+/// in it, which split the label across two lines; and the note fits the
+/// kind of string it is in.
+#[test]
+fn a_backslash_ending_a_line_is_named_not_printed() {
+    let c = body("  let a = \"x\\\ny\"\n  let b = \"\"\"\n    p\\\n    q\n    \"\"\"\n  io.print(a + b)");
+    let said: Vec<(String, String, String)> = c
+        .diags
+        .iter()
+        .filter(|d| d.code.map(|c| c.0) == Some("E0003"))
+        .map(|d| {
+            (
+                c.sources.span_text(d.labels[0].span).to_string(),
+                d.labels[0].message.clone(),
+                d.notes.join(" "),
+            )
+        })
+        .collect();
+    assert_eq!(said.len(), 2, "{}", c.render());
+    for (text, label, _) in &said {
+        assert_eq!(text, "\\", "{}", c.render());
+        assert!(!label.contains('\n') && label.contains("end of a line"), "{}", c.render());
+    }
+    assert!(said[0].2.contains("`\\n`"), "{}", c.render());
+    assert!(said[1].2.contains("remove the `\\`"), "{}", c.render());
+}
+
+/// The same `\` before a Windows line break, `\r\n`, is the same one report:
+/// the string goes on past it as past a `\` and a `\n`, where it used to end
+/// at the `\n` and take the next line for code — five reports of one slip.
+#[test]
+fn a_backslash_ending_a_crlf_line_is_one_report() {
+    let c = body("  let a = \"x\\\r\ny\"\r\n  io.print(a)");
+    let codes: Vec<&str> = c.diags.iter().filter_map(|d| d.code.map(|c| c.0)).collect();
+    assert_eq!(codes, vec!["E0003"], "{}", c.render());
+    assert_eq!(c.sources.span_text(c.diags.iter().next().unwrap().labels[0].span), "\\");
+}
+
 // ---- cascade suppression --------------------------------------------------
 
 /// One mistake must yield one diagnostic. `TyId::ERROR` satisfies every

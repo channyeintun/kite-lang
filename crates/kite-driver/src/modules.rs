@@ -669,6 +669,11 @@ pub struct Loader {
     /// trusted it. A spelling is a convenience for the file that writes it and
     /// has no business being visible outside the module that does.
     pub aliases: HashMap<(String, String), String>,
+    /// The path the `use` that claimed each spelling in `aliases` wrote,
+    /// keyed the same way: `lib/util` where the identity is `src/lib/util`,
+    /// measured from the `kite.toml` above. A note naming the module that
+    /// holds a spelling names it as the reader wrote it.
+    written: HashMap<(String, String), String>,
     /// Spellings, keyed as `aliases` are, whose `use` was reported and loaded
     /// nothing — so what they qualify is not reported again.
     pub unresolved: std::collections::HashSet<(String, String)>,
@@ -1295,7 +1300,7 @@ impl Loader {
             let origin = found.origin(&self.files);
             if !self.seen.contains_key(&origin) {
                 let refusal =
-                    self.already_a_member(&found, &owner, &segments, &spelling, u.span, sources);
+                    self.already_a_member(&found, &owner, &segments, &spelling, u.span, stack, sources);
                 if let Some(refusal) = refusal {
                     diags.push(refusal);
                     self.unresolved.insert(failed);
@@ -1315,12 +1320,9 @@ impl Loader {
             // `use utils` claims the spelling `utils` in this module, and it
             // has to, or a later `use dep/utils` would take the spelling from
             // under it and every `utils.…` above would quietly change meaning.
-            if let Some(first) = self
-                .aliases
-                .get(&(owner.clone(), spelling.clone()))
-                .filter(|first| **first != identity)
-                .cloned()
-            {
+            let key = (owner.clone(), spelling.clone());
+            if let Some(first) = self.aliases.get(&key).filter(|first| **first != identity).cloned() {
+                let first = self.written.get(&key).cloned().unwrap_or(first);
                 diags.push(
                     Diagnostic::error(
                         codes::E0404,
@@ -1368,6 +1370,7 @@ impl Loader {
                 }
             }
             self.aliases.insert((owner.clone(), spelling.clone()), identity.clone());
+            self.written.insert((owner.clone(), spelling.clone()), segments.join("/"));
 
             if let Some(at) = stack.iter().position(|frame| frame.origin == origin) {
                 diags.push(cycle(stack, at, &identity, u.span, sources));
@@ -1377,6 +1380,7 @@ impl Loader {
                 // of a name it declares `pub`. Reported once, as the cycle.
                 if stack[at].identity.is_empty() {
                     self.aliases.remove(&(owner.clone(), spelling.clone()));
+                    self.written.remove(&(owner.clone(), spelling.clone()));
                     self.unresolved.insert(failed);
                 }
                 continue;
@@ -1785,6 +1789,7 @@ impl Loader {
     /// identities, which are paths below the package's root — "remove the
     /// `use src/lib/shape`" and "reach … as `src/lib.…`" in a package whose
     /// `main.kite` is in `src/`, neither of which is code that compiles.
+    #[allow(clippy::too_many_arguments)]
     fn already_a_member(
         &self,
         found: &Found,
@@ -1792,6 +1797,7 @@ impl Loader {
         written: &[&str],
         spelling: &str,
         span: Span,
+        stack: &[Frame],
         sources: &SourceMap,
     ) -> Option<Diagnostic> {
         let Found::Path { at, is_dir, .. } = found else {
@@ -1839,12 +1845,53 @@ impl Loader {
                         directory
                     ))
                 } else if owner.starts_with(&inside) {
-                    d.with_note(format!(
-                        "this module is inside `{0}`, which imports it, so it cannot import `{0}` \
-                         back; move `{1}.kite` into a directory of its own, `{0}/{1}/`, and write \
-                         `use {1}` in both",
-                        directory, stem
-                    ))
+                    // Moved to a directory of its own, the file is still
+                    // beside this module, and a `use` of it there still
+                    // reaches here: then the two import each other, which no
+                    // move undoes, and the note says so instead of a recipe
+                    // that ends in E0402.
+                    let here = owner[inside.len()..].to_string();
+                    // `use widgets`, or the same module by a longer path:
+                    // `use ui/widgets` reaches it from the package's root.
+                    let back = self.files.read(&file).ok().is_some_and(|text| {
+                        text.lines().any(|line| {
+                            let mut words = line.split_whitespace();
+                            words.next() == Some("use")
+                                && words.next().is_some_and(|path| {
+                                    path == here || path.ends_with(&format!("/{}", here))
+                                })
+                        })
+                    });
+                    // Or through other modules: the chain being loaded left
+                    // the directory by a `use` in this very file, so it leads
+                    // from the file to here whatever directory it is in.
+                    let through = !back
+                        && stack
+                            .iter()
+                            .position(|frame| frame.identity == *other)
+                            .and_then(|k| stack.get(k + 1))
+                            .is_some_and(|next| {
+                                let from = &sources.file(next.entered.file).name;
+                                self.files.canonical(from) == self.files.canonical(&file)
+                            });
+                    if back || through {
+                        let how = if back { "imports" } else { "reaches" };
+                        let by = if back { "itself" } else { "through the modules it imports" };
+                        d.with_note(format!(
+                            "this module is inside `{0}`, which imports it, so it cannot import \
+                             `{0}` back; and `{1}.kite` {3} `{2}` {4}, so the two depend on \
+                             each other wherever `{1}.kite` is — what both need has to be in a \
+                             module that imports neither",
+                            directory, stem, here, how, by
+                        ))
+                    } else {
+                        d.with_note(format!(
+                            "this module is inside `{0}`, which imports it, so it cannot import \
+                             `{0}` back; move `{1}.kite` into a directory of its own, `{0}/{1}/`, \
+                             and write `use {1}` in both",
+                            directory, stem
+                        ))
+                    }
                 } else {
                     // The directory, as this module reaches it: the path it
                     // wrote, less the file's own segment.

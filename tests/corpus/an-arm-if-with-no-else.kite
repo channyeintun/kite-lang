@@ -1,0 +1,14 @@
+// An `if` with no `else` is a statement as an arm of a `match` statement,
+// and has no value on one path where the arm's value is wanted.
+fn main() {
+    let n = 1
+    match n {
+        0 => if n > 0 { io.print("zero") },
+        _ => { },
+    }
+    let d = match n {
+        0 => if n > 0 { 1 }, //~ ERROR E0100
+        _ => 2,
+    }
+    io.print(d)
+}

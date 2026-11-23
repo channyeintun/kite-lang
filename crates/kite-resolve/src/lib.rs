@@ -2541,6 +2541,15 @@ impl<'a> FnResolver<'a> {
                 return;
             }
         }
+        // `main.helper()` below a `use main` that was refused — a file
+        // importing itself: `main` is that `use`'s spelling, reported once
+        // already, and not the function of the same name the file declares,
+        // which had no `helper` to be asked for.
+        if let Expr::Path(p) = head {
+            if p.is_simple() && self.failed_use(&p.segments[0].name) {
+                return;
+            }
+        }
         self.expr(head)
     }
 
