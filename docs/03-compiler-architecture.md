@@ -356,19 +356,33 @@ e out of scope while Unchecked  : E0302 — at the end of its block, and at
                                   that leaves it behind
 e = call  (assigned later)      : e ← Unchecked
 e = …  while e is Unchecked     : E0302 at the write — it drops the old one
+let c = e  (a copy)             : c, e ← one Unchecked failure; inspecting
+                                  either inspects both
 test e (`e == nil`, `e != nil`) : e ← Clean
-path on which e is proved nil   : v ← Clean
+path on which e is proved nil   : v ← Clean — through `&&`, `||` and `!`
+                                  as logic allows
 check e                         : v ← Clean after it — the other path returned
+Task, tuple or slice holding one: watched as the error is; taking it apart,
+                                  awaiting it or walking it hands each on
 join(a, b)                      : Tainted if either is Tainted,
                                   else Unchecked if either is Unchecked
+loop top                        : join of the entry and what the body's end
+                                  and every `continue` hand back, repeated
+                                  until it stops changing
 ```
 
 The join rule is what makes it sound: a value is Clean only when it is Clean on
 *every* incoming path. Inside `if e != nil { … }` the value is still Tainted —
-that branch is exactly the path on which it does not exist.
+that branch is exactly the path on which it does not exist. A loop's top is a
+join too, and the only one whose inputs include a later point in the body: the
+body is checked from the entry state, and checked again from the join when its
+end hands back something worse. A state only gets worse and the lattice has
+height two, so that ends, and a body that hands back nothing new is checked
+once.
 
 This is emphatically **not** a borrow checker. There is no notion of ownership,
-aliasing, moves, or lifetimes. It is the same machinery as definite-assignment
+moves, or lifetimes, and the only aliasing it knows is that a plain copy of an
+error names the same failure. It is the same machinery as definite-assignment
 analysis, applied to a different property, and it lives beside it.
 
 ### 5.2 Definite assignment — `E0110`, and divergence

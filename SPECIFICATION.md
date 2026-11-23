@@ -1053,7 +1053,8 @@ somebody decided, on a line a reader can see and `grep` can find.
 
 The analysis is a standard forward dataflow pass over the control-flow graph,
 run after type checking. It is not a borrow checker; it has no notion of
-ownership, aliasing, or lifetimes. A loop body is entered both from before the
+ownership or lifetimes, and knows of aliasing only that a plain copy of an
+error names the same failure (R7). A loop body is entered both from before the
 loop and from its own end and every `continue`, so the state at its top is the
 join of all of them, and a failure one iteration leaves unchecked is still
 there when the next writes over it: `var e: error = nil` then
