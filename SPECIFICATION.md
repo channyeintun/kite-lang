@@ -1079,7 +1079,11 @@ The rules:
 > these in it — what `task.both`, `task.all` and `task.timeout` answer
 > with — is Unchecked when bound, taking it apart or walking it with `for`
 > hands each failure in it to the name it is bound to, and counting it with
-> `len` is not reading it.
+> `len` is not reading it. Nor is testing an optional against `nil`, which
+> asks only whether a failure is there: where it is nil there is none, and
+> where it is present the optional, narrowed to what it holds, is still
+> Unchecked — `if r == nil { return }` is followed by a test of the error
+> or a destructuring of the pair.
 
 R1–R5 are about bindings, and R6 and R7 close the shapes they leave open: a
 call written as a statement makes no binding, so nothing in R1–R5 ever sees it,

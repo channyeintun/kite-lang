@@ -1,0 +1,90 @@
+// Testing an optional result against `nil` asks whether the failure is
+// there, not what it is. Where it is nil there is nothing to look at; where
+// it is present, the error the finished task gave is still unread and has to
+// be checked. `if r == nil { return }` alone used to count as reading it.
+
+use std/task
+
+async fn save() -> error {
+    return errors.new("disk full")
+}
+
+async fn load() -> (int, error) {
+    return 1, nil
+}
+
+async fn only_nil_tested() {
+    let r = await task.timeout(save(), 100) //~ ERROR E0302
+    if r == nil {
+        io.print("timed out")
+        return
+    }
+    io.print("saved")
+}
+
+async fn present_and_unread() {
+    let r = await task.timeout(save(), 100) //~ ERROR E0302
+    if r != nil {
+        io.print("finished")
+    }
+}
+
+async fn kept_as_a_flag() {
+    let r = await task.timeout(save(), 100) //~ ERROR E0302
+    let late = r == nil
+    io.print(late)
+}
+
+async fn matched_against_nil_and_dropped() {
+    let r = await task.timeout(save(), 100) //~ ERROR E0302
+    match r {
+        nil => io.print("late"),
+        _ => io.print("done"),
+    }
+}
+
+// Once narrowed, `r` is the error itself, and testing it inspects it.
+async fn the_error_tested_too() {
+    let r = await task.timeout(save(), 100)
+    if r == nil {
+        io.print("timed out")
+        return
+    }
+    if r != nil {
+        io.print(r.message())
+    }
+}
+
+async fn the_pair_taken_apart() {
+    let r = await task.timeout(load(), 100)
+    if r == nil {
+        return
+    }
+    let (n, err) = r
+    if err != nil {
+        return
+    }
+    io.print(n)
+}
+
+async fn matched_and_tested() {
+    let r = await task.timeout(save(), 100)
+    match r {
+        nil => io.print("late"),
+        e => {
+            if e != nil {
+                io.print(e.message())
+            }
+        }
+    }
+}
+
+async fn main() {
+    await only_nil_tested()
+    await present_and_unread()
+    await kept_as_a_flag()
+    await matched_against_nil_and_dropped()
+    await the_error_tested_too()
+    await the_pair_taken_apart()
+    await matched_and_tested()
+}

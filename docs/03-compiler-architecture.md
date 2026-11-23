@@ -364,7 +364,9 @@ path on which e is proved nil   : v ← Clean — through `&&`, `||` and `!`
                                   as logic allows
 check e                         : v ← Clean after it — the other path returned
 Task, tuple, slice or optional  : watched as the error is; taking it apart,
-holding one                       awaiting it or walking it hands each on
+holding one                       awaiting it or walking it hands each on;
+                                  `r == nil` on an optional reads nothing:
+                                  nil side Clean, present side Unchecked
 join(a, b)                      : Tainted if either is Tainted,
                                   else Unchecked if either is Unchecked
 loop top                        : join of the entry and what the body's end

@@ -2042,6 +2042,16 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// Whether a local is an optional that may hold a failure — what
+    /// `task.timeout` answers with — and has not been narrowed to what it
+    /// holds. Testing such a local against `nil` asks whether the failure
+    /// is there, not what it is: `if r == nil { return }` alone used to
+    /// count as reading it, and the error the finished task gave was lost.
+    fn optional_result(&self, id: u32) -> bool {
+        self.holder(self.locals[id as usize].ty) == Some(Holder::Maybe)
+            && !self.narrowed.contains_key(&id)
+    }
+
     /// Whether a value put somewhere new brings an unchecked failure with it,
     /// given the taint from before it was evaluated.
     ///
@@ -3508,6 +3518,11 @@ impl<'a> Checker<'a> {
     /// nothing here has to be undone.
     fn enter_branch(&mut self, narrowing: Option<(u32, bool)>, cond: &ast::Expr, in_then: bool) {
         if let Some((id, is_eq)) = narrowing {
+            // Where an optional result is nil there is no failure in it to
+            // look at; where it is present, the failure is still unread.
+            if is_eq == in_then && self.optional_result(id) {
+                self.inspect(id);
+            }
             if is_eq != in_then {
                 if let TyKind::Optional(inner) = *self.types.kind(self.locals[id as usize].ty) {
                     self.narrowed.insert(id, inner);
@@ -3637,8 +3652,13 @@ impl<'a> Checker<'a> {
             (ast::Expr::Nil(_), ast::Expr::Path(p)) => p,
             _ => return None,
         };
+        // An optional result narrowed to the error it holds is tested as
+        // that error: `if r == nil { return }` then `if r != nil { … }`.
         match self.resolved.lookup_use(path.span) {
-            Some(Res::Local(id)) if self.locals[id as usize].ty == TyId::ERR => {
+            Some(Res::Local(id))
+                if self.locals[id as usize].ty == TyId::ERR
+                    || self.narrowed.get(&id) == Some(&TyId::ERR) =>
+            {
                 Some((id, is_eq))
             }
             _ => None,
@@ -3782,7 +3802,24 @@ impl<'a> Checker<'a> {
                         || matches!(rhs.as_ref(), ast::Expr::Nil(_))) =>
             {
                 let subject = if matches!(lhs.as_ref(), ast::Expr::Nil(_)) { rhs } else { lhs };
+                // A nil test of an optional result does not read the failure
+                // it may hold: that is left to whichever side finds it there.
+                let held = match subject.as_ref() {
+                    ast::Expr::Path(p) => match self.resolved.lookup_use(p.span) {
+                        Some(Res::Local(id)) if self.optional_result(id) => Some(id),
+                        _ => None,
+                    },
+                    _ => None,
+                };
+                let before = held.map(|_| self.taint.clone());
                 let value = self.expr(subject, None);
+                if let (Some(id), Some(before)) = (held, before) {
+                    for i in self.copies_of(id) {
+                        if before.get(i as usize) == Some(&Taint::Unchecked) {
+                            self.taint[i as usize] = Taint::Unchecked;
+                        }
+                    }
+                }
                 if !matches!(self.types.kind(value.ty), TyKind::Optional(_))
                     && value.ty != TyId::ERR
                     && !self.types.is_poisoned(value.ty)
@@ -9270,8 +9307,16 @@ impl<'a> Checker<'a> {
         // name. So the failure stays where it was — a binding scrutinee keeps
         // it, an arm's name holds it as a copy — and a new failure with only
         // `_` to receive it is dropped right there, as by a bare call (R6).
+        //
+        // Nor does matching an optional result against `nil`, which asks
+        // only whether the failure is there: an arm that is `nil` holds
+        // none, and the others hold it unread.
+        let maybe = self.holder(scrut_ty) == Some(Holder::Maybe);
         let tests_nothing = self.may_hold_failure(scrut_ty)
-            && m.arms.iter().all(|a| self.binds_whole(&a.pattern, scrut_ty));
+            && m.arms.iter().all(|a| {
+                self.binds_whole(&a.pattern, scrut_ty)
+                    || (maybe && matches!(a.pattern, ast::Pattern::Nil(_)))
+            });
         let held = tests_nothing && self.holds_obligation(&scrutinee, &before);
         let source = match scrutinee.kind {
             ExprKind::Local(id) if held => Some(id.0),
@@ -9357,6 +9402,9 @@ impl<'a> Checker<'a> {
                 Some(src) => self.taint.get(src as usize) == Some(&Taint::Unchecked),
                 None => open,
             };
+            if let (true, Some(src), hir::Pattern::Nil) = (held, source, &pattern) {
+                self.inspect(src);
+            }
             if let (true, hir::Pattern::Binding { local, .. }) = (held, &pattern) {
                 self.forget_copies(local.0);
                 self.taint[local.index()] = if unseen { Taint::Unchecked } else { Taint::Clean };

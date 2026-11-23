@@ -450,6 +450,29 @@ async fn main() {
 }
 ```
 
+Testing a `task.timeout` result against `nil` only asks whether the work came in
+time. Where it did, what it gave is still unread: after `if r == nil { return }`,
+`r` is the `error` (or the pair) and has to be tested (or taken apart) in turn:
+
+```kite
+use std/task
+
+async fn save() -> error {
+    return errors.new("disk full")
+}
+
+async fn main() {
+    let r = await task.timeout(save(), 100)
+    if r == nil {
+        io.print("timed out")
+        return
+    }
+    if r != nil {
+        io.print(r.message())
+    }
+}
+```
+
 The same holds however the failure got into a single binding — `var e = f()`,
 `let e = await f()`, `let e = if c { f() } else { g() }`, `let (n, e) = (1,
 f())`: the binding has to be looked at. Only `nil` starts out Checked.
