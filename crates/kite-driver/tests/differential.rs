@@ -5524,6 +5524,36 @@ fn main() {
 "#,
         "2\n3\n20\n7\n1\n0\n5\nstatement\n",
     ),
+    // A `match` statement discards its arms' values, so a print beside a
+    // call returning an `int` or a `str` is fine. It was "match arms have
+    // different types".
+    (
+        "a-match-statement-discards-arms-of-different-types",
+        r#"fn f() -> int {
+  io.print("f ran")
+  return 7
+}
+
+fn g() -> str {
+  io.print("g ran")
+  return "s"
+}
+
+fn main() {
+  for n in 0..4 {
+    match n {
+      0 => io.print("zero"),
+      1 => f(),
+      2 => g(),
+      _ => {
+        io.print("many")
+      },
+    }
+  }
+}
+"#,
+        "zero\nf ran\ng ran\nmany\n",
+    ),
 ];
 
 #[test]

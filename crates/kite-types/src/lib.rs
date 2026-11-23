@@ -9180,6 +9180,7 @@ impl<'a> Checker<'a> {
         let mut poisoned = false;
         let mut arms = Vec::with_capacity(m.arms.len());
         let mut result_ty: Option<TyId> = None;
+        let mut disagree = false;
         let mut arm_spans: Vec<(Span, TyId)> = Vec::new();
 
         // Arms are checked in order so a binding can be narrowed. Once an
@@ -9242,7 +9243,9 @@ impl<'a> Checker<'a> {
                 }
             }
 
-            let want = expected.or(result_ty);
+            // In a `match` statement the arms' values are thrown away, so one
+            // arm says nothing about what the next should be.
+            let want = if discard { expected } else { expected.or(result_ty) };
             let body = match &arm.body {
                 ast::MatchBody::Expr(e) => self.expr(e, want),
                 ast::MatchBody::Block(b) => self.match_block(b, want, discard),
@@ -9274,6 +9277,9 @@ impl<'a> Checker<'a> {
 
             if body.ty != TyId::NEVER && !self.types.is_poisoned(body.ty) {
                 match result_ty {
+                    Some(want) if discard && !self.types.satisfies(body.ty, want) => {
+                        disagree = true;
+                    }
                     None => result_ty = Some(body.ty),
                     Some(want) if !self.types.satisfies(body.ty, want) => {
                         let (a, b) = (self.types.name(want), self.types.name(body.ty));
@@ -9339,7 +9345,31 @@ impl<'a> Checker<'a> {
         // No arm produced a type, and one of them could not: the match's type
         // is unknown, not `()`, or binding it reports the one mistake again as
         // "cannot bind a value of type `()`".
-        let ty = result_ty.unwrap_or(if poisoned { TyId::ERROR } else { TyId::UNIT });
+        let mut ty = result_ty.unwrap_or(if poisoned { TyId::ERROR } else { TyId::UNIT });
+        // A `match` statement whose arms produce different types — a print
+        // beside a call returning an `int` — is fine, since nothing reads the
+        // value. Each arm that has one is made a statement of its own, so the
+        // match is `()` and the backends see arms that agree.
+        if disagree {
+            for arm in &mut arms {
+                if arm.body.ty == TyId::UNIT || arm.body.ty == TyId::NEVER {
+                    continue;
+                }
+                // An arm's error is dropped here, as a bare call's would be.
+                self.dropped_error(&arm.body);
+                let span = arm.body.span;
+                let body = std::mem::replace(
+                    &mut arm.body,
+                    hir::Expr { kind: ExprKind::Error, ty: TyId::UNIT, span },
+                );
+                arm.body = hir::Expr {
+                    kind: ExprKind::Block(hir::Block { stmts: vec![hir::Stmt::Expr(body)] }),
+                    ty: TyId::UNIT,
+                    span,
+                };
+            }
+            ty = TyId::UNIT;
+        }
         let expr = hir::Expr {
             kind: ExprKind::Match {
                 scrutinee: Box::new(scrutinee),

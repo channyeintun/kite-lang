@@ -1,0 +1,26 @@
+// A `match` statement throws its arms' values away, so they need not agree in
+// type. An arm whose value is an error is still an error dropped.
+use std/errors
+
+fn count() -> int {
+    return 7
+}
+
+fn fails() -> error {
+    return errors.new("no")
+}
+
+fn main() {
+    for n in 0..3 {
+        match n {
+            0 => io.print("zero"),
+            1 => count(),
+            _ => fails(), //~ ERROR E0302
+        }
+    }
+    let v = match 1 {
+        1 => 10,
+        _ => "twenty", //~ ERROR E0200
+    }
+    io.print(v)
+}

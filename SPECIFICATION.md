@@ -1409,8 +1409,8 @@ that is not one: `Dir` where the enum says `Directory` is a binding, which takes
 every value.
 
 An arm is an expression or a block. A block arm **runs for its effects**: it
-produces a value only when it is a single expression — which may be an `if` or a
-`match` whose own branches are single expressions — because there are no tail
+produces a value only when it is a single expression (which may be an `if` or a
+`match` whose own branches are single expressions), because there are no tail
 expressions in Kite — a value arriving by falling off the end of a block is the
 hidden control flow the language is spent avoiding, and an `if` used as a value
 says "expected a single expression" for the same reason.
@@ -1437,6 +1437,12 @@ fn area(s: Shape) -> int {
 
 Every arm leaving means the `match` leaves, so this **is** a returning path and
 the function needs no `return` after it.
+
+A `match` in statement position discards its arms' values, so its arms need not
+agree in type: `0 => io.print("zero")` beside `_ => count()`, where `count`
+returns an `int`, is fine. An arm whose value is an `error` is still one dropped
+([E0302](#16-diagnostics)), as a bare call's would be. A `match` used as a value
+needs every arm to produce the same type.
 
 ### 9.3 Patterns
 

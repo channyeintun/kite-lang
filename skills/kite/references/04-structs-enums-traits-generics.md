@@ -549,7 +549,9 @@ is an ordinary binding, and does catch all.
 ## 4. `match`
 
 `match` is exhaustive, in expression **and** statement position. The diagnostic
-names the missing variants.
+names the missing variants. In statement position the arms' values are thrown
+away, so the arms need not agree in type (`0 => io.print("zero")` beside
+`_ => count()` is fine); an arm whose value is an `error` is still `E0302`.
 
 ```kite fails
 enum Shape {
