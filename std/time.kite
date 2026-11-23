@@ -232,6 +232,213 @@ pub fn month_end(year: int, month: int, east_minutes: int) -> int {
     return month_start(year, month + 1, east_minutes) - 1
 }
 
+// ---- reading and writing RFC 3339, and calendar arithmetic -------------------
+
+/// An instant as RFC 3339 in UTC: `2025-08-09T00:00:00Z`.
+///
+/// Milliseconds are written, as `.fff`, only when there are some, so a whole
+/// second reads the way every other tool writes one.
+///
+/// ```kite
+/// assert(rfc3339(1_754_697_600_000) == "2025-08-09T00:00:00Z", "a whole second")
+/// assert(rfc3339(1_754_697_600_042) == "2025-08-09T00:00:00.042Z", "with milliseconds")
+/// ```
+pub fn rfc3339(ms: int) -> str {
+    return rfc3339_at(ms, 0)
+}
+
+/// An instant as RFC 3339 in the zone `east_minutes` east of UTC:
+/// `2025-08-09T07:00:00+07:00`, or `…Z` when the offset is zero.
+///
+/// Unlike [`stamp`], this names the offset, so what it writes is the instant
+/// and not only a reading of the clock on the wall.
+///
+/// ```kite
+/// assert(rfc3339_at(1_754_697_600_000, 420) == "2025-08-09T07:00:00+07:00", "east")
+/// assert(rfc3339_at(1_754_697_600_000, -90) == "2025-08-08T22:30:00-01:30", "west")
+/// ```
+pub fn rfc3339_at(ms: int, east_minutes: int) -> str {
+    var out = stamp(ms, east_minutes)
+    let fraction = floor_mod(ms, 1000)
+    if fraction != 0 {
+        out = out + "." + pad_start("\(fraction)", 3, "0")
+    }
+    if east_minutes == 0 {
+        return out + "Z"
+    }
+    let magnitude = if east_minutes < 0 { 0 - east_minutes } else { east_minutes }
+    let sign = if east_minutes < 0 { "-" } else { "+" }
+    return "\(out)\(sign)\(pad2(magnitude / 60)):\(pad2(magnitude % 60))"
+}
+
+/// An ISO 8601 / RFC 3339 reading as an instant, or nil if it is not one.
+///
+/// The forms are `YYYY-MM-DD`, `YYYY-MM-DDThh:mm:ss` with any number of
+/// fractional digits after the seconds, and either of those followed by `Z` or
+/// `+hh:mm` / `-hh:mm`. A date alone is midnight, and a reading with no zone
+/// is UTC. Everything is checked down to the calendar — `2025-02-29` and
+/// `24:00:00` are nil, not a day later — and nothing is trimmed or guessed at:
+/// the letters are the capitals `T` and `Z`. Digits past the milliseconds are
+/// dropped.
+///
+/// ```kite
+/// assert(or_else(parse_iso("2025-08-09"), -1) == 1_754_697_600_000, "a day")
+/// assert(or_else(parse_iso("2025-08-09T07:00:00.5+07:00"), -1) == 1_754_697_600_500, "an offset")
+/// assert(parse_iso("2025-02-29") == nil, "no such day")
+/// ```
+pub fn parse_iso(s: str) -> Option<int> {
+    let n = s.len()
+    if n < 10 || s.slice(4, 5) != "-" || s.slice(7, 8) != "-" {
+        return nil
+    }
+    let year = number_at(s, 0, 4)
+    let month = number_at(s, 5, 2)
+    let day = number_at(s, 8, 2)
+    if year < 0 || month < 1 || month > 12 || day < 1 || day > days_in_month(year, month) {
+        return nil
+    }
+    var hour = 0
+    var minute = 0
+    var second = 0
+    var fraction = 0
+    var east = 0
+    var i = 10
+    if i < n {
+        if s.slice(i, i + 1) != "T" {
+            return nil
+        }
+        if n < i + 9 || s.slice(i + 3, i + 4) != ":" || s.slice(i + 6, i + 7) != ":" {
+            return nil
+        }
+        hour = number_at(s, i + 1, 2)
+        minute = number_at(s, i + 4, 2)
+        second = number_at(s, i + 7, 2)
+        if hour < 0 || hour > 23 || minute < 0 || minute > 59 || second < 0 || second > 59 {
+            return nil
+        }
+        i = i + 9
+        if i < n && s.slice(i, i + 1) == "." {
+            i = i + 1
+            let from = i
+            var scale = 100
+            for i < n && number_at(s, i, 1) >= 0 {
+                fraction = fraction + number_at(s, i, 1) * scale
+                scale = scale / 10
+                i = i + 1
+            }
+            if i == from {
+                return nil
+            }
+        }
+        if i < n {
+            if s.slice(i, n) != "Z" {
+                if n - i != 6 || s.slice(i + 3, i + 4) != ":" {
+                    return nil
+                }
+                let sign = s.slice(i, i + 1)
+                let hours = number_at(s, i + 1, 2)
+                let minutes = number_at(s, i + 4, 2)
+                if (sign != "+" && sign != "-") || hours < 0 || hours > 23 || minutes < 0 || minutes > 59 {
+                    return nil
+                }
+                east = hours * 60 + minutes
+                if sign == "-" {
+                    east = 0 - east
+                }
+            }
+        }
+    }
+    let c = Civil{ year: year, month: month, day: day, hour: hour, minute: minute, second: second }
+    return epoch_of(c, east) + fraction
+}
+
+/// The `count` decimal digits at `at` as a number, or -1 if any is not one.
+fn number_at(s: str, at: int, count: int) -> int {
+    if at + count > s.len() {
+        return -1
+    }
+    var value = 0
+    for i in at..at + count {
+        let d = s.code_at(i) - 48
+        if d < 0 || d > 9 {
+            return -1
+        }
+        value = value * 10 + d
+    }
+    return value
+}
+
+/// The same time of day, `n` calendar months later (earlier if negative).
+///
+/// The day of the month is kept where the new month has it and otherwise
+/// clamped to the new month's last day — January 31st plus one month is
+/// February 28th or 29th, not March 2nd or 3rd. The hour, minute, second and
+/// millisecond are kept as the zone `east_minutes` reads them.
+///
+/// ```kite
+/// let jan31 = or_else(parse_iso("2025-01-31T10:00:00Z"), 0)
+/// assert(rfc3339(add_months(jan31, 1, 0)) == "2025-02-28T10:00:00Z", "clamped")
+/// assert(rfc3339(add_months(jan31, -2, 0)) == "2024-11-30T10:00:00Z", "backwards")
+/// ```
+pub fn add_months(ms: int, n: int, east_minutes: int) -> int {
+    let c = civil_of(ms, east_minutes)
+    let total = c.year * 12 + (c.month - 1) + n
+    let year = floor_div(total, 12)
+    let month = total - year * 12 + 1
+    let day = min(c.day, days_in_month(year, month))
+    let moved = Civil{ year: year, month: month, day: day, hour: c.hour, minute: c.minute, second: c.second }
+    return epoch_of(moved, east_minutes) + floor_mod(ms, 1000)
+}
+
+/// The first millisecond of the day that `ms` falls in, as the zone
+/// `east_minutes` reads it.
+///
+/// ```kite
+/// assert(start_of_day(1_754_697_600_000 + 3_600_000, 0) == 1_754_697_600_000, "midnight")
+/// ```
+pub fn start_of_day(ms: int, east_minutes: int) -> int {
+    let c = civil_of(ms, east_minutes)
+    return epoch_of(Civil{ year: c.year, month: c.month, day: c.day, hour: 0, minute: 0, second: 0 }, east_minutes)
+}
+
+/// How many calendar days `b`'s date is after `a`'s, in the zone
+/// `east_minutes` — negative if it is before. Dates are compared, not elapsed
+/// time: 23:00 and 01:00 the next day are one day apart.
+///
+/// ```kite
+/// assert(days_between(1_754_697_600_000 + 82_800_000, 1_754_697_600_000 + 90_000_000, 0) == 1, "across midnight")
+/// ```
+pub fn days_between(a: int, b: int, east_minutes: int) -> int {
+    return floor_div(b + east_minutes * 60000, 86400000) - floor_div(a + east_minutes * 60000, 86400000)
+}
+
+/// The English name of a day of the week, 0 (Sunday) to 6, as [`weekday`]
+/// counts them — or "" for any other number.
+///
+/// ```kite
+/// assert(weekday_name(weekday(1_754_697_600_000, 0)) == "Saturday", "2025-08-09")
+/// ```
+pub fn weekday_name(day: int) -> str {
+    let names = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"]
+    if day < 0 || day > 6 {
+        return ""
+    }
+    return names[day]
+}
+
+/// The English name of a month, 1 (January) to 12, or "" for any other number.
+///
+/// ```kite
+/// assert(month_name(8) == "August", "a month")
+/// ```
+pub fn month_name(month: int) -> str {
+    let names = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"]
+    if month < 1 || month > 12 {
+        return ""
+    }
+    return names[month - 1]
+}
+
 // ---- the arithmetic underneath ----------------------------------------------
 
 /// Days since 1970-01-01 from a civil date.

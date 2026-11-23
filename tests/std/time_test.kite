@@ -178,6 +178,42 @@ fn checks() -> [error] {
     }
     out.push(test.equal_int(drifted, 0, "1000 days round-trip unchanged"))
 
+    // ---- RFC 3339 and calendar arithmetic ----
+    //
+    // Checked against Python's `datetime` over a few thousand random instants
+    // and zones when they were written; these are the edges of that.
+    out.push(test.equal_str(time.rfc3339(0), "1970-01-01T00:00:00Z", "the epoch"))
+    out.push(test.equal_str(time.rfc3339(-1), "1969-12-31T23:59:59.999Z", "a millisecond before it"))
+    out.push(test.equal_str(time.rfc3339_at(0, 330), "1970-01-01T05:30:00+05:30", "a half-hour zone"))
+    out.push(test.equal_str(time.rfc3339_at(0, -570), "1969-12-31T14:30:00-09:30", "a western one"))
+    out.push(test.equal_int(or_else(time.parse_iso("1970-01-01T00:00:00Z"), -1), 0, "reads the epoch"))
+    out.push(test.equal_int(or_else(time.parse_iso("1970-01-01"), -1), 0, "a date is midnight UTC"))
+    out.push(test.equal_int(or_else(time.parse_iso("1970-01-01T00:00:00"), -1), 0, "no zone is UTC"))
+    out.push(test.equal_int(or_else(time.parse_iso("1970-01-01T05:30:00+05:30"), -1), 0, "an offset is applied"))
+    out.push(test.equal_int(or_else(time.parse_iso("1969-12-31T23:59:59.9999Z"), -1), -1, "extra digits are dropped"))
+    out.push(test.equal_int(or_else(time.parse_iso("2024-02-29"), -1), 1709164800000, "a leap day"))
+    for bad in ["2025-02-29", "2025-13-01", "2025-00-10", "2025-04-31", "2025-1-01", "2025-01-01T24:00:00Z", "2025-01-01T10:00Z", "2025-01-01T10:00:60Z", "2025-01-01T10:00:00.Z", "2025-01-01t10:00:00z", "2025-01-01 10:00:00", "2025-01-01T10:00:00+0100", "2025-01-01T10:00:00+01:60", " 2025-01-01", "2025-01-01Z", "", "x"] {
+        out.push(test.is_true(time.parse_iso(bad) == nil, "not a reading: \(bad)"))
+    }
+    let end_of_jan = or_else(time.parse_iso("2025-01-31T10:00:00.250Z"), 0)
+    out.push(test.equal_str(time.rfc3339(time.add_months(end_of_jan, 1, 0)), "2025-02-28T10:00:00.250Z", "a month on from the 31st is clamped"))
+    out.push(test.equal_str(time.rfc3339(time.add_months(end_of_jan, 12, 0)), "2026-01-31T10:00:00.250Z", "a year on is the same day"))
+    out.push(test.equal_str(time.rfc3339(time.add_months(end_of_jan, -13, 0)), "2023-12-31T10:00:00.250Z", "and back across a year"))
+    out.push(test.equal_str(
+            time.rfc3339(time.start_of_day(end_of_jan, 420)),
+            "2025-01-30T17:00:00Z",
+            "the start of a day is the zone's midnight",
+        ))
+    out.push(test.equal_int(time.days_between(end_of_jan, end_of_jan + 86400000, 0), 1, "a day apart"))
+    out.push(test.equal_int(time.days_between(end_of_jan, end_of_jan - 3 * 86400000, 0), -3, "before is negative"))
+    out.push(test.equal_int(time.days_between(1000, 2000, 0), 0, "the same date is none"))
+    out.push(test.equal_str(time.weekday_name(0), "Sunday", "day 0"))
+    out.push(test.equal_str(time.weekday_name(6), "Saturday", "day 6"))
+    out.push(test.equal_str(time.weekday_name(7), "", "no day 7"))
+    out.push(test.equal_str(time.month_name(1), "January", "month 1"))
+    out.push(test.equal_str(time.month_name(12), "December", "month 12"))
+    out.push(test.equal_str(time.month_name(0), "", "no month 0"))
+
     return out
 }
 

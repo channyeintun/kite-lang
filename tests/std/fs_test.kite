@@ -113,6 +113,33 @@ fn listing_checks() -> [error] {
     }
     out.push(test.is_false(dots, "and `.` and `..` are not"))
     out.push(test.ok(fs.remove(path), "tidied up"))
+
+    // A name with a line break in it came back as two names, one on each side
+    // of the break, because the host separates names with one.
+    let odd = "\(fs.temp_dir())/kite-fs-test-two\nlines.txt"
+    let odd_err = fs.write(odd, "x")
+    out.push(test.ok(odd_err, "a file whose name has a line break"))
+    if odd_err != nil {
+        return out
+    }
+    let (with_odd, odd_list_err) = fs.list(fs.temp_dir())
+    out.push(test.ok(odd_list_err, "lists"))
+    if odd_list_err != nil {
+        return out
+    }
+    var whole = 0
+    var halves = 0
+    for name in with_odd {
+        if name == "kite-fs-test-two\nlines.txt" {
+            whole += 1
+        }
+        if name == "kite-fs-test-two" || name == "lines.txt" {
+            halves += 1
+        }
+    }
+    out.push(test.equal_int(whole, 1, "as one name"))
+    out.push(test.equal_int(halves, 0, "and not as two"))
+    out.push(test.ok(fs.remove(odd), "tidied up again"))
     return out
 }
 
@@ -137,12 +164,114 @@ fn failure_checks() -> [error] {
     return out
 }
 
+fn helper_checks() -> [error] {
+    var out: [error] = []
+    let path = "\(fs.temp_dir())/kite-fs-test-helpers.txt"
+    let other = "\(fs.temp_dir())/kite-fs-test-helpers-copy.txt"
+
+    // ---- lines ----
+    out.push(test.ok(fs.write(path, "a\r\n\nb\nlast"), "a file with every kind of line"))
+    let (lines, lines_err) = fs.read_lines(path)
+    out.push(test.ok(lines_err, "read_lines"))
+    if lines_err != nil {
+        return out
+    }
+    out.push(test.equal_strs(lines, ["a", "", "b", "last"], "splits on \\n, drops \\r, keeps an empty line, takes a last line with no end"))
+    out.push(test.ok(fs.write(path, "x\ny\n"), "a file ending in a newline"))
+    let (two, two_err) = fs.read_lines(path)
+    out.push(test.ok(two_err, "read_lines again"))
+    if two_err != nil {
+        return out
+    }
+    out.push(test.equal_strs(two, ["x", "y"], "has no empty last line"))
+    out.push(test.ok(fs.write(path, ""), "an empty file"))
+    let (none, none_err) = fs.read_lines(path)
+    out.push(test.ok(none_err, "read_lines of it"))
+    if none_err != nil {
+        return out
+    }
+    out.push(test.equal_strs(none, [], "has no lines"))
+    out.push(test.ok(fs.write_lines(path, ["one", "", "three"]), "write_lines"))
+    let (written, written_err) = fs.read(path)
+    out.push(test.ok(written_err, "reads back"))
+    if written_err != nil {
+        return out
+    }
+    out.push(test.equal_str(written, "one\n\nthree\n", "each line ends with a newline"))
+    let (_, missing_lines) = fs.read_lines("\(fs.temp_dir())/kite-no-such-dir/x")
+    out.push(test.failed(missing_lines, "read_lines of a missing file is an error"))
+
+    // ---- append, copy, read_or ----
+    _ = fs.remove(path)
+    out.push(test.ok(fs.append(path, "first\n"), "append creates a file"))
+    out.push(test.ok(fs.append(path, "second\n"), "and adds to it"))
+    out.push(test.equal_str(fs.read_or(path, "?"), "first\nsecond\n", "both are there"))
+    out.push(test.failed(fs.append(fs.temp_dir(), "x"), "append to a directory is an error"))
+    out.push(test.ok(fs.copy(path, other), "copy"))
+    out.push(test.equal_str(fs.read_or(other, "?"), "first\nsecond\n", "is a copy"))
+    out.push(test.failed(fs.copy("\(fs.temp_dir())/kite-no-such-file", other), "copy of a missing file is an error"))
+    out.push(test.equal_str(fs.read_or(other, "?"), "first\nsecond\n", "which leaves the target alone"))
+    out.push(test.equal_str(fs.read_or("\(fs.temp_dir())/kite-no-such-file", "fallback"), "fallback", "read_or falls back"))
+    out.push(test.equal_str(fs.read_or(fs.temp_dir(), "fallback"), "fallback", "also for a directory"))
+    _ = fs.remove(path)
+    _ = fs.remove(other)
+
+    // ---- paths ----
+    out.push(test.equal_str(fs.join_path(["a", "b", "c.txt"]), "a/b/c.txt", "join_path"))
+    out.push(test.equal_str(fs.join_path(["a/", "/b"]), "a/b", "does not double a slash"))
+    out.push(test.equal_str(fs.join_path(["a//", "//b"]), "a/b", "or several"))
+    out.push(test.equal_str(fs.join_path(["/", "etc"]), "/etc", "keeps the root"))
+    out.push(test.equal_str(fs.join_path(["/a", "b"]), "/a/b", "and an absolute first part"))
+    out.push(test.equal_str(fs.join_path(["", "a", "", "b"]), "a/b", "skips empty parts"))
+    out.push(test.equal_str(fs.join_path([]), "", "of nothing is nothing"))
+    out.push(test.equal_str(fs.join_path(["a"]), "a", "of one is itself"))
+    out.push(test.equal_str(fs.base_name("a/b/c.txt"), "c.txt", "base_name"))
+    out.push(test.equal_str(fs.base_name("c.txt"), "c.txt", "of a bare name"))
+    out.push(test.equal_str(fs.base_name("a/b/"), "b", "ignores a trailing slash"))
+    out.push(test.equal_str(fs.base_name("a/b//"), "b", "or several"))
+    out.push(test.equal_str(fs.base_name("/"), "/", "of the root"))
+    out.push(test.equal_str(fs.base_name("/a"), "a", "of a top-level name"))
+    out.push(test.equal_str(fs.base_name(""), "", "of nothing"))
+    out.push(test.equal_str(fs.dir_name("a/b/c.txt"), "a/b", "dir_name"))
+    out.push(test.equal_str(fs.dir_name("c.txt"), ".", "of a bare name"))
+    out.push(test.equal_str(fs.dir_name("/c.txt"), "/", "of a top-level name"))
+    out.push(test.equal_str(fs.dir_name("/"), "/", "of the root"))
+    out.push(test.equal_str(fs.dir_name("a/b/"), "a", "ignores a trailing slash"))
+    out.push(test.equal_str(fs.dir_name("a//b"), "a", "and a doubled one"))
+    out.push(test.equal_str(fs.dir_name(""), ".", "of nothing"))
+    out.push(test.equal_str(fs.extension("notes.txt"), "txt", "extension"))
+    out.push(test.equal_str(fs.extension("a/b.d/notes.tar.gz"), "gz", "is the last, of the last part"))
+    out.push(test.equal_str(fs.extension("a.d/notes"), "", "a dot in a directory is not one"))
+    out.push(test.equal_str(fs.extension(".bashrc"), "", "a dotfile has none"))
+    out.push(test.equal_str(fs.extension("name."), "", "nor does a trailing dot"))
+    out.push(test.equal_str(fs.extension("a/b/"), "", "nor a directory with no dot"))
+
+    // ---- walk ----
+    let (_, walk_missing) = fs.walk("\(fs.temp_dir())/kite-no-such-dir")
+    out.push(test.failed(walk_missing, "walking a missing directory is an error"))
+    let (_, walk_file) = fs.walk("\(fs.temp_dir())/kite-fs-test-walk-file.txt")
+    out.push(test.failed(walk_file, "walking what is not a directory is an error"))
+    // Run from the repository root, where `tests/std` is: a real tree to walk.
+    if fs.is_dir("tests/std") {
+        let (found, walk_err) = fs.walk("tests/std")
+        out.push(test.ok(walk_err, "walk of a tree"))
+        if walk_err != nil {
+            return out
+        }
+        out.push(test.is_true(index_of(found, "tests/std/fs_test.kite") >= 0, "finds a file below"))
+        out.push(test.is_true(found == sorted(found, |a: str, b: str| a < b), "sorted"))
+        out.push(test.is_false(index_of(found, "tests/std") >= 0, "and lists no directory"))
+    }
+    return out
+}
+
 fn main() {
     var results: [error] = []
     results = concat(results, round_trip_checks())
     results = concat(results, mark_checks())
     results = concat(results, listing_checks())
     results = concat(results, failure_checks())
+    results = concat(results, helper_checks())
     var failed = 0
     for e in results {
         if e != nil {

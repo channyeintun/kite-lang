@@ -39,7 +39,9 @@
 // a decision about `std/time`'s surface rather than about parsing, and it is
 // left undone rather than half-done. A date in a document parses as the
 // string it was written as, which is lossless and honest, and is stated here
-// so nobody discovers it from a wrong answer.
+// so nobody discovers it from a wrong answer. `emit` writes a string that
+// reads as a date back without its quotes, so a date survives a round trip as
+// a date — which means a *quoted* string of the same shape comes back bare.
 
 use std/errors
 use std/math
@@ -929,9 +931,32 @@ fn put_back(held: Toml, inner: { str: Toml }) -> Toml {
 ///
 /// `toml.at(doc, "package.name")` rather than three lookups and two matches,
 /// because reading a configuration file is the thing this module is for.
+///
+/// The path is split on every dot, so a key that has a dot *in* it —
+/// `"a.b" = 1` — cannot be named this way: `at(doc, "a.b")` looks for the key
+/// `b` of the table `a`. [`at_path`] takes the segments already split.
 pub fn at(doc: Toml, path: str) -> Option<Toml> {
+    return at_path(doc, split_dots(path))
+}
+
+/// The value at a path given as its segments, or nil.
+///
+/// Where [`at`] splits one string on its dots, this takes each key whole, so
+/// a quoted key containing a dot is reachable: for `"a.b" = 1`, the path is
+/// `["a.b"]`. An empty path is the document itself.
+///
+/// ```kite
+/// let (doc, err) = parse("\"a.b\" = 1\n[t]\nx = 2\n")
+/// if err != nil {
+///     return
+/// }
+/// assert(at_path(doc, ["a.b"]) == Toml.Int(1), "a key with a dot in it")
+/// assert(at_path(doc, ["t", "x"]) == Toml.Int(2), "a nested one")
+/// assert(at(doc, "a.b") == nil, "which at cannot reach")
+/// ```
+pub fn at_path(doc: Toml, path: [str]) -> Option<Toml> {
     var here = doc
-    for segment in split_dots(path) {
+    for segment in path {
         let table = as_table(here)
         let next = table[segment]
         if next == nil {
@@ -1008,6 +1033,124 @@ pub fn bool_at(doc: Toml, path: str, fallback: bool) -> bool {
         Array(a) => fallback
         Table(t) => fallback
     }
+}
+
+/// The strings of the array at a dotted path — and only the strings: an
+/// element that is not one is left out. Nothing at all if the path is absent
+/// or is not an array.
+///
+/// ```kite
+/// let (doc, err) = parse("[package]\nauthors = [\"ada\", \"grace\"]\n")
+/// if err != nil {
+///     return
+/// }
+/// assert(texts_at(doc, "package.authors") == ["ada", "grace"], "an array of strings")
+/// assert(texts_at(doc, "package.missing") == [], "absent")
+/// ```
+pub fn texts_at(doc: Toml, path: str) -> [str] {
+    var out: [str] = []
+    let found = at(doc, path)
+    if found == nil {
+        return out
+    }
+    let items = as_array(found)
+    if items == nil {
+        return out
+    }
+    for item in items {
+        match item {
+            Text(s) => {
+                out.push(s)
+            },
+            other => {
+            },
+        }
+    }
+    return out
+}
+
+/// The keys of the table at a dotted path, in the order the document wrote
+/// them. The empty path `""` is the document itself. Nothing at all if the
+/// path is absent or is not a table.
+///
+/// ```kite
+/// let (doc, err) = parse("[deps]\nb = 1\na = 2\n")
+/// if err != nil {
+///     return
+/// }
+/// assert(keys_at(doc, "deps") == ["b", "a"], "in document order")
+/// assert(keys_at(doc, "") == ["deps"], "the root")
+/// ```
+pub fn keys_at(doc: Toml, path: str) -> [str] {
+    var found: Option<Toml> = doc
+    if path.len() > 0 {
+        found = at(doc, path)
+    }
+    if found == nil {
+        return []
+    }
+    if !is_table(found) {
+        return []
+    }
+    return keys_of(as_table(found))
+}
+
+/// `doc` with `value` placed at a dotted path, making the tables on the way
+/// that are not there yet.
+///
+/// A value already at the path is replaced. A path that runs through something
+/// that is not a table — `a.b` where `a` is a number — is an error rather than
+/// a silent replacement of `a`, and so is an empty segment (`a..b`) and a
+/// `doc` that is not a table. The document given is not changed; the new one is
+/// returned. The result is as a program put it and no check is made of the
+/// rules a *document* must keep (an inline table written by hand is not closed
+/// to this).
+///
+/// ```kite
+/// let (doc, err) = parse("[a]\nx = 1\n")
+/// if err != nil {
+///     return
+/// }
+/// let (made, serr) = set(doc, "a.b.c", Toml.Int(2))
+/// if serr != nil {
+///     return
+/// }
+/// assert(emit(made) == "\n[a]\nx = 1\n\n[a.b]\nc = 2\n", "a table made on the way")
+/// ```
+pub fn set(doc: Toml, path: str, value: Toml) -> (Toml, error) {
+    if !is_table(doc) {
+        return _, errors.new("toml: set needs a table to put \(path) in")
+    }
+    let (table, err) = set_in(as_table(doc), split_dots(path), 0, value, path)
+    check err
+    return Toml.Table(table), nil
+}
+
+fn set_in(here: { str: Toml }, segments: [str], i: int, value: Toml, path: str) -> ({ str: Toml }, error) {
+    let key = segments[i]
+    if key.len() == 0 {
+        return _, errors.new("toml: `\(path)` has an empty segment")
+    }
+    var out: { str: Toml } = { }
+    for (name, held) in here {
+        out[name] = held
+    }
+    if i == segments.len() - 1 {
+        out[key] = value
+        return out, nil
+    }
+    let existing = here[key]
+    var inner: { str: Toml } = { }
+    if existing != nil {
+        if !is_table(existing) {
+            return _, errors.new("toml: `\(path)` runs through `\(key)`, which is not a table")
+        }
+        inner = as_table(existing)
+    }
+    let (deeper, err) = set_in(inner, segments, i + 1, value, path)
+    check err
+    out[key] = Toml.Table(deeper)
+    return out, nil
 }
 
 fn split_dots(path: str) -> [str] {
@@ -1115,10 +1258,26 @@ fn emit_value(value: Toml) -> str {
         Bool(b) => if b { "true" } else { "false" }
         Int(n) => "\(n)"
         Float(f) => "\(f)"
-        Text(s) => emit_string(s)
+        Text(s) => emit_text(s)
         Array(items) => emit_array(items)
         Table(t) => emit_inline(t)
     }
+}
+
+/// A string, or — when it reads as one of TOML's date and time forms — that
+/// date written bare.
+///
+/// `parse` keeps a date as the text it was written as, because `Toml` has no
+/// date type, so a date and a quoted string that looks like one are the same
+/// value here. Writing the quotes on every one turned `when = 1979-05-27`
+/// into `when = "1979-05-27"` on the way through, which every other TOML
+/// reader sees as a different type. So the form that reads as a date is
+/// written as one, and a string that happens to look like a date is the cost.
+fn emit_text(s: str) -> str {
+    if is_date_time(s) {
+        return s
+    }
+    return emit_string(s)
 }
 
 fn emit_array(items: [Toml]) -> str {
@@ -1316,22 +1475,6 @@ fn without(body: str, drop: str) -> str {
     return join(out, "")
 }
 
-/// Whether a bare word is a date or a time rather than a number.
-///
-/// A `:` anywhere is enough: no integer or float in TOML contains one. A `-`
-/// after the first character usually means a date too — but not when what
-/// precedes it is `e` or `E`, because that is a float's exponent sign.
-///
-/// Without that exception this claimed every negative exponent: `1e-5` was
-/// returned as the *text* `1e-5`, so `float_at` handed back its fallback and
-/// a configuration file's number silently stopped being one. It went unseen
-/// because it fails quietly and because nothing tested it — every exponent in
-/// the suite was positive. It also hid a second bug behind it, since an
-/// exponent that never reached the number reader could not overflow it.
-///
-/// The exception cannot let a date through: a date is digits, `-`, `.`, `:`,
-/// `+`, and `T`/`Z` in either case, so no `-` in one is ever preceded by an
-/// `e`. `1979-05-27` is still a date; `1e-5` is a float.
 /// Whether a word is one of TOML's four date and time forms: a date
 /// `1979-05-27`, a time `07:32:00` with an optional fraction of a second, the
 /// two joined by `T` or a space, and that with `Z` or an offset `-07:00`.
@@ -1433,6 +1576,22 @@ fn two_digits(body: str, at: int) -> int {
     return tens * 10 + ones
 }
 
+/// Whether a bare word is a date or a time rather than a number.
+///
+/// A `:` anywhere is enough: no integer or float in TOML contains one. A `-`
+/// after the first character usually means a date too — but not when what
+/// precedes it is `e` or `E`, because that is a float's exponent sign.
+///
+/// Without that exception this claimed every negative exponent: `1e-5` was
+/// returned as the *text* `1e-5`, so `float_at` handed back its fallback and
+/// a configuration file's number silently stopped being one. It went unseen
+/// because it fails quietly and because nothing tested it — every exponent in
+/// the suite was positive. It also hid a second bug behind it, since an
+/// exponent that never reached the number reader could not overflow it.
+///
+/// The exception cannot let a date through: a date is digits, `-`, `.`, `:`,
+/// `+`, and `T`/`Z` in either case, so no `-` in one is ever preceded by an
+/// `e`. `1979-05-27` is still a date; `1e-5` is a float.
 fn looks_like_date(body: str) -> bool {
     for i in 0..body.len() {
         let c = body.slice(i, i + 1)

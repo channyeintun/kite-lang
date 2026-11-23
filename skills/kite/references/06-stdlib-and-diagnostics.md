@@ -679,8 +679,9 @@ fn main() {
 ### crypto — bindings, not implementations
 
 Thin declared boundary over the host's primitives (WebCrypto in a browser or
-Node). No ECB, no CBC, no MD5, no SHA-1, no raw RSA. Salts and nonces are
-generated, never passed. Keys are opaque handles; a private half never crosses
+Node). No ECB, no CBC, no MD5, no SHA-1, no raw RSA. Nonces are generated,
+never passed, and so are salts — except that `derive`, for matching a
+derivation made elsewhere, takes one. Keys are opaque handles; a private half never crosses
 the boundary.
 
 Sync: `random(count) -> str` (lowercase hex), `token() -> str`,
@@ -1225,8 +1226,16 @@ chain without unwrapping and a `Json` passes where an `Option<Json>` is wanted.
 
 `parse` reads RFC 8259 and nothing looser — `01`, `1.`, `\x` and a raw control
 character in a string are errors — and each number is the float nearest what
-was written. `int_of` is nil unless the number is whole and fits an `int`, so
-`@derive(Decode)` refuses `3.7` for an `int` field. `stringify` writes a number
+was written. `int_of` is nil unless the number is whole and below 2⁵³ in
+magnitude (a float holds every integer only there, so `9007199254740993` would
+read as a different number), so `@derive(Decode)` refuses `3.7` for an `int`
+field, and refuses `9007199254740993` saying it is not exact. `of_int(n) -> Json` is what `@derive(Encode)` writes for an `int`: a
+number inside that range, and outside it the decimal text as a string, which
+`int_of` reads back — so no `int` is silently changed in either direction.
+`parse` stops at 128 levels of nesting, and `stringify` and `pretty` trap past
+the same depth (`check_nesting(v) -> error` tests first), so everything `parse`
+returns can be written and no backend runs out of stack on the way. `stringify`
+writes a number
 that is whole and fits an `int` without a `.0`, and any other finite one as the
 float it is: 2⁶³ is `9223372036854775808.0`. JSON cannot spell an infinity or
 a NaN, so each is written `null`, as JavaScript's `JSON.stringify` does.
@@ -1628,7 +1637,9 @@ reopen a table a header defined. Whitespace is a space or a tab, and a carriage
 return is accepted only in the CRLF that ends a line. **Dates and times are not
 implemented** — a date is checked to be one of TOML's four forms and parses as
 the string it was written as, losslessly, rather than being half-mapped onto
-`std/time`. A document nesting deeper than 128 levels — each key segment, array
+`std/time`. `emit` writes a string of one of those forms back bare, so a date
+stays a date for the next reader — which means a *quoted* `"1979-05-27"` comes
+out unquoted too. A document nesting deeper than 128 levels — each key segment, array
 and inline table counting one — is refused with an error, as `std/json` refuses
 one, so that input cannot choose how much stack a parse uses.
 

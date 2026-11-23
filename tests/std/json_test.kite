@@ -193,10 +193,13 @@ fn checks() -> [error] {
     out.push(test.is_true(json.int_of(parsed("9223372036854775808")) == nil, "2^63 does not fit"))
     out.push(test.equal_int(or_else(json.int_of(parsed("3.0")), 0), 3, "3.0 is the whole number 3"))
     out.push(test.equal_int(or_else(json.int_of(parsed("-12")), 0), -12, "a negative whole number"))
+    // The smallest int is a float exactly, but so is every neighbour a float
+    // cannot tell it from; it travels as text.
+    out.push(test.is_true(json.int_of(parsed("-9223372036854775808")) == nil, "a number past 2^53 is not read as an int"))
     out.push(test.equal_int(
-            or_else(json.int_of(parsed("-9223372036854775808")), 0),
+            or_else(json.int_of(parsed("\"-9223372036854775808\"")), 0),
             -9223372036854775807 - 1,
-            "the smallest int",
+            "the smallest int, as text",
         ))
     out.push(test.equal_int(json.int_or(parsed("{\"n\": 2.5}"), "n", -1), -1, "int_or falls back on a fraction"))
     let (_, fraction_err) = Row.decode(parsed("{\"id\": 3.7}"))
@@ -207,13 +210,137 @@ fn checks() -> [error] {
         ))
     let (_, huge_id_err) = Row.decode(parsed("{\"id\": 1e30}"))
     out.push(test.failed(huge_id_err, "Decode refuses an int past the range"))
+    // 2^53 + 1 is whole, so "expected a whole number" would be false of it.
+    let (_, inexact_err) = Row.decode(parsed("{\"id\": 9007199254740993}"))
+    out.push(test.equal_str(
+            if inexact_err == nil { "decoded" } else { inexact_err.message() },
+            "Row.id: a number this large is not exact in JSON; an int past 2^53 is written as a string of its digits",
+            "Decode says why a whole number past 2^53 is refused",
+        ))
     let (row, row_err) = Row.decode(parsed("{\"id\": 42}"))
     out.push(test.ok(row_err, "Decode takes a whole number"))
+
+    // ---- an int a float cannot hold is not a number ----
+    //
+    // `1234567890123456789` was written `1234567890123456768`, and
+    // `9007199254740993` was read as 9007199254740992, both without a word.
+    out.push(test.is_true(json.int_of(parsed("9007199254740993")) == nil, "2^53 + 1 is not read as an int"))
+    out.push(test.is_true(json.int_of(parsed("9007199254740992")) == nil, "2^53 is ambiguous, so it is not read as an int"))
+    out.push(test.equal_int(or_else(json.int_of(parsed("9007199254740991")), 0), 9007199254740991, "2^53 - 1 is the last exact int"))
+    out.push(test.equal_str(json.stringify(json.of_int(42)), "42", "a small int is a number"))
+    out.push(test.equal_str(json.stringify(json.of_int(-9007199254740991)), "-9007199254740991", "a negative one too"))
+    out.push(test.equal_str(
+            json.stringify(json.of_int(1234567890123456789)),
+            "\"1234567890123456789\"",
+            "a big int is its digits as text",
+        ))
+    for n in [1234567890123456789, 9007199254740993, 9007199254740992, -9007199254740992, 9223372036854775807, 7] {
+        let (back, back_err) = Row.decode(parsed(json.stringify(Row{ id: n }.encode())))
+        if back_err != nil {
+            out.push(back_err)
+        } else {
+            out.push(test.equal_int(back.id, n, "the int \(n) comes back as it went"))
+        }
+    }
+    out.push(test.is_true(json.int_of(parsed("\"5\"")) == nil, "a small int is not read from text"))
+    out.push(test.is_true(json.int_of(parsed("\"+9007199254740993\"")) == nil, "text must be spelled as an int is"))
+    out.push(test.is_true(json.int_of(parsed("\"9223372036854775808\"")) == nil, "text past the range is nil"))
+    out.push(test.is_true(json.int_of(parsed("\"12abc\"")) == nil, "text that is not a number is nil"))
+
+    // ---- what is wrong is said, not guessed at ----
+    //
+    // `{"a":}` said "expected a number", which is one of six things that could
+    // have been there.
+    for (doc, want) in [
+        ("{\"a\":}", "json: expected a value at 5"),
+        ("[1,]", "json: expected a value at 3"),
+        ("[}", "json: expected a value at 1"),
+        ("-", "json: expected a number at 0"),
+        ("[-]", "json: expected a number at 1"),
+    ] {
+        let (_, bad) = json.parse(doc)
+        out.push(test.equal_str(if bad == nil { "parsed" } else { bad.message() }, want, doc))
+    }
+
+    // ---- the accessor family ----
+    let shop = parsed("{\"name\": \"kite\", \"price\": 2.5, \"n\": 3, \"tags\": [\"a\", {\"deep\": [10, 20]}], \"0\": \"zero\", \"a.b\": 1}")
+    out.push(test.equal_float(json.float_or(shop, "price", 0.0), 2.5, 0.0, "float_or"))
+    out.push(test.equal_float(json.float_or(shop, "n", 0.0), 3.0, 0.0, "float_or takes an integer"))
+    out.push(test.equal_float(json.float_or(shop, "name", 7.0), 7.0, 0.0, "float_or falls back on a string"))
+    out.push(test.equal_float(json.float_or(shop, "missing", 7.0), 7.0, 0.0, "and on a missing key"))
+    out.push(test.equal_strs(json.keys(shop), ["name", "price", "n", "tags", "0", "a.b"], "keys, in document order"))
+    out.push(test.equal_strs(json.keys(json.field(shop, "n")), [], "a number has no keys"))
+    out.push(test.equal_strs(json.keys(nil), [], "nor has nothing"))
+    out.push(test.equal_str(or_else(json.text(json.path(shop, "name")), "?"), "kite", "path to a key"))
+    out.push(test.equal_int(or_else(json.int_of(json.path(shop, "tags.1.deep.1")), 0), 20, "path through array and object"))
+    out.push(test.equal_str(or_else(json.text(json.path(shop, "tags.0")), "?"), "a", "path to an element"))
+    out.push(test.is_true(json.path(shop, "tags.2") == nil, "past the end of an array"))
+    out.push(test.is_true(json.path(shop, "tags.x") == nil, "a non-number on an array"))
+    out.push(test.is_true(json.path(shop, "name.x") == nil, "a key of a string"))
+    out.push(test.equal_str(or_else(json.text(json.path(shop, "0")), "?"), "zero", "a number is a key on an object"))
+    out.push(test.is_true(json.path(shop, "a.b") == nil, "a dotted key cannot be named"))
+    out.push(test.is_true(json.path(shop, "") == shop, "an empty path is the value"))
+    out.push(test.is_true(json.path(nil, "a") == nil, "nothing in, nothing out"))
+    out.push(test.equal_str(json.stringify(json.parse_or("{\"a\":1}", json.Json.Null)), "{\"a\":1}", "parse_or parses"))
+    out.push(test.equal_str(json.stringify(json.parse_or("{\"a\":", json.Json.Array([]))), "[]", "parse_or falls back"))
+    out.push(test.equal_str(
+            json.stringify_sorted(parsed("{\"b\": [{\"z\": 1, \"y\": 2}], \"a\": {\"d\": 2, \"c\": 3}, \"B\": null}")),
+            "{\"B\":null,\"a\":{\"c\":3,\"d\":2},\"b\":[{\"y\":2,\"z\":1}]}",
+            "stringify_sorted sorts at every level",
+        ))
+    out.push(test.equal_str(json.stringify_sorted(parsed("[3, \"x\", true]")), "[3,\"x\",true]", "and leaves the rest alone"))
+
+    // ---- writing stops where reading does ----
+    //
+    // `stringify` of 2,000 nested arrays ran out of stack on Wasm alone.
+    out.push(test.ok(json.check_nesting(wrapped(128)), "128 levels can be written"))
+    out.push(test.failed(json.check_nesting(wrapped(129)), "129 levels cannot"))
+    out.push(test.equal_int(json.stringify(wrapped(128)).len(), 256, "the deepest value that parses is written"))
+    out.push(test.is_true(json.pretty(wrapped(128)).len() > 256, "and written indented"))
+    out.push(test.failed(json.check_nesting(wrapped_object(129)), "an object counts as a level"))
+    out.push(test.ok(json.check_nesting(wrapped_object(128)), "128 objects can be written"))
+
+    // ---- a derived enum decoder is as strict as the encoder is exact ----
+    out.push(test.equal_str(kind("\"Plain\""), "Plain", "a unit variant is its name"))
+    out.push(test.equal_str(kind("{\"Two\":[1,\"x\"]}"), "Two(1, \"x\")", "a payload is an object with one key"))
+    out.push(test.equal_str(kind("{\"One\":[1,2,3]}"), "Kind.One: expected an array of 1 value", "a longer payload is an error"))
+    out.push(test.equal_str(kind("{\"Two\":[1]}"), "Kind.Two: expected an array of 2 values", "a shorter payload is an error"))
+    out.push(test.equal_str(kind("{\"One\":5}"), "Kind.One: expected an array of 1 value", "a payload that is no array is an error"))
+    out.push(test.equal_str(kind("{\"One\":[1],\"Plain\":[]}"), "Kind: expected a one-key object, found 2 keys", "two keys are an error"))
+    out.push(test.equal_str(
+            kind("{\"Plain\":[]}"),
+            "Kind: Plain has no payload, so it is written as the string \"Plain\"",
+            "a unit variant as an object says what to write",
+        ))
+    out.push(test.equal_str(
+            kind("\"One\""),
+            "Kind: One has a payload, so it is written as an object with the one key \"One\"",
+            "a payload variant as a string says what to write",
+        ))
+    out.push(test.equal_str(kind("\"Zed\""), "Kind: no variant named Zed", "an unknown name"))
+    out.push(test.equal_str(kind("{\"Zed\":1}"), "Kind: no variant named Zed", "an unknown key"))
+    out.push(test.equal_str(kind("5"), "Kind: expected a variant name or a one-key object", "no variant at all"))
 
     return out
 }
 
-@derive(Decode)
+@derive(Debug, Decode)
+enum Kind {
+    Plain
+    One(int)
+    Two(int, str)
+}
+
+/// What decoding `doc` as a `Kind` says: the variant, or the error.
+fn kind(doc: str) -> str {
+    let (k, err) = Kind.decode(parsed(doc))
+    if err != nil {
+        return err.message()
+    }
+    return k.debug()
+}
+
+@derive(Encode, Decode)
 struct Row {
     id: int
 }
@@ -242,6 +369,25 @@ fn nested(depth: int) -> str {
         close = close + "]"
     }
     return open + close
+}
+
+/// An array nested `levels` deep, built directly rather than parsed.
+fn wrapped(levels: int) -> json.Json {
+    var v = json.Json.Array([])
+    for n in 1..levels {
+        v = json.Json.Array([v])
+    }
+    return v
+}
+
+fn wrapped_object(levels: int) -> json.Json {
+    var v = json.Json.Object({ })
+    for n in 1..levels {
+        var fields: { str: json.Json } = { }
+        fields["k"] = v
+        v = json.Json.Object(fields)
+    }
+    return v
 }
 
 fn main() {

@@ -454,6 +454,96 @@ fn crypto_binds_to_the_hosts_primitives() {
     );
 }
 
+/// RFC 2104 defines an HMAC under an empty key, but WebCrypto refuses to
+/// import zero bytes, so `hmac("", …)` was an error. A one-byte zero key pads
+/// to the same block; the value below is HMAC-SHA-256 of nothing under
+/// nothing, which any implementation gives.
+#[test]
+fn hmac_under_an_empty_key_is_defined() {
+    if !node_available() {
+        eprintln!("skipping: node is not on PATH");
+        return;
+    }
+    let out = run_under_node(
+        "hmac_empty",
+        "use std/crypto\n\
+         async fn main() {\n\
+         \x20 let (h, err) = await crypto.hmac(\"\", \"\")\n\
+         \x20 if err != nil {\n    io.print(err.message())\n    return\n  }\n\
+         \x20 io.print(h)\n\
+         \x20 let (z, zerr) = await crypto.hmac(\"\\u{0}\", \"\")\n\
+         \x20 if zerr != nil { return }\n\
+         \x20 io.print(h == z)\n}\n",
+    );
+    assert_eq!(
+        out,
+        "b613679a0814d9ec772f95d778c35fc5ff1697c493715653c6c712144292c5ad\ntrue\n",
+        "{}",
+        out
+    );
+}
+
+/// HMAC-SHA-384 and -512 against RFC 4231's second case, PBKDF2 against
+/// vectors from Python's `hashlib`, and `random_int` staying inside its range
+/// and reaching both ends of a small one.
+#[test]
+fn crypto_hmac_variants_derive_and_random_int() {
+    if !node_available() {
+        eprintln!("skipping: node is not on PATH");
+        return;
+    }
+    let out = run_under_node(
+        "crypto_additions",
+        "use std/crypto\n\
+         async fn main() {\n\
+         \x20 let (a, e1) = await crypto.hmac384(\"Jefe\", \"what do ya want for nothing?\")\n\
+         \x20 if e1 != nil { return }\n\
+         \x20 io.print(a)\n\
+         \x20 let (b, e2) = await crypto.hmac512(\"Jefe\", \"what do ya want for nothing?\")\n\
+         \x20 if e2 != nil { return }\n\
+         \x20 io.print(b)\n\
+         \x20 let (c, e3) = await crypto.hmac384(\"\", \"\")\n\
+         \x20 if e3 != nil { return }\n\
+         \x20 io.print(c)\n\
+         \x20 let (d, e4) = await crypto.derive(\"password\", crypto.hex_of(\"salt\"), 2)\n\
+         \x20 if e4 != nil { return }\n\
+         \x20 io.print(d)\n\
+         \x20 let (f, e5) = await crypto.derive(\"p\\u{e4}ssword\\u{1f600}\", \"00ff10\", 3)\n\
+         \x20 if e5 != nil { return }\n\
+         \x20 io.print(f)\n\
+         \x20 let (_, e6) = await crypto.derive(\"p\", \"zz\", 1)\n\
+         \x20 let (_, e7) = await crypto.derive(\"p\", \"abc\", 1)\n\
+         \x20 let (_, e8) = await crypto.derive(\"p\", \"00\", 0)\n\
+         \x20 io.print(\"\\(e6 != nil) \\(e7 != nil) \\(e8 != nil)\")\n\
+         \x20 var seen = [0, 0, 0, 0, 0, 0]\n\
+         \x20 var outside = 0\n\
+         \x20 for i in 0..600 {\n\
+         \x20   let n = crypto.random_int(6)\n\
+         \x20   if n < 0 || n > 5 {\n      outside += 1\n    } else {\n      seen[n] = seen[n] + 1\n    }\n  }\n\
+         \x20 var every = true\n\
+         \x20 for count in seen {\n    if count == 0 {\n      every = false\n    }\n  }\n\
+         \x20 io.print(\"\\(outside) \\(every) \\(crypto.random_int(1)) \\(crypto.random_int(0)) \\(crypto.random_int(-5))\")\n\
+         \x20 var big_ok = true\n\
+         \x20 for i in 0..50 {\n\
+         \x20   let n = crypto.random_int(9223372036854775807)\n\
+         \x20   if n < 0 {\n      big_ok = false\n    }\n  }\n\
+         \x20 io.print(big_ok)\n}\n",
+    );
+    assert_eq!(
+        out,
+        "af45d2e376484031617f78d2b58a6b1b9c7ef464f5a01b47e42ec3736322445e8e2240ca5e69e2c78b3239ecfab21649\n\
+         164b7a7bfcf819e2e395fbe73b56e0a387bd64222e831fd610270cd7ea2505549758bf75c05a994a6d034f65f8f0e6fdcaeab1a34d4a6b4b636e070a38bce737\n\
+         6c1f2ee938fad2e24bd91298474382ca218c75db3d83e114b3d4367776d14d3551289e75e8209cd4b792302840234adc\n\
+         ae4d0c95af6b46d32d0adff928f06dd02a303f8ef3c251dfd6e2d85a95474c43\n\
+         5fb88b96b5c89316fe3be9a508c23e9c5ef0afc4957077261eb9fa4945275074\n\
+         true true true\n\
+         0 true 0 0 0\n\
+         true\n",
+        "{}",
+        out
+    );
+}
+
 /// Sealed text opens back to the plaintext, and stops opening the moment a
 /// character changes or the key is wrong — an authentication failure is an
 /// error, not a wrong answer. Importing the same hex twice gives keys that

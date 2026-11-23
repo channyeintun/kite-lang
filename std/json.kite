@@ -118,6 +118,12 @@ fn parse_value(input: str, at: int, depth: int) -> (Step, error) {
     if c == "n" {
         return keyword(input, at, "null", Json.Null)
     }
+    // Anything else that cannot begin a number is not a value at all —
+    // `{"a":}`, `[1,]` and `[}` used to say "expected a number", which names
+    // one of six things that could have stood there.
+    if c != "-" && digit(c) < 0 {
+        return _, errors.new("json: expected a value at \(at)")
+    }
     return parse_number(input, at)
 }
 
@@ -452,13 +458,69 @@ fn digit(c: str) -> int {
 /// An infinity or a NaN is written `null`, as `JSON.stringify` writes it:
 /// JSON has no spelling for either, so the choice is between that and a
 /// document nothing can read back.
+///
+/// **A value nested deeper than 128 levels traps**, which is exactly as deep
+/// as `parse` reads — so everything `parse` returns can be written, and a
+/// value built to be deeper is a bug in the program that built it. Writing
+/// recurses once per level just as reading does, and without the ceiling the
+/// value chose how much stack to use: a program that held 2,000 nested arrays
+/// printed on the VM and the native backend and ran out of stack on Wasm.
+/// `check_nesting` is the test that returns an error instead, for a value
+/// that came from somewhere that does not cap it.
 pub fn stringify(value: Json) -> str {
+    require(!too_deep(value, 1), "json: the value is nested deeper than \(max_depth()) levels")
+    return write(value)
+}
+
+/// Whether `value` holds a container more than `max_depth()` levels down,
+/// `level` being how many containers deep `value` itself is. It stops at the
+/// ceiling, so it cannot run out of stack on the very thing it guards against.
+fn too_deep(value: Json, level: int) -> bool {
+    var children: [Json] = []
+    match value {
+        Array(list) => {
+            children = list
+        },
+        Object(entries) => {
+            for (key, item) in entries {
+                children.push(item)
+            }
+        },
+        other => {
+            return false
+        },
+    }
+    if level > max_depth() {
+        return true
+    }
+    for child in children {
+        if too_deep(child, level + 1) {
+            return true
+        }
+    }
+    return false
+}
+
+/// nil if `stringify` and `pretty` can write `value`, and an error if it is
+/// nested deeper than 128 levels, the depth `parse` stops at.
+///
+/// ```kite
+/// assert(check_nesting(Json.Array([Json.Null])) == nil, "one level is fine")
+/// ```
+pub fn check_nesting(value: Json) -> error {
+    if too_deep(value, 1) {
+        return errors.new("json: the value is nested deeper than \(max_depth()) levels")
+    }
+    return nil
+}
+
+fn write(value: Json) -> str {
     return match value {
         Null => "null",
         Bool(b) => if b { "true" } else { "false" },
         Number(n) => number(n),
         Text(s) => quote(s),
-        Array(list) => "[" + join(map(list, |item: Json| stringify(item)), ",") + "]",
+        Array(list) => "[" + join(map(list, |item: Json| write(item)), ",") + "]",
         Object(entries) => "{" + join(pairs(entries), ",") + "}",
     }
 }
@@ -468,7 +530,7 @@ fn pairs(entries: { str: Json }) -> [str] {
     // Insertion order, which the specification guarantees for a map — so a
     // document read and written again keeps its field order.
     for (key, value) in entries {
-        out.push(quote(key) + ":" + stringify(value))
+        out.push(quote(key) + ":" + write(value))
     }
     return out
 }
@@ -556,7 +618,10 @@ fn hex2(code: int) -> str {
 }
 
 /// A value as indented JSON, for something a person will read.
+///
+/// Nested deeper than 128 levels it traps, as `stringify` does.
 pub fn pretty(value: Json) -> str {
+    require(!too_deep(value, 1), "json: the value is nested deeper than \(max_depth()) levels")
     return indent_value(value, 0)
 }
 
@@ -574,7 +639,7 @@ fn indent_value(value: Json, depth: int) -> str {
         } else {
             "{\n" + join(indented_pairs(entries, depth + 1), ",\n") + "\n" + close + "}"
         },
-        other => stringify(other),
+        other => write(other),
     }
 }
 
@@ -655,20 +720,84 @@ pub fn number_of(value: Option<Json>) -> Option<float> {
 }
 
 /// A whole number, or nil — for anything that is not a number, and for a
-/// number that is not whole or does not fit in an `int`.
+/// number that is not whole or that an `int` cannot be trusted to hold.
 ///
 /// The cast this used to be truncated `3.7` to 3 and saturated `1e30` to the
 /// largest `int`, and `@derive(Decode)` reads an `int` field through this, so
 /// a decoder that promises "expected a whole number" accepted both. JSON's one
 /// number type is a float, so `3.0` is the whole number 3.
+///
+/// **Only a number a float holds exactly is read as an `int`**: magnitude
+/// below 2⁵³. Past that two neighbouring integers share a float —
+/// `9007199254740993` reads as 9007199254740992 — so the value in the program
+/// would be a different number from the one in the document, and nothing would
+/// say so. It is nil instead. An integer that large is carried as text, which
+/// is how `of_int` writes it, and a text of digits that fits an `int` and
+/// is outside that range is read back here.
 pub fn int_of(value: Option<Json>) -> Option<int> {
     if value == nil {
         return nil
     }
     return match value {
-        Number(n) => whole_number(n),
+        Number(n) => exact_int(n),
+        Text(s) => big_int_text(s),
         other => nil,
     }
+}
+
+/// The largest integer below which a float holds every integer: 2⁵³.
+fn exact_limit() -> int {
+    return 9007199254740992
+}
+
+fn exact_int(n: float) -> Option<int> {
+    let whole = whole_number(n)
+    if whole == nil {
+        return nil
+    }
+    if whole <= -exact_limit() || whole >= exact_limit() {
+        return nil
+    }
+    return whole
+}
+
+/// A decimal integer written as text, when it is one `of_int` would have
+/// written that way: outside the exact range, and spelled the way an `int`
+/// is, so `"5"` and `"+9007199254740993"` are not numbers.
+fn big_int_text(s: str) -> Option<int> {
+    let n = parse_int(s)
+    if n == nil {
+        return nil
+    }
+    if n > -exact_limit() && n < exact_limit() {
+        return nil
+    }
+    if "\(n)" != s {
+        return nil
+    }
+    return n
+}
+
+/// An `int` as JSON — what `@derive(Encode)` writes for an `int` field.
+///
+/// JSON has one number type, read as a float by almost everything, and a float
+/// holds every integer only below 2⁵³. An `int` inside that range is a number;
+/// one outside it is written as a string of its digits, because the
+/// alternative is a number that silently reads back as a different one
+/// (`1234567890123456789` became `1234567890123456768`). `int_of` reads both
+/// forms, so a document written here round-trips, and another program sees a
+/// string where it would otherwise see a wrong number.
+///
+/// ```kite
+/// assert(stringify(of_int(42)) == "42", "a small int is a number")
+/// assert(stringify(of_int(1234567890123456789)) == "\"1234567890123456789\"", "a big one is text")
+/// assert(int_of(of_int(1234567890123456789)) == 1234567890123456789, "and reads back")
+/// ```
+pub fn of_int(n: int) -> Json {
+    if n > -exact_limit() && n < exact_limit() {
+        return Json.Number(n as float)
+    }
+    return Json.Text("\(n)")
 }
 
 fn whole_number(n: float) -> Option<int> {
@@ -774,4 +903,133 @@ pub fn bool_or(value: Option<Json>, key: str, fallback: bool) -> bool {
         return fallback
     }
     return b
+}
+
+/// A field's number, or a fallback. An integer answers too: JSON has one
+/// number type.
+pub fn float_or(value: Option<Json>, key: str, fallback: float) -> float {
+    let n = number_of(field(value, key))
+    if n == nil {
+        return fallback
+    }
+    return n
+}
+
+/// The keys of an object, in the order the document wrote them — and none for
+/// anything that is not an object.
+///
+/// ```kite
+/// let (doc, err) = parse("{\"b\": 1, \"a\": 2}")
+/// if err != nil {
+///     return
+/// }
+/// assert(keys(doc) == ["b", "a"], "in document order")
+/// assert(keys(field(doc, "b")) == [], "a number has none")
+/// ```
+pub fn keys(value: Option<Json>) -> [str] {
+    var out: [str] = []
+    for (key, item) in entries(value) {
+        out.push(key)
+    }
+    return out
+}
+
+/// The value at a dotted path, or nil: `path(doc, "users.0.name")`.
+///
+/// Each segment is a key of an object, or, when the value so far is an array
+/// and the segment is a whole number, an index into it. A key that itself
+/// contains a dot, or that is a number on an object, cannot be named this way;
+/// chain [`field`] and [`at`] for those. An empty path is the value itself.
+///
+/// ```kite
+/// let (doc, err) = parse("{\"users\": [{\"name\": \"ada\"}]}")
+/// if err != nil {
+///     return
+/// }
+/// assert(text(path(doc, "users.0.name")) == "ada", "through an object, an array, an object")
+/// assert(path(doc, "users.1.name") == nil, "past the end")
+/// ```
+pub fn path(value: Option<Json>, dotted: str) -> Option<Json> {
+    var here = value
+    if dotted.len() == 0 {
+        return here
+    }
+    for segment in split(dotted, ".") {
+        if here == nil {
+            return nil
+        }
+        let index = parse_int(segment)
+        let in_array = match here {
+            Array(list) => true,
+            other => false,
+        }
+        if in_array {
+            if index == nil {
+                return nil
+            }
+            here = at(here, index)
+        } else {
+            here = field(here, segment)
+        }
+    }
+    return here
+}
+
+/// The document `input` holds, or `fallback` if it is not one.
+///
+/// For a configuration that is allowed to be missing or damaged. A caller that
+/// needs to say *why* it failed uses [`parse`].
+pub fn parse_or(input: str, fallback: Json) -> Json {
+    let (value, err) = parse(input)
+    if err != nil {
+        return fallback
+    }
+    return value
+}
+
+/// A value as compact JSON with the keys of every object in sorted order,
+/// where [`stringify`] keeps the order they were inserted in.
+///
+/// For output that has to be the same bytes whenever it means the same thing:
+/// a hash, a cache key, a signature, a file under version control. Sorted by
+/// the keys' characters (code points), which is the order `<` gives strings.
+/// Traps past 128 levels, as `stringify` does.
+///
+/// ```kite
+/// let (doc, err) = parse("{\"b\": 1, \"a\": {\"d\": 2, \"c\": 3}}")
+/// if err != nil {
+///     return
+/// }
+/// assert(stringify_sorted(doc) == "{\"a\":{\"c\":3,\"d\":2},\"b\":1}", "sorted at every level")
+/// ```
+pub fn stringify_sorted(value: Json) -> str {
+    require(!too_deep(value, 1), "json: the value is nested deeper than \(max_depth()) levels")
+    return write(sort_keys(value))
+}
+
+fn sort_keys(value: Json) -> Json {
+    return match value {
+        Array(list) => Json.Array(map(list, |item: Json| sort_keys(item))),
+        Object(entries) => sort_object(entries),
+        other => other,
+    }
+}
+
+fn sort_object(entries: { str: Json }) -> Json {
+    var out: { str: Json } = { }
+    for key in sorted(keys_of(entries), |a: str, b: str| a < b) {
+        let held = entries[key]
+        if held != nil {
+            out[key] = sort_keys(held)
+        }
+    }
+    return Json.Object(out)
+}
+
+fn keys_of(entries: { str: Json }) -> [str] {
+    var out: [str] = []
+    for (key, item) in entries {
+        out.push(key)
+    }
+    return out
 }

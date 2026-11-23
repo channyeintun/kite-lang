@@ -1935,6 +1935,11 @@ Book.year: expected a whole number
 
 So the JSON encoding of an enum is: unit variant → its own name as a string;
 positional payload → `{"Variant": [...]}`; named payload → `{"Variant": {...}}`.
+Decoding holds to that: a positional payload must be an array of exactly its
+length, an object with two keys is an error, and a unit variant written as an
+object (or a payload variant written as a string) is refused with a message that
+says which form to write. An `int` too big for a JSON number to carry exactly
+(2⁵³ and up) is encoded as its decimal text in a string, and decoded back.
 
 ### What does not derive
 

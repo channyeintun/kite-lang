@@ -131,6 +131,81 @@ fn number_checks() -> [error] {
             "1979-05-27T00:32:00-07:00",
             "and so is one carrying an offset",
         ))
+    // `emit` wrote `when = "1979-05-27"`, which every other reader takes for a
+    // string rather than a date.
+    out.push(test.equal_str(
+            toml.emit(dated),
+            "when = 1979-05-27\noffset = 1979-05-27T00:32:00-07:00\n",
+            "a date is emitted bare",
+        ))
+    let (quoted, quoted_err) = toml.parse("s = \"1979-5-27\"\nt = \"hello\"\n")
+    out.push(test.ok(quoted_err, "quoted strings parse"))
+    if quoted_err != nil {
+        return out
+    }
+    out.push(test.equal_str(
+            toml.emit(quoted),
+            "s = \"1979-5-27\"\nt = \"hello\"\n",
+            "a string that is not a date keeps its quotes",
+        ))
+
+    // `at` splits on every dot, so `"a.b" = 1` had no spelling; `at_path`
+    // takes the segments whole.
+    let (dotted, dotted_err) = toml.parse("\"a.b\" = 1\n[t]\n\"x.y\" = 2\n")
+    out.push(test.ok(dotted_err, "a quoted key with a dot parses"))
+    if dotted_err != nil {
+        return out
+    }
+    out.push(test.is_true(toml.at(dotted, "a.b") == nil, "`at` cannot reach it"))
+    out.push(test.is_true(toml.at_path(dotted, ["a.b"]) == toml.Toml.Int(1), "`at_path` reaches it"))
+    out.push(test.is_true(toml.at_path(dotted, ["t", "x.y"]) == toml.Toml.Int(2), "and one inside a table"))
+    out.push(test.is_true(toml.at_path(dotted, ["t", "x"]) == nil, "and does not split it"))
+    out.push(test.is_true(toml.at_path(dotted, []) == dotted, "an empty path is the document"))
+
+    // ---- reading arrays of strings and tables' keys; placing a value ----
+    let (cfg, cfg_err) = toml.parse("name = \"x\"\n[p]\nauthors = [\"a\", \"b\"]\nmixed = [\"a\", 1, \"c\"]\nn = 3\n[p.deps]\nz = 1\ny = 2\n")
+    out.push(test.ok(cfg_err, "a configuration parses"))
+    if cfg_err != nil {
+        return out
+    }
+    out.push(test.equal_strs(toml.texts_at(cfg, "p.authors"), ["a", "b"], "texts_at"))
+    out.push(test.equal_strs(toml.texts_at(cfg, "p.mixed"), ["a", "c"], "texts_at leaves out what is not a string"))
+    out.push(test.equal_strs(toml.texts_at(cfg, "p.n"), [], "and gives none for a non-array"))
+    out.push(test.equal_strs(toml.texts_at(cfg, "p.nope"), [], "or an absent path"))
+    out.push(test.equal_strs(toml.keys_at(cfg, "p.deps"), ["z", "y"], "keys_at, in document order"))
+    out.push(test.equal_strs(toml.keys_at(cfg, ""), ["name", "p"], "the root's keys"))
+    out.push(test.equal_strs(toml.keys_at(cfg, "name"), [], "a string has none"))
+    let (placed, place_err) = toml.set(cfg, "p.deps.w", toml.Toml.Int(9))
+    out.push(test.ok(place_err, "set into an existing table"))
+    if place_err != nil {
+        return out
+    }
+    out.push(test.equal_strs(toml.keys_at(placed, "p.deps"), ["z", "y", "w"], "adds a key"))
+    out.push(test.equal_strs(toml.keys_at(cfg, "p.deps"), ["z", "y"], "and leaves the original alone"))
+    let (replaced, replace_err) = toml.set(placed, "p.n", toml.Toml.Text("three"))
+    out.push(test.ok(replace_err, "set over a value"))
+    if replace_err != nil {
+        return out
+    }
+    out.push(test.equal_str(toml.text_at(replaced, "p.n", "?"), "three", "replaces it"))
+    let (made, made_err) = toml.set(replaced, "q.r.s", toml.Toml.Bool(true))
+    out.push(test.ok(made_err, "set through tables that are not there"))
+    if made_err != nil {
+        return out
+    }
+    out.push(test.equal_bool(toml.bool_at(made, "q.r.s", false), true, "makes them"))
+    let (again, again_err) = toml.parse(toml.emit(made))
+    out.push(test.ok(again_err, "and what it made emits and parses"))
+    if again_err != nil {
+        return out
+    }
+    out.push(test.is_true(again == made, "to the same document"))
+    let (_, through_err) = toml.set(cfg, "name.x", toml.Toml.Int(1))
+    out.push(test.failed(through_err, "set through a string is an error"))
+    let (_, empty_err) = toml.set(cfg, "a..b", toml.Toml.Int(1))
+    out.push(test.failed(empty_err, "an empty segment is an error"))
+    let (_, root_err) = toml.set(toml.Toml.Int(1), "a", toml.Toml.Int(1))
+    out.push(test.failed(root_err, "and a document that is not a table"))
     return out
 }
 

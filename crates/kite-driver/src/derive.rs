@@ -1098,8 +1098,10 @@ impl<'a> Writer<'a, '_> {
             Type::Path(p) => match path_text(p).as_str() {
                 // JSON has one numeric type, and `json.stringify` writes a
                 // whole number without a point, so an `int` survives the round
-                // trip as an `int`.
-                "int" => format!("{j}.Json.Number({} as float)", expr),
+                // trip as an `int` — unless it is too big for a float to hold,
+                // which `json.of_int` writes as its digits in a string rather
+                // than as a number that reads back as another.
+                "int" => format!("{j}.of_int({})", expr),
                 "float" => format!("{j}.Json.Number({})", expr),
                 "bool" => format!("{j}.Json.Bool({})", expr),
                 "str" => format!("{j}.Json.Text({})", expr),
@@ -1204,9 +1206,32 @@ impl<'a> Writer<'a, '_> {
                         body.push("        }".to_string());
                     }
                 }
+                // A name that is a variant with a payload is a mistake of its
+                // own: "no variant named" would be false of it.
+                for v in &e.variants {
+                    if !v.payload.is_empty() {
+                        body.push(format!("        if {} == {} {{", tag, quote(&v.name.name)));
+                        body.push(format!(
+                            "            return _, errors.new(\"{}: {} has a payload, so it is written as an object with the one key \\\"{}\\\"\")",
+                            decl.bare, v.name.name, v.name.name
+                        ));
+                        body.push("        }".to_string());
+                    }
+                }
                 body.push(format!(
                     "        return _, errors.new(\"{}: no variant named \\({})\")",
                     decl.bare, tag
+                ));
+                body.push("    }".to_string());
+                // The other form is an object with exactly one key. A second
+                // key used to be ignored, so `{"One":[1],"Two":[2]}` was
+                // `One` and nobody was told about `Two`.
+                let fields = self.temp("keys");
+                body.push(format!("    let {} = {j}.entries({doc})", fields));
+                body.push(format!("    if {}.len() > 1 {{", fields));
+                body.push(format!(
+                    "        return _, errors.new(\"{}: expected a one-key object, found \\({}.len()) keys\")",
+                    decl.bare, fields
                 ));
                 body.push("    }".to_string());
                 for v in &e.variants {
@@ -1220,6 +1245,22 @@ impl<'a> Writer<'a, '_> {
                         quote(&v.name.name)
                     ));
                     body.push(format!("    if {} != nil {{", held));
+                    // A positional payload is an array of exactly its arity:
+                    // a longer one used to lose its tail, and a shorter one
+                    // reached the element reader as "missing" or as a type
+                    // error about the wrong element.
+                    if let VariantPayload::Positional(tys) = &v.payload {
+                        let n = tys.len();
+                        body.push(format!("        if {j}.items({}).len() != {} {{", held, n));
+                        body.push(format!(
+                            "            return _, errors.new(\"{}.{}: expected an array of {} value{}\")",
+                            decl.bare,
+                            v.name.name,
+                            n,
+                            if n == 1 { "" } else { "s" }
+                        ));
+                        body.push("        }".to_string());
+                    }
                     let args = match &v.payload {
                         VariantPayload::Named(fields) => {
                             let mut args = Vec::new();
@@ -1261,6 +1302,30 @@ impl<'a> Writer<'a, '_> {
                     ));
                     body.push("    }".to_string());
                 }
+                // What is left is a document that names no variant with a
+                // payload: a unit variant written as an object, a key that is
+                // nobody's, or no object at all. Each is its own message.
+                for v in &e.variants {
+                    if v.payload.is_empty() {
+                        body.push(format!(
+                            "    if {j}.field({doc}, {}) != nil {{",
+                            quote(&v.name.name)
+                        ));
+                        body.push(format!(
+                            "        return _, errors.new(\"{}: {} has no payload, so it is written as the string \\\"{}\\\"\")",
+                            decl.bare, v.name.name, v.name.name
+                        ));
+                        body.push("    }".to_string());
+                    }
+                }
+                let k = self.temp("key");
+                let unused = self.temp("unused");
+                body.push(format!("    for ({}, {}) in {} {{", k, unused, fields));
+                body.push(format!(
+                    "        return _, errors.new(\"{}: no variant named \\({})\")",
+                    decl.bare, k
+                ));
+                body.push("    }".to_string());
                 body.push(format!(
                     "    return _, errors.new(\"{}: expected a variant name or a one-key object\")",
                     decl.bare
@@ -1339,6 +1404,24 @@ impl<'a> Writer<'a, '_> {
                 let held = self.temp("value");
                 out.push(format!("{}let {} = {}({})", pad, held, reader, source));
                 out.push(format!("{}if {} == nil {{", pad, held));
+                if path_text(p) == "int" {
+                    // A number at or past 2⁵³ is whole, so "expected a whole
+                    // number" would be false of it; it is refused because a
+                    // float cannot say which integer it was.
+                    let n = self.temp("number");
+                    out.push(format!("{}    let {} = {j}.number_of({})", pad, n, source));
+                    out.push(format!("{}    if {} != nil {{", pad, n));
+                    out.push(format!(
+                        "{}        if {} >= 9007199254740992.0 || {} <= -9007199254740992.0 {{",
+                        pad, n, n
+                    ));
+                    out.push(format!(
+                        "{}            return _, errors.new(\"{}: a number this large is not exact in JSON; an int past 2^53 is written as a string of its digits\")",
+                        pad, where_
+                    ));
+                    out.push(format!("{}        }}", pad));
+                    out.push(format!("{}    }}", pad));
+                }
                 out.push(format!(
                     "{}    return _, errors.new(\"{}: expected {}\")",
                     pad, where_, what

@@ -1352,6 +1352,26 @@ fn main() {
          \x20 let (bad, berr) = Palette.decode(json.Json.Null)\n\
          \x20 io.print(if berr == nil { \"?\" } else { berr.message() })\n}\n",
     ),
+    // A derived enum decoder was lenient about a positional payload's length
+    // (`{"One":[1,2,3]}` was `One(1)`), took the first of several keys, and
+    // told a unit variant written as an object that it was not "a variant
+    // name or a one-key object".
+    (
+        "derived-json-enum-decode-is-strict",
+        "use std/json\n\
+         @derive(Debug, Decode)\n\
+         enum Kind {\n  Plain\n  One(int)\n  Two(int, str)\n}\n\
+         fn show(s: str) {\n\
+         \x20 let (d, e) = json.parse(s)\n\
+         \x20 if e != nil {\n    return\n  }\n\
+         \x20 let (k, ke) = Kind.decode(d)\n\
+         \x20 if ke != nil {\n    io.print(\"\\(s) -> ERR \\(ke.message())\")\n    return\n  }\n\
+         \x20 io.print(\"\\(s) -> \\(k.debug())\")\n}\n\
+         fn main() {\n\
+         \x20 for s in [\"{\\\"One\\\":[1,2,3]}\", \"{\\\"One\\\":[1],\\\"Plain\\\":[]}\", \"{\\\"Plain\\\":[]}\", \
+         \"{\\\"One\\\":[]}\", \"{\\\"Two\\\":[1]}\", \"\\\"One\\\"\", \"{\\\"Zed\\\":1}\", \"{}\", \
+         \"{\\\"Two\\\":[1,\\\"x\\\"]}\", \"\\\"Plain\\\"\"] {\n    show(s)\n  }\n}\n",
+    ),
     // `std/json` spelled like a name the derived code binds. The derive wrote
     // the module's own spelling into a `decode` whose parameter is `doc`, so
     // `doc.field(doc, …)` asked the parameter for a method, and the program

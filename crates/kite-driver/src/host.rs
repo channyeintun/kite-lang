@@ -90,7 +90,10 @@ impl Host for NativeHost {
                         for entry in entries {
                             match entry {
                                 Ok(e) => {
-                                    names.push_str(&e.file_name().to_string_lossy());
+                                    // A line break inside a name would be read as the end of it; the
+                                    // listing carries it as NUL, which no file name can contain, and
+                                    // `fs.list` turns it back.
+                                    names.push_str(&e.file_name().to_string_lossy().replace('\n', "\0"));
                                     names.push('\n');
                                 }
                                 Err(e) => return Ok(failure(e)),

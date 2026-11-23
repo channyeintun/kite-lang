@@ -94,13 +94,21 @@ pub fn write(path: str, body: str) -> error {
 
 /// The names in a directory, without `.` and `..`, in the order the host gives
 /// them — which is not sorted, on any platform worth relying on.
+///
+/// The host puts one name on each line, so a name with a line break in it
+/// would have come back as two. It writes that break as a NUL instead — no
+/// file name has one — and it is turned back into a line break here.
 pub fn list(path: str) -> ([str], error) {
     let (answer, err) = unwrap(list_dir(path), "list \(path)")
     check err
     if answer.len() == 0 {
         return [], nil
     }
-    return split_lines(answer), nil
+    var names: [str] = []
+    for name in split_lines(answer) {
+        names.push(replace(name, "\u{0}", "\n"))
+    }
+    return names, nil
 }
 
 /// Delete a file, or an empty directory.
@@ -170,6 +178,262 @@ pub fn is_dir(path: str) -> bool {
 /// including Windows, whose API takes either separator.
 pub fn temp_dir() -> str {
     return temp_path()
+}
+
+/// The lines of a text file, without their line endings.
+///
+/// Split on `\n`, with a `\r` before it removed too, so a file written on
+/// Windows reads the same. A last line with no ending is a line; the empty
+/// string after a final `\n` is not, so `"a\nb\n"` and `"a\nb"` are both `a`
+/// and `b`, and an empty file has none. Empty lines in the middle are kept.
+///
+/// ```kite ignore
+/// let path = temp_dir() + "/kite-doc-read-lines.txt"
+/// assert(write(path, "a\r\n\nb\n") == nil, "written")
+/// let (lines, err) = read_lines(path)
+/// if err != nil {
+///     return
+/// }
+/// assert(lines == ["a", "", "b"], "the empty line stays")
+/// assert(remove(path) == nil, "tidied")
+/// ```
+pub fn read_lines(path: str) -> ([str], error) {
+    let (body, err) = read(path)
+    check err
+    var out: [str] = []
+    var start = 0
+    for i in 0..body.len() {
+        if body.code_at(i) == 10 {
+            var end = i
+            if end > start && body.code_at(end - 1) == 13 {
+                end = end - 1
+            }
+            out.push(body.slice(start, end))
+            start = i + 1
+        }
+    }
+    if start < body.len() {
+        var end = body.len()
+        if body.code_at(end - 1) == 13 {
+            end = end - 1
+        }
+        out.push(body.slice(start, end))
+    }
+    return out, nil
+}
+
+/// Write `lines` to `path`, each followed by `\n`, replacing what was there.
+///
+/// The inverse of [`read_lines`] for lines with no line break inside them.
+pub fn write_lines(path: str, lines: [str]) -> error {
+    var parts: [str] = []
+    for line in lines {
+        parts.push(line)
+        parts.push("\n")
+    }
+    return write(path, join(parts, ""))
+}
+
+/// Add `body` to the end of a file, creating it if it is not there.
+///
+/// This reads the file and writes it back whole, so it is not atomic: two
+/// programs appending at once can lose one of the appends. It is for a log or
+/// a list one program keeps.
+pub fn append(path: str, body: str) -> error {
+    var before = ""
+    if exists(path) {
+        let (held, err) = read(path)
+        if err != nil {
+            return err
+        }
+        before = held
+    }
+    return write(path, before + body)
+}
+
+/// A file's text, or `fallback` if it cannot be read — missing, a directory,
+/// or not text. For a file that is allowed not to be there; use [`read`] to
+/// find out why it was not.
+pub fn read_or(path: str, fallback: str) -> str {
+    let (body, err) = read(path)
+    if err != nil {
+        return fallback
+    }
+    return body
+}
+
+/// Copy a text file: the whole of `from` is read and written to `to`, which
+/// is replaced if it is there.
+///
+/// Text only, like [`read`]: a file that is not UTF-8 is an error rather than
+/// a damaged copy.
+pub fn copy(from: str, to: str) -> error {
+    let (body, err) = read(from)
+    if err != nil {
+        return err
+    }
+    return write(to, body)
+}
+
+/// The paths of every file below a directory, at any depth, sorted. Each is
+/// `path` joined to where the file is: walking `a` finds `a/b/c.txt`.
+///
+/// Directories are not listed, only what is in them; an empty one leaves no
+/// trace. A link to a directory is followed, and a walk that goes more than 64
+/// directories deep — which a link back up the tree would do forever — is an
+/// error.
+///
+/// ```kite ignore
+/// let (_, err) = walk(temp_dir() + "/kite-doc-no-such-directory")
+/// assert(err != nil, "a directory that is not there is an error")
+/// ```
+pub fn walk(path: str) -> ([str], error) {
+    let (found, err) = walk_into(path, 0)
+    check err
+    return sorted(found, |a: str, b: str| a < b), nil
+}
+
+fn walk_into(path: str, depth: int) -> ([str], error) {
+    if depth > 64 {
+        return _, errors.new("fs: walk \(path): more than 64 directories deep")
+    }
+    let (names, err) = list(path)
+    check err
+    var found: [str] = []
+    for name in names {
+        let child = join_path([path, name])
+        if is_dir(child) {
+            let (inner, inner_err) = walk_into(child, depth + 1)
+            check inner_err
+            for item in inner {
+                found.push(item)
+            }
+        } else {
+            found.push(child)
+        }
+    }
+    return found, nil
+}
+
+// ---- paths, as text ---------------------------------------------------------
+//
+// None of these asks the host anything. They read and write paths the way the
+// platforms this runs on all accept them, with `/`, and know nothing about
+// whether the path exists or what a drive letter is.
+
+/// Paths joined with exactly one `/` between them.
+///
+/// An empty part is skipped, and a `/` ending one part or starting the next is
+/// not doubled, so `join_path(["a/", "/b"])` is `a/b`. A first part that begins with
+/// `/` keeps it, so a path stays absolute. `.` and `..` are not resolved.
+///
+/// ```kite
+/// assert(join_path(["a", "b", "c.txt"]) == "a/b/c.txt", "plain")
+/// assert(join_path(["a/", "/b"]) == "a/b", "not doubled")
+/// assert(join_path(["/", "etc"]) == "/etc", "absolute")
+/// assert(join_path(["", "a"]) == "a", "an empty part")
+/// ```
+pub fn join_path(parts: [str]) -> str {
+    var out = ""
+    for part in parts {
+        if part.len() > 0 {
+            if out.len() == 0 {
+                out = part
+            } else {
+                out = trim_slashes_end(out) + "/" + trim_slashes_start(part)
+            }
+        }
+    }
+    return out
+}
+
+fn trim_slashes_end(s: str) -> str {
+    var end = s.len()
+    for end > 1 && s.code_at(end - 1) == 47 {
+        end = end - 1
+    }
+    // "/" alone stays "/", which the join then follows with the next part
+    // as "//": ask for it to be left out.
+    if end == 1 && s.code_at(0) == 47 {
+        return ""
+    }
+    return s.slice(0, end)
+}
+
+fn trim_slashes_start(s: str) -> str {
+    var start = 0
+    for start < s.len() && s.code_at(start) == 47 {
+        start = start + 1
+    }
+    return s.slice(start, s.len())
+}
+
+/// The last part of a path: `a/b/c.txt` is `c.txt`. Slashes at the end are
+/// ignored, so `a/b/` is `b`; `/` is `/`, and an empty path is empty.
+///
+/// ```kite
+/// assert(base_name("a/b/c.txt") == "c.txt", "a file")
+/// assert(base_name("a/b/") == "b", "a trailing slash")
+/// assert(base_name("/") == "/", "the root")
+/// ```
+pub fn base_name(path: str) -> str {
+    var end = path.len()
+    for end > 1 && path.code_at(end - 1) == 47 {
+        end = end - 1
+    }
+    if end == 1 && path.code_at(0) == 47 {
+        return "/"
+    }
+    let trimmed = path.slice(0, end)
+    let at = last_index_of(trimmed, "/")
+    return trimmed.slice(at + 1, trimmed.len())
+}
+
+/// Everything but the last part of a path: `a/b/c.txt` is `a/b`. A path with
+/// no `/` is `.`, the directory it is in; the parent of `/a` and of `/` is
+/// `/`; and slashes at the end are ignored, so `a/b/` is `a`.
+///
+/// ```kite
+/// assert(dir_name("a/b/c.txt") == "a/b", "a file")
+/// assert(dir_name("c.txt") == ".", "no directory")
+/// assert(dir_name("/c.txt") == "/", "the root")
+/// ```
+pub fn dir_name(path: str) -> str {
+    var end = path.len()
+    for end > 1 && path.code_at(end - 1) == 47 {
+        end = end - 1
+    }
+    let trimmed = path.slice(0, end)
+    let at = last_index_of(trimmed, "/")
+    if at < 0 {
+        return "."
+    }
+    var cut = at
+    for cut > 1 && trimmed.code_at(cut - 1) == 47 {
+        cut = cut - 1
+    }
+    if cut == 0 {
+        return "/"
+    }
+    return trimmed.slice(0, cut)
+}
+
+/// The extension of a path's last part, without the dot: `a/b.tar.gz` is
+/// `gz`. A name with no dot, one that only begins with a dot (`.bashrc`) and
+/// one that ends in a dot have none: it is "".
+///
+/// ```kite
+/// assert(extension("notes.txt") == "txt", "an extension")
+/// assert(extension("a.tar.gz") == "gz", "the last")
+/// assert(extension(".bashrc") == "", "a dotfile has none")
+/// ```
+pub fn extension(path: str) -> str {
+    let name = base_name(path)
+    let at = last_index_of(name, ".")
+    if at <= 0 || at == name.len() - 1 {
+        return ""
+    }
+    return name.slice(at + 1, name.len())
 }
 
 fn split_lines(body: str) -> [str] {
