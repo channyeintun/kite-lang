@@ -506,6 +506,21 @@ fn an_unknown_module_says_where_it_looked() {
     assert!(err.contains("E0400"), "{}", err);
 }
 
+/// A `use` below the declarations is refused for where it is, and a module
+/// it names that is not there is still reported: two mistakes. Only a path
+/// written from the file (`use ../nowhere`), whose one error says how paths
+/// are looked for, is not reported missing again.
+#[test]
+fn a_late_use_of_a_missing_module_is_reported_missing_too() {
+    let p = Project::new("late-missing");
+    let main = p.file("main.kite", "fn main() {\n}\n\nuse nowhere\nuse ../near\n");
+    let src = std::fs::read_to_string(&main).expect("read main");
+    let c = compile(&main, &src, Emit::Check);
+    let codes: Vec<&str> = c.diags.iter().filter_map(|d| d.code.map(|c| c.0)).collect();
+    assert_eq!(codes.iter().filter(|c| **c == "E0400").count(), 1, "{}", c.render_diagnostics());
+    assert_eq!(codes.iter().filter(|c| **c == "E0100").count(), 2, "{}", c.render_diagnostics());
+}
+
 #[test]
 fn an_unknown_standard_module_lists_the_ones_there_are() {
     let c = compile("t.kite", "use std/nope\n\nfn main() {\n}\n", Emit::Check);
