@@ -2821,7 +2821,7 @@ A second review checked this phase's fixes and found them partial:
 
 ---
 
-## Phase 31 — Three rounds of fixes, and what a program notices
+## Phase 31 — Five rounds of fixes, and what a program notices
 
 **Goal:** the language made better without a feature added to it — its bugs
 fixed, the standard library's gaps filled, and what the specification promised
@@ -2830,8 +2830,14 @@ made true.
 This was not a phase of the plan. Eight audits read the specification, the
 library and the tools against the compiler and found a few hundred faults; the
 fixes landed as twelve workstreams, a re-check of those fixes found what they
-had left and sent nine more, and a third round took what the second left. Each
-workstream's merge on `complete-kite` says what is true after it. This section
+had left and sent nine more, a third round took what the second left, a fourth
+(grapheme clusters, a function that keeps nothing of its argument, a dozen
+diagnostics that said two things about one cause) closed what the third's
+reviewers had open, and a fifth took what a final re-check by seven checkers,
+each claim tried by a skeptic, still confirmed: the error analysis, the types
+and notes, the parser and module loader, the write-in-place analysis, a 205 and
+the documents. Each workstream's merge on `complete-kite` says what is true
+after it. This section
 is the one place that gathers what a program written against v0.1.9 will meet,
 and it is written as that program's author would want it: what stops
 compiling, what runs differently, what the library does now, and what was
@@ -2849,7 +2855,12 @@ accepted as it is rather than fixed.
   returning on the first of several started tasks' failures while the others
   are unread, a projection `(f(1), f(2)).0` of a temporary that throws the
   other failure away, and a nil test of an `Option<error>` taken as handling
-  the error inside it.
+  the error inside it. A nil test of a temporary optional result,
+  `if await task.timeout(save(), 10) == nil`, leaves the failure inside unread
+  and is `E0302` at the temporary; `t.0.0` of a nested tuple leaves the error
+  beside it, `t.0.1`, owed. A present optional does not prove the error in it, so after
+  `if r == nil { return }` a `r.message()` is `E0301` until `r != nil` is
+  tested.
 - **`task.park()` and `task.wait_host()`** outside an `async fn` are `E0521`,
   as `task.yield()` was.
 - **One name, one meaning.** A type with an inherent method and a trait method
@@ -2876,6 +2887,28 @@ accepted as it is rather than fixed.
   on an enum variant are one diagnostic each.
 - **Lexical.** `"\u{41"` and `\u{+41}` are `E0003`, and an escaped quote never
   closes a block string.
+- **Types written wrongly are one report.** `bogus.Thing<int>` and
+  `sync.Nope<str>` are one `E0204` wherever a type is written, `int<str>` says
+  `int` takes no type arguments, and `var x = ()` is `E0200` as `let x = ()`
+  is. A name that is an embedded standard-library module the file does not
+  `use` is an `E0111` that says which `use std/<name>` to add.
+- **Tokens Kite does not have.** `;` is one `E0002` — a line break ends a
+  statement — and a run of `?` is one `E0002`; a type that does not parse in an
+  annotation, parameter, field or return is one `E0100` and its declaration
+  stays declared; an assignment, `let`, `for`, `defer`, `check` or `_ =`
+  written as a `match` arm is one `E0100` whose note shows the block form.
+
+### Programs that compiled and were refused, and are accepted now
+
+- A retry loop whose only exits are `return`s — `for { … }` with no `break` —
+  and a value `if` whose branches hold no failure, which made an obligation
+  that nothing could meet.
+- `pat => if c { … }` with no `else` as an arm of a `match` statement, which
+  §9.2 always allowed.
+- `-> (int, error, int)` is a tuple type; a return type is the fallible form
+  only as the pair `(T, error)`.
+- A closure where an `Option<fn(T) -> T>` is wanted, or beside a `nil` that
+  an argument later types, is typed from that argument, as §4.5 says.
 
 ### Programs that run differently
 
@@ -2904,7 +2937,11 @@ accepted as it is rather than fixed.
   flag has no way across a call, and moving it would be new machinery. So
   `toml.parse` reads a document into flat tables written in place and nests
   them once at the end, and is linear in sections, dotted keys and inline
-  tables; what it returns and reports is unchanged.
+  tables; what it returns and reports is unchanged. A write after a read
+  through a field whose key is computed by a `str` method or a builtin that
+  runs no code — `self.counts[w.trim()] = …`, `b.xs[s.len() % n]` — is in
+  place too, and finding what a long literal or a left-deep chain of operands
+  writes is linear.
 - **On the VM, an `Option<error>` holding a nil error is present**, as it was
   natively and on Wasm — so a `task.timeout` around a task that finished with
   no error is no longer `nil` there.
@@ -2959,6 +2996,9 @@ Existing functions that answer differently:
   partway. `crypto.password_verify` is an error for a stored hash of the wrong
   shape, and `fs.read_lines` splits exactly as `lines` does.
 
+Every `pub` item of `std/` has a doc comment, so `kitec doc` prints no bare
+signature, and a test keeps it so.
+
 About 130 functions were added, to the prelude and to every one of the twenty
 modules; `skills/kite/references/06-stdlib-and-diagnostics.md` lists them
 module by module.
@@ -2976,7 +3016,11 @@ module by module.
 - A diagnostic quotes a source line wider than 140 columns as a window of it,
   and underlines by display column; a module is named as the `use` writes it.
 - `kitec --explain` with two codes exits 1, a misspelt command is an unknown
-  command, and every explained code has an example and a fix that compiles.
+  command, and all fifty-five codes have an example that raises them and a fix
+  that compiles, run from the texts by one test; `E0900` and `E0901`, which no
+  program can raise, say so and show the shape of the report, and `E0102` and
+  `E0902`, which only a program of some size raises, are raised by programs the
+  test generates.
 
 ### Accepted rather than fixed
 
@@ -3048,9 +3092,9 @@ none.
 | 28 — Packages from a bundler | ✅ `vite-plugin-kite` and the WebAssembly `kitec` read `kite.toml` and compile what it declares; provided modules are keyed by their whole path and a package resolves its own imports inside itself; a one-file module reads its imports from its own directory; `kitec run` sees modules |
 | 29 — Imports are the boundary | ✅ a qualified name resolves only in a module that imported it, and the entry file is reachable from nowhere; a `use` is looked for outward from the importer as far as its package's root, so sibling directory modules import each other |
 | 30 — The boundary, reviewed | ✅ a module is where its source is; each package's dependencies are its own; the entry file and bare variants are gated too; `bundle`, `test`, `pkg` and the option parser do what they say. §4.3 no longer names `pub` on an enum variant or `pub use`: a variant is as visible as its enum, there is no `pub use`, and each is refused with one diagnostic |
-| 31 — Three rounds of fixes | ✅ an audit, a re-check and a third round: bugs fixed on all three backends, about 130 library functions added, and the specification's claims checked by compiling them; maps are hash maps and field-held slices and maps are written in place on every target. What a v0.1.9 program notices is listed in the phase |
+| 31 — Five rounds of fixes | ✅ an audit, a re-check and three rounds after it: bugs fixed on all three backends, about 130 library functions added, and the specification's claims checked by compiling them; maps are hash maps and field-held slices and maps are written in place on every target. What a v0.1.9 program notices is listed in the phase |
 
-More than 1,300 tests: unit tests per crate, an annotated compile-fail
+More than 1,370 tests: unit tests per crate, an annotated compile-fail
 corpus, a differential corpus that runs every program on **three** backends and
 compares, the standard library's own suite on all three, the standard library's own
 documentation examples, the host boundary and a real socket under Node, the one
