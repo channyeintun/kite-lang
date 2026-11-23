@@ -1589,14 +1589,10 @@ impl Loader {
                 real.push(name);
                 continue;
             }
-            match entries.iter().find(|e| e.to_lowercase() == name.to_lowercase()) {
-                Some(on_disk) => {
-                    real.push(on_disk);
-                    differs = true;
-                }
-                // Not listed at all: an unsaved buffer inside a saved directory.
-                None => return None,
-            }
+            // Not listed at all: an unsaved buffer inside a saved directory.
+            let on_disk = entries.iter().find(|e| e.to_lowercase() == name.to_lowercase())?;
+            real.push(on_disk);
+            differs = true;
         }
         differs.then_some(real)
     }

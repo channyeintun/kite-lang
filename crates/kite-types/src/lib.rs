@@ -1337,6 +1337,9 @@ enum Holder {
 /// An error state: the taint, and which locals are copies of which.
 type ErrorState = (Vec<Taint>, std::collections::BTreeSet<(u32, u32)>);
 
+/// A field's name and where it is declared.
+type NamedSpan = (String, Span);
+
 /// The error states a loop's body hands on other than by falling into what
 /// follows it: back to its start, from its end and every `continue`, and out
 /// past it, from every `break`. Each is the join of all that arrive.
@@ -6630,7 +6633,7 @@ impl<'a> Checker<'a> {
     /// name and its private fields. A struct that is not `pub` at all is not
     /// opaque but private, and naming it was already `E0401`: a second one
     /// saying it cannot be built was two errors for one cause.
-    fn opaque_here(&self, sid: kite_hir::StructId) -> Option<(String, String, Vec<(String, Span)>)> {
+    fn opaque_here(&self, sid: kite_hir::StructId) -> Option<(String, String, Vec<NamedSpan>)> {
         let module = self.module_of_struct(sid)?;
         if module == self.module || !self.struct_is_pub(sid) {
             return None;
