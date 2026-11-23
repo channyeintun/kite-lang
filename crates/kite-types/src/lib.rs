@@ -4004,6 +4004,26 @@ impl<'a> Checker<'a> {
                         }
                         Some(want) => self.accept(v, want, None),
                     };
+                    // A key the compiler knows, written twice: the later
+                    // entry replaces the earlier, whose value is never seen.
+                    // Almost always a copied line whose key was not edited.
+                    let known = |e: &hir::Expr| match &e.kind {
+                        ExprKind::Int(i) => Some(i.to_string()),
+                        ExprKind::Str(s) => Some(format!("{:?}", s)),
+                        ExprKind::Bool(b) => Some(b.to_string()),
+                        _ => None,
+                    };
+                    if let Some(key) = known(&k) {
+                        let earlier = flat.iter().step_by(2).find(|p: &&hir::Expr| known(p).as_ref() == Some(&key));
+                        if let Some(first) = earlier {
+                            self.diags.push(
+                                Diagnostic::warning(codes::E0112, format!("the key {} is given twice", key))
+                                    .with_primary(k.span, "this entry replaces the earlier one")
+                                    .with_secondary(first.span, "first given here, and never seen")
+                                    .with_note("a map holds one value per key; remove one of the two"),
+                            );
+                        }
+                    }
                     flat.push(k);
                     flat.push(v);
                 }

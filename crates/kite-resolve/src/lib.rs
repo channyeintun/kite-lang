@@ -1862,6 +1862,22 @@ impl<'a> FnResolver<'a> {
 
     fn for_stmt(&mut self, f: &ForStmt) {
         if let Some(l) = &f.label {
+            // An inner loop taking the label of one around it makes `break a`
+            // leave the inner loop, whichever the writer meant — and the
+            // outer one cannot be named from inside at all.
+            if self.labels.contains(&l.name) {
+                self.diags.push(
+                    Diagnostic::error(
+                        codes::E0112,
+                        format!("the label `{}` is already used by a loop around this one", l.name),
+                    )
+                    .with_primary(l.span, "redeclared here")
+                    .with_note(
+                        "`break` and `continue` name the innermost loop with a label, so the \
+                         outer loop could no longer be reached; give this loop a label of its own",
+                    ),
+                );
+            }
             self.labels.push(l.name.clone());
         }
         self.loop_depth += 1;

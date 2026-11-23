@@ -144,7 +144,12 @@ codes! {
          trait implementations included, so an inherent method and a trait's of \
          the same name, or two traits', are a clash too: `x.m()` must name one \
          method, not whichever block came first. Likewise a type parameter \
-         bounded by two traits that both declare `m`.";
+         bounded by two traits that both declare `m`.\n\n\
+         A loop label is a name too: a loop inside another may not reuse the \
+         outer one's label, or `break outer` would leave the inner loop. And a \
+         map literal giving one known key twice, `{\"a\": 1, \"a\": 2}`, is a \
+         warning under this code: the later entry wins, and the earlier value \
+         is never seen.";
 
     E0113 = "E0113", "wrong number of arguments",
         "Kite has no default arguments, no variadics, and no overloading, so \

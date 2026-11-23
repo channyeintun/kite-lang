@@ -851,7 +851,8 @@ fn main() {
 ```
 
 The loop variable is a `let`: assigning to it is `E0114`. Labelled `break` and `continue`
-work on nested loops; the label goes before the `for` with a colon.
+work on nested loops; the label goes before the `for` with a colon. An inner loop may not
+reuse the label of a loop around it (`E0112`).
 
 ```kite
 fn main() {

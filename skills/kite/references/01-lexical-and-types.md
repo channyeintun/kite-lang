@@ -659,6 +659,10 @@ fn main() {
 }
 ```
 
+A literal that gives one key twice, `{"a": 1, "a": 2}`, keeps the later entry; where both
+keys are literals or constants it is the `E0112` warning, since the earlier value is never
+seen.
+
 ### Maps iterate in pairs
 
 A map **is** iterable, in insertion order, but only through a two-element

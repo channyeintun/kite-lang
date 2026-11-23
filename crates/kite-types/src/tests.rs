@@ -1083,6 +1083,20 @@ fn an_arm_after_a_misspelt_variant_is_unreachable() {
     assert!(c.render().contains("did you mean `Directory`?"), "{}", c.render());
 }
 
+/// A key the compiler knows, written twice in one map literal, is a warning:
+/// the later entry replaces the earlier, whose value nothing ever sees.
+#[test]
+fn a_map_literal_giving_one_key_twice_warns() {
+    let c = run("let KEY = \"a\"\n\
+                 fn main() {\n  let m = {\"a\": 1, \"b\": 2, KEY: 3}\n\
+                 \x20 let n = {1: \"x\", 2: \"y\"}\n  io.print(m.len() + n.len())\n}\n");
+    let twice: Vec<&kite_diag::Diagnostic> =
+        c.diags.iter().filter(|d| d.code == Some(codes::E0112)).collect();
+    assert_eq!(twice.len(), 1, "{}", c.render());
+    assert!(!c.diags.has_errors(), "must be a warning:\n{}", c.render());
+    assert!(c.render().contains("the key \"a\" is given twice"), "{}", c.render());
+}
+
 /// A built-in type with no text form cannot be given an `impl`, so E0207's
 /// note names what does compile for its shape — it used to say "write `impl
 /// Display for Option<int>`", which can never compile.

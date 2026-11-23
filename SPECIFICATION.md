@@ -749,6 +749,10 @@ m.remove("a")         // takes the entry out; a key that is not there is not an 
 
 Map indexing returns `Option<V>`, never a zero value.
 
+A map literal that gives one key twice keeps the later entry. Where the two
+keys are literals or constants, so the compiler can see they are equal, that is
+a warning ([E0112](#16-diagnostics)): the earlier value is never seen.
+
 `remove` shifts the entries after it down, so insertion order keeps meaning what
 it says and `keys()` and `values()` still line up element for element. Its
 receiver must be somewhere a change can be kept, exactly as `xs.push(v)`'s
@@ -881,6 +885,10 @@ outer: for row in grid {
     }
 }
 ```
+
+A loop inside another may not take the label of the one around it
+([E0112](#16-diagnostics)): `break outer` would then leave the inner loop, and
+the outer one could not be named from inside at all.
 
 ### 6.3 `defer`
 
