@@ -947,6 +947,26 @@ impl ResolveMap {
         self.modules.of(decl_index)
     }
 
+    /// How a diagnostic in `asking` names the module `identity`: the name the
+    /// one `use` of it there gives it — `money`, or its alias — and the
+    /// identity only where no `use` of `asking` names it, or two do.
+    ///
+    /// **A module is named as the reader's `use` writes it.** ``private to
+    /// module `src/money` `` beside the `money.secret` that was written named
+    /// one module two ways, the second a path below `kite.toml` nobody wrote.
+    pub fn module_as_spelled_in(&self, asking: &str, identity: &str) -> String {
+        let mut names = self
+            .modules
+            .aliases
+            .iter()
+            .filter(|((from, _), to)| from == asking && to.as_str() == identity)
+            .map(|((_, alias), _)| alias);
+        match (names.next(), names.next()) {
+            (Some(one), None) => one.clone(),
+            _ => identity.trim_start_matches('@').to_string(),
+        }
+    }
+
     /// The module a function was declared in.
     pub fn module_of_fn(&self, index: u32) -> &str {
         self.modules.of(self.fns[index as usize].decl_index)
@@ -1773,7 +1793,7 @@ impl<'a> FnResolver<'a> {
         if module.is_empty() || module == PRELUDE || module == self.module || is_pub {
             return;
         }
-        let module = module.to_string();
+        let module = self.map.module_as_spelled_in(&self.module, module);
         self.diags.push(
             Diagnostic::error(
                 codes::E0401,
@@ -2759,6 +2779,7 @@ fn private_in_header(map: &ResolveMap, module: &str, named: u32, header: &TypePa
         return None;
     }
     let what = decl.kind.describe();
+    let home = map.module_as_spelled_in(module, home);
     Some(
         Diagnostic::error(codes::E0401, format!("`{}` is private to module `{}`", header.text(), home))
             .with_primary(header.span, "not visible here")

@@ -1283,16 +1283,19 @@ fn a_member_imported_on_its_own_is_told_the_fix_in_the_words_written() {
     assert!(said.contains("as `lib.…`"), "{}", said);
 }
 
-/// A diagnostic names a module by where it is, so two `util`s are told apart
-/// in what the compiler says as well as in what it does.
+/// A privacy error names the module as the reader's `use` writes it, and the
+/// declaration it points at is in the module's own file, which is what tells
+/// two `util`s apart. It said ``private to module `a/util` `` beside the
+/// `util.hidden` that was written: one module named two ways.
 #[test]
-fn a_privacy_error_names_the_module_by_where_it_is() {
+fn a_privacy_error_names_the_module_as_the_use_writes_it() {
     let p = Project::new("identity-in-diagnostic");
     p.file("a/a.kite", "use util\n\npub fn go() -> str {\n  return util.hidden()\n}\n");
     p.file("a/util/util.kite", "fn hidden() -> str {\n  return \"x\"\n}\n");
     let main = p.file("main.kite", "use a\n\nfn main() {\n  io.print(a.go())\n}\n");
-    let said = p.run(&main).expect_err("private");
-    assert!(said.contains("private to module `a/util`"), "{}", said);
+    let said = p.run(&main).expect_err("private").replace('\\', "/");
+    assert!(said.contains("`util.hidden` is private to module `util`"), "{}", said);
+    assert!(said.contains("a/util/util.kite:1:4"), "{}", said);
 }
 
 // ---- each package's dependencies are its own ---------------------------------
