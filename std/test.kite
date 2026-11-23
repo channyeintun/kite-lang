@@ -56,7 +56,25 @@ pub fn equal_bool(found: bool, want: bool, what: str) -> error {
 /// Floats compare within a tolerance, because comparing them exactly is
 /// almost never what is meant — the compiler warns about `==` on floats for
 /// the same reason.
+///
+/// Equal floats pass whatever the tolerance, infinities included, and a NaN
+/// passes when a NaN was wanted. Both used to fail, since the test was only
+/// `|found − want| ≤ tolerance`, and `inf − inf` is a NaN, which is within no
+/// tolerance: `equal_float(inf, inf, 0.0, …)` said "expected inf, found inf".
+///
+/// ```kite
+/// let inf = 1.0 / 0.0
+/// assert(equal_float(inf, inf, 0.0, "inf") == nil, "an infinity is itself")
+/// assert(equal_float(0.0 / 0.0, 0.0 / 0.0, 0.0, "nan") == nil, "a NaN was wanted")
+/// assert(equal_float(0.0 / 0.0, 1.0, 1000.0, "nan") != nil, "and only then")
+/// ```
 pub fn equal_float(found: float, want: float, tolerance: float, what: str) -> error {
+    if found <= want && found >= want {
+        return nil
+    }
+    if !(found >= found) && !(want >= want) {
+        return nil
+    }
     if absf(found - want) <= tolerance {
         return nil
     }

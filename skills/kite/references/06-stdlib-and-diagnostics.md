@@ -1479,7 +1479,9 @@ the same thing `vite-plugin-kite` does to build a page.
 `is_true(cond, what)` `is_false` `equal_int` `equal_str` `equal_bool`
 `equal_float(found, want, tolerance, what)` `equal_ints` `equal_strs`
 `failed(err, what)` `ok(err, what)` `fail(what)` — each returns `error`, so
-`check` makes a test read as a list of claims.
+`check` makes a test read as a list of claims. `equal_float` passes equal
+floats whatever the tolerance, infinities included, and a NaN when a NaN was
+wanted.
 
 ```kite
 use std/test

@@ -1,4 +1,4 @@
-// std/math, std/fmt, std/time, std/errors and std/buffer.
+// std/math, std/fmt, std/time, std/errors, std/buffer and std/test itself.
 
 use std/test
 use std/math
@@ -243,6 +243,19 @@ fn checks() -> [error] {
         ))
     out.push(test.is_true(errors.wrap(nil, "context") == nil, "wrap passes nil through"))
     out.push(test.is_true(errors.mentions(wrapped, "no such file"), "mentions"))
+
+    // ---- test ----
+    // inf - inf is a NaN, which is within no tolerance, so equal infinities
+    // failed: "expected inf ± 0.0, found inf".
+    let inf = 1.0 / 0.0
+    let nan = 0.0 / 0.0
+    out.push(test.is_true(test.equal_float(inf, inf, 0.0, "inf") == nil, "equal_float(inf, inf)"))
+    out.push(test.is_true(test.equal_float(-inf, -inf, 0.0, "-inf") == nil, "equal_float(-inf, -inf)"))
+    out.push(test.is_true(test.equal_float(nan, nan, 0.0, "nan") == nil, "a NaN, when a NaN was wanted"))
+    out.push(test.is_true(test.equal_float(nan, 1.0, inf, "nan") != nil, "a NaN is not within any tolerance of 1"))
+    out.push(test.is_true(test.equal_float(1.0, nan, inf, "nan") != nil, "nor 1 of a NaN"))
+    out.push(test.is_true(test.equal_float(inf, 1.0, 0.5, "inf") != nil, "an infinity is not near 1"))
+    out.push(test.is_true(test.equal_float(1.0, 1.25, 0.5, "near") == nil, "within the tolerance"))
 
     // ---- buffer ----
     var b = buffer.f64(2)
