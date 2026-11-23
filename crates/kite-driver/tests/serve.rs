@@ -465,7 +465,10 @@ fn a_response_header_name_must_be_a_token_and_a_value_has_no_nul() {
          \x20   let nul = http.respond(incoming, http.ok(\"x\"),\n\
          \x20       [http.Header{ name: \"x-a\", value: \"a\\0b\" }])\n\
          \x20   let none: [http.Header] = []\n\
-         \x20   let last = http.respond(incoming, http.ok(\"colon=\\(colon != nil) nul=\\(nul != nil)\"), none)\n\
+         \x20   let big = http.respond(incoming, http.status(1000, \"x\"), none)\n\
+         \x20   var why = \"\"\n\
+         \x20   if big != nil {\n        why = big.message()\n    }\n\
+         \x20   let last = http.respond(incoming, http.ok(\"colon=\\(colon != nil) nul=\\(nul != nil) \\(why)\"), none)\n\
          \x20   if last != nil {\n        io.print(last.message())\n    }\n\
          }\n";
     let client = client_with(
@@ -474,7 +477,12 @@ fn a_response_header_name_must_be_a_token_and_a_value_has_no_nul() {
   console.log("body " + (await r.text()));"#,
     );
     let out = serve_under_node("header-names", src, &client);
-    assert_eq!(out, "cookie null\nbody colon=true nul=true\n", "{}", out);
+    assert_eq!(
+        out,
+        "cookie null\nbody colon=true nul=true http.respond: `1000` is not a status HTTP sends (100 to 599)\n",
+        "{}",
+        out
+    );
 }
 
 /// `run` sends the headers a handler put on its response, and answers 500 to a
@@ -500,12 +508,16 @@ fn run_sends_the_headers_a_handler_added() {
          fn plain(request: http.Request) -> http.Response {\n\
          \x20   return http.ok(\"plain\")\n\
          }\n\
+         fn zero(request: http.Request) -> http.Response {\n\
+         \x20   return http.status(0, \"zero\")\n\
+         }\n\
          async fn main() {\n\
          \x20   let (server, err) = await http.open(0)\n\
          \x20   if err != nil {\n        io.print(err.message())\n        return\n    }\n\
          \x20   io.print(\"listening \\(http.port_of(server))\")\n\
          \x20   let routes = [\n\
          \x20       http.route(\"GET\", \"/api\", api),\n\
+         \x20       http.route(\"GET\", \"/zero\", zero),\n\
          \x20       http.route(\"GET\", \"/bad\", bad),\n\
          \x20       http.route(\"GET\", \"/plain\", plain),\n\
          \x20   ]\n\
@@ -517,13 +529,15 @@ fn run_sends_the_headers_a_handler_added() {
   console.log("api " + a.status + " " + a.headers.get("content-type") + " " + a.headers.getSetCookie().join(" "));
   const b = await fetch(`http://127.0.0.1:${port}/bad`);
   console.log("bad " + b.status + " " + JSON.stringify(b.headers.get("set-cookie")));
+  const z = await fetch(`http://127.0.0.1:${port}/zero`);
+  console.log("zero " + z.status);
   const p = await fetch(`http://127.0.0.1:${port}/plain`);
   console.log("plain " + p.status + " " + p.headers.get("content-type") + " " + (await p.text()));"#,
     );
     let out = serve_under_node("run-headers", src, &client);
     assert_eq!(
         out,
-        "api 200 application/json a=1 b=2\nbad 500 null\nplain 200 text/plain; charset=utf-8 plain\n",
+        "api 200 application/json a=1 b=2\nbad 500 null\nzero 500\nplain 200 text/plain; charset=utf-8 plain\n",
         "{}",
         out
     );
