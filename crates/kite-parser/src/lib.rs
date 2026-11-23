@@ -3157,14 +3157,19 @@ impl<'a> Parser<'a> {
         // be a bare "expected an expression" with nothing to say what to
         // write instead. The rest of the statement is read, so the body is
         // not reported again for want of a header.
+        //
+        // The parser does not know what is walked, so the note gives the
+        // form for each: `for item in m` over a map is E0200, and a note that
+        // led with it sent a map's reader to another error.
         if self.at(T::Underscore) && self.peek_at(1) == T::In {
             let at = self.span();
             self.diags.push(
                 Diagnostic::error(codes::E0100, "a `for` loop needs a name for what it walks")
                     .with_primary(at, "`_` is not a binding on its own")
                     .with_note(
-                        "name the variable and leave it unread, as in `for item in xs`; `_` \
-                         stands for an element only inside a tuple binding, `for (_, v) in m`",
+                        "name what it walks and leave it unread: over a slice or a range, \
+                         `for item in xs`; over a map, `for (k, _) in m`, where `_` may stand \
+                         for one part of the pair",
                     ),
             );
             self.bump();
