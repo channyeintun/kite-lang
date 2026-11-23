@@ -145,3 +145,33 @@ fn a_whole_program_example_and_its_fix_are_what_they_say() {
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// `kitec fix main.kite` leaves the modules it imports alone, and then said
+/// their errors were ones it "cannot fix" — after showing a fix for each. They
+/// are in another file: the closing line says so and names it.
+#[test]
+fn fix_names_the_other_file_whose_errors_it_left() {
+    let dir = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("fix_other_file");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("m.kite"),
+        "pub fn f() -> int {\n    let k = 1\n    k = 2\n    return k\n}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("main.kite"),
+        "use m\n\nfn main() {\n    let a = 1\n    a = 3\n    io.print(m.f() + a)\n}\n",
+    )
+    .unwrap();
+    let out = kitec(&["fix", dir.join("main.kite").to_str().unwrap()]);
+    assert!(!out.status.success());
+    let said = stderr(&out);
+    assert!(said.contains("applied 1 fix"), "{}", said);
+    assert!(said.contains("in other files has fixes of its own"), "{}", said);
+    assert!(said.contains("m.kite"), "{}", said);
+    assert!(!said.contains("cannot fix"), "{}", said);
+    // Run on the module itself, the fix applies and nothing is left.
+    let out = kitec(&["fix", dir.join("m.kite").to_str().unwrap()]);
+    assert!(out.status.success(), "{}", stderr(&out));
+}

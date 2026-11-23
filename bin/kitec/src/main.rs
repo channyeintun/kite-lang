@@ -653,7 +653,7 @@ fn fix_file(path: &str, src: &str) -> ExitCode {
     if edits.is_empty() {
         eprintln!("nothing to fix in {}", path);
         eprint!("{}", result.render_diagnostics());
-        return still_failing(&result);
+        return still_failing(&result, path);
     }
     // Back to front: an edit near the end cannot move one before it.
     edits.sort_by_key(|(start, _, _)| std::cmp::Reverse(*start));
@@ -677,23 +677,57 @@ fn fix_file(path: &str, src: &str) -> ExitCode {
             if after.diags.has_errors() {
                 eprint!("{}", after.render_diagnostics());
             }
-            still_failing(&after)
+            still_failing(&after, path)
         }
         Err(e) => fail(&format!("cannot write `{}`: {}", path, e)),
     }
 }
 
 /// How `kitec fix` ends: failing while the file still has errors.
-fn still_failing(result: &kite_driver::Compilation) -> ExitCode {
-    let errors = result.diags.error_count();
-    if errors == 0 {
+///
+/// An error whose fixes all point into another file is not one `kitec fix`
+/// "cannot fix": it only leaves that file alone, as it leaves the standard
+/// library alone. Those are counted apart and the files named, so the way on
+/// is `kitec fix <that file>` and not a search for a fix that does not exist.
+fn still_failing(result: &kite_driver::Compilation, path: &str) -> ExitCode {
+    let own = result.sources.iter().find(|(_, name)| name == path).map(|(id, _)| id);
+    let (mut stuck, mut elsewhere) = (0usize, 0usize);
+    let mut files: Vec<String> = Vec::new();
+    for d in result.diags.iter().filter(|d| d.severity == kite_diag::Severity::Error) {
+        let spans: Vec<_> = d.fixes.iter().flat_map(|f| f.edits.iter()).map(|e| e.span).collect();
+        if spans.is_empty() || spans.iter().any(|s| Some(s.file) == own) {
+            stuck += 1;
+            continue;
+        }
+        elsewhere += 1;
+        for s in spans {
+            let name = result.sources.iter().find(|(id, _)| *id == s.file).map(|(_, n)| n.to_string());
+            if let Some(name) = name {
+                if !files.contains(&name) {
+                    files.push(name);
+                }
+            }
+        }
+    }
+    let plural = |n: usize| if n == 1 { "" } else { "s" };
+    if stuck == 0 && elsewhere == 0 {
         return ExitCode::SUCCESS;
     }
-    fail(&format!(
-        "{} error{} left that `kitec fix` cannot fix",
-        errors,
-        if errors == 1 { "" } else { "s" }
-    ))
+    if elsewhere > 0 {
+        eprintln!(
+            "error: {} error{} in other files {} fixes of {} own; `kitec fix` changes only the \
+             file it is given, so run it on {}",
+            elsewhere,
+            plural(elsewhere),
+            if elsewhere == 1 { "has" } else { "have" },
+            if elsewhere == 1 { "its" } else { "their" },
+            files.iter().map(|f| format!("`{}`", f)).collect::<Vec<_>>().join(", ")
+        );
+    }
+    if stuck == 0 {
+        return ExitCode::FAILURE;
+    }
+    fail(&format!("{} error{} left that `kitec fix` cannot fix", stuck, plural(stuck)))
 }
 
 /// `--emit native` — write the object file, then link it into an executable.
