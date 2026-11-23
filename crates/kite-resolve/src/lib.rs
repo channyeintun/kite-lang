@@ -906,7 +906,7 @@ impl ResolveMap {
         )
         .with_primary(
             member.span,
-            format!("`{}` declares no public type of this name", module.trim_start_matches('@')),
+            format!("`{}` declares no public type of this name", head.name),
         );
         Some(match nearest(&member.name, &members) {
             Some(near) => d.with_note(format!("a similar type is in `{}`: `{}`", head.name, near)),
@@ -945,6 +945,26 @@ impl ResolveMap {
     /// The module an item was declared in.
     pub fn module_of_item(&self, decl_index: usize) -> &str {
         self.modules.of(decl_index)
+    }
+
+    /// How a diagnostic in `asking` names the module `identity`: the name the
+    /// one `use` of it there gives it — `money`, or its alias — and the
+    /// identity only where no `use` of `asking` names it, or two do.
+    ///
+    /// **A module is named as the reader's `use` writes it.** ``private to
+    /// module `src/money` `` beside the `money.secret` that was written named
+    /// one module two ways, the second a path below `kite.toml` nobody wrote.
+    pub fn module_as_spelled_in(&self, asking: &str, identity: &str) -> String {
+        let mut names = self
+            .modules
+            .aliases
+            .iter()
+            .filter(|((from, _), to)| from == asking && to.as_str() == identity)
+            .map(|((_, alias), _)| alias);
+        match (names.next(), names.next()) {
+            (Some(one), None) => one.clone(),
+            _ => identity.trim_start_matches('@').to_string(),
+        }
     }
 
     /// The module a function was declared in.
@@ -1791,7 +1811,7 @@ impl<'a> FnResolver<'a> {
         if module.is_empty() || module == PRELUDE || module == self.module || is_pub {
             return;
         }
-        let module = module.to_string();
+        let module = self.map.module_as_spelled_in(&self.module, module);
         self.diags.push(
             Diagnostic::error(
                 codes::E0401,
@@ -2552,12 +2572,14 @@ impl<'a> FnResolver<'a> {
         if imported.is_none() && nearest(&name.name, &members).is_none() {
             return None;
         }
-        let shown = module.trim_start_matches('@');
+        // The module as the reader's `use` spells it, as the title and the note
+        // do: its identity is a path below `kite.toml` (`src/money`), which the
+        // `use` never wrote.
         let mut d = Diagnostic::error(
             codes::E0111,
             format!("cannot find `{}` in module `{}`", name.name, spelled),
         )
-        .with_primary(name.span, format!("`{}` declares nothing public of this name", shown));
+        .with_primary(name.span, format!("`{}` declares nothing public of this name", spelled));
         d = match nearest(&name.name, &members) {
             Some(near) => d.with_note(format!("a similar name is in `{}`: `{}`", spelled, near)),
             None => d.with_note(format!(
@@ -2776,6 +2798,7 @@ fn private_in_header(map: &ResolveMap, module: &str, named: u32, header: &TypePa
         return None;
     }
     let what = decl.kind.describe();
+    let home = map.module_as_spelled_in(module, home);
     Some(
         Diagnostic::error(codes::E0401, format!("`{}` is private to module `{}`", header.text(), home))
             .with_primary(header.span, "not visible here")

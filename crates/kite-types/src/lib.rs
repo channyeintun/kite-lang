@@ -7417,7 +7417,12 @@ impl<'a> Checker<'a> {
         self.diags.push(
             Diagnostic::error(
                 codes::E0401,
-                format!("{} `{}` is private to module `{}`", what, name, module),
+                format!(
+                    "{} `{}` is private to module `{}`",
+                    what,
+                    name,
+                    self.resolved.module_as_spelled_in(&self.module, &module)
+                ),
             )
             .with_primary(span, "not visible here")
             .with_secondary(
@@ -7463,7 +7468,12 @@ impl<'a> Checker<'a> {
         self.diags.push(
             Diagnostic::error(
                 codes::E0401,
-                format!("{} `{}` is private to module `{}`", what, name, decl_module),
+                format!(
+                    "{} `{}` is private to module `{}`",
+                    what,
+                    name,
+                    self.resolved.module_as_spelled_in(&self.module, &decl_module)
+                ),
             )
             .with_primary(span, "not visible here")
             .with_secondary(decl, format!("this {} is not marked `pub`", what))
@@ -11818,6 +11828,7 @@ impl<'a> Checker<'a> {
             return;
         }
         let (shown, enum_span) = (decl.name.trim_start_matches('@').to_string(), decl.span);
+        let module = self.resolved.module_as_spelled_in(&self.module, &module);
         self.diags.push(
             Diagnostic::error(codes::E0401, format!("`{}` is private to module `{}`", shown, module))
                 .with_primary(span, format!("`{}` is a variant of `{}`, not visible here", name, shown))
@@ -15234,6 +15245,7 @@ fn check_type_visible(
     if decl.is_pub || home.is_empty() || home == kite_resolve::PRELUDE || home == module {
         return;
     }
+    let home = resolved.module_as_spelled_in(module, home);
     diags.push(
         Diagnostic::error(codes::E0401, format!("`{}` is private to module `{}`", written, home))
             .with_primary(span, "not visible here")

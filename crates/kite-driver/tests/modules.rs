@@ -1308,16 +1308,19 @@ fn a_member_imported_on_its_own_is_told_the_fix_in_the_words_written() {
     assert!(said.contains("as `lib.…`"), "{}", said);
 }
 
-/// A diagnostic names a module by where it is, so two `util`s are told apart
-/// in what the compiler says as well as in what it does.
+/// A privacy error names the module as the reader's `use` writes it, and the
+/// declaration it points at is in the module's own file, which is what tells
+/// two `util`s apart. It said ``private to module `a/util` `` beside the
+/// `util.hidden` that was written: one module named two ways.
 #[test]
-fn a_privacy_error_names_the_module_by_where_it_is() {
+fn a_privacy_error_names_the_module_as_the_use_writes_it() {
     let p = Project::new("identity-in-diagnostic");
     p.file("a/a.kite", "use util\n\npub fn go() -> str {\n  return util.hidden()\n}\n");
     p.file("a/util/util.kite", "fn hidden() -> str {\n  return \"x\"\n}\n");
     let main = p.file("main.kite", "use a\n\nfn main() {\n  io.print(a.go())\n}\n");
-    let said = p.run(&main).expect_err("private");
-    assert!(said.contains("private to module `a/util`"), "{}", said);
+    let said = p.run(&main).expect_err("private").replace('\\', "/");
+    assert!(said.contains("`util.hidden` is private to module `util`"), "{}", said);
+    assert!(said.contains("a/util/util.kite:1:4"), "{}", said);
 }
 
 // ---- each package's dependencies are its own ---------------------------------
@@ -1917,6 +1920,10 @@ fn a_module_reached_as_part_of_two_packages_is_refused() {
         let said = p.run(&main).expect_err("one module, two packages");
         assert!(said.contains("E0404"), "{}", said);
         assert!(said.contains("it was first reached here"), "{}", said);
+        // The module is named once, in the title, as the `use`s spell it: the
+        // note did not say it again as the canonical absolute path.
+        assert!(said.contains("inner` is already loaded as part of"), "{}", said);
+        assert!(said.contains("= note: it is one module,"), "no path in the note: {}", said);
     }
     // One route alone is fine.
     let one = p.file("src/one.kite", &format!("use d/inner\n\n{}", body));
@@ -2135,4 +2142,39 @@ fn a_module_that_imports_itself_is_told_so() {
     let main = p.file("main.kite", "use ui\n\nfn main() {\n  io.print(ui.f())\n}\n");
     let said = p.run(&main).expect_err("a cycle of one");
     assert!(said.contains("module `ui` imports itself"), "{}", said);
+}
+
+/// A module is named in `E0111` and `E0204` the way the `use` that brought it
+/// in writes it. The title and the note said `money`; the label under the
+/// member said `src/money`, its identity below the package's `kite.toml`,
+/// which nothing in the program ever wrote.
+#[test]
+fn a_missing_member_names_its_module_as_the_use_writes_it() {
+    let p = Project::new("missing-member-label");
+    p.file("kite.toml", "[package]\nname = \"app\"\nversion = \"0.1.0\"\n");
+    p.file("src/money.kite", "pub fn zero() -> int {\n  return 0\n}\n");
+    let main = p.file(
+        "src/main.kite",
+        "use money\n\nfn main() {\n  let a: money.Nothing = 1\n  io.print(money.nothing())\n}\n",
+    );
+    let said = p.run(&main).expect_err("members that are not there");
+    assert!(said.contains("E0111") && said.contains("E0204"), "{}", said);
+    assert!(said.contains("`money` declares nothing public of this name"), "{}", said);
+    assert!(said.contains("`money` declares no public type of this name"), "{}", said);
+    assert!(!said.contains("src/money"), "{}", said);
+}
+
+/// A block string that never closes reads the rest of the file as its text, so
+/// a `\(a)` after it is some later line and not a hole its author wrote. It
+/// named the very binding being defined, and was `cannot find `a`` as a second
+/// error for the one mistake. (Not a corpus file: a file with a lexical error
+/// cannot be formatted, and the tree's Kite is always formatted.)
+#[test]
+fn a_hole_swallowed_by_an_unterminated_block_string_is_not_a_second_error() {
+    let p = Project::new("swallowed-hole");
+    let main = p.file("main.kite", "fn main() {\n    let a = \"\"\"ab\n    io.print(\"\\(a)\")\n}\n");
+    let said = p.run(&main).expect_err("an unterminated string");
+    assert!(said.contains("E0001"), "{}", said);
+    assert!(!said.contains("E0111"), "{}", said);
+    assert!(said.contains("1 previous error"), "{}", said);
 }

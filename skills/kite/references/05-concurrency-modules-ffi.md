@@ -671,7 +671,9 @@ A module is identified by the file or directory it was loaded from, and named
 by its path within its package — below the directory of its `kite.toml`, or of
 the entry file when there is none: `a/util` for `a/util.kite` there,
 `md/util` for `util.kite` inside a dependency called `md`. That is the name a
-diagnostic uses — ``private to module `a/util` ``. So `use util` inside `a/`
+type of it is printed under (``found `a/util.T` ``); a module the file at fault
+imports is named as its `use` writes it — ``private to module `util` `` inside
+`a/`, with the declaration it points at in `a/util/`. So `use util` inside `a/`
 and `use util` inside `b/` are two modules, each spelled `util` in the file
 that imported it; a nested `lib/x` beside a top-level `x` is not a cycle; and a
 module whose `util` does not exist gets `E0400` rather than whichever `util`
