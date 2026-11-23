@@ -320,8 +320,10 @@ pub fn sending_with(headers: str) -> Options {
 /// Joined here from parts that arrive separately, which is what makes "the
 /// program meant two headers" and "a value added one" decidable, as it is for
 /// [`respond`]. A name that is not an HTTP token, or a value carrying a line
-/// break, is refused rather than stripped: there is no escaping that keeps
-/// the meaning.
+/// break, a NUL or another control character, or a character past U+00FF, is
+/// refused rather than stripped — as `respond` refuses it:
+/// there is no escaping that keeps the meaning, and the host would otherwise
+/// fail with its own wording.
 ///
 /// ```kite ignore
 /// let (opts, err) = http.sending_pairs([http.Header{ name: "x-user", value: name }])
@@ -339,6 +341,11 @@ pub fn sending_pairs(headers: [Header]) -> (Options, error) {
         }
         if has_nul(h.value) {
             return _, errors.new("http: the value of `\(h.name)` contains a NUL byte")
+        }
+        if !carriable(h.value) {
+            return _, errors.new(
+                "http: the value of `\(h.name)` contains a control character or one past U+00FF, which a header cannot carry; encode it first, with encode_component",
+            )
         }
         lines.push("\(h.name): \(h.value)")
     }
@@ -368,7 +375,15 @@ fn is_token(name: str) -> bool {
 /// The host drops a line with no colon without a word, so a value carrying a
 /// newline and then something that is not a header vanished rather than
 /// failing. A line break at the very end of a line is allowed, since `\r\n`
-/// between lines is a habit worth tolerating; one anywhere else is not.
+/// between lines is a habit worth tolerating; one anywhere else is not. A value
+/// the host cannot put on the wire is refused here, in Kite's words, rather than
+/// failing in the host's.
+///
+/// ```kite
+/// assert(header_lines_error("x-a: b\r\nx-c: d\r\n") == nil, "ordinary lines")
+/// assert(header_lines_error("x-price: 5\u{20AC}") != nil, "a character past U+00FF")
+/// assert(header_lines_error("x-name: caf\u{E9}\tok") == nil, "Latin-1 and a tab")
+/// ```
 fn header_lines_error(text: str) -> error {
     var n = 0
     for raw in split(text, "\n") {
@@ -383,6 +398,11 @@ fn header_lines_error(text: str) -> error {
         let at = line.index_of(":")
         if line.index_of("\r") >= 0 || at <= 0 || !is_token(line.slice(0, at).trim()) {
             return errors.new("http: header line \(n) is not `name: value`")
+        }
+        if !carriable(line.slice(at + 1, line.len())) {
+            return errors.new(
+                "http: header line \(n) has a control character or one past U+00FF in its value, which a header cannot carry; encode it first, with encode_component",
+            )
         }
     }
     return nil
