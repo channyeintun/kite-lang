@@ -163,7 +163,10 @@ async fn main() {
 
 Note the shape of the type: `async fn fetch(id: int) -> (str, error)` produces
 `Task<(str, error)>`, and `await` on it yields the pair, which is then
-destructured. The taint analysis (`E0302`) still applies across the `await` —
+destructured. That type cannot be written, though: `(str, error)` written as a
+type is a plain tuple, not a result, so `var ts: [Task<(str, error)>] = []` refuses
+`ts.push(fetch(1))` (`E0200`). Let a value give the type instead — `var ts =
+[fetch(1)]`. The taint analysis (`E0302`) still applies across the `await` —
 and before it: a task whose result holds an error is watched like the error
 itself. Called as a bare statement, or bound and never awaited, it is `E0302`,
 since its body would run and fail with nobody to hear it. Await it, return it,

@@ -12636,6 +12636,37 @@ impl<'a> Checker<'a> {
             self.pair_is_not_a_tuple(found, expected, span, because);
             return;
         }
+        // The same difference one level in: `[Task<(int, error)>]` written
+        // as a type holds tuples, and `load(1)` is the task of a result.
+        if self.types.name(found) == self.types.name(expected)
+            && self.holds_pair(found) != self.holds_pair(expected)
+        {
+            let name = self.types.name(found);
+            let (headline, primary) = if self.holds_pair(found) {
+                (
+                    format!("expected `{}` of a tuple, found one of the result of a fallible call", name),
+                    "this holds a result whose error has to be checked, not a tuple",
+                )
+            } else {
+                (
+                    format!("expected `{}` of the result of a fallible call, found one of a tuple", name),
+                    "this holds a tuple, not a result",
+                )
+            };
+            let mut d = Diagnostic::error(codes::E0200, headline).with_primary(span, primary);
+            if let Some(b) = because {
+                d = d.with_secondary(b, "written as a type, the `(T, error)` here is a tuple");
+            }
+            d = d.with_note(
+                "a `(T, error)` written as a type is a plain tuple, so a type holding the result \
+                 of a fallible call cannot be written",
+            );
+            d = d.with_note(
+                "leave the type out and let a value give it, as in `var tasks = [load(1)]`",
+            );
+            self.diags.push(d);
+            return;
+        }
         let mut d = Diagnostic::error(
             codes::E0200,
             format!("expected `{}`, found `{}`", self.types.name(expected), self.types.name(found)),
@@ -12718,6 +12749,23 @@ impl<'a> Checker<'a> {
             )
         };
         self.diags.push(d);
+    }
+
+    /// Whether a type is, or holds, the result of a fallible call.
+    fn holds_pair(&self, ty: TyId) -> bool {
+        if let Some(inner) = self.types.task_payload(ty) {
+            return self.holds_pair(inner);
+        }
+        match self.types.kind(ty) {
+            TyKind::Fallible(_) => true,
+            TyKind::Slice(e) | TyKind::Optional(e) => self.holds_pair(*e),
+            TyKind::Map(k, v) => self.holds_pair(*k) || self.holds_pair(*v),
+            TyKind::Tuple(es) => es.iter().any(|e| self.holds_pair(*e)),
+            TyKind::Fn { params, ret } => {
+                params.iter().any(|p| self.holds_pair(*p)) || self.holds_pair(*ret)
+            }
+            _ => false,
+        }
     }
 
     /// Whether a type is, or is built from, one that failed to check.

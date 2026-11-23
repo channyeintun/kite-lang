@@ -2155,6 +2155,27 @@ fn a_result_where_a_written_tuple_is_wanted_says_what_to_write() {
         fn main() {\n  let p = g()\n  let (v, err) = p\n  if err != nil {\n    return\n  }\n  io.print(v)\n}\n");
 }
 
+/// The same difference inside another type printed the same twice:
+/// "expected `Task<(int, error)>`, found `Task<(int, error)>`". It names the
+/// difference there too, and says the type cannot be written.
+#[test]
+fn a_result_inside_a_written_type_says_what_differs() {
+    let c = run("async fn load(n: int) -> (int, error) {\n  return n, nil\n}\n\
+        async fn main() {\n  var tasks: [Task<(int, error)>] = []\n  tasks.push(load(1))\n\
+        \x20 for t in tasks {\n    let (n, err) = await t\n    if err == nil {\n      io.print(n)\n    }\n  }\n}\n");
+    assert_eq!(c.codes(), vec!["E0200"], "{}", c.render());
+    let text = c.render();
+    assert!(!text.contains("found `Task<(int, error)>`"), "{}", text);
+    assert!(
+        text.contains("expected `Task<(int, error)>` of a tuple, found one of the result of a fallible call"),
+        "{}",
+        text
+    );
+    ok("async fn load(n: int) -> (int, error) {\n  return n, nil\n}\n\
+        async fn main() {\n  var tasks = [load(1)]\n  tasks.push(load(2))\n\
+        \x20 for t in tasks {\n    let (n, err) = await t\n    if err == nil {\n      io.print(n)\n    }\n  }\n}\n");
+}
+
 /// A default method's body is checked once per block that takes it, so a
 /// mistake in it that is not about the implementing type was reported once
 /// per `impl`, by the resolver and by the checker alike. It is reported once.
