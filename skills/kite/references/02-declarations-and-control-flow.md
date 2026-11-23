@@ -408,11 +408,16 @@ fn main() {
 ## 4. Closures
 
 A closure is `|params| body`. The body is either a single expression or a block. A block
-body that *produces* a value needs an explicit `-> T`, because there is nothing else to
-check its `return` statements against; a block that only acts — `|| { increment(state) }` —
-needs nothing. Parameter types come from the context the closure is used in, so
-`apply(|x| x * 2, 21)` infers `x` from `apply`'s signature; where there is no context,
-annotate them.
+body that *produces* a value needs an explicit `-> T` unless the context states it (an
+annotated binding, a field, a parameter of type `fn() -> int`), because there is nothing
+else to check its `return` statements against; a block that only acts —
+`|| { increment(state) }` — needs nothing. The one place a block body's result is learned
+from its `return`s is a generic parameter whose result nothing has fixed yet: against
+`run<T>(g: fn() -> T)`, `run(|| { return 6 })` makes `T` an `int`, and a body returning
+`n, nil` or `_, err` makes it fallible for `fn() -> (T, error)`. Parameter types come from
+the context the closure is used in, so `apply(|x| x * 2, 21)` infers `x` from `apply`'s
+signature — through an `Option<fn(int) -> int>` too; where there is no context, annotate
+them.
 
 ```kite
 fn apply(f: fn(int) -> int, x: int) -> int {

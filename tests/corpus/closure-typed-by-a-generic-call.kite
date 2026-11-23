@@ -1,0 +1,27 @@
+// A closure passed to a generic call is told each parameter type the other
+// arguments fixed, and its result solves the rest: `|c| c.count` against
+// `fn(T) -> U` with `T` fixed by `items` is a `fn(Counter) -> int`. So the
+// one thing wrong with the `parallel` call is the one reported — it used to
+// be E0209 for `U` and E0211 for `c` too. A parameter nothing fixes is
+// E0211 alone, not also `cannot infer T`.
+
+use std/task
+
+struct Counter {
+    var count: int
+}
+
+fn each<T>(f: fn(T) -> int) -> int {
+    return 0
+}
+
+async fn go(items: [Counter]) {
+    let t = await task.parallel(items, |c| c.count) //~ ERROR E0520
+    io.print(t.len())
+}
+
+fn main() {
+    io.print(each(|n| 1)) //~ ERROR E0211
+    let doubled = map([1, 2], |n| n * 2)
+    io.print(doubled.len())
+}

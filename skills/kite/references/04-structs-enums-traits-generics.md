@@ -1512,13 +1512,12 @@ fn main() {
 }
 ```
 
-A closure's parameter types come from the parameter it is passed to, once that
-parameter's type is fully known. `fold(items, 0, |acc, item| acc + item.price)`
-and `filter(xs, |n| n > 0)` need no annotation, because every type parameter in
-the function type is fixed by the other arguments. When the closure is the only
-thing that could fix one — `U` in `fn(T) -> U` — a bare `|n| …` is `E0211`,
-"cannot infer the type of `n`", even though `T` is known. Annotate the
-parameter, or pass a named function.
+A closure's parameter types come from the parameter it is passed to, each one once
+the other arguments have fixed its type. `fold(items, 0, |acc, item| acc + item.price)`,
+`filter(xs, |n| n > 0)` and `apply([1, 2, 3], |n| "n\(n)")` below need no annotation:
+`T` is fixed by the slice, and `U` in `fn(T) -> U` — which only the closure could
+fix — is whatever it returns (a block body's `return`s say it). A parameter whose own
+type nothing fixes is still `E0211`, "cannot infer the type of `n`".
 
 ```kite
 fn apply<T, U>(items: [T], f: fn(T) -> U) -> [U] {
@@ -1537,25 +1536,19 @@ fn main() {
     for s in apply([1, 2, 3], label) {
         io.print(s)
     }
-    for s in apply([1, 2], |n: int| "x\(n)") {
+    for s in apply([1, 2], |n| "x\(n)") {
         io.print(s)
     }
 }
 ```
 
 ```kite fails
-fn apply<T, U>(items: [T], f: fn(T) -> U) -> [U] {
-    var out: [U] = []
-    for item in items {
-        out.push(f(item))
-    }
-    return out
+fn each<T>(f: fn(T) -> int) -> int {
+    return 0
 }
 
 fn main() {
-    for s in apply([1, 2, 3], |n| "n\(n)") { //~ E0211
-        io.print(s)
-    }
+    io.print(each(|n| 1)) //~ E0211
 }
 ```
 

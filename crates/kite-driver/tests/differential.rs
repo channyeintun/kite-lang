@@ -5811,6 +5811,79 @@ fn main() {
 "#,
         "v5s\nr7\n",
     ),
+    // A closure is typed by the place it is used: through an `Option<fn …>`
+    // (an argument, a binding, a field, a fallible one), with `-> (T, error)`
+    // written on it as the fallible form wherever it stands, and — passed
+    // where a generic `fn() -> T` or `fn() -> (T, error)` is wanted — with a
+    // block body's result learned from its `return`s. Each of these was
+    // E0211 or E0200.
+    (
+        "a-closure-is-typed-by-where-it-is-used",
+        r#"struct Hooks {
+  on_load: Option<fn() -> (int, error)>
+  on_step: Option<fn(int) -> int>
+}
+struct Job<T> {
+  run: fn() -> (T, error)
+}
+fn apply(f: Option<fn(int) -> int>, x: int) -> int {
+  if f != nil {
+    return f(x)
+  }
+  return x
+}
+fn run<T>(g: fn() -> T) -> T {
+  return g()
+}
+fn retry<T>(g: fn() -> (T, error)) -> (T, error) {
+  let (v, err) = g()
+  check err
+  return v, nil
+}
+fn main() {
+  io.print(apply(|n| n * 3, 2))
+  let f: Option<fn(int) -> int> = |n| n + 1
+  if f != nil {
+    io.print(f(2))
+  }
+  let h = Hooks{ on_load: || { return 1, nil }, on_step: |x| x + 10 }
+  let step = h.on_step
+  if step != nil {
+    io.print(step(2))
+  }
+  let load = h.on_load
+  if load != nil {
+    let (n, e) = load()
+    if e == nil {
+      io.print(n)
+    }
+  }
+  let g: fn() -> (bool, error) = || -> (bool, error) { return true, nil }
+  let (b, e1) = g()
+  if e1 == nil {
+    io.print(b)
+  }
+  let j = Job{ run: || -> (str, error) { return "job", nil } }
+  let (s, e2) = j.run()
+  if e2 == nil {
+    io.print(s)
+  }
+  io.print(run(|| {
+    return 6
+  }))
+  let (v, e3) = retry(|| {
+    if false {
+      return _, errors.new("no")
+    }
+    return 7, nil
+  })
+  if e3 == nil {
+    io.print(v)
+  }
+}
+"#,
+        "6\n3\n12\n1\ntrue\njob\n6\n7\n",
+    ),
     // An `Option<fn(…)>` proved present is the function it holds, so it can
     // be called as written, after an `if` or an early return. The call
     // looked at the declared type and said it was not a function.

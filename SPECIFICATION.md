@@ -626,9 +626,22 @@ let total = fold(items, 0, |acc, item| acc + item.price)   // types from `fold`'
 ```
 
 A closure's parameter types come from the place it is used: an annotated
-binding, or the parameter it is passed to once the other arguments have fixed
-that parameter's type. Where nothing fixes them, `|x| x * 2` is
-[E0211](#16-diagnostics), and the parameter is annotated instead.
+binding, a field, or the parameter it is passed to — each of the closure's
+parameters once the other arguments have fixed its type, so `map(xs, |n| n * 2)`
+knows `n` from `xs`. The place is looked through `Option`: a closure where an
+`Option<fn(int) -> int>` is wanted is typed as one where an `fn(int) -> int` is.
+Where nothing fixes them, `|x| x * 2` is [E0211](#16-diagnostics), and the
+parameter is annotated instead.
+
+Its result type comes from the same place, else from `-> T` written on it, else
+from an expression body's own type. A block body with none of these returns
+`()` — except where it is passed to a generic function's parameter whose result
+is a type parameter nothing else fixes, as `run<T>(g: fn() -> T)` or `map`'s
+`U`. Then its `return` statements say what it returns: `run(|| { return 6 })`
+makes `T` an `int`, and where `fn() -> (T, error)` is wanted (or a `return`
+gives a pair or `_, err`) the closure is fallible, so `retry(|| { … return n,
+nil })` solves `T` from `n`. `-> (T, error)` written on a closure is the
+fallible form wherever it stands, exactly as on a named function.
 
 **Closures capture by value, taken when the closure is made.** Because `let`
 bindings are immutable, the vast majority of captures are trivially safe: the

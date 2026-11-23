@@ -516,6 +516,14 @@ pub fn subst(ty: TyId, targs: &[TyId], types: &mut Types) -> TyId {
     types.substitute(ty, targs)
 }
 
+/// Replace every `Param` in a body with the type argument at its index —
+/// every expression's type, the type arguments of calls in it and its
+/// patterns' types. The checker uses it to settle a type it learned only
+/// partway through the body.
+pub fn substitute_body(b: &mut Block, targs: &[TyId], types: &mut Types) {
+    substitute_block(b, targs, types)
+}
+
 fn substitute_block(b: &mut Block, targs: &[TyId], types: &mut Types) {
     for s in &mut b.stmts {
         for e in stmt_exprs(s) {
