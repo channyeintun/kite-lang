@@ -334,6 +334,26 @@ fn a_bad_doc_example_fails_alone() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A fence that uses what another fence declares is not blamed for a third
+/// fence's mistake: compiled without the bad one, it still has the helper it
+/// calls. And of two fences that declare one name, only the second fails.
+#[test]
+fn a_fence_that_uses_another_is_not_blamed_for_a_third() {
+    let src = "/// A.\n///\n/// ```kite\n/// fn helper() -> int {\n///     return 2\n/// }\n/// ```\npub fn one() -> int {\n    return 1\n}\n\n\
+/// B.\n///\n/// ```kite\n/// assert(helper() == 2, \"two\")\n/// ```\npub fn two() -> int {\n    return 2\n}\n\n\
+/// C.\n///\n/// ```kite\n/// assert(one() == \"x\", \"bad\")\n/// ```\npub fn three() -> int {\n    return 3\n}\n\n\
+/// D.\n///\n/// ```kite\n/// fn helper() -> int {\n///     return 3\n/// }\n/// ```\npub fn four() -> int {\n    return 4\n}\n";
+    let dir = scratch("doc-uses", "t.kite", src);
+    let Some((ok, out, err)) = kitec_in(&dir, &["test", "t.kite"]) else { return };
+    assert!(!ok, "{}{}", out, err);
+    assert!(out.contains("ok       ./t.kite:3 (doc example, compiled)"), "{}", out);
+    assert!(out.contains("ok       ./t.kite:14 (doc example)"), "{}", out);
+    assert!(out.contains("FAILED   ./t.kite:23 (doc example)"), "{}", out);
+    assert!(out.contains("FAILED   ./t.kite:32 (doc example)"), "{}", out);
+    assert!(out.contains("2 passed, 2 failed"), "{}", out);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// A file with no tests says so in one line and still succeeds. The line used
 /// to describe a signature, `-> (int, error)`, that a test does not need.
 #[test]

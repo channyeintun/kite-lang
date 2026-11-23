@@ -555,18 +555,23 @@ fn run_tests(result: &kite_driver::Compilation, path: &str, src: &str) -> ExitCo
 /// a declaration goes.
 ///
 /// **A fence that does not compile fails alone.** One compilation fails for
-/// every fence in it, so when it fails each fence is tried on its own against
-/// the module: the ones that do not compile are reported with their own
-/// diagnostics, by the line they opened on, and the rest are compiled again
-/// without them and run. When the module itself is what is broken, no fence
-/// is to blame and every one of them is reported, as before.
+/// every fence in it, so when it fails the blame is found by where the errors
+/// are: the first fence that holds one is reported with its own diagnostics,
+/// by the line it opened on, and the rest are compiled again without it —
+/// until they compile. Fences are taken out one at a time, the first first,
+/// because a fence that does not parse can leave errors in the ones after it,
+/// and because a fence may use what another declares: taken out with the bad
+/// one, it would be blamed for that one. When the module itself is what is
+/// broken, or no error is inside a fence (two fences that declare one name
+/// are told at the module's own line, say), no fence is singled out and every
+/// remaining one is reported, as before.
 fn run_doc_tests(
     out: &mut dyn Write,
     path: &str,
     src: &str,
     docs: &[kite_driver::doctest::DocTest],
 ) -> (usize, usize) {
-    use kite_driver::doctest::{augment_mapped, render_diagnostics};
+    use kite_driver::doctest::{augment_mapped, diagnostic_line, render_diagnostics, render_diagnostics_where};
     // **Never a release build**, whatever `--release` said. An example fails
     // by trapping — an `assert` that did not hold — and a release build drops
     // `assert`, so under `--release` every example with a wrong claim in it
@@ -587,7 +592,7 @@ fn run_doc_tests(
         (compiled, names, remap)
     };
     let mut docs: Vec<&kite_driver::doctest::DocTest> = docs.iter().collect();
-    let (mut compiled, mut names, _) = build(&docs);
+    let (mut compiled, mut names, mut remap) = build(&docs);
     let mut bad = 0;
     if compiled.failed() {
         // Is it the module? Then every fence is named, once, with the
@@ -600,29 +605,33 @@ fn run_doc_tests(
             let _ = write!(out, "{}", render_diagnostics(&alone, path, src, &alone_map));
             return (docs.len(), docs.len());
         }
-        let mut good = Vec::new();
-        for d in &docs {
-            let (one, _, one_map) = build(&[d]);
-            if one.failed() {
-                bad += 1;
-                let _ = writeln!(out, "FAILED   {}:{} (doc example)", path, d.line);
-                let _ = write!(out, "{}", render_diagnostics(&one, path, src, &one_map));
-            } else {
-                good.push(*d);
-            }
-        }
-        docs = good;
-        let (again, again_names, remap) = build(&docs);
-        (compiled, names) = (again, again_names);
-        if compiled.failed() {
-            // Each fence compiles alone and they do not together: two of
-            // them declare the same name, say. Nobody is singled out.
+    }
+    while compiled.failed() {
+        let errors: Vec<u32> = compiled
+            .diags
+            .iter()
+            .filter(|d| d.severity == kite_diag::Severity::Error)
+            .filter_map(|d| diagnostic_line(&compiled, path, &remap, d))
+            .collect();
+        let Some(at) = docs.iter().position(|d| errors.iter().any(|l| d.lines().contains(l))) else {
+            // No error is inside a fence: nobody is singled out.
             for d in &docs {
                 let _ = writeln!(out, "FAILED   {}:{} (doc example)", path, d.line);
             }
             let _ = write!(out, "{}", render_diagnostics(&compiled, path, src, &remap));
             return (bad + docs.len(), bad + docs.len());
-        }
+        };
+        let d = docs.remove(at);
+        bad += 1;
+        let _ = writeln!(out, "FAILED   {}:{} (doc example)", path, d.line);
+        let _ = write!(
+            out,
+            "{}",
+            render_diagnostics_where(&compiled, path, src, &remap, |x| {
+                diagnostic_line(&compiled, path, &remap, x).is_some_and(|l| d.lines().contains(&l))
+            })
+        );
+        (compiled, names, remap) = build(&docs);
     }
     let mut failed = 0;
     // A declaring fence contributes no name: compiling was the whole test.

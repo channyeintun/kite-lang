@@ -192,6 +192,22 @@ impl Remap {
         let (start, len) = self.real_lines[(real as usize - 1).min(self.real_lines.len() - 1)];
         start + (column + shift as i64).clamp(0, len as i64) as u32
     }
+
+    /// The 1-based line of the real file that `at`, an offset in the
+    /// augmented source, stands for — what tells which fence a diagnostic
+    /// is in.
+    pub fn line(&self, at: u32) -> u32 {
+        let line = self.augmented_starts.partition_point(|&s| s <= at).saturating_sub(1);
+        self.origins.get(line).or(self.origins.last()).map_or(0, |o| o.0)
+    }
+}
+
+impl DocTest {
+    /// The lines of the real file the fence occupies, its opening and closing
+    /// lines included.
+    pub fn lines(&self) -> std::ops::RangeInclusive<u32> {
+        self.line..=self.line + self.code.lines().count() as u32 + 1
+    }
 }
 
 /// [`augment`], and the map back from the augmented source to the real file.
@@ -279,6 +295,30 @@ pub fn render_diagnostics(
     src: &str,
     remap: &Remap,
 ) -> String {
+    render_diagnostics_where(compiled, path, src, remap, |_| true)
+}
+
+/// The real line of the entry file a diagnostic's primary span points at, or
+/// `None` when it points into another file (a module the program uses).
+pub fn diagnostic_line(
+    compiled: &crate::Compilation,
+    path: &str,
+    remap: &Remap,
+    d: &kite_diag::Diagnostic,
+) -> Option<u32> {
+    let span = d.primary_span()?;
+    let entry = compiled.sources.iter().find(|(_, name)| name == path)?.0;
+    (span.file == entry).then(|| remap.line(span.start))
+}
+
+/// [`render_diagnostics`], for only the diagnostics `keep` accepts.
+pub fn render_diagnostics_where(
+    compiled: &crate::Compilation,
+    path: &str,
+    src: &str,
+    remap: &Remap,
+    keep: impl Fn(&kite_diag::Diagnostic) -> bool,
+) -> String {
     use kite_span::{SourceMap, Span};
     let mut sources = SourceMap::new();
     let mut entry = None;
@@ -299,7 +339,7 @@ pub fn render_diagnostics(
         Span { file: span.file, start, end: end.max(start) }
     };
     let mut diags = kite_diag::DiagBag::new();
-    for d in compiled.diags.iter() {
+    for d in compiled.diags.iter().filter(|d| keep(d)) {
         let mut d = d.clone();
         for label in &mut d.labels {
             label.span = moved(label.span);
