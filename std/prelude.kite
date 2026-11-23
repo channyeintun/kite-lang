@@ -418,30 +418,50 @@ pub fn split(s: str, sep: str) -> [str] {
         out.push(s)
         return out
     }
-    var rest = s
-    for rest.len() > 0 {
-        let at = rest.index_of(sep)
-        if at < 0 {
-            out.push(rest)
-            return out
+    // A walk along `s` rather than `index_of` on what is left: cutting the
+    // rest off after every piece copied the tail each time, which made a
+    // string of many pieces quadratic to split.
+    let first = sep.code_at(0)
+    var start = 0
+    var i = 0
+    for i + sep.len() <= s.len() {
+        if s.code_at(i) == first && s.slice(i, i + sep.len()) == sep {
+            out.push(s.slice(start, i))
+            i = i + sep.len()
+            start = i
+        } else {
+            i = i + 1
         }
-        out.push(rest.slice(0, at))
-        rest = rest.slice(at + sep.len(), rest.len())
     }
-    out.push("")
+    out.push(s.slice(start, s.len()))
     return out
 }
 
 /// The pieces joined with `sep` between them.
 pub fn join(pieces: [str], sep: str) -> str {
-    var out = ""
-    for i in 0..pieces.len() {
-        if i > 0 {
-            out = out + sep
-        }
-        out = out + pieces[i]
+    if pieces.len() == 0 {
+        return ""
     }
-    return out
+    // Joined in pairs, and then the pairs in pairs, with the separator
+    // between each two. Adding each piece to one growing string copied
+    // everything before it every time, which is quadratic in the length of
+    // the answer on every target; in pairs, each character is copied once per
+    // level, and there are only as many levels as it takes to halve the count
+    // to one.
+    var level = pieces
+    for level.len() > 1 {
+        var next: [str] = []
+        var i = 0
+        for i + 1 < level.len() {
+            next.push(level[i] + sep + level[i + 1])
+            i = i + 2
+        }
+        if i < level.len() {
+            next.push(level[i])
+        }
+        level = next
+    }
+    return level[0]
 }
 
 /// `s` with every occurrence of `from` replaced by `to`.
@@ -1030,17 +1050,17 @@ pub fn equal_ignoring_case(left: str, right: str) -> bool {
 }
 
 fn mapped(text: str, from: str, to: str) -> str {
-    var out = ""
+    var out: [str] = []
     for i in 0..text.len() {
         let c = text.slice(i, i + 1)
         let at = from.index_of(c)
         if at >= 0 {
-            out = out + to.slice(at, at + 1)
+            out.push(to.slice(at, at + 1))
         } else {
-            out = out + c
+            out.push(c)
         }
     }
-    return out
+    return join(out, "")
 }
 
 /// `text` at least `width` long, padded on the left with `with`. Numbers in a
@@ -1304,26 +1324,27 @@ pub fn hash_str(text: str) -> int {
 /// back. What `@derive(Debug)` uses for a `str` field, so a value containing a
 /// comma or a brace cannot be mistaken for structure.
 pub fn debug_str(text: str) -> str {
-    var out = "\""
+    var out = ["\""]
     for i in 0..text.len() {
         let c = text.slice(i, i + 1)
         if c == "\"" {
-            out = out + "\\\""
+            out.push("\\\"")
         } else {
             if c == "\\" {
-                out = out + "\\\\"
+                out.push("\\\\")
             } else {
                 if c == "\n" {
-                    out = out + "\\n"
+                    out.push("\\n")
                 } else {
                     if c == "\t" {
-                        out = out + "\\t"
+                        out.push("\\t")
                     } else {
-                        out = out + c
+                        out.push(c)
                     }
                 }
             }
         }
     }
-    return out + "\""
+    out.push("\"")
+    return join(out, "")
 }

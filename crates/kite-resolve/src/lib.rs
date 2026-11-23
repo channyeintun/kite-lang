@@ -626,6 +626,11 @@ pub struct ResolveMap {
     variants_by_module: HashMap<String, Vec<NamedVariant>>,
     /// The module `variant_index` currently describes.
     variant_scope: Option<String>,
+    /// Each entry of `types` by its name, which is where a type is looked up
+    /// from. A search of the list was linear per lookup, and following a
+    /// chain of aliases looks one up per link: two thousand aliases took
+    /// seconds to resolve. Written where `types` is.
+    type_names: HashMap<String, u32>,
 }
 
 impl ResolveMap {
@@ -765,7 +770,7 @@ impl ResolveMap {
     }
 
     fn find_type(&self, name: &str) -> Option<u32> {
-        self.types.iter().position(|t| t.name == name).map(|i| i as u32)
+        self.type_names.get(name).copied()
     }
 
     /// The struct or enum a type found by name stands for: the type itself,
@@ -950,6 +955,7 @@ fn collect_types(file: &SourceFile, map: &mut ResolveMap, diags: &mut DiagBag) {
             continue;
         }
         seen.insert(&name.name, name.span);
+        map.type_names.entry(name.name.clone()).or_insert(map.types.len() as u32);
         map.types.push(TypeDecl {
             name: name.name.clone(),
             kind,
@@ -966,12 +972,26 @@ fn collect_types(file: &SourceFile, map: &mut ResolveMap, diags: &mut DiagBag) {
 /// lose the `int`. A cycle is left for the checker, which reports it where
 /// it expands aliases.
 fn index_aliases(file: &SourceFile, map: &mut ResolveMap) {
+    // Where each alias's chain ends, once some walk has found it: every
+    // alias a walk passes through ends where the walk does, so a chain is
+    // walked once however many of its links are aliases. Walking it afresh
+    // from each was quadratic in a chain's length.
+    let mut end: Vec<Option<usize>> = vec![None; map.types.len()];
+    let mut on_path = vec![false; map.types.len()];
     for index in 0..map.types.len() {
-        if map.types[index].kind != TypeKind::Alias {
+        if map.types[index].kind != TypeKind::Alias || end[index].is_some() {
             continue;
         }
+        let mut path = Vec::new();
         let mut at = index;
-        for _ in 0..map.types.len() {
+        let last = loop {
+            if let Some(e) = end[at] {
+                break e;
+            }
+            // A cycle ends on an alias, which names nothing to record.
+            if on_path[at] {
+                break at;
+            }
             let decl = &map.types[at];
             let named = match (&decl.kind, &file.items[decl.decl_index]) {
                 (TypeKind::Alias, Item::TypeAlias(a)) => match &a.ty {
@@ -982,11 +1002,23 @@ fn index_aliases(file: &SourceFile, map: &mut ResolveMap) {
                 },
                 _ => None,
             };
+            on_path[at] = true;
+            path.push(at);
             match named {
                 Some(next) => at = next as usize,
-                None => break,
+                None => break at,
             }
+        };
+        for p in path {
+            on_path[p] = false;
+            end[p] = Some(last);
         }
+    }
+    for (index, last) in end.into_iter().enumerate() {
+        if map.types[index].kind != TypeKind::Alias {
+            continue;
+        }
+        let at = last.unwrap_or(index);
         let plain = match &file.items[map.types[at].decl_index] {
             Item::Struct(st) => st.generics.is_empty(),
             Item::Enum(e) => e.generics.is_empty(),

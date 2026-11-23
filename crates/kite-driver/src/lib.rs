@@ -675,6 +675,83 @@ fn compile_reading(
     c
 }
 
+/// `{:#?}`'s layout, laid out from `{:?}`'s text in one pass.
+///
+/// The standard library indents pretty `Debug` output by wrapping the writer
+/// once per level of nesting, so every byte passes through as many wrappers as
+/// it is deep. An AST is as deep as its program nests — an `else if` chain is
+/// one `if` inside the next — and 300 links took half a minute to dump. The
+/// compact form costs nothing per level, and its structure is all in its
+/// brackets and its `, `s: an opening bracket with something inside starts an
+/// indented line, a `, ` ends one, and a closing bracket gets the trailing
+/// comma `{:#?}` writes. String and character literals are copied whole, so a
+/// bracket or a comma inside one is text.
+fn pretty_debug(compact: &str) -> String {
+    const INDENT: &str = "    ";
+    fn newline(out: &mut String, depth: usize) {
+        out.push('\n');
+        for _ in 0..depth {
+            out.push_str(INDENT);
+        }
+    }
+    let mut out = String::with_capacity(compact.len() * 2);
+    // How many brackets are open and broken across lines.
+    let mut depth = 0;
+    let mut chars = compact.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '"' | '\'' => {
+                out.push(c);
+                while let Some(d) = chars.next() {
+                    out.push(d);
+                    if d == '\\' {
+                        if let Some(e) = chars.next() {
+                            out.push(e);
+                        }
+                    } else if d == c {
+                        break;
+                    }
+                }
+            }
+            '{' | '(' | '[' => {
+                out.push(c);
+                let close = match c {
+                    '{' => '}',
+                    '(' => ')',
+                    _ => ']',
+                };
+                if chars.peek() == Some(&close) {
+                    out.push(chars.next().unwrap_or(close));
+                    continue;
+                }
+                // A struct's fields are written `{ a: 1 }`; the space after
+                // the brace is the line break now.
+                if c == '{' && chars.peek() == Some(&' ') {
+                    chars.next();
+                }
+                depth += 1;
+                newline(&mut out, depth);
+            }
+            '}' | ')' | ']' => {
+                if out.ends_with(' ') {
+                    out.pop();
+                }
+                out.push(',');
+                depth = depth.saturating_sub(1);
+                newline(&mut out, depth);
+                out.push(c);
+            }
+            ',' if chars.peek() == Some(&' ') && depth > 0 => {
+                chars.next();
+                out.push(',');
+                newline(&mut out, depth);
+            }
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
 #[allow(clippy::too_many_arguments)]
 fn run_passes(
     prelude: FileId,
@@ -698,7 +775,7 @@ fn run_passes(
     let mut ast = kite_parser::parse(file, &src, &tokens, diags);
 
     if emit == Emit::Ast {
-        return (format!("{:#?}\n", ast), None, None, None, Index::default());
+        return (pretty_debug(&format!("{:?}", ast)) + "\n", None, None, None, Index::default());
     }
 
     // Modules the program reaches, transitively. Nothing is compiled that
@@ -1074,15 +1151,12 @@ fn run_passes(
                 )
                 .with_primary(limit.span, limit.what)
                 // Each target's own limit, since the note once said the other
-                // two had none: WebAssembly counts locals, not the literal's
-                // staging, and refuses past fifty thousand of them. A literal
-                // is only this long here when its elements need no computing
-                // (constants and locals): past a short window, one computed
-                // element at a time is built into it.
+                // two had none: WebAssembly counts locals, and refuses past
+                // fifty thousand of them. A literal is never what is too
+                // large: every backend builds one a window at a time.
                 .with_note(
-                    "split the function, or build a large literal of constants in a loop; \
-                     `--native` does not have this limit, and `--emit wasm` accepts a \
-                     literal of any length and up to 50000 locals in one function",
+                    "split the function; `--native` does not have this limit, and \
+                     `--emit wasm` accepts up to 50000 locals in one function",
                 ),
             );
         }
@@ -1419,6 +1493,86 @@ fn signature_text(sources: &SourceMap, at: Span, param_count: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The AST dump is `{:#?}`'s layout to the byte, on every example and on
+    /// the standard library — strings with brackets, commas and quotes in them
+    /// included — without being written by `{:#?}`.
+    #[test]
+    fn the_ast_dump_is_laid_out_as_pretty_debug_is() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let mut files: Vec<PathBuf> = Vec::new();
+        for dir in ["examples", "std"] {
+            for entry in std::fs::read_dir(root.join(dir)).expect("read the directory") {
+                let path = entry.expect("an entry").path();
+                if path.extension().is_some_and(|e| e == "kite") {
+                    files.push(path);
+                }
+            }
+        }
+        files.push(root.join("tests/std/json_test.kite"));
+        assert!(files.len() > 20, "found only {} files", files.len());
+        let edge = "fn main() {\n  let s = \"a, b) [c] {d} \\\"e\\\" \\\\\"\n  let t = ()\n  io.print(\"\\(s) \\(t)\")\n}\n";
+        let mut sources: Vec<String> = files
+            .iter()
+            .map(|f| std::fs::read_to_string(f).expect("read a source"))
+            .collect();
+        sources.push(edge.to_string());
+        for src in &sources {
+            let mut map = SourceMap::new();
+            let file = map.add("t.kite", src.clone());
+            let mut diags = DiagBag::new();
+            let tokens = kite_lexer::tokenize(file, src, &mut diags);
+            let ast = kite_parser::parse(file, src, &tokens, &mut diags);
+            let want = format!("{:#?}", ast);
+            assert_eq!(pretty_debug(&format!("{:?}", ast)), want);
+        }
+    }
+
+    /// A chain of five thousand aliases — of `int`, and of a struct, which is
+    /// what a literal through the last of them builds — checks and runs in a
+    /// fraction of a second. Each alias's chain was walked afresh from it, and
+    /// each link was found by searching every declared type, so 2,000 took
+    /// seconds and 20,000 over a minute. The bound is generous by two orders
+    /// of magnitude.
+    #[test]
+    fn a_long_chain_of_aliases_checks_quickly() {
+        let n = 5000;
+        let mut src = String::from("type A0 = int\nstruct S {\n  v: int\n}\ntype B0 = S\n");
+        for i in 1..n {
+            src.push_str(&format!("type A{} = A{}\ntype B{} = B{}\n", i, i - 1, i, i - 1));
+        }
+        src.push_str(&format!(
+            "fn main() {{\n  let x: A{} = 3\n  let s = B{}{{ v: x }}\n  io.print(s.v)\n}}\n",
+            n - 1,
+            n - 1
+        ));
+        let started = std::time::Instant::now();
+        let c = compile("aliases.kite", &src, Emit::Check);
+        assert!(!c.failed(), "{}", c.render_diagnostics());
+        let mut out = Vec::new();
+        c.run(&mut out).expect("runs");
+        let took = started.elapsed();
+        assert_eq!(String::from_utf8(out).expect("UTF-8"), "3\n");
+        assert!(took < std::time::Duration::from_secs(20), "checking took {:?}", took);
+    }
+
+    /// An `else if` chain hundreds of links long dumps in about the time it
+    /// takes to write the dump: 300 links took half a minute, and 400 nearly
+    /// a minute and a half, when every byte passed through one indenting
+    /// writer per level. The bound is generous by two orders of magnitude.
+    #[test]
+    fn a_long_chain_dumps_its_ast_quickly() {
+        let mut branches = String::from("  if c == 0 {\n    io.print(0)\n  }");
+        for i in 1..400 {
+            branches.push_str(&format!(" else if c == {} {{\n    io.print({})\n  }}", i, i));
+        }
+        let src = format!("fn main() {{\n  let c = 7\n{}\n}}\n", branches);
+        let started = std::time::Instant::now();
+        let c = on_compiler_stack(move || compile("chain.kite", &src, Emit::Ast).output);
+        let took = started.elapsed();
+        assert!(c.starts_with("SourceFile {\n"), "{}", &c[..c.len().min(200)]);
+        assert!(took < std::time::Duration::from_secs(20), "the dump took {:?}", took);
+    }
 
     /// `wrap(wrap(…(x)))`, `depth` calls deep.
     fn nested(call: &str, depth: usize, core: &str) -> String {

@@ -68,9 +68,9 @@ pub struct Limit {
 /// diagnostic rather than emitting bytecode that means something else.
 ///
 /// The argument window is also where a literal's elements are staged, so this
-/// bounds a slice, map or struct literal too: a count is as wide as a
-/// register index, and a literal with more elements than a frame has
-/// registers would not fit either.
+/// bounds a struct or tuple literal too: a count is as wide as a register
+/// index. A slice or map literal stages at most [`mir::LITERAL_WINDOW`] items
+/// and adds the rest one at a time, so its length is not a limit.
 pub fn limits(program: &mir::Program) -> Vec<Limit> {
     let mut found = Vec::new();
     for func in &program.fns {
@@ -106,9 +106,11 @@ fn widest_window(func: &mir::Function) -> usize {
             | mir::Inst::Assign { value: mir::Rvalue::CallExtern { args, .. }, .. } => args.len(),
             mir::Inst::Assign { value: mir::Rvalue::StructNew { fields, .. }, .. }
             | mir::Inst::Assign { value: mir::Rvalue::EnumNew { fields, .. }, .. } => fields.len(),
-            mir::Inst::Assign { value: mir::Rvalue::SliceNew { elems }, .. }
-            | mir::Inst::Assign { value: mir::Rvalue::TupleNew { elems }, .. } => elems.len(),
-            mir::Inst::Assign { value: mir::Rvalue::MapNew { entries }, .. } => entries.len(),
+            mir::Inst::Assign { value: mir::Rvalue::TupleNew { elems }, .. } => elems.len(),
+            mir::Inst::Assign { value: mir::Rvalue::SliceNew { elems: items }, .. }
+            | mir::Inst::Assign { value: mir::Rvalue::MapNew { entries: items }, .. } => {
+                items.len().min(mir::LITERAL_WINDOW)
+            }
             _ => 0,
         })
         .max()
@@ -426,12 +428,18 @@ impl<'a> Emitter<'a> {
             }
 
             mir::Rvalue::MapNew { entries } => {
-                self.stage_args(entries);
+                let first = &entries[..entries.len().min(mir::LITERAL_WINDOW)];
+                self.stage_args(first);
                 self.code.push(Op::NewMap {
                     dst,
                     base: self.arg_base,
-                    count: width(entries.len()),
+                    count: width(first.len()),
                 });
+                for entry in entries[first.len()..].chunks(2) {
+                    let key = self.operand_reg(&entry[0], 0);
+                    let src = self.operand_reg(&entry[1], 1);
+                    self.code.push(Op::MapSet { obj: dst, key, src });
+                }
             }
             mir::Rvalue::MapGet { base, key } => {
                 let obj = self.operand_reg(base, 0);
@@ -468,13 +476,25 @@ impl<'a> Emitter<'a> {
                 });
             }
 
+            // A literal past the window is built a window at a time, as the
+            // other backends build it: the first window staged, and each item
+            // after it added to what has been built. Staged whole, a literal
+            // of constants took a register per element, and seventy thousand
+            // of them was a frame the bytecode cannot address. Writing into
+            // the literal before its last items are read is safe because none
+            // of them can be it: no slice or map holds its own type.
             mir::Rvalue::SliceNew { elems } => {
-                self.stage_args(elems);
+                let first = &elems[..elems.len().min(mir::LITERAL_WINDOW)];
+                self.stage_args(first);
                 self.code.push(Op::NewSlice {
                     dst,
                     base: self.arg_base,
-                    count: width(elems.len()),
+                    count: width(first.len()),
                 });
+                for elem in &elems[first.len()..] {
+                    let src = self.operand_reg(elem, 0);
+                    self.code.push(Op::SlicePush { obj: dst, src });
+                }
             }
             mir::Rvalue::IndexGet { base, index } => {
                 let obj = self.operand_reg(base, 0);

@@ -534,14 +534,14 @@ codes! {
          cannot represent it.\n\n\
          The bytecode VM addresses a frame's registers with sixteen bits, so \
          one function may use at most 65,536 of them: one per local and \
-         temporary, plus the widest call or literal it builds. A function \
-         past that — tens of thousands of locals, or a literal with tens of \
-         thousands of elements — used to be emitted anyway, with register \
-         numbers silently cut short, so that unrelated values shared a \
-         register.\n\n\
-         Split the function, or build the large literal in a loop.\n\n\
+         temporary, plus the widest call it makes. A function past that — \
+         tens of thousands of locals — used to be emitted anyway, with \
+         register numbers silently cut short, so that unrelated values shared \
+         a register.\n\n\
+         Split the function.\n\n\
          WebAssembly has a limit of its own: an engine accepts at most 50,000 \
          locals in one function, parameters included, and every local and \
-         temporary is one — though a literal's elements are not, so a long \
-         literal is no trouble there. The native target has neither limit.";
+         temporary is one. A long slice or map literal is no trouble on any \
+         target: past a short window, each element is added to what has been \
+         built. The native target has neither limit.";
 }

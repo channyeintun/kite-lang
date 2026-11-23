@@ -102,7 +102,9 @@ const REMEMBERED_BIT: u64 = 1 << 9;
 
 /// Header: two words. Word 0 is `kind | gc bits | aux << 32`; word 1 is
 /// kind-specific (a length, a variant, a capture count; for a slice, the
-/// length and the capacity — see [`slice_len`]). Payload slots follow.
+/// length and the capacity — see [`slice_len`]; for a string, its count of
+/// characters once something has counted them — see [`str_chars`]). Payload
+/// slots follow.
 const HEADER: usize = 16;
 
 #[inline]
@@ -331,6 +333,12 @@ struct Rt {
     shapes: Shapes,
     /// String constants, as immortal old-generation objects.
     strings: Vec<u64>,
+    /// Where every [`CHAR_STRIDE`]-th character starts, in the few long
+    /// strings that are not ASCII most recently used, keyed by address —
+    /// see [`str_byte_at`]. An address names one object only until a
+    /// collection moves or frees it, so a minor collection drops the
+    /// nursery's entries and a major one drops them all.
+    char_marks: Vec<(u64, Vec<u32>)>,
 
     // ---- the scheduler -------------------------------------------------
     tasks: Vec<Scheduled>,
@@ -514,6 +522,7 @@ pub extern "C" fn kite_rt_startup() {
             stack_maps: Vec::new(),
             shapes: Shapes::default(),
             strings: Vec::new(),
+            char_marks: Vec::new(),
             tasks: Vec::new(),
             clock: 0,
             wake_request: None,
@@ -1130,6 +1139,7 @@ fn collect_minor() {
         unsafe { for_each_ref_slot(p, &mut |s| evac_slot(s, &mut queue)) };
     }
     rt().nursery_top = 0;
+    rt().char_marks.retain(|(p, _)| !in_nursery(*p));
 
     if rt().old_bytes > rt().threshold {
         collect_major();
@@ -1142,6 +1152,7 @@ fn collect_minor() {
 /// non-moving by design, which is what spares the runtime a read barrier.
 fn collect_major() {
     rt().major_collections += 1;
+    rt().char_marks.clear();
     let mut stack: Vec<*mut u8> = Vec::new();
     let mark_slot = |s: *mut u64, stack: &mut Vec<*mut u8>| {
         let v = unsafe { *s };
@@ -1867,6 +1878,95 @@ unsafe fn str_str<'a>(s: u64) -> &'a str {
     std::str::from_utf8_unchecked(str_bytes(s))
 }
 
+/// How many characters a string holds — counted once, then remembered.
+///
+/// A string's second header word is that memory: zero when the string is
+/// made (every constructor below writes it so), the count plus one once
+/// something has asked. Nothing else reads the word — the collector sizes a
+/// string from its byte length and copies the whole header when it moves
+/// one — and a string's bytes never change, so the count cannot go stale.
+/// Without it a parser's `input.slice(i, i + 1)` counted the whole input to
+/// clamp `i`, on every character.
+unsafe fn str_chars(s: u64) -> usize {
+    let word1 = (s as *mut u64).add(1);
+    if *word1 != 0 {
+        return (*word1 - 1) as usize;
+    }
+    let n = str_str(s).chars().count();
+    *word1 = n as u64 + 1;
+    n
+}
+
+/// Record a count the caller already knows, so the string is never walked
+/// to find it.
+unsafe fn str_set_chars(s: u64, n: usize) {
+    *(s as *mut u64).add(1) = n as u64 + 1;
+}
+
+/// The byte offset at which character `c` starts, for `c` at most the
+/// string's length in characters.
+///
+/// A string with as many characters as bytes is ASCII, so there the answer
+/// is `c` itself and indexing is constant time — the common case for the
+/// text a parser reads. A long string that is not ASCII has the start of
+/// every [`CHAR_STRIDE`]-th character found once, as the VM's has, so no
+/// more than that many are walked; a short one is walked from the front.
+unsafe fn str_byte_at(s: u64, c: usize) -> usize {
+    let text = str_str(s);
+    if str_chars(s) == text.len() {
+        return c;
+    }
+    let (from, skip) = if text.len() > CHAR_STRIDE {
+        let marks = str_marks(s);
+        // The last mark, for `c == chars` on a whole number of strides.
+        let j = (c / CHAR_STRIDE).min(marks.len() - 1);
+        (marks[j] as usize, c - j * CHAR_STRIDE)
+    } else {
+        (0, c)
+    };
+    text[from..].char_indices().nth(skip).map_or(text.len(), |(b, _)| from + b)
+}
+
+const CHAR_STRIDE: usize = 64;
+const CHAR_MARKS_KEPT: usize = 4;
+
+/// The marks of a long string that is not ASCII, found in `Rt::char_marks`
+/// or made there: `marks[j]` is where character `j * CHAR_STRIDE` starts.
+/// Nothing here allocates on the Kite heap, so `s` cannot move meanwhile.
+unsafe fn str_marks<'a>(s: u64) -> &'a [u32] {
+    let rt = rt();
+    // Kept in the order last used, and the one used longest ago is the one
+    // let go: a loop that reads a long input and, between reads, each long
+    // piece it cut from it would otherwise push the input out every few
+    // pieces and index it afresh, which is quadratic again.
+    if let Some(at) = rt.char_marks.iter().position(|(p, _)| *p == s) {
+        let hit = rt.char_marks.remove(at);
+        rt.char_marks.push(hit);
+    } else {
+        let marks: Vec<u32> = str_str(s)
+            .char_indices()
+            .step_by(CHAR_STRIDE)
+            .map(|(b, _)| b as u32)
+            .collect();
+        if rt.char_marks.len() == CHAR_MARKS_KEPT {
+            rt.char_marks.remove(0);
+        }
+        rt.char_marks.push((s, marks));
+    }
+    &rt.char_marks[rt.char_marks.len() - 1].1
+}
+
+/// How many bytes the `k` characters starting at byte `start` take — so a
+/// slice walks to its start once, not to each end from the front.
+unsafe fn str_byte_at_from(s: u64, start: usize, k: usize) -> usize {
+    let text = str_str(s);
+    if str_chars(s) == text.len() {
+        return k;
+    }
+    let rest = &text[start..];
+    rest.char_indices().nth(k).map(|(b, _)| b).unwrap_or(rest.len())
+}
+
 /// A string's length as its header records it, or `None` past what 32 bits
 /// can say.
 fn str_len_field(len: usize) -> Option<u32> {
@@ -1932,6 +2032,12 @@ pub extern "C" fn kite_rt_str_concat(a: u64, b: u64) -> u64 {
             p.add(HEADER + abytes.len()),
             bbytes.len(),
         );
+        // Two counted halves make a counted whole, so a string built up
+        // piece by piece is never walked to learn its length.
+        let (ca, cb) = (obj_word1(a as *const u8), obj_word1(b as *const u8));
+        if ca != 0 && cb != 0 {
+            str_set_chars(p as u64, (ca - 1 + cb - 1) as usize);
+        }
         p as u64
     }
 }
@@ -1954,13 +2060,16 @@ pub extern "C" fn kite_rt_str_compare(a: u64, b: u64) -> i64 {
     }
 }
 
-// Every string operation counts characters, not bytes — the same walk the VM
-// does, at the same linear cost, because a string is text rather than
-// storage.
+// Every string operation counts characters, not bytes, because a string is
+// text rather than storage. The count is remembered in the header
+// ([`str_chars`]), an ASCII string indexes by byte, and any other long one
+// through marks found once ([`str_byte_at`]), so a loop over a long
+// string's characters is linear rather than quadratic —
+// as the VM's is, and as the Wasm backend's array of scalars is anyway.
 
 #[no_mangle]
 pub extern "C" fn kite_rt_str_len(s: u64) -> i64 {
-    unsafe { str_str(s).chars().count() as i64 }
+    unsafe { str_chars(s) as i64 }
 }
 
 #[no_mangle]
@@ -1987,27 +2096,20 @@ pub extern "C" fn kite_rt_str_trim(s: u64) -> u64 {
 pub extern "C" fn kite_rt_str_slice(s: u64, from: i64, to: i64) -> u64 {
     let mut s = s;
     unsafe {
-        let text = str_str(s);
         // Clamped rather than trapping: an out-of-range slice is an ordinary
         // condition in text processing.
-        let char_len = text.chars().count() as i64;
+        let char_len = str_chars(s) as i64;
         let from_c = from.clamp(0, char_len) as usize;
         let to_c = to.clamp(from.clamp(0, char_len), char_len) as usize;
-        let byte_at = |c: usize| {
-            text.char_indices()
-                .nth(c)
-                .map(|(b, _)| b)
-                .unwrap_or(text.len())
-        };
-        let start = byte_at(from_c);
-        let end = byte_at(to_c);
+        let start = str_byte_at(s, from_c);
+        let end = start + str_byte_at_from(s, start, to_c - from_c);
         let len = end - start;
         let header = str_word0(len);
         root(&mut s);
         let p = alloc(HEADER + round8(len));
         unroot(1);
         *(p as *mut u64) = header;
-        *(p as *mut u64).add(1) = 0;
+        str_set_chars(p as u64, to_c - from_c);
         std::ptr::copy_nonoverlapping(str_bytes(s).as_ptr().add(start), p.add(HEADER), len);
         p as u64
     }
@@ -2031,12 +2133,12 @@ pub extern "C" fn kite_rt_str_index_of(s: u64, needle: u64) -> i64 {
 #[no_mangle]
 pub extern "C" fn kite_rt_str_code_at(s: u64, at: i64) -> i64 {
     unsafe {
-        match usize::try_from(at)
-            .ok()
-            .and_then(|i| str_str(s).chars().nth(i))
-        {
-            Some(c) => c as i64,
-            None => -1,
+        match usize::try_from(at) {
+            Ok(i) if i < str_chars(s) => {
+                let start = str_byte_at(s, i);
+                str_str(s)[start..].chars().next().map_or(-1, |c| c as i64)
+            }
+            _ => -1,
         }
     }
 }

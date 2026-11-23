@@ -681,7 +681,7 @@ pub fn query_parameter(r: Request, name: str) -> Option<str> {
 /// `application/x-www-form-urlencoded` text decoded: `+` is a space, `%XX` a
 /// byte, and a `%` not followed by two hex digits is itself.
 fn form_decoded(text: str) -> str {
-    var out = ""
+    var out: [str] = []
     var bytes: [int] = []
     var i = 0
     for i < text.len() {
@@ -696,20 +696,20 @@ fn form_decoded(text: str) -> str {
             }
         }
         if bytes.len() > 0 {
-            out = out + utf8_decoded(bytes)
+            out.push(utf8_decoded(bytes))
             bytes = []
         }
         if c == 43 {
-            out = out + " "
+            out.push(" ")
         } else {
-            out = out + text.slice(i, i + 1)
+            out.push(text.slice(i, i + 1))
         }
         i += 1
     }
     if bytes.len() > 0 {
-        out = out + utf8_decoded(bytes)
+        out.push(utf8_decoded(bytes))
     }
-    return out
+    return join(out, "")
 }
 
 fn hex_value(text: str, at: int) -> int {
@@ -733,12 +733,12 @@ fn hex_value(text: str, at: int) -> int {
 /// run that cannot begin or continue a character becomes one U+FFFD, and the
 /// byte that broke a sequence is read again as the start of the next.
 fn utf8_decoded(bytes: [int]) -> str {
-    var out = ""
+    var out: [str] = []
     var i = 0
     for i < bytes.len() {
         let b = bytes[i]
         if b < 128 {
-            out = out + text.from_code(b)
+            out.push(text.from_code(b))
             i += 1
             continue
         }
@@ -768,7 +768,7 @@ fn utf8_decoded(bytes: [int]) -> str {
                 upper = 143
             }
         } else {
-            out = out + text.from_code(65533)
+            out.push(text.from_code(65533))
             i += 1
             continue
         }
@@ -787,13 +787,13 @@ fn utf8_decoded(bytes: [int]) -> str {
             }
         }
         if whole {
-            out = out + text.from_code(code)
+            out.push(text.from_code(code))
         } else {
-            out = out + text.from_code(65533)
+            out.push(text.from_code(65533))
         }
         i = j
     }
-    return out
+    return join(out, "")
 }
 
 /// A header's value out of the `name: value` lines a request carries.

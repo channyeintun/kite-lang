@@ -261,7 +261,11 @@ or JavaScript-string root exists.
 JavaScript strings appear only at a declared host or export boundary. The
 generated glue converts synchronously through one fixed 64 KiB scratch page in
 4,096-scalar chunks, and retains no converted value after the call. On native
-and bytecode targets the storage is GC-managed UTF-8. Kite programs observe
+and bytecode targets the storage is GC-managed UTF-8, indexed so that a loop
+over a string's characters is linear on every target: an ASCII string is
+indexed by byte, natively a string's length is counted once and kept, and for
+the few long strings a program has read most recently, its length and where
+every 64th character starts are found once and kept. Kite programs observe
 the same rule everywhere: indexing and length count Unicode scalar values,
 never bytes or UTF-16 code units.
 

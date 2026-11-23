@@ -188,7 +188,7 @@ fn parse_string(input: str, at: int) -> (Text, error) {
     if peek(input, at) != "\"" {
         return _, errors.new("json: expected a string at \(at)")
     }
-    var out = ""
+    var out: [str] = []
     var i = at + 1
     // Where the current run of ordinary characters began.
     //
@@ -204,7 +204,11 @@ fn parse_string(input: str, at: int) -> (Text, error) {
         let c = input.code_at(i)
         // `"` ends the string.
         if c == 34 {
-            return Text{ text: out + input.slice(run, i), next: i + 1 }, nil
+            if out.len() == 0 {
+                return Text{ text: input.slice(run, i), next: i + 1 }, nil
+            }
+            out.push(input.slice(run, i))
+            return Text{ text: join(out, ""), next: i + 1 }, nil
         }
         // RFC 8259 §7: a control character inside a string must be escaped.
         // Reading a raw one would accept a document no other parser does.
@@ -213,32 +217,32 @@ fn parse_string(input: str, at: int) -> (Text, error) {
         }
         // `\` ends the run: what follows is not itself.
         if c == 92 {
-            out = out + input.slice(run, i)
+            out.push(input.slice(run, i))
             let e = peek(input, i + 1)
             var width = 2
             if e == "n" {
-                out = out + "\n"
+                out.push("\n")
             } else {
                 if e == "t" {
-                    out = out + "\t"
+                    out.push("\t")
                 } else {
                     if e == "r" {
-                        out = out + "\r"
+                        out.push("\r")
                     } else {
                         if e == "b" {
-                            out = out + "\u{8}"
+                            out.push("\u{8}")
                         } else {
                             if e == "f" {
-                                out = out + "\u{c}"
+                                out.push("\u{c}")
                             } else {
                                 if e == "u" {
                                     let (decoded, uerr) = unicode_at(input, i)
                                     check uerr
-                                    out = out + decoded.text
+                                    out.push(decoded.text)
                                     width = decoded.width
                                 } else if e == "\"" || e == "\\" || e == "/" {
                                     // Each of these is itself.
-                                    out = out + e
+                                    out.push(e)
                                 } else {
                                     // `\x` used to read as `x`. The RFC lists
                                     // eight escapes and `\u`; anything else
@@ -494,20 +498,20 @@ fn number(n: float) -> str {
 }
 
 fn quote(s: str) -> str {
-    var out = "\""
+    var out = ["\""]
     for i in 0..s.len() {
         let c = s.slice(i, i + 1)
         if c == "\"" {
-            out = out + "\\\""
+            out.push("\\\"")
         } else {
             if c == "\\" {
-                out = out + "\\\\"
+                out.push("\\\\")
             } else {
                 if c == "\n" {
-                    out = out + "\\n"
+                    out.push("\\n")
                 } else {
                     if c == "\t" {
-                        out = out + "\\t"
+                        out.push("\\t")
                     } else {
                         // **Every other control character has to be escaped
                         // too.** RFC 8259 forbids a raw one inside a string,
@@ -519,27 +523,28 @@ fn quote(s: str) -> str {
                         let code = c.code_at(0)
                         if code < 32 {
                             if code == 13 {
-                                out = out + "\\r"
+                                out.push("\\r")
                             } else {
                                 if code == 8 {
-                                    out = out + "\\b"
+                                    out.push("\\b")
                                 } else {
                                     if code == 12 {
-                                        out = out + "\\f"
+                                        out.push("\\f")
                                     } else {
-                                        out = out + "\\u00" + hex2(code)
+                                        out.push("\\u00" + hex2(code))
                                     }
                                 }
                             }
                         } else {
-                            out = out + c
+                            out.push(c)
                         }
                     }
                 }
             }
         }
     }
-    return out + "\""
+    out.push("\"")
+    return join(out, "")
 }
 
 /// Two lowercase hex digits, for a `\u00XX` escape.
