@@ -432,7 +432,8 @@ leaves `x` present. An `if x == nil` whose branch always leaves — by `return`,
 narrowing applies in a `match` arm once an earlier arm has covered `nil`. A
 write to a `var` ends its narrowing unless the value written cannot be nil
 either; inside a loop, that holds for every write the loop's body makes, since
-the body runs again after each of them.
+the body runs again after each of them. Parentheses change nothing: `(x) !=
+nil` and `(x != nil)` narrow as `x != nil` does.
 
 Those are the only places narrowing happens. It does not reach the right
 operand of `&&` or `||` — `x != nil && x.n > 2` reads `x.n` from an optional
@@ -1275,6 +1276,11 @@ The rules:
 > nil`, leaves the failure where nothing can reach it again, and is `E0302`
 > there; a field, entry or element tested in place is still where it was
 > stored.
+
+Parentheses change nothing in any of this. `(e) != nil`, `nil == ((r))`,
+`r == (nil)` and `(r == nil)` are the tests they are written without them:
+they prove what those prove, narrow what those narrow, and leave owed what
+those leave owed.
 
 R1–R5 are about bindings, and R6 and R7 close the shapes they leave open: a
 call written as a statement makes no binding, so nothing in R1–R5 ever sees it,

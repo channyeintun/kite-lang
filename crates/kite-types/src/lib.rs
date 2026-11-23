@@ -4052,7 +4052,9 @@ impl<'a> Checker<'a> {
     /// Returns `None` unless the local's type is optional, so an `error` test
     /// (handled separately by the taint analysis) does not narrow anything.
     fn nil_test(&self, cond: &ast::Expr) -> Option<(u32, bool)> {
-        let ast::Expr::Binary { op, lhs, rhs, .. } = cond else {
+        // Parentheses change nothing: `(x) != nil` and `(x != nil)` are the
+        // test `x != nil` is.
+        let ast::Expr::Binary { op, lhs, rhs, .. } = unparen(cond) else {
             return None;
         };
         let is_eq = match op {
@@ -4060,7 +4062,7 @@ impl<'a> Checker<'a> {
             ast::BinaryOp::Ne => false,
             _ => return None,
         };
-        let path = match (lhs.as_ref(), rhs.as_ref()) {
+        let path = match (unparen(lhs), unparen(rhs)) {
             (ast::Expr::Path(p), ast::Expr::Nil(_)) => p,
             (ast::Expr::Nil(_), ast::Expr::Path(p)) => p,
             _ => return None,
@@ -4239,7 +4241,7 @@ impl<'a> Checker<'a> {
     /// exactly that branch is what lets a hand-written test do the same work as
     /// `check`.
     fn error_tested_by(&self, cond: &ast::Expr) -> Option<(u32, bool)> {
-        let ast::Expr::Binary { op, lhs, rhs, .. } = cond else {
+        let ast::Expr::Binary { op, lhs, rhs, .. } = unparen(cond) else {
             return None;
         };
         let is_eq = match op {
@@ -4247,7 +4249,7 @@ impl<'a> Checker<'a> {
             ast::BinaryOp::Ne => false,
             _ => return None,
         };
-        let path = match (lhs.as_ref(), rhs.as_ref()) {
+        let path = match (unparen(lhs), unparen(rhs)) {
             (ast::Expr::Path(p), ast::Expr::Nil(_)) => p,
             (ast::Expr::Nil(_), ast::Expr::Path(p)) => p,
             _ => return None,
@@ -4413,13 +4415,14 @@ impl<'a> Checker<'a> {
             // equality rules entirely.
             ast::Expr::Binary { op, lhs, rhs, span }
                 if matches!(op, ast::BinaryOp::Eq | ast::BinaryOp::Ne)
-                    && (matches!(lhs.as_ref(), ast::Expr::Nil(_))
-                        || matches!(rhs.as_ref(), ast::Expr::Nil(_))) =>
+                    && (matches!(unparen(lhs), ast::Expr::Nil(_))
+                        || matches!(unparen(rhs), ast::Expr::Nil(_))) =>
             {
-                let subject = if matches!(lhs.as_ref(), ast::Expr::Nil(_)) { rhs } else { lhs };
+                let subject = if matches!(unparen(lhs), ast::Expr::Nil(_)) { rhs } else { lhs };
                 // A nil test of an optional result does not read the failure
                 // it may hold: that is left to whichever side finds it there.
-                let held = match subject.as_ref() {
+                // Parentheses change nothing, so `(r) == nil` is that test too.
+                let held = match unparen(subject) {
                     ast::Expr::Path(p) => match self.resolved.lookup_use(p.span) {
                         Some(Res::Local(id)) if self.optional_result(id) => Some(id),
                         _ => None,
@@ -16557,6 +16560,16 @@ fn fresh_result(e: &hir::Expr) -> bool {
         ExprKind::Match { arms, .. } => arms.iter().any(|a| fresh_result(&a.body)),
         _ => false,
     }
+}
+
+/// An expression with the parentheses around it taken off. They change
+/// nothing in what it means, so nothing that asks what it is should see them.
+fn unparen(e: &ast::Expr) -> &ast::Expr {
+    let mut e = e;
+    while let ast::Expr::Paren { inner, .. } = e {
+        e = inner;
+    }
+    e
 }
 
 /// The binding a projection's base reads, and the elements it projects on
