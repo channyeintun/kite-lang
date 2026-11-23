@@ -1216,6 +1216,10 @@ pub fn atan2(y: float, x: float) -> float {
 /// that of ±1 — the nearest point that has one. A NaN answers a NaN; it used
 /// to be clamped into range and come back as -π/2, a NaN made into an angle.
 ///
+/// Through [`atan`]'s series, so not correctly rounded: within five units in
+/// the last place across the range, as measured against libm, and the same
+/// for `acos`.
+///
 /// ```kite
 /// assert(asin(1.0) == pi() / 2.0, "asin(1)")
 /// assert(!(asin(0.0 / 0.0) >= 0.0) && !(asin(0.0 / 0.0) < 0.0), "a NaN stays one")

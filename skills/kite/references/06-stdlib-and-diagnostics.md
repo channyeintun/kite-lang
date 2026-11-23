@@ -1258,9 +1258,25 @@ integers: `max_int()` `min_int()` `checked_add(a, b) -> Option<int>`
 
 `sqrt` is correctly rounded over the whole range; `trunc`, `floor`, `ceil` and
 `round` hand back a float that is already whole (anything from 2⁵²) rather than
-casting it through `int`. `sin`, `cos` and `tan` take whole quarter turns off
-an argument exactly however large it is, so `sin(1e300)` is right to a few
-units in the last place.
+casting it through `int`, and keep the sign of a zero (`round(-0.4)` is -0.0).
+`sin`, `cos` and `tan` take whole quarter turns off an argument exactly however
+large it is, so `sin(1e300)` is right to a few units in the last place.
+
+Accuracy, as the doc comments state it: `pow(base, n)` is by squaring in two
+floats and correctly rounded in practice, subnormal answers included
+(`pow(2.0, -1074)` is 5e-324); `exp` and `ln` are within one unit in the last
+place and almost always correctly rounded; `powf` hands a whole exponent to
+`pow`, so `powf(10.0, 2.0)` is exactly 100, and is within one unit otherwise.
+The inverse trigonometric functions are within a few units.
+
+Edges. A NaN in is a NaN out everywhere, and `min`, `max` and `clamp` carry
+one whichever side it is on (IEEE 754's `minimum`/`maximum`; -0.0 is the
+smaller zero). `exp` overflows to **infinity** past about 709.78, as IEEE 754
+has it; `pow`, `powf` and `atan2` follow C99's special values (`pow(0.0, -1)`
+is infinite, `powf(x, 0.0)` is 1 for every `x`, `atan2(-0.0, -1.0)` is -π).
+What a real function has no answer for answers a number rather than a NaN, by
+deliberate choice: `sqrt`, `ln` and `powf` of a negative base with a fractional
+exponent answer 0, and `asin`/`acos` past ±1 answer as at ±1.
 
 There is no `math.approx_eq`: the prelude's `approx_eq(a, b, tolerance)` is
 the one that exists, and it is what the float-equality warning suggests.
