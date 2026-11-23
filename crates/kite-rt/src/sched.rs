@@ -26,6 +26,7 @@
 //!
 //! A copy of the VM's `sched.rs`, as the rest of this scheduler is a copy of
 //! the VM's: the two must poll in the same order, so change them together.
+//! Below this comment the two are one text, and `tests` fails when they are not.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
