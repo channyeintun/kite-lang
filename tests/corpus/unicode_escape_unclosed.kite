@@ -4,5 +4,6 @@
 fn main() {
     io.print("[\u{41") //~ ERROR E0003
     io.print("\u{+41}") //~ ERROR E0003
+    io.print("\u41") //~ ERROR E0003
     io.print("\u{41}\u{1F600}")
 }

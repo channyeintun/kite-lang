@@ -14465,7 +14465,8 @@ pub(crate) fn decode_escapes_into(inner: &str, span: Span, diags: &mut DiagBag) 
             Some('u') => {
                 let mut hex = String::new();
                 let mut closed = false;
-                if chars.next() == Some('{') {
+                let opened = chars.next() == Some('{');
+                if opened {
                     for c in chars.by_ref() {
                         if c == '}' {
                             closed = true;
@@ -14478,6 +14479,11 @@ pub(crate) fn decode_escapes_into(inner: &str, span: Span, diags: &mut DiagBag) 
                 let value = if closed && digits { u32::from_str_radix(&hex, 16).ok() } else { None };
                 match value.and_then(char::from_u32) {
                     Some(c) => out.push(c),
+                    None if !opened => diags.push(
+                        Diagnostic::error(codes::E0003, "invalid unicode escape")
+                            .with_primary(span, "this `\\u` is not followed by `{`")
+                            .with_note("a unicode escape is hex digits between braces: `\\u{41}`"),
+                    ),
                     None if !closed => diags.push(
                         Diagnostic::error(codes::E0003, "unclosed unicode escape")
                             .with_primary(span, "this `\\u{` is never closed")
