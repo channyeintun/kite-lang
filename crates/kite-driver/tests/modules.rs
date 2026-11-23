@@ -2135,3 +2135,18 @@ fn a_missing_member_names_its_module_as_the_use_writes_it() {
     assert!(said.contains("`money` declares no public type of this name"), "{}", said);
     assert!(!said.contains("src/money"), "{}", said);
 }
+
+/// A block string that never closes reads the rest of the file as its text, so
+/// a `\(a)` after it is some later line and not a hole its author wrote. It
+/// named the very binding being defined, and was `cannot find `a`` as a second
+/// error for the one mistake. (Not a corpus file: a file with a lexical error
+/// cannot be formatted, and the tree's Kite is always formatted.)
+#[test]
+fn a_hole_swallowed_by_an_unterminated_block_string_is_not_a_second_error() {
+    let p = Project::new("swallowed-hole");
+    let main = p.file("main.kite", "fn main() {\n    let a = \"\"\"ab\n    io.print(\"\\(a)\")\n}\n");
+    let said = p.run(&main).expect_err("an unterminated string");
+    assert!(said.contains("E0001"), "{}", said);
+    assert!(!said.contains("E0111"), "{}", said);
+    assert!(said.contains("1 previous error"), "{}", said);
+}
