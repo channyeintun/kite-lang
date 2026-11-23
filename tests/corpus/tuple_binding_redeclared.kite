@@ -1,0 +1,37 @@
+// A tuple binding may not name one thing twice, and its second slot may
+// rebind a name already in the same scope only when that name is an earlier
+// error (§7.4): everything else is a redeclaration, as for a plain `let`.
+use std/errors
+
+fn parse(s: str) -> (int, error) {
+    if s == "" {
+        return 0, errors.new("empty")
+    }
+    return s.len(), nil
+}
+
+// The chain of fallible calls §7.4 shows is the one exception.
+fn twice(s: str) -> (int, error) {
+    let (n, err) = parse(s)
+    check err
+    let (p, err) = parse("\(n)")
+    check err
+    return p, nil
+}
+
+fn main() {
+    let (a, a) = (1, 2) //~ ERROR E0112
+    for (b, b) in [(3, 4)] { //~ ERROR E0112
+        io.print(b)
+    }
+    let m = { "k": 5 }
+    for (k, k) in m { //~ ERROR E0112
+        io.print(k)
+    }
+    let x = 1
+    let (y, x) = (2, 3) //~ ERROR E0112
+    let (p, err) = twice("ab")
+    if err == nil {
+        io.print(a + x + y + p)
+    }
+}

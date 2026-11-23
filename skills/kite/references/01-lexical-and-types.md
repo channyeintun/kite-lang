@@ -197,7 +197,12 @@ a negated number and computes nothing. That is `E0117` too: an expression
 statement with no call and no `await` anywhere in it does nothing, and is
 refused whatever its shape — a leading `-`, a leading `[` (a slice literal, not
 an index into the line above), `done == true` typed for `done = true`, a bare
-`n + 1`. A statement holding a call, such as `f() + 1`, is left alone.
+`n + 1`. A statement holding a call, such as `f() + 1`, is left alone. An arm of
+a `match` statement is a statement too, so `0 => 1` and `0 => { done == true }`
+are `E0117` there. An index or an interpolation is not counted as an effect even
+though one can trap and the other runs `show`: to keep one for that alone, write
+`_ = xs[i]` (as an arm, `0 => { _ = xs[i] }`; the note says so). `0 => ()` is fine:
+like `0 => {}`, it says nothing happens.
 
 ```kite fails
 fn main() {
@@ -605,7 +610,9 @@ fn main() {
 depth. The compiler copies each level out, changes the innermost and writes
 every level back — what you would otherwise write by hand — with the indices
 and the right-hand side evaluated once, first. So a copy of the outer slice
-taken before the write keeps its old contents: slices are values.
+taken before the write keeps its old contents: slices are values. Any `t op= v` —
+on a local, a field or an element — reads `t` after `v` has run: `c.n += f(c)`
+adds to whatever `f` stored in `c.n`, unlike `c.n = c.n + f(c)`.
 
 ```kite
 struct Board {
@@ -675,9 +682,10 @@ fn main() {
 }
 ```
 
-A literal that gives one key twice, `{"a": 1, "a": 2}`, keeps the later entry; where both
-keys are literals or constants it is the `E0112` warning, since the earlier value is never
-seen.
+A literal that gives one key twice, `{"a": 1, "a": 2}`, keeps the later value under the key
+as first written (`{-0.0: 1, 0.0: 2}` holds `-0.0` with `2`; two NaN keys are two entries).
+Where both keys are literals or constants — negative numbers, floats and tuples of them
+included — it is the `E0112` warning, since the earlier value is never seen.
 
 ### Maps iterate in pairs
 

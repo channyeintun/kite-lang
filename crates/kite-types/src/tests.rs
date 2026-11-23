@@ -1092,6 +1092,38 @@ fn a_bare_error_statement_is_one_diagnostic() {
     assert_eq!(c.codes(), vec!["E0117"], "{}", c.render());
 }
 
+/// An inert statement that can still trap, or run `show`, is refused like any
+/// other, and the note names `_ = …` as the way to keep it for that alone;
+/// one that can do neither is not offered it.
+#[test]
+fn an_inert_index_or_interpolation_is_offered_a_discard() {
+    let c = run("fn main() {\n  let xs = [1, 2, 3]\n  xs[5]\n  _ = xs[5]\n}\n");
+    assert_eq!(c.codes(), vec!["E0117"], "{}", c.render());
+    assert!(c.render().contains("an index in it can still trap"), "{}", c.render());
+    assert!(c.render().contains("write `_ = …`"), "{}", c.render());
+
+    let c = run("fn main() {\n  let n = 1\n  \"\\(n)\"\n}\n");
+    assert_eq!(c.codes(), vec!["E0117"], "{}", c.render());
+    assert!(c.render().contains("an interpolation in it runs `show`"), "{}", c.render());
+
+    let c = run("fn main() {\n  let xs = [1, 2, 3]\n  let n = 1\n  n + 1\n  xs[0..2]\n}\n");
+    assert_eq!(c.codes(), vec!["E0117", "E0117"], "{}", c.render());
+    assert!(!c.render().contains("_ = …"), "{}", c.render());
+}
+
+/// An inert arm of a `match` statement is not on a line of its own, so its
+/// note says nothing about lines, and the way to keep one that can trap is
+/// one an arm can hold: `_ = …` is a statement, so it takes braces. `()`
+/// says nothing happens, as `{}` does, and is left alone.
+#[test]
+fn an_inert_arm_is_told_what_an_arm_can_hold() {
+    let c = run("fn main() {\n  let n = 1\n  let xs = [1]\n  match n {\n    0 => -1,\n    1 => [n],\n    2 => xs[3],\n    3 => (),\n    _ => {},\n  }\n}\n");
+    assert_eq!(c.codes(), vec!["E0117", "E0117", "E0117"], "{}", c.render());
+    assert!(!c.render().contains("a line that begins"), "{}", c.render());
+    assert!(c.render().contains("an arm that does nothing is written `{}`"), "{}", c.render());
+    assert!(c.render().contains("write `{ _ = … }`"), "{}", c.render());
+}
+
 /// An exclusive range from a number to itself matches nothing, exactly as a
 /// reversed one does.
 #[test]
@@ -1115,6 +1147,37 @@ fn a_map_literal_giving_one_key_twice_warns() {
     assert_eq!(twice.len(), 1, "{}", c.render());
     assert!(!c.diags.has_errors(), "must be a warning:\n{}", c.render());
     assert!(c.render().contains("the key \"a\" is given twice"), "{}", c.render());
+}
+
+/// Every key the compiler can see is compared: a negated number, a float by
+/// value (so `0.0` and `-0.0` are one key, and a NaN is never a duplicate),
+/// a constant standing for one, and a tuple of them.
+#[test]
+fn a_map_literal_key_of_any_literal_form_given_twice_warns() {
+    let c = run("let NEG = -1\n\
+                 fn main() {\n  let a = {-1: 1, NEG: 2}\n  let b = {1.5: 1, 1.5: 2}\n\
+                 \x20 let z = {0.0: 1, -0.0: 2}\n  let t = {(1, \"x\"): 1, (1, \"x\"): 2}\n\
+                 \x20 let nan = 0.0 / 0.0\n  let d = {(1, -2.5): 1, (1, 2.5): 2, (-1, -2.5): 3}\n\
+                 \x20 io.print(a.len() + b.len() + z.len() + t.len() + d.len())\n  io.print(nan)\n}\n");
+    let twice: Vec<String> = c
+        .diags
+        .iter()
+        .filter(|d| d.code == Some(codes::E0112))
+        .map(|d| d.message.clone())
+        .collect();
+    assert_eq!(
+        twice,
+        vec![
+            "the key -1 is given twice",
+            "the key 1.5 is given twice",
+            "the key -0.0 is given twice",
+            "the key (1, \"x\") is given twice",
+        ],
+        "{}",
+        c.render()
+    );
+    assert!(!c.diags.has_errors(), "must be warnings:\n{}", c.render());
+    assert!(c.render().contains("`0.0` and `-0.0` are equal, so they are one key"), "{}", c.render());
 }
 
 /// A built-in type with no text form cannot be given an `impl`, so E0207's

@@ -637,6 +637,7 @@ pub fn check_recording(
             taint: Vec::new(),
             guards: std::collections::HashMap::new(),
             narrowed: std::collections::HashMap::new(),
+            unit_variants: Default::default(),
             error_nonnil: std::collections::HashSet::new(),
             loops: Vec::new(),
             loop_edges: Vec::new(),
@@ -1177,6 +1178,13 @@ struct Checker<'a> {
     /// leave the IR describing a local as `T` that the backend allocated as
     /// `Option<T>`. The narrowed *use* carries an explicit `Unwrap` instead.
     narrowed: std::collections::HashMap<u32, TyId>,
+    /// The unit variants of each large enum a pattern has named, by name —
+    /// built on first use. A pattern's name is looked up among the variants
+    /// of the scrutinee's enum, and a scan of them for every arm made a
+    /// generated `match` over thousands of variants quadratic.
+    unit_variants: std::cell::RefCell<
+        std::collections::HashMap<kite_hir::EnumId, std::collections::HashMap<String, u32>>,
+    >,
     /// Error locals control flow has proved are not nil.
     ///
     /// `error` is nil-able, so `err.message()` has to reach a value that is
@@ -1640,7 +1648,7 @@ impl<'a> Checker<'a> {
                 // Asked after the expression is checked, so one already wrong
                 // for another reason is not reported a second time; and one
                 // that does nothing is not also an error dropped.
-                let inert = !self.types.is_poisoned(expr.ty) && self.inert_statement(e);
+                let inert = !self.types.is_poisoned(expr.ty) && self.inert_statement(e, false);
                 if !inert {
                     self.dropped_error(&expr);
                 }
@@ -1893,6 +1901,15 @@ impl<'a> Checker<'a> {
         let before = self.init[slot];
         let taint_before = self.taint.clone();
         let value = self.expr(&a.value, Some(local_ty));
+        // `n += v` reads `n` after `v` has run (§5.4), which matters only
+        // where `v` writes `n` — a `match` arm block in it can — since an
+        // operand is otherwise fixed where it is written.
+        let mut first = Vec::new();
+        let value = if a.op.to_binary().is_some() && value.writes(hir::LocalId(local_id)) {
+            self.evaluated_first(value, &mut first)
+        } else {
+            value
+        };
         let (value, written) = match a.op.to_binary() {
             None => {
                 let written = value.ty;
@@ -2006,10 +2023,12 @@ impl<'a> Checker<'a> {
         }
         self.error_nonnil.remove(&local_id);
 
-        Some((
-            hir::Stmt::Assign { local: hir::LocalId(local_id), value, span: a.span },
-            Flow::Falls,
-        ))
+        let assign = hir::Stmt::Assign { local: hir::LocalId(local_id), value, span: a.span };
+        if first.is_empty() {
+            return Some((assign, Flow::Falls));
+        }
+        first.push(assign);
+        Some((hir::Stmt::Block(hir::Block { stmts: first }), Flow::Falls))
     }
 
     /// Whether a binding of this type carries the obligation to be checked:
@@ -2873,14 +2892,27 @@ impl<'a> Checker<'a> {
     }
 
     fn if_stmt(&mut self, i: &ast::IfStmt, sig: &Signature) -> Option<(hir::Stmt, Flow)> {
+        self.if_parts(&i.cond, &i.then, i.else_.as_deref(), i.span, sig)
+    }
+
+    /// An `if` in statement position, from its parts: an `if` statement's,
+    /// or a value `if`'s written where its value is thrown away.
+    fn if_parts(
+        &mut self,
+        cond: &ast::Expr,
+        then: &ast::Block,
+        else_: Option<&ast::ElseBranch>,
+        span: Span,
+        sig: &Signature,
+    ) -> Option<(hir::Stmt, Flow)> {
         // `if err != nil { … }` is the explicit form of a check. Recognising it
         // here is what lets a hand-written test clean the value it guards.
-        let tested = self.error_facts(&i.cond, true);
+        let tested = self.error_facts(cond, true);
         // `if x == nil { … } else { … }` narrows `x` in whichever branch it
         // cannot be nil. Kite has no `?` sigil of any kind: an inline `if`
         // does the same work, in the open.
-        let narrowing = self.nil_test(&i.cond);
-        let cond = self.condition(&i.cond);
+        let narrowing = self.nil_test(cond);
+        let test = self.condition(cond);
         for (id, _) in tested {
             self.inspect(id);
         }
@@ -2889,10 +2921,10 @@ impl<'a> Checker<'a> {
         // merged at the join. A branch that diverges contributes nothing to the
         // join, because control never arrives from it.
         let entry = self.flow_state();
-        self.enter_branch(narrowing, &i.cond, true);
-        let (then, then_flow) = self.block(&i.then, sig);
+        self.enter_branch(narrowing, cond, true);
+        let (then_block, then_flow) = self.block(then, sig);
         if then_flow == Flow::Diverges {
-            self.report_unchecked_errors(Some(i.then.span));
+            self.report_unchecked_errors(Some(then.span));
         }
         let then_exit = self.flow_state();
         self.set_flow_state(entry);
@@ -2902,8 +2934,8 @@ impl<'a> Checker<'a> {
         // it arrives knowing the condition was false. An `else if` starts from
         // that knowledge too, so `if x == nil { … } else if c { … }` has `x`
         // narrowed in the second test's branches.
-        self.enter_branch(narrowing, &i.cond, false);
-        let (else_, else_flow) = match i.else_.as_deref() {
+        self.enter_branch(narrowing, cond, false);
+        let (else_block, else_flow) = match else_ {
             None => (None, Flow::Falls),
             Some(ast::ElseBranch::Block(b)) => {
                 let (blk, f) = self.block(b, sig);
@@ -2937,13 +2969,13 @@ impl<'a> Checker<'a> {
         self.set_flow_state(merged);
 
         // Without an `else`, control can always fall through.
-        let flow = if i.else_.is_none() {
+        let flow = if else_.is_none() {
             Flow::Falls
         } else {
             then_flow.merge(else_flow)
         };
 
-        Some((hir::Stmt::If { cond, then, else_, span: i.span }, flow))
+        Some((hir::Stmt::If { cond: test, then: then_block, else_: else_block, span }, flow))
     }
 
     fn for_stmt(&mut self, f: &ast::ForStmt, sig: &Signature) -> Option<(hir::Stmt, Flow)> {
@@ -4266,7 +4298,7 @@ impl<'a> Checker<'a> {
                 let mut key_ty = hint.map(|(k, _)| k);
                 let mut val_ty = hint.map(|(_, v)| v);
                 // The keys the compiler knows, and where each was first given.
-                let mut known_keys: std::collections::HashMap<String, Span> =
+                let mut known_keys: std::collections::HashMap<String, (Span, String)> =
                     std::collections::HashMap::new();
                 for e in entries {
                     let k = self.expr(&e.key, key_ty);
@@ -4290,24 +4322,25 @@ impl<'a> Checker<'a> {
                         Some(want) => self.accept(v, want, None),
                     };
                     // A key the compiler knows, written twice: the later
-                    // entry replaces the earlier, whose value is never seen.
+                    // entry's value replaces the earlier, which is never seen.
                     // Almost always a copied line whose key was not edited.
-                    let known = |e: &hir::Expr| match &e.kind {
-                        ExprKind::Int(i) => Some(i.to_string()),
-                        ExprKind::Str(s) => Some(format!("{:?}", s)),
-                        ExprKind::Bool(b) => Some(b.to_string()),
-                        _ => None,
-                    };
-                    if let Some(key) = known(&k) {
-                        if let Some(&first) = known_keys.get(&key) {
-                            self.diags.push(
-                                Diagnostic::warning(codes::E0112, format!("the key {} is given twice", key))
-                                    .with_primary(k.span, "this entry replaces the earlier one")
-                                    .with_secondary(first, "first given here, and never seen")
-                                    .with_note("a map holds one value per key; remove one of the two"),
-                            );
+                    if let Some((key, shown)) = known_key(&k) {
+                        if let Some((first, first_shown)) = known_keys.get(&key) {
+                            let mut d =
+                                Diagnostic::warning(codes::E0112, format!("the key {} is given twice", shown))
+                                    .with_primary(k.span, "this entry's value replaces the earlier one's")
+                                    .with_secondary(*first, "first given here, and its value never seen");
+                            // `0.0` and `-0.0` are one key, and the map keeps
+                            // the one written first.
+                            if *first_shown != shown {
+                                d = d.with_note(format!(
+                                    "`{}` and `{}` are equal, so they are one key; the map keeps `{}`",
+                                    first_shown, shown, first_shown
+                                ));
+                            }
+                            self.diags.push(d.with_note("a map holds one value per key; remove one of the two"));
                         } else {
-                            known_keys.insert(key, k.span);
+                            known_keys.insert(key, (k.span, shown));
                         }
                     }
                     flat.push(k);
@@ -7746,6 +7779,29 @@ impl<'a> Checker<'a> {
         let annotated = l.ty.as_ref().map(|t| self.resolve_type(t));
         let before = self.taint.clone();
         let checked = l.init.as_ref().map(|init| self.expr(init, annotated));
+        // The error slot may rebind a name already in this scope only when
+        // that name is an earlier error (§7.4). `let x = 1` then `let (y, x)
+        // = (2, 3)` redeclared `x` with nothing said.
+        for e in elems {
+            let ast::BindElem::Name(n) = e else { continue };
+            let Some(&prev) = self.resolved.shadowed.get(&n.span) else { continue };
+            let prev_ty = self.locals[prev as usize].ty;
+            if prev_ty != TyId::ERR && !self.types.is_poisoned(prev_ty) {
+                let first = self.locals[prev as usize].span;
+                self.diags.push(
+                    Diagnostic::error(
+                        codes::E0112,
+                        format!("`{}` is already declared in this scope", n.name),
+                    )
+                    .with_primary(n.span, "redeclared here")
+                    .with_secondary(first, format!("first declared here, as {}", self.types.with_article(prev_ty)))
+                    .with_note(
+                        "only an earlier `error` may be rebound in the same scope, as the \
+                         `err` of `let (v, err) = …`; give this binding another name",
+                    ),
+                );
+            }
+        }
         let checked = match checked {
             Some(value) if matches!(self.types.kind(value.ty), TyKind::Tuple(_)) => {
                 return self.let_tuple(elems, value, span, &before);
@@ -7922,11 +7978,18 @@ impl<'a> Checker<'a> {
     ///
     /// Whether it reported one, so the statement is not reported again for
     /// the error its value holds: a bare `err` is one mistake, not two.
-    fn inert_statement(&mut self, e: &ast::Expr) -> bool {
+    ///
+    /// `arm` is set for the expression of an arm of a `match` statement. It
+    /// does not start a line, so nothing is said about lines; an assignment
+    /// is not an expression, so keeping one takes braces, `{ _ = … }`; and
+    /// `0 => ()` says that nothing happens, as `0 => {}` does, so it is not
+    /// refused.
+    fn inert_statement(&mut self, e: &ast::Expr, arm: bool) -> bool {
         if let ast::Expr::Closure { span, .. } = e {
-            self.diags.push(
-                Diagnostic::error(codes::E0117, "this closure is built and thrown away")
-                    .with_primary(*span, "nothing calls it, so nothing in it happens")
+            let mut d = Diagnostic::error(codes::E0117, "this closure is built and thrown away")
+                .with_primary(*span, "nothing calls it, so nothing in it happens");
+            if !arm {
+                d = d
                     .with_note(
                         "an `||` opening a line is a closure with no parameters, not the \
                          continuation of the line above",
@@ -7934,11 +7997,12 @@ impl<'a> Checker<'a> {
                     .with_note(
                         "a statement continues onto the next line when it *ends* in an \
                          operator — put the `||` at the end of the line it continues",
-                    ),
-            );
+                    );
+            }
+            self.diags.push(d);
             return true;
         }
-        if expr_acts(e) {
+        if expr_acts(e) || (arm && matches!(e, ast::Expr::Tuple { elems, .. } if elems.is_empty())) {
             return false;
         }
         let mut d = Diagnostic::error(codes::E0117, "this statement has no effect")
@@ -7946,6 +8010,11 @@ impl<'a> Checker<'a> {
         d = match e {
             ast::Expr::Binary { op: ast::BinaryOp::Eq, .. } => d.with_note(
                 "`==` compares and gives back a `bool`; to assign, write `=`",
+            ),
+            ast::Expr::Path(_) => d.with_note("naming a value does nothing; a call needs `()`"),
+            _ if arm => d.with_note(
+                "nothing in it calls a function or awaits a task, so its value is the \
+                 only thing it makes — an arm that does nothing is written `{}`",
             ),
             ast::Expr::Unary { op: ast::UnaryOp::Neg, .. } => d.with_note(
                 "a line that begins with `-` is a statement of its own, not the \
@@ -7957,12 +8026,23 @@ impl<'a> Checker<'a> {
                     "a line that begins with `[` or `(` is a statement of its own, not an \
                      index or a call on the line above; keep it on that line",
                 ),
-            ast::Expr::Path(_) => d.with_note("naming a value does nothing; a call needs `()`"),
             _ => d.with_note(
                 "nothing in it calls a function or awaits a task, so its value is the \
                  only thing it makes — bind it with `let`, or return it",
             ),
         };
+        // An index can trap and a hole runs `show`, which is not nothing:
+        // a statement written for that alone says so with `_ =`.
+        let what = match expr_may_trap(e) {
+            (true, true) => Some("an index in it can still trap, and an interpolation runs `show`"),
+            (true, false) => Some("an index in it can still trap"),
+            (false, true) => Some("an interpolation in it runs `show`"),
+            (false, false) => None,
+        };
+        if let Some(what) = what {
+            let keep = if arm { "`{ _ = … }`" } else { "`_ = …`" };
+            d = d.with_note(format!("{}; to evaluate it for that alone, write {}", what, keep));
+        }
         self.diags.push(d);
         true
     }
@@ -8775,17 +8855,15 @@ impl<'a> Checker<'a> {
             ty: elem,
             span,
         };
+        let mut stmts = vec![hir::Stmt::Let { local: hir::LocalId(slot), init: Some(i), span }];
+        // The element is read after the right-hand side has run (§5.4), which
+        // matters only where that writes the slice — a `match` arm block in
+        // it can — as it does for `n += v`.
+        let value = if value.writes(hir::LocalId(local)) { self.evaluated_first(value, &mut stmts) } else { value };
         let sum = self.binary(binop, current, value, a.span);
         let sum = self.accept(sum, elem, None);
-        Some((
-            hir::Stmt::Block(hir::Block {
-                stmts: vec![
-                    hir::Stmt::Let { local: hir::LocalId(slot), init: Some(i), span },
-                    hir::Stmt::SetIndex { base: seq, index: at, value: sum, span: a.span },
-                ],
-            }),
-            Flow::Falls,
-        ))
+        stmts.push(hir::Stmt::SetIndex { base: seq, index: at, value: sum, span: a.span });
+        Some((hir::Stmt::Block(hir::Block { stmts }), Flow::Falls))
     }
 
     /// Where a slice or map that is about to change in place is kept.
@@ -9675,6 +9753,10 @@ impl<'a> Checker<'a> {
         // everything: every later arm then drew "unreachable", and a missing
         // variant nothing, for a mistake already reported once.
         let mut rejected = Vec::with_capacity(m.arms.len());
+        // Per arm of a `match` statement written as an expression: whether
+        // what its value holds was already settled where it was checked —
+        // reported as having no effect, or a statement in its own right.
+        let mut inert = Vec::new();
 
         for arm in &m.arms {
             self.set_flow_state(start.clone());
@@ -9763,10 +9845,12 @@ impl<'a> Checker<'a> {
             // In a `match` statement the arms' values are thrown away, so one
             // arm says nothing about what the next should be.
             let want = if discard { expected } else { expected.or(result_ty) };
-            let body = match &arm.body {
-                ast::MatchBody::Expr(e) => self.expr(e, want),
-                ast::MatchBody::Block(b) => self.match_block(b, want, discard),
+            let (body, settled) = match &arm.body {
+                ast::MatchBody::Expr(e) if discard => self.arm_statement(e),
+                ast::MatchBody::Expr(e) => (self.expr(e, want), false),
+                ast::MatchBody::Block(b) => (self.match_block(b, want, discard), false),
             };
+            inert.push(settled);
             // An arm producing a `T` where a `?T` is wanted is subsumption,
             // exactly as it is for a `let` or an argument — so `Text(s) => s`
             // and `other => nil` are arms of one `Option<str>` match rather
@@ -9872,8 +9956,10 @@ impl<'a> Checker<'a> {
         // or not the arms agree: `0 => fails(), _ => fails()` agrees on
         // `error`, and throws it away just the same.
         if discard {
-            for arm in &arms {
-                self.dropped_error(&arm.body);
+            for (arm, settled) in arms.iter().zip(&inert) {
+                if !settled {
+                    self.dropped_error(&arm.body);
+                }
             }
         }
         if disagree {
@@ -9937,6 +10023,44 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// An arm of a `match` statement written as an expression. It is in
+    /// statement position, as the match is: its value is thrown away.
+    ///
+    /// So a `match` or an `if` written there is a statement too — its
+    /// branches need not agree, as `0 => { match … }` already did not — and
+    /// what each branch holds is checked where it stands. Any other arm is an
+    /// expression statement, and one that does nothing is E0117 exactly as it
+    /// is on a line of its own: `0 => 1` computes a value nobody reads.
+    ///
+    /// Says whether what the arm's value holds was settled here — reported as
+    /// having no effect, or checked branch by branch — so that it is not
+    /// reported again as an error thrown away.
+    fn arm_statement(&mut self, e: &ast::Expr) -> (hir::Expr, bool) {
+        let sig = self.current_signature();
+        let stmt = match e {
+            ast::Expr::Match(m) => {
+                let (x, flow) = self.match_expr_with_flow(m, None, true);
+                Some((hir::Stmt::Expr(x), flow))
+            }
+            ast::Expr::If { cond, then, else_, span } => {
+                self.if_parts(cond, then, Some(else_), *span, &sig)
+            }
+            _ => {
+                let x = self.expr(e, None);
+                let inert = !self.types.is_poisoned(x.ty) && self.inert_statement(e, true);
+                return (x, inert);
+            }
+        };
+        let span = e.span();
+        match stmt {
+            Some((s, flow)) => {
+                let ty = if flow == Flow::Diverges { TyId::NEVER } else { TyId::UNIT };
+                (hir::Expr { kind: ExprKind::Block(hir::Block { stmts: vec![s] }), ty, span }, true)
+            }
+            None => (self.lit(ExprKind::Error, TyId::ERROR, span), true),
+        }
+    }
+
     /// A block arm.
     ///
     /// A block that *is* one expression yields it. Anything longer runs for its
@@ -9954,10 +10078,13 @@ impl<'a> Checker<'a> {
     /// when it is the whole block and every branch of it is one expression,
     /// it is one expression too — `2 => { if a { 1 } else { 0 } }` is `1` or
     /// `0`, not `()`. Only where the value is wanted: an arm of a `match`
-    /// statement runs its block for its effects, as it always has.
+    /// statement runs its block for its effects, as it always has — a single
+    /// expression in it included, which is a statement there and is checked
+    /// as one, so `0 => { done == true }` is E0117 as the same line under an
+    /// `if` is.
     fn match_block(&mut self, b: &ast::Block, expected: Option<TyId>, discard: bool) -> hir::Expr {
         match b.stmts.as_slice() {
-            [ast::Stmt::Expr(e)] => self.expr(e, expected),
+            [ast::Stmt::Expr(e)] if !discard => self.expr(e, expected),
             [ast::Stmt::If(i)] if !discard && if_is_value(i) => {
                 let else_ = i.else_.as_deref().expect("a value `if` has an `else`");
                 self.if_expr(&i.cond, &i.then, else_, i.span, expected)
@@ -11105,12 +11232,24 @@ impl<'a> Checker<'a> {
         // scrutinee itself made `Slow` against an `Option<Pace>` a binding
         // whenever another enum also declared a `Slow`.
         let TyKind::Enum(eid) = *self.types.kind(self.types.present(scrut)) else { return None };
-        let vi = self
-            .types
-            .enum_def(eid)
-            .variants
-            .iter()
-            .position(|v| v.name == name && v.fields.is_empty())?;
+        let variants = &self.types.enum_def(eid).variants;
+        let vi = if variants.len() <= 32 {
+            variants.iter().position(|v| v.name == name && v.fields.is_empty())?
+        } else {
+            let mut index = self.unit_variants.borrow_mut();
+            let by_name = index.entry(eid).or_insert_with(|| {
+                // Reversed, so the first of two same-named variants wins, as
+                // the scan's `position` had it.
+                variants
+                    .iter()
+                    .enumerate()
+                    .rev()
+                    .filter(|(_, v)| v.fields.is_empty())
+                    .map(|(i, v)| (v.name.clone(), i as u32))
+                    .collect()
+            });
+            *by_name.get(name)? as usize
+        };
         // Patterns name the declaration, so a specialisation resolves back to
         // the template it came from.
         let template = self.types.enum_template_of(eid).unwrap_or(eid);
@@ -11524,9 +11663,13 @@ impl<'a> Checker<'a> {
         // among the written ones.
         let holder = base.as_ref().map(|b| (self.synthetic_local("base", struct_ty, b.span), b.span));
 
-        // Fill the gaps from `..base`, or report them.
+        // Fill the gaps from `..base`, or report them. The gaps are read
+        // before any written field runs, because `..base` is written first:
+        // a struct is a reference, so a later field whose call writes the
+        // base through a `var` parameter would otherwise leak into the copy.
         let mut fields = Vec::with_capacity(field_count);
         let mut missing = Vec::new();
+        let written = std::mem::take(&mut order);
         for (i, slot) in given.into_iter().enumerate() {
             match slot {
                 Some(e) => fields.push(e),
@@ -11570,6 +11713,7 @@ impl<'a> Checker<'a> {
             return self.lit(ExprKind::Error, TyId::ERROR, lit.span);
         }
 
+        order.extend(written);
         let order = in_written_order(order);
         let built = hir::Expr {
             kind: ExprKind::StructNew { struct_id: sid, fields, order },
@@ -11817,18 +11961,42 @@ impl<'a> Checker<'a> {
             ty,
             span,
         };
+        // The right-hand side runs before the field is read (§5.4), as it
+        // does for `xs[i] += v`: `c.n += f(c)`, where `f` sets `c.n`, adds
+        // to what `f` left. The field was read first, and the two forms
+        // disagreed.
+        let mut stmts = vec![hir::Stmt::Let { local: hir::LocalId(holder), init: Some(obj), span }];
+        let value = self.evaluated_first(value, &mut stmts);
         let sum = self.binary(binop, current, value, a.span);
         let sum = self.coerce(sum, Some(ty));
         self.expect_ty(sum.ty, ty, sum.span, Some(decl_span));
-        Some((
-            hir::Stmt::Block(hir::Block {
-                stmts: vec![
-                    hir::Stmt::Let { local: hir::LocalId(holder), init: Some(obj), span },
-                    hir::Stmt::SetField { base: read, index: index as u32, value: sum, span: a.span },
-                ],
-            }),
-            Flow::Falls,
-        ))
+        stmts.push(hir::Stmt::SetField { base: read, index: index as u32, value: sum, span: a.span });
+        Some((hir::Stmt::Block(hir::Block { stmts }), Flow::Falls))
+    }
+
+    /// A compound assignment's right-hand side, evaluated ahead of the read
+    /// of its target: bound to a hidden local by a statement pushed onto
+    /// `stmts`, unless reading it later is the same as reading it now — a
+    /// literal, or a local, which nothing between here and the read can
+    /// write.
+    fn evaluated_first(&mut self, value: hir::Expr, stmts: &mut Vec<hir::Stmt>) -> hir::Expr {
+        let settled = matches!(
+            value.kind,
+            ExprKind::Int(_)
+                | ExprKind::Float(_)
+                | ExprKind::Bool(_)
+                | ExprKind::Str(_)
+                | ExprKind::Nil
+                | ExprKind::Local(_)
+                | ExprKind::Error
+        );
+        if settled || value.ty == TyId::NEVER || self.types.is_poisoned(value.ty) {
+            return value;
+        }
+        let (ty, span) = (value.ty, value.span);
+        let id = self.synthetic_local("value", ty, span);
+        stmts.push(hir::Stmt::Let { local: hir::LocalId(id), init: Some(value), span });
+        hir::Expr { kind: ExprKind::Local(hir::LocalId(id)), ty, span }
     }
 
     fn if_expr(
@@ -14446,9 +14614,38 @@ fn visit_expr_stmts(e: &ast::Expr, closures: bool, f: &mut dyn FnMut(&ast::Stmt)
 /// it does not count. An expression the parser could not read counts, so that
 /// nothing is reported twice.
 fn expr_acts(e: &ast::Expr) -> bool {
+    expr_holds(e, &|x| matches!(x, ast::Expr::Call { .. } | ast::Expr::Await { .. } | ast::Expr::Error(_)))
+}
+
+/// What an inert expression can still do besides produce its value: an index
+/// can be out of range, and an interpolation's hole calls `show`, which may be
+/// the program's own. Neither is an effect for [`expr_acts`] — `n + 1` can
+/// overflow, and counting a trap would let every arithmetic slip through —
+/// but where one is there, `_ = …` is how to keep it, and E0117 says so.
+fn expr_may_trap(e: &ast::Expr) -> (bool, bool) {
+    let indexes = expr_holds(e, &|x| match x {
+        ast::Expr::Index { index, .. } => !matches!(**index, ast::Expr::Range { .. }),
+        _ => false,
+    });
+    let shows = expr_holds(e, &|x| match x {
+        ast::Expr::Interpolated { parts, .. } => parts.iter().any(|p| matches!(p, ast::StrPart::Hole(_))),
+        _ => false,
+    });
+    (indexes, shows)
+}
+
+/// Whether `hit` holds of an expression or of anything evaluated with it. A
+/// closure's body does not run where the closure is built, so it is not
+/// looked in; a statement in a branch other than an expression counts as a
+/// hit, since it may do anything.
+fn expr_holds(e: &ast::Expr, hit: &dyn Fn(&ast::Expr) -> bool) -> bool {
     use ast::Expr as E;
+    if hit(e) {
+        return true;
+    }
+    let sub = |x: &ast::Expr| expr_holds(x, hit);
     match e {
-        E::Call { .. } | E::Await { .. } | E::Error(_) => true,
+        E::Call { .. } | E::Await { .. } | E::Error(_) => false,
         E::Int(_)
         | E::ImpliedInt { .. }
         | E::Float(_)
@@ -14460,57 +14657,55 @@ fn expr_acts(e: &ast::Expr) -> bool {
         | E::SelfExpr(_)
         | E::Closure { .. } => false,
         E::Interpolated { parts, .. } => parts.iter().any(|p| match p {
-            ast::StrPart::Hole(h) => expr_acts(h),
+            ast::StrPart::Hole(h) => sub(h),
             ast::StrPart::Text(_) => false,
         }),
-        E::Unary { operand, .. } => expr_acts(operand),
-        E::Binary { lhs, rhs, .. } => expr_acts(lhs) || expr_acts(rhs),
-        E::Field { base, .. } => expr_acts(base),
-        E::Index { base, index, .. } => expr_acts(base) || expr_acts(index),
-        E::Range { start, end, .. } => expr_acts(start) || expr_acts(end),
-        E::Cast { expr, .. } | E::Paren { inner: expr, .. } => expr_acts(expr),
-        E::Tuple { elems, .. } | E::Slice { elems, .. } => elems.iter().any(expr_acts),
-        E::Map { entries, .. } => entries.iter().any(|m| expr_acts(&m.key) || expr_acts(&m.value)),
-        E::StructLit(l) => {
-            l.base.as_deref().is_some_and(expr_acts) || l.fields.iter().any(|f| expr_acts(&f.value))
-        }
+        E::Unary { operand, .. } => sub(operand),
+        E::Binary { lhs, rhs, .. } => sub(lhs) || sub(rhs),
+        E::Field { base, .. } => sub(base),
+        E::Index { base, index, .. } => sub(base) || sub(index),
+        E::Range { start, end, .. } => sub(start) || sub(end),
+        E::Cast { expr, .. } | E::Paren { inner: expr, .. } => sub(expr),
+        E::Tuple { elems, .. } | E::Slice { elems, .. } => elems.iter().any(sub),
+        E::Map { entries, .. } => entries.iter().any(|m| sub(&m.key) || sub(&m.value)),
+        E::StructLit(l) => l.base.as_deref().is_some_and(sub) || l.fields.iter().any(|f| sub(&f.value)),
         E::If { cond, then, else_, .. } => {
-            expr_acts(cond)
-                || block_acts(then)
+            sub(cond)
+                || block_holds(then, hit)
                 || match &**else_ {
-                    ast::ElseBranch::Block(b) => block_acts(b),
-                    ast::ElseBranch::If(i) => if_acts(i),
+                    ast::ElseBranch::Block(b) => block_holds(b, hit),
+                    ast::ElseBranch::If(i) => if_holds(i, hit),
                 }
         }
         E::Match(m) => {
-            expr_acts(&m.scrutinee)
+            sub(&m.scrutinee)
                 || m.arms.iter().any(|a| {
-                    a.guard.as_ref().is_some_and(expr_acts)
+                    a.guard.as_ref().is_some_and(sub)
                         || match &a.body {
-                            ast::MatchBody::Expr(e) => expr_acts(e),
-                            ast::MatchBody::Block(b) => block_acts(b),
+                            ast::MatchBody::Expr(e) => sub(e),
+                            ast::MatchBody::Block(b) => block_holds(b, hit),
                         }
                 })
         }
     }
 }
 
-/// As [`expr_acts`], for a block: anything but an inert expression statement
-/// may act.
-fn block_acts(b: &ast::Block) -> bool {
+/// As [`expr_holds`], for a block: anything but an expression statement
+/// counts.
+fn block_holds(b: &ast::Block, hit: &dyn Fn(&ast::Expr) -> bool) -> bool {
     b.stmts.iter().any(|s| match s {
-        ast::Stmt::Expr(e) => expr_acts(e),
+        ast::Stmt::Expr(e) => expr_holds(e, hit),
         _ => true,
     })
 }
 
-fn if_acts(i: &ast::IfStmt) -> bool {
-    expr_acts(&i.cond)
-        || block_acts(&i.then)
+fn if_holds(i: &ast::IfStmt, hit: &dyn Fn(&ast::Expr) -> bool) -> bool {
+    expr_holds(&i.cond, hit)
+        || block_holds(&i.then, hit)
         || match i.else_.as_deref() {
             None => false,
-            Some(ast::ElseBranch::Block(b)) => block_acts(b),
-            Some(ast::ElseBranch::If(i)) => if_acts(i),
+            Some(ast::ElseBranch::Block(b)) => block_holds(b, hit),
+            Some(ast::ElseBranch::If(i)) => if_holds(i, hit),
         }
 }
 
@@ -14553,6 +14748,46 @@ fn expr_defers(e: &ast::Expr) -> bool {
     let mut found = false;
     visit_expr_stmts(e, false, &mut |s| found |= matches!(s, ast::Stmt::Defer { .. }));
     found
+}
+
+/// A map key the compiler can see the value of, as a text that is the same
+/// exactly when two keys are equal under the map's `==`, and as it is shown:
+/// a literal or a constant of any key type, a negated number, an optional's
+/// wrapping of one, and a tuple of them. `0.0` and `-0.0` are one key, as the
+/// maps hold them; a NaN equals nothing, so it is never a duplicate.
+fn known_key(e: &hir::Expr) -> Option<(String, String)> {
+    match &e.kind {
+        ExprKind::Int(i) => Some((i.to_string(), i.to_string())),
+        ExprKind::Str(s) => Some((format!("{:?}", s), format!("{:?}", s))),
+        ExprKind::Bool(b) => Some((b.to_string(), b.to_string())),
+        ExprKind::Float(f) => float_key(*f),
+        ExprKind::Unary { op: hir::UnOp::NegInt | hir::UnOp::NegIntWrap, operand } => match operand.kind {
+            ExprKind::Int(i) => i.checked_neg().map(|n| (n.to_string(), n.to_string())),
+            _ => None,
+        },
+        ExprKind::Unary { op: hir::UnOp::NegFloat, operand } => match operand.kind {
+            ExprKind::Float(f) => float_key(-f),
+            _ => None,
+        },
+        ExprKind::Wrap { value } => known_key(value),
+        ExprKind::TupleNew { elems } => {
+            let parts = elems.iter().map(known_key).collect::<Option<Vec<_>>>()?;
+            let key = parts.iter().map(|(k, _)| k.as_str()).collect::<Vec<_>>().join(", ");
+            let shown = parts.iter().map(|(_, s)| s.as_str()).collect::<Vec<_>>().join(", ");
+            Some((format!("({})", key), format!("({})", shown)))
+        }
+        _ => None,
+    }
+}
+
+/// A float key as [`known_key`] gives it.
+fn float_key(f: f64) -> Option<(String, String)> {
+    if f.is_nan() {
+        return None;
+    }
+    let shown = format!("{:?}", f);
+    let key = if f == 0.0 { "0.0".to_string() } else { shown.clone() };
+    Some((key, shown))
 }
 
 /// A constructor's evaluation order as `StructNew` and `EnumNew` carry it:

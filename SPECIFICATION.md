@@ -211,7 +211,11 @@ call and no `await` anywhere in it computes a value and throws it away, so it is
 `E0117` too: a line opening with `-` (a negation, not a subtraction carried
 over), one opening with `[` (a slice literal, not an index), and `done == true`
 written for `done = true`. A statement that holds a call, such as `f() + 1`, is
-something happening and is left alone.
+something happening and is left alone. An arm of a `match` statement is a
+statement in this sense too ([§9.2](#92-match)). An index that can trap, or an
+interpolation whose hole runs `show`, does not count as an effect — `n + 1` can
+overflow too — so a statement kept for that alone is written `_ = xs[i]` (as an
+arm, `{ _ = xs[i] }`), and the diagnostic says so.
 
 ---
 
@@ -478,7 +482,9 @@ a struct and pass it to what changes it.
 
 A constant shares the value name space with functions, so a module cannot
 declare both `fn limit` and `let limit`; a cycle among constants is
-[E0119](#16-diagnostics).
+[E0119](#16-diagnostics). A module's own constant shadows a prelude function of
+the same name, exactly as its own function would: after `let max = 100`, `max`
+is that constant everywhere in the module, and `max(1, 2)` there is an error.
 
 In a `match` pattern a constant's name is its value too, so `LIMIT => …` and
 `limits.MAX_BODY => …` match that one value, exactly as the literal would — they
@@ -753,8 +759,14 @@ becomes `0`, `""`, or `nil`.
 
 The fields of a struct literal, and the named payload of a variant such as
 `Rect(h: f(), w: g())`, are evaluated in the order they are written, not the
-order they are declared in. `..base` is written first, so it is evaluated
-first, and once; the fields it supplies are read from that one value.
+order they are declared in. Every operand list runs in written order — a call's
+arguments, the elements of a tuple, slice or map literal, the two sides of an
+operator — and each operand's value is fixed when it is evaluated: a later one
+that assigns a local, as a `match` arm block can, does not change what an
+earlier one read from it. `..base` is written first, so it is evaluated
+first, and once; the fields it supplies are read from that one value, before
+any written field is evaluated — so a written field whose call changes the
+base through a `var` parameter does not change what the new value copies.
 
 ### 5.4 Slices and maps
 
@@ -777,9 +789,15 @@ m.remove("a")         // takes the entry out; a key that is not there is not an 
 
 Map indexing returns `Option<V>`, never a zero value.
 
-A map literal that gives one key twice keeps the later entry. Where the two
-keys are literals or constants, so the compiler can see they are equal, that is
-a warning ([E0112](#16-diagnostics)): the earlier value is never seen.
+A map literal that gives one key twice holds one entry for it: the later value,
+under the key as it was first written. That is what `m[k] = v` does to a key
+already there — the value changes and the stored key stays — and it shows only
+for keys that are equal without being the same: `{-0.0: 1, 0.0: 2}` holds
+`-0.0` with `2`. A NaN equals nothing, itself included, so two NaN keys are two
+entries. Where the two keys are literals or constants — a negated number, a
+float compared by value, and a tuple of them included — so the compiler can see
+they are equal, that is a warning ([E0112](#16-diagnostics)): the earlier value
+is never seen.
 
 `remove` shifts the entries after it down, so insertion order keeps meaning what
 it says and `keys()` and `values()` still line up element for element. Its
@@ -837,6 +855,14 @@ anything is copied, so no code the program wrote runs between taking a copy and
 writing it back, and a call in an index that changes the same field is not
 undone by the write. Because these are values, a copy of `grid` or of `grid[i]`
 taken before the write still holds what it did.
+
+**`target op= value` reads its target last**, by the same rule. The target's
+operands and the right-hand side are evaluated first, in the order written; then
+the target's current value is read, combined and stored. That holds for a local
+and a field as for an element: `c.count += f(c)`, where `f` sets `c.count`
+through a `var` parameter, adds to what `f` stored — as `xs[0] += f(h)` does —
+and is not the same as `c.count = c.count + f(c)`, which reads `c.count` where it
+is written, first.
 
 A `let` binding at the root, or a field not declared `var`, is `E0114`, as the
 same assignment written out would be. A call's result is held by nothing, so
@@ -1257,7 +1283,10 @@ pub fn load_config(path: str) -> (Config, error) {
 
 Rebinding `err` in the same scope is permitted, and is the one exception to the
 same-scope shadowing rule in [§4.1](#41-bindings) — but only because the previous
-`err` is provably Checked at that point.
+`err` is provably Checked at that point. The exception is the error slot of a
+two-name tuple binding, over an earlier binding that is an `error`; anything
+else a tuple binding redeclares in its own scope is [E0112](#16-diagnostics),
+as is a tuple binding that names one identifier twice, `let (a, a) = …`.
 
 ### 7.5 Handling a failure in place
 
@@ -1512,9 +1541,14 @@ the function needs no `return` after it.
 
 A `match` in statement position discards its arms' values, so its arms need not
 agree in type: `0 => io.print("zero")` beside `_ => count()`, where `count`
-returns an `int`, is fine. An arm whose value is an `error` is still one dropped
-([E0302](#16-diagnostics)), as a bare call's would be. A `match` used as a value
-needs every arm to produce the same type.
+returns an `int`, is fine. Each arm is in statement position too: a `match` or
+`if` written as an arm discards its own branches' values, so they need not
+agree either, and an arm that does nothing — `0 => 1`, or `{ done == true }` —
+is [E0117](#16-diagnostics), exactly as the same line on its own is; `0 => ()`
+says that nothing happens, as `0 => {}` does, and is fine. An arm
+whose value is an `error` is still one dropped ([E0302](#16-diagnostics)), as a
+bare call's would be. A `match` used as a value needs every arm to produce the
+same type.
 
 ### 9.3 Patterns
 

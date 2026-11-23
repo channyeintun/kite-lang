@@ -239,8 +239,10 @@ codes! {
          A loop label is a name too: a loop inside another may not reuse the \
          outer one's label, or `break outer` would leave the inner loop. And a \
          map literal giving one known key twice, `{\"a\": 1, \"a\": 2}`, is a \
-         warning under this code: the later entry wins, and the earlier value \
-         is never seen.";
+         warning under this code: the later value replaces the earlier, which \
+         is never seen. A key is known when it is a literal or a constant, a \
+         negated number, or a tuple of those; floats are compared by value, \
+         so `0.0` and `-0.0` are one key.";
 
     E0113 = "E0113", "wrong number of arguments",
         "Kite has no default arguments, no variadics, and no overloading, so \
@@ -292,7 +294,17 @@ codes! {
          \x20       - 2                         // n is 10; this line does nothing\n\
          \x20   done == true                    // write `done = true`\n\n\
          A statement holding a call, such as `f() + 1`, does something, and \
-         is left alone.";
+         is left alone.\n\n\
+         An arm of a `match` statement is a statement as well, since its value \
+         is thrown away: `0 => 1` and `0 => { done == true }` are refused there \
+         as they are on a line of their own. `0 => ()` and `0 => {}` say \
+         that nothing happens, and are fine.\n\n\
+         An index that can trap and an interpolation whose hole runs `show` \
+         are not counted as effects, any more than an addition that can \
+         overflow is. To evaluate one for that alone, say so:\n\n\
+         \x20   _ = xs[i]                       // traps if `i` is out of range\n\n\
+         An arm holds an expression, not an assignment, so there it is \
+         `0 => { _ = xs[i] }`.";
 
     E0118 = "E0118", "module-level binding is not a constant",
         "A `let` at the top of a module names a value the compiler works out \

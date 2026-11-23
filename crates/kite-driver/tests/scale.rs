@@ -5,7 +5,8 @@
 //! only worth asserting when nothing else is running beside it: native runs
 //! take a process-wide lock, so in the differential suite a native run's
 //! clock also counted every other test's native run it queued behind. Only
-//! running is timed, never compiling, and each bound is generous by two
+//! running is timed, never compiling — except where the checking was what
+//! grew, and then only the checking — and each bound is generous by two
 //! orders of magnitude — the old cost exceeds it by as much again — so a
 //! loaded machine cannot fail one and a quadratic runtime cannot pass it.
 
@@ -235,6 +236,44 @@ fn a_long_map_literal_is_built_in_linear_time() {
         entries.join(", ")
     );
     vm_within("map-literal", &src, "200000 1\n", Duration::from_secs(20));
+}
+
+/// Checking is linear in the arms of a generated `match` and in the links of
+/// a field-access chain — the one place here where it is checking that is
+/// timed, since that is where the cost was. Each `match` arm was looked up
+/// by a scan of the enum's variants, asked about against every arm above
+/// it, and the coverage of every constructor found by a pass over every
+/// row; each link of `x.a.a…` spelled out the whole chain to ask whether it
+/// was a dotted name. These took about a minute together; now a second.
+#[test]
+fn a_large_match_and_a_long_field_chain_are_checked_in_linear_time() {
+    let _turn = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+    let n = 20_000;
+    let variants: String = (0..n).map(|i| format!("  V{}\n", i)).collect();
+    let arms: String = (0..n).map(|i| format!("    V{} => {},\n", i, i)).collect();
+    let by_enum = format!("enum E {{\n{}}}\nfn f(e: E) -> int {{\n  return match e {{\n{}  }}\n}}\n\
+                           fn main() {{\n  io.print(f(V7))\n}}\n", variants, arms);
+    let arms: String = (0..n).map(|i| format!("    {} => {},\n", i, i)).collect();
+    let by_int = format!("fn f(e: int) -> int {{\n  return match e {{\n{}    _ => 0,\n  }}\n}}\n\
+                          fn main() {{\n  io.print(f(7))\n}}\n", arms);
+    let arms: String = (0..n).map(|i| format!("    \"k{}\" => {},\n", i, i)).collect();
+    let by_str = format!("fn f(e: str) -> int {{\n  return match e {{\n{}    _ => 0,\n  }}\n}}\n\
+                          fn main() {{\n  io.print(f(\"k7\"))\n}}\n", arms);
+    let chain = format!("fn main() {{\n  let x = 1\n  let s = x{}\n}}\n", ".a".repeat(8000));
+    let started = Instant::now();
+    // On the stack `kitec` gives the compiler: a chain this deep nests as
+    // deep, and a test thread's stack is smaller.
+    let codes = kite_driver::on_compiler_stack(move || {
+        for (name, src) in [("match-enum", &by_enum), ("match-int", &by_int), ("match-str", &by_str)] {
+            compiled(name, src, Emit::Check);
+        }
+        let c = compile("chain.kite", &chain, Emit::Check);
+        let codes: Vec<String> = c.diags.iter().filter_map(|d| d.code.map(|x| x.0.to_string())).collect();
+        (codes, c.render_diagnostics())
+    });
+    assert_eq!(codes.0, vec!["E0200"], "{}", codes.1);
+    let took = started.elapsed();
+    assert!(took < Duration::from_secs(20), "checking took {:?}", took);
 }
 
 /// A key is hashed whole, so keys that differ only far inside still spread

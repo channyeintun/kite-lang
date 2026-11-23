@@ -653,6 +653,12 @@ pub struct ResolveMap {
     /// reports `E0112` at it only if both turn out to be bindings. Keyed by
     /// the second's span; the value is the first's.
     pub rebound: HashMap<Span, Span>,
+    /// The error slot of a tuple binding that redeclared a name already in
+    /// the same scope — `let (text, err) = …` after `let (bytes, err) = …`.
+    /// That is allowed only when the earlier binding is an `error` (§7.4),
+    /// which is a type, so the checker decides; keyed by the new binding's
+    /// span, the value is the local it shadows.
+    pub shadowed: HashMap<Span, u32>,
     /// Spans that also spell a struct field: the `x` of a shorthand
     /// `Point{ x }`, in a literal or a pattern. The one identifier serves two
     /// roles, so a tool that rewrites the binding's name — rename — must not
@@ -812,6 +818,11 @@ impl ResolveMap {
 
     fn find_const(&self, name: &str) -> Option<u32> {
         self.consts.iter().position(|c| c.name == name).map(|i| i as u32)
+    }
+
+    /// Whether a declaration's merged name is the prelude's.
+    fn is_prelude(&self, merged: &str) -> bool {
+        merged.strip_prefix(PRELUDE).is_some_and(|rest| rest.starts_with('.'))
     }
 
     pub fn type_by_name_in(&self, module: &str, name: &str) -> Option<u32> {
@@ -1810,6 +1821,7 @@ impl<'a> FnResolver<'a> {
                 return prev_id;
             }
             if allow_shadow {
+                self.map.shadowed.insert(name.span, prev_id);
                 let id = self.locals.len() as u32;
                 self.locals.push(LocalInfo {
                     name: name.name.clone(),
@@ -1920,8 +1932,13 @@ impl<'a> FnResolver<'a> {
                 for (i, e) in elems.iter().enumerate() {
                     if let BindElem::Name(n) = e {
                         // The error slot may shadow an earlier one in the same
-                        // scope; see `declare_maybe_shadowing`.
-                        let is_error_slot = elems.len() == 2 && i == 1;
+                        // scope; see `declare_maybe_shadowing`. Not the value
+                        // slot beside it: `let (a, a) = …` names one thing
+                        // twice, and kept the last.
+                        let twice = elems[..i]
+                            .iter()
+                            .any(|p| matches!(p, BindElem::Name(m) if m.name == n.name));
+                        let is_error_slot = elems.len() == 2 && i == 1 && !twice;
                         self.declare_maybe_shadowing(n, mutable, false, is_error_slot);
                     }
                 }
@@ -2241,17 +2258,7 @@ impl<'a> FnResolver<'a> {
             // associated function (`Rect.square`) — but only when its head is
             // not a local. Locals win, so a field named `print` on a value
             // called `io` still works.
-            Expr::Field { base, name, span } => {
-                if let Some(res) = self.try_dotted(base, name) {
-                    self.map.uses.insert(*span, res);
-                    return;
-                }
-                if let Some(d) = self.missing_member(base, name) {
-                    self.diags.push(d);
-                    return;
-                }
-                self.expr(base)
-            }
+            Expr::Field { .. } => self.field_chain(e),
             Expr::Index { base, index, .. } => {
                 self.expr(base);
                 self.expr(index);
@@ -2334,6 +2341,66 @@ impl<'a> FnResolver<'a> {
     ///
     /// The modules in scope without a `use` — `io.prnt` — are the same
     /// mistake, and said the same way when one of their builtins is near.
+    /// A run of field accesses, `a.b.c`, from the outside in: the longest
+    /// prefix that names something dotted wins, and what is left is fields.
+    ///
+    /// Walked as a loop over the links, and each link asked whether it can
+    /// be a dotted name only when it is short enough to be one: the head is
+    /// the same for every link, and a name has no more segments than the
+    /// longest declared, plus a variant or an associated function. Asking
+    /// every link, each spelling out its whole text, made `x.a.a.a…` of
+    /// 8,000 links take ten seconds.
+    fn field_chain(&mut self, e: &Expr) {
+        let mut links = Vec::new();
+        let mut head = e;
+        while let Expr::Field { base, name, span } = head {
+            links.push((&**base, name, *span));
+            head = base;
+        }
+        let head_segments = match head {
+            Expr::Path(p) if self.lookup(&p.segments[0].name).is_none() => Some(p.segments.len()),
+            _ => None,
+        };
+        // Only a long chain is worth the count of the longest name.
+        let limit = match head_segments {
+            Some(n) if n + links.len() > 8 => Some(self.longest_dotted_name() + 1),
+            _ => None,
+        };
+        for (i, &(base, name, span)) in links.iter().enumerate() {
+            let segments = head_segments.map(|n| n + links.len() - i);
+            let may_be_dotted = match (segments, limit) {
+                (None, _) => false,
+                (Some(n), Some(limit)) => n <= limit,
+                (Some(_), None) => true,
+            };
+            if may_be_dotted {
+                if let Some(res) = self.try_dotted(base, name) {
+                    self.map.uses.insert(span, res);
+                    return;
+                }
+            }
+            if let Some(d) = self.missing_member(base, name) {
+                self.diags.push(d);
+                return;
+            }
+        }
+        self.expr(head)
+    }
+
+    /// How many segments the longest dotted name a body can reach has.
+    fn longest_dotted_name(&self) -> usize {
+        let segments = |n: &str| n.split('.').count();
+        let map = &*self.map;
+        map.fns
+            .iter()
+            .map(|f| segments(&f.name))
+            .chain(map.consts.iter().map(|c| segments(&c.name)))
+            .chain(map.types.iter().map(|t| segments(&t.name)))
+            .chain(BUILTIN_PATHS.iter().map(|p| segments(p)))
+            .max()
+            .unwrap_or(1)
+    }
+
     fn missing_member(&self, base: &Expr, name: &Ident) -> Option<Diagnostic> {
         let Expr::Path(p) = base else { return None };
         if !p.is_simple() || self.lookup(&p.text()).is_some() {
@@ -2498,7 +2565,16 @@ impl<'a> FnResolver<'a> {
             self.map.uses.insert(p.span, Res::Local(id));
             return;
         }
+        // A program's own constant shadows a prelude function, exactly as its
+        // own function does: `let max = 100` then `max + 1` is the constant.
+        // It was the prelude's `max` here and the constant in a pattern, so
+        // one name meant two things in one function.
+        let own_const = self.find_const(name).filter(|&c| !self.map.is_prelude(&self.map.consts[c as usize].name));
         if let Some(id) = self.find_fn(name) {
+            if let (Some(c), true) = (own_const, self.map.is_prelude(&self.map.fns[id as usize].name)) {
+                self.map.uses.insert(p.span, Res::Const(c));
+                return;
+            }
             self.map.uses.insert(p.span, Res::Fn(id));
             return;
         }
