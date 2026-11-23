@@ -1078,6 +1078,23 @@ fn an_arm_after_a_misspelt_variant_is_unreachable() {
     assert!(c.render().contains("did you mean `Directory`?"), "{}", c.render());
 }
 
+/// A built-in type with no text form cannot be given an `impl`, so E0207's
+/// note names what does compile for its shape — it used to say "write `impl
+/// Display for Option<int>`", which can never compile.
+#[test]
+fn e0207_names_a_fix_that_compiles_for_a_built_in_type() {
+    let c = body(
+        "  let xs = [1, 2]\n  let found = xs.get(0)\n\
+         \x20 io.print(\"\\(found)\")\n  io.print(\"\\(xs)\")\n  io.print(\"\\((1, 2))\")",
+    );
+    let text = c.render();
+    assert_eq!(c.codes().iter().filter(|&&x| x == "E0207").count(), 3, "{}", text);
+    assert!(!text.contains("impl Display for"), "{}", text);
+    assert!(text.contains("or_else(x, …)"), "{}", text);
+    assert!(text.contains("join_ints(xs, \", \")"), "{}", text);
+    assert!(text.contains("\"(\\(t.0), \\(t.1))\""), "{}", text);
+}
+
 /// A literal or a range inside a range above it reaches nothing, and is
 /// E0116 like any arm no value can reach; so is an empty range, which was
 /// E0210, the code for a match missing values.

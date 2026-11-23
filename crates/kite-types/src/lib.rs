@@ -11854,6 +11854,41 @@ impl<'a> Checker<'a> {
             }
             _ => {}
         }
+        // A built-in type cannot be given an `impl` — `impl Display for
+        // Option<int>` names no type that can be written there — so the note
+        // says what does compile for the shape at hand.
+        match self.types.kind(ty).clone() {
+            TyKind::Optional(inner) => {
+                return format!(
+                    "narrow it first — inside `if x != nil {{ … }}`, `x` is {} — or give \
+                     it a fallback: `or_else(x, …)`",
+                    self.types.with_article(inner)
+                )
+            }
+            TyKind::Slice(elem) => {
+                let join = match self.types.kind(elem) {
+                    TyKind::Int => Some("join_ints(xs, \", \")"),
+                    TyKind::Float => Some("join_floats(xs, \", \")"),
+                    TyKind::Str => Some("join(xs, \", \")"),
+                    _ => None,
+                };
+                return match join {
+                    Some(call) => format!("build the text: `{}`", call),
+                    None => "build the text: render each element in a `for` loop and \
+                             `join` the pieces"
+                        .to_string(),
+                };
+            }
+            TyKind::Tuple(elems) => {
+                let holes: Vec<String> =
+                    (0..elems.len()).map(|i| format!("\\(t.{})", i)).collect();
+                return format!(
+                    "render its elements: `\"({})\"`",
+                    holes.join(", ")
+                );
+            }
+            _ => {}
+        }
         if self.type_index_of(ty).is_none() {
             return format!(
                 "{} cannot be given an `impl`; render its parts, or hold it in a struct \
