@@ -286,6 +286,20 @@ fn an_error_in_a_doc_example_points_at_the_line_it_was_written_on() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A file with no tests says so in one line and still succeeds. The line used
+/// to describe a signature, `-> (int, error)`, that a test does not need.
+#[test]
+fn a_file_with_no_tests_says_so_in_one_line() {
+    let dir = scratch("no-tests", "t.kite", "fn main() {\n}\n");
+    let Some((ok, _, err)) = kitec_in(&dir, &["test", "t.kite"]) else { return };
+    assert!(ok, "{}", err);
+    assert_eq!(err.trim().lines().count(), 1, "{}", err);
+    assert!(err.contains("no tests in"), "{}", err);
+    assert!(err.contains("`fn test_…()` taking no arguments"), "{}", err);
+    assert!(!err.contains("(int, error)"), "{}", err);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// `kitec doc` on a file that does not parse says what is wrong and fails. It
 /// printed "Nothing is exported from this module." and exited 0, which is the
 /// reference of a file whose one declaration was the one with the error.

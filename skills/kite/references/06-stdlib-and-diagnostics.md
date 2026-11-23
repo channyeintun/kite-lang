@@ -1952,7 +1952,8 @@ Notes worth having:
 - **`--emit ast|hir|mir|kbc`** dumps that stage to stdout and exits — with
   `run` too, which does not then run the program. Useful for confirming what
   the compiler actually did.
-- **`kitec test`** runs every `fn test_*() -> (int, error)` — `pub` or not,
+- **`kitec test`** runs every `fn test_*()` that takes no arguments (write
+  `-> (int, error)` so it can report a failure) — `pub` or not,
   `async` or not — and every ` ```kite ` doc comment example, reporting both —
   **in the entry file only**. A `use`d module's tests and doc examples are
   invisible to it; see `### test`.

@@ -493,8 +493,12 @@ fn run_tests(result: &kite_driver::Compilation, path: &str, src: &str) -> ExitCo
         );
     }
     if tests.is_empty() && docs.is_empty() {
+        // Said in one line, and still a success: a file with nothing to test
+        // has not failed. A test is any `test_…` that takes no arguments;
+        // `-> (int, error)` is how one *reports* a failure, not what makes it
+        // a test, so the hint does not ask for it.
         eprintln!(
-            "no tests in `{}`\n\nnote: a test is a `fn test_…() -> (int, error)`, or a \
+            "no tests in `{}`: a test is a `fn test_…()` taking no arguments, or a \
              ```kite fence in a doc comment",
             path
         );
