@@ -4301,6 +4301,9 @@ impl<'a> Checker<'a> {
                     );
                     self.lit(ExprKind::Error, TyId::ERROR, *span)
                 }
+                // An annotation that failed has its error, and is the type
+                // `nil` was given.
+                Some(_) => self.lit(ExprKind::Error, TyId::ERROR, *span),
                 _ => {
                     self.diags.push(
                         Diagnostic::error(codes::E0204, "cannot infer a type for `nil`")
@@ -14521,6 +14524,20 @@ fn resolve_named_ty(
                     }
                     let id = types.instantiate_enum(e, &args);
                     types.enum_ty(id)
+                }
+                // A name that is not declared at all is unknown, as it is
+                // without arguments: "does not take type arguments" claimed
+                // a type that is not there.
+                None if found.is_none() => {
+                    if p.segments.len() > 1 && resolved.modules.is_unresolved(module, &p.segments[0].name) {
+                        return TyId::ERROR;
+                    }
+                    if p.segments.len() == 1 && p.name() != "Self" {
+                        diags.push(unknown_type_here(p, resolved, module, generics));
+                    } else if let Some(d) = resolved.missing_type_member(module, &p.segments, codes::E0204) {
+                        diags.push(d);
+                    }
+                    TyId::ERROR
                 }
                 _ => {
                     diags.push(

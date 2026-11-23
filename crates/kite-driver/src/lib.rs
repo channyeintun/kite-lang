@@ -1762,6 +1762,25 @@ mod tests {
         assert!(!text.contains('#') && !text.contains("`d<int>`"), "{}", text);
     }
 
+    /// A type name nothing declares is unknown whether or not it is written
+    /// with arguments — not a type that "does not take type arguments" — and
+    /// `nil` given the failed annotation is not also "cannot infer a type".
+    #[test]
+    fn an_unknown_generic_type_is_unknown_once() {
+        let c = compile(
+            "t.kite",
+            "use std/sync\nfn main() {\n  let x: Foo<int> = 1\n  let q: Nope<str> = nil\n  let r: sync.Nope<str> = nil\n  io.print(1)\n}\n",
+            Emit::Check,
+        );
+        let codes: Vec<&str> = c.diags.iter().filter_map(|d| d.code.map(|x| x.0)).collect();
+        assert_eq!(codes, vec!["E0204", "E0204", "E0204"], "{}", c.render_diagnostics());
+        let text = c.render_diagnostics();
+        assert!(text.contains("unknown type `Foo`"), "{}", text);
+        assert!(text.contains("unknown type `Nope`"), "{}", text);
+        assert!(text.contains("cannot find `Nope` in module `sync`"), "{}", text);
+        assert!(!text.contains("does not take type arguments") && !text.contains("`nil`"), "{}", text);
+    }
+
     /// A default method that asks of `Self` what its trait does not declare
     /// is not told to "add the bound: `Self: Display`", which no program
     /// can write.
