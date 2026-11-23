@@ -603,12 +603,18 @@ pub fn serve(routes: [Route], request: Request) -> Response {
     return not_found()
 }
 
-/// Whether a path matches a pattern, where `:name` stands for one segment.
+/// Whether a path matches a pattern, where `:name` stands for one segment of at
+/// least one character.
 ///
 /// `path` may be a whole request target: whatever follows a `?` or a `#` is
 /// not part of the path, and is not compared. The server hands a handler the
 /// target as the client sent it, query and all, and routing on that made a
 /// link with `?utm=1` on it a 404.
+///
+/// ```kite
+/// assert(matches("/users/:id", "/users/7?tab=posts"), "a capture, and the query is not compared")
+/// assert(!matches("/users/:id", "/users/"), "a parameter is not an empty segment")
+/// ```
 pub fn matches(pattern: str, path: str) -> bool {
     let want = split(pattern, "/")
     let found = split(path_part(path), "/")
@@ -621,12 +627,15 @@ pub fn matches(pattern: str, path: str) -> bool {
             if w != found[i] {
                 return false
             }
+        } else if found[i].len() == 0 {
+            // A parameter captures something: `/users/` is not `/users/:id`.
+            return false
         }
     }
     return true
 }
 
-/// The value a `:name` segment captured, or nil.
+/// The value a `:name` segment captured, or nil — and nil for an empty segment.
 ///
 /// As it appears in the path — still percent-encoded, so `/users/a%20b`
 /// captures `a%20b` — and without the query: `/users/7?tab=posts` captures
@@ -639,6 +648,9 @@ pub fn parameter(pattern: str, path: str, name: str) -> Option<str> {
     }
     for i in 0..want.len() {
         if want[i] == ":\(name)" {
+            if found[i].len() == 0 {
+                return nil
+            }
             return found[i]
         }
     }

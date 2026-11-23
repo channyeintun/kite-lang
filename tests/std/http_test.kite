@@ -44,6 +44,10 @@ fn checks() -> [error] {
     out.push(test.equal_str(served("/users/7#top"), "200 user 7", "a capture with a fragment"))
     out.push(test.equal_str(served("/users/7/x?a=b"), "404 not found", "a longer path is still no match"))
     out.push(test.is_true(http.matches("/users/:id", "/users/7?x=/a/b"), "a slash in the query is not a segment"))
+    out.push(test.is_true(!http.matches("/users/:id", "/users/"), "a parameter does not match an empty segment"))
+    out.push(test.is_true(!http.matches("/users/:id", "/users/?a=1"), "nor one with only a query after it"))
+    out.push(test.is_true(http.parameter("/users/:id", "/users/", "id") == nil, "and captures nothing from it"))
+    out.push(test.equal_str(served("/users/"), "404 not found", "so it is a 404"))
     out.push(test.equal_str(
             or_else(http.parameter("/users/:id", "/users/a%20b", "id"), "?"),
             "a%20b",
