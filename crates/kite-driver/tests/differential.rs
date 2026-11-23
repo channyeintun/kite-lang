@@ -6335,6 +6335,33 @@ fn main() {
 "#,
         "0\n10\n20\na! 2\n2\n",
     ),
+    // A task carries its number with the scheduler, so `==` on two tasks is
+    // true only for the same one (§12.1). Two tasks with equal results, or
+    // two unfinished ones, used to compare equal, and a map keyed by tasks
+    // folded them into one entry.
+    (
+        "a-task-is-equal-only-to-itself",
+        r#"async fn one() -> int {
+  return 1
+}
+
+pub async fn main() {
+  let a = one()
+  let b = one()
+  let c = a
+  io.print("\(a == b) \(a == c)")
+  _ = await a
+  _ = await b
+  io.print("\(a == b) \(a == c) \(a == a)")
+  var m: {Task<int>: int} = {}
+  m[a] = 1
+  m[b] = 2
+  m[c] = 3
+  io.print("\(m.len()) \(or_else(m[a], 0))")
+}
+"#,
+        "false true\nfalse true true\n2 3\n",
+    ),
 ];
 
 #[test]

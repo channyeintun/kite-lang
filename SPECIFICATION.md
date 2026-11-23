@@ -732,7 +732,8 @@ is how it reads. It is non-associative too: `a..b..c` has no meaning to give.
 equal, two slices when their elements are, two maps when they hold equal
 entries in the same insertion order. Order counts for a map because it is part
 of what a map is — iteration, `keys()` and a derived `hash()` all observe it —
-so `{"a": 1, "b": 2} != {"b": 2, "a": 1}`. A recursive type — a list whose
+so `{"a": 1, "b": 2} != {"b": 2, "a": 1}`. A `Task` is equal only to itself
+([§12.1](#121-the-model)). A recursive type — a list whose
 tail is another list, a tree whose children are trees — is compared the same
 way, as deep as the values go. There is no reference equality
 operator in the surface language; `ptr.same(a, b)` is a compiler builtin, for
@@ -1945,6 +1946,10 @@ walking it hands each one to the loop's binding to be checked.
 `task.all([...])`, `task.race([...])`, and `task.timeout(t, ms)` cover the
 remaining combinators. There is no channel type; a `Task<T>` *is* the
 one-shot result channel, and it is awaited rather than received from.
+
+A task carries which task it is, so under `==` a `Task` is equal only to
+itself: two calls of `one()` are two tasks and never equal, finished or not,
+and a map keyed by tasks keeps an entry for each.
 
 ### 12.2 Parallelism: the surface is thread-agnostic
 
