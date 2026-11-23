@@ -999,7 +999,11 @@ The rules:
 >
 > **R6.** A call left as a bare statement, whose type is `error` or `(T,
 > error)`, is a compile error (`E0302`). Binding nothing is not a way out of
-> binding an error.
+> binding an error. Nor is not awaiting one: a call to an `async fn` whose
+> result is either yields the `Task` of a failure on its way, and the `Task`
+> is held to the same rules as what it will give — left as a statement it is
+> `E0302`, and bound to a name it is Unchecked until it is awaited, returned
+> or passed on.
 >
 > **R7.** An `error`, or a whole `(T, error)`, bound to a single name makes
 > that binding Unchecked — by `let` or by `var`, whether it came straight from

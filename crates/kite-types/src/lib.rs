@@ -1266,6 +1266,17 @@ struct FlowState {
     copies: std::collections::BTreeSet<(u32, u32)>,
 }
 
+/// What holds a failure, which is what a diagnostic about dropping it says.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Holder {
+    /// An `error`.
+    Error,
+    /// A whole `(T, error)`.
+    Pair,
+    /// The `Task` of a call to an `async fn` whose result holds one.
+    Task,
+}
+
 /// An error state: the taint, and which locals are copies of which.
 type ErrorState = (Vec<Taint>, std::collections::BTreeSet<(u32, u32)>);
 
@@ -1930,7 +1941,29 @@ impl<'a> Checker<'a> {
     /// Whether a binding of this type carries the obligation to be checked:
     /// an `error`, or a whole `(T, error)`.
     fn may_hold_failure(&self, ty: TyId) -> bool {
-        ty == TyId::ERR || self.types.fallible_value(ty).is_some()
+        self.holder(ty).is_some()
+    }
+
+    /// What holds the failure in a value of this type, if anything can.
+    ///
+    /// A `Task` of one is a failure not yet arrived. Calling an `async fn`
+    /// queues its body and hands back the task, so `save()` on its own line
+    /// — where `save` is `async` and answers with an `error` — ran, failed,
+    /// and was never heard of: R6 saw a `Task<error>`, not an `error`, and a
+    /// task bound and never awaited went the same way. Awaiting the task,
+    /// returning it or passing it on reads it; `_ = save()` is the
+    /// deliberate drop.
+    fn holder(&self, ty: TyId) -> Option<Holder> {
+        if ty == TyId::ERR {
+            return Some(Holder::Error);
+        }
+        if self.types.fallible_value(ty).is_some() {
+            return Some(Holder::Pair);
+        }
+        match self.types.task_payload(ty) {
+            Some(inner) if self.may_hold_failure(inner) => Some(Holder::Task),
+            _ => None,
+        }
     }
 
     /// Whether a value put somewhere new brings an unchecked failure with it,
@@ -7244,22 +7277,30 @@ impl<'a> Checker<'a> {
     ///
     /// [§7.3]: ../../../SPECIFICATION.md#73-correlated-results-and-taint-analysis
     fn dropped_error(&mut self, expr: &hir::Expr) {
-        let pair = self.types.fallible_value(expr.ty).is_some();
-        if expr.ty != TyId::ERR && !pair {
+        let Some(holder) = self.holder(expr.ty) else {
             return;
-        }
-        let what = if pair {
-            "this call returns a value and an error, and both are thrown away"
-        } else {
-            "this call returns an error, and it is thrown away"
+        };
+        let (what, fix) = match holder {
+            Holder::Error => (
+                "this call returns an error, and it is thrown away",
+                "write `check` to propagate it, or bind it and test it — \
+                 `let err = …` then `if err != nil { … }`",
+            ),
+            Holder::Pair => (
+                "this call returns a value and an error, and both are thrown away",
+                "write `check` to propagate it, or bind it and test it — \
+                 `let err = …` then `if err != nil { … }`",
+            ),
+            Holder::Task => (
+                "this call starts a task whose error nobody will see",
+                "`await` it and check what it gives, or bind the task and hand it to \
+                 something that will, such as `task.all`",
+            ),
         };
         self.diags.push(
             Diagnostic::error(codes::E0302, "error is never checked")
                 .with_primary(expr.span, what)
-                .with_note(
-                    "write `check` to propagate it, or bind it and test it — \
-                     `let err = …` then `if err != nil { … }`",
-                )
+                .with_note(fix)
                 .with_note("to throw it away on purpose, write `_ = …`"),
         );
     }
@@ -7465,7 +7506,7 @@ impl<'a> Checker<'a> {
     /// through may check them, and it was the early exits that dropped an
     /// error bound above them in silence.
     fn report_unchecked_errors_at(&mut self, region: Option<Span>, exit: Option<(Span, &str)>) {
-        let mut pending: Vec<(String, Span, bool)> = Vec::new();
+        let mut pending: Vec<(String, Span, Holder)> = Vec::new();
         let leaves = |s: &Self, j: u32| region.is_none_or(|r| s.declared_inside(j, r));
         for i in 0..self.taint.len() {
             let id = i as u32;
@@ -7491,11 +7532,11 @@ impl<'a> Checker<'a> {
             self.reported_unchecked.extend(group);
             if first {
                 let local = &self.locals[i];
-                let pair = self.types.fallible_value(local.ty).is_some();
-                pending.push((local.name.clone(), local.span, pair));
+                let holder = self.holder(local.ty).unwrap_or(Holder::Error);
+                pending.push((local.name.clone(), local.span, holder));
             }
         }
-        for (name, span, pair) in pending {
+        for (name, span, holder) in pending {
             let d = match exit {
                 Some((at, how)) => Diagnostic::error(
                     codes::E0302,
@@ -7505,27 +7546,34 @@ impl<'a> Checker<'a> {
                 .with_secondary(span, "bound here"),
                 None => {
                     let d = Diagnostic::error(codes::E0302, format!("`{}` is never checked", name));
-                    if pair {
-                        d.with_primary(span, "the error in this result goes out of scope uninspected")
-                    } else {
-                        d.with_primary(span, "this error goes out of scope uninspected")
-                    }
+                    d.with_primary(
+                        span,
+                        match holder {
+                            Holder::Error => "this error goes out of scope uninspected",
+                            Holder::Pair => "the error in this result goes out of scope uninspected",
+                            Holder::Task => "this task's error is never awaited",
+                        },
+                    )
                 }
             };
             let d = d.with_note(
                 "silently dropping errors is the single most common source of \
                  production failures in languages that permit it",
             );
-            let d = if pair {
-                d.with_note(
-                    "take the result apart where it is bound — `let (value, err) = …` — \
-                     and then check `err`",
-                )
-            } else {
-                d.with_note(
+            let d = match holder {
+                Holder::Error => d.with_note(
                     "to propagate, write `check` on its own line; to handle it here, \
                      test `err != nil`",
-                )
+                ),
+                Holder::Pair => d.with_note(
+                    "take the result apart where it is bound — `let (value, err) = …` — \
+                     and then check `err`",
+                ),
+                Holder::Task => d.with_note(format!(
+                    "await it where what it gives can be checked — `let err = await {}`, \
+                     or `let (value, err) = await {}` — or hand it to something that will",
+                    name, name
+                )),
             };
             self.diags.push(d);
         }
@@ -7534,7 +7582,7 @@ impl<'a> Checker<'a> {
     /// An error binding written over while it still held a failure nobody
     /// had looked at: the write is where that failure is dropped (R3).
     fn overwritten_unchecked(&mut self, name: &str, decl: Span, at: Span, ty: TyId) {
-        let pair = self.types.fallible_value(ty).is_some();
+        let holder = self.holder(ty).unwrap_or(Holder::Error);
         let d = Diagnostic::error(
             codes::E0302,
             format!("`{}` is overwritten before it is checked", name),
@@ -7545,17 +7593,20 @@ impl<'a> Checker<'a> {
             "silently dropping errors is the single most common source of \
              production failures in languages that permit it",
         );
-        let d = if pair {
-            d.with_note(
+        let d = match holder {
+            Holder::Pair => d.with_note(
                 "take the result apart before writing over it — `let (value, err) = …` — \
                  and check `err`",
-            )
-        } else {
-            d.with_note(format!(
+            ),
+            Holder::Task => d.with_note(format!(
+                "await it and check what it gives before the write — `let err = await {}`",
+                name
+            )),
+            Holder::Error => d.with_note(format!(
                 "test `{} != nil` or `check {}` before the write; to pass it on instead, \
                  write `{} = errors.wrap({}, \"…\")`",
                 name, name, name, name
-            ))
+            )),
         };
         self.diags.push(d);
     }

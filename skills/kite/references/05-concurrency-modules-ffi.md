@@ -160,7 +160,22 @@ async fn main() {
 
 Note the shape of the type: `async fn fetch(id: int) -> (str, error)` produces
 `Task<(str, error)>`, and `await` on it yields the pair, which is then
-destructured. The taint analysis (`E0302`) still applies across the `await`.
+destructured. The taint analysis (`E0302`) still applies across the `await` —
+and before it: a task whose result holds an error is watched like the error
+itself. Called as a bare statement, or bound and never awaited, it is `E0302`,
+since its body would run and fail with nobody to hear it. Await it, return it,
+or hand it to `task.all`; `_ = save()` drops one on purpose.
+
+```kite fails
+async fn save() -> error {
+    return errors.new("disk full")
+}
+
+async fn main() {
+    save() //~ E0302
+    io.print("saved?")
+}
+```
 
 ### `Task<T>` in a signature
 
