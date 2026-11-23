@@ -101,6 +101,28 @@ fn the_rest_dropped_on_purpose() {
     }
 }
 
+// Taking the tuple apart after one element was taken owes only the rest:
+// `a` holds the failure `t.0` already looked at.
+fn taken_apart_after_one_was_taken() {
+    let t = (f(1), f(2))
+    if t.0 != nil {
+        io.print("first")
+    }
+    let (a, b) = t
+    if b != nil {
+        io.print("second")
+    }
+}
+
+fn the_rest_left_unread_once_taken_apart() {
+    let t = (f(1), f(2))
+    if t.0 != nil {
+        io.print("first")
+    }
+    let (a, b) = t //~ ERROR E0302
+    io.print("done")
+}
+
 // A slice cannot be followed element by element, so indexing it counts as
 // reading all of it.
 async fn a_slice_indexed() {
@@ -119,5 +141,7 @@ async fn main() {
     each_tested()
     taken_apart_on_the_other_branch(true)
     the_rest_dropped_on_purpose()
+    taken_apart_after_one_was_taken()
+    the_rest_left_unread_once_taken_apart()
     await a_slice_indexed()
 }

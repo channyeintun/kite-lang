@@ -7675,10 +7675,21 @@ impl<'a> Checker<'a> {
         // `let (a, b) = await task.both(x, y)` each bind failures nobody has
         // looked at, and marking none of them let every one go unread. What
         // each element brings is what it was built from, for a tuple literal,
-        // and for a read of a binding whatever that binding held unchecked.
+        // and for a read of a binding whatever that binding held unchecked —
+        // less any element already taken with `.N`, whose failure went where
+        // that landed: `if t.0 != nil { … }` then `let (a, b) = t` owes only `b`.
+        let taken = |i: usize| match &value.kind {
+            ExprKind::Local(id) => self.parts.get(&id.0).is_some_and(|ps| {
+                ps.iter().any(|&(j, part)| {
+                    j as usize == i && before.get(part as usize) != Some(&Taint::Unchecked)
+                })
+            }),
+            _ => false,
+        };
         let held: Vec<bool> = (0..parts.len())
             .map(|i| {
                 self.may_hold_failure(parts[i])
+                    && !taken(i)
                     && match &value.kind {
                         ExprKind::TupleNew { elems } => self.holds_obligation(&elems[i], before),
                         _ => self.holds_obligation(&value, before),

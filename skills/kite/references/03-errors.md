@@ -412,7 +412,8 @@ drops the failures of the elements not yet reached, with no report.
 shapes `task.both`, `task.all` and `task.timeout` answer with. Bound to one name it is Unchecked
 (`rs.len()` does not count as reading it); taking it apart, or walking it with
 `for`, hands each failure to the name it lands in. `r.0` takes one element of a
-tuple and leaves the others owed — the tuple is settled once each has been taken —
+tuple and leaves the others owed — the tuple is settled once each has been taken,
+and taking it apart afterwards binds only the failures not yet taken —
 but `rs[0]` on a slice counts as reading the whole slice, since a slice cannot be
 followed element by element. Both results of
 `task.both` arrive together, so deal with both before any exit — a `check` on
