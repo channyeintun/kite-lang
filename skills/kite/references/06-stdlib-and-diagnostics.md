@@ -1768,7 +1768,7 @@ cannot emit.
 | E0102 expression nested too deeply | E0110 use of possibly-uninitialised binding | E0111 unknown name | E0112 duplicate definition |
 | E0113 wrong number of arguments | E0114 cannot assign to immutable binding | E0115 `break` or `continue` outside a loop | E0116 unreachable code |
 | E0117 statement has no effect | E0118 module-level binding is not a constant | E0119 constant defined in terms of itself | E0200 type mismatch |
-| E0201 cannot apply operator to these types | E0202 condition must be `bool` | E0203 missing return value | E0204 unknown type |
+| E0201 cannot apply operator to these types | E0202 condition must be `bool` | E0203 missing return value | E0204 a type that cannot be named or worked out |
 | E0205 no such method, function, or callable value | E0206 trait cannot be a trait object | E0207 value cannot be interpolated | E0208 invalid type parameter |
 | E0209 type argument cannot be inferred | E0210 non-exhaustive match | E0211 invalid closure | E0212 invalid cast |
 | E0213 type has no identity | E0214 invalid type alias | E0220 generic instantiation does not terminate | E0301 value used before its error was checked |

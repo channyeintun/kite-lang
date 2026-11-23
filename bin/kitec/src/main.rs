@@ -72,9 +72,15 @@ fn command() -> ExitCode {
     }
 
     if let Some(i) = args.iter().position(|a| a == "--explain") {
+        // One code, and nothing else. `--explain E0117 E0118` explained the
+        // first and said nothing of the second, which reads as "that one has
+        // no explanation" and is not what happened.
         return match args.get(i + 1) {
-            Some(code) => explain(code),
             None => fail("`--explain` needs a diagnostic code, e.g. `--explain E0301`"),
+            Some(_) if args.len() > 2 => fail(
+                "`--explain` takes one diagnostic code and nothing else, e.g. `--explain E0301`",
+            ),
+            Some(code) => explain(code),
         };
     }
 
@@ -844,7 +850,10 @@ fn explain(code: &str) -> ExitCode {
         Some((summary, body)) => answer(&format!("{}: {}\n\n{}\n", code, summary, body)),
         None => {
             eprintln!("error: `{}` is not a known diagnostic code", code);
-            let known: Vec<&str> = kite_diag::codes::all().iter().map(|(c, _)| *c).collect();
+            // In code order: the table is in the order the codes were
+            // written, which is not the order they are numbered in.
+            let mut known: Vec<&str> = kite_diag::codes::all().iter().map(|(c, _)| *c).collect();
+            known.sort_unstable();
             eprintln!("note: known codes: {}", known.join(", "));
             ExitCode::FAILURE
         }
