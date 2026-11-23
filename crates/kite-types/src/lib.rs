@@ -6125,15 +6125,6 @@ impl<'a> Checker<'a> {
             self.require_mutable_receiver(base, &name.name);
         }
 
-        // `Self` is the receiver's type. Through a bound that is the
-        // parameter, and monomorphisation makes it the concrete type; through
-        // a `dyn` no method mentioning it is callable at all, which is what
-        // object safety is (§10.3).
-        let self_param = self.types.self_param();
-        let map = [(self_param, receiver.ty)];
-        let params: Vec<TyId> = params.iter().map(|p| replace_types(self.types, *p, &map)).collect();
-        let ret = replace_types(self.types, ret, &map);
-
         // A method generic in its own right solves its parameters from its
         // arguments, as a generic function does. They are numbered after the
         // trait's own, so the substitution has a slot for those too.
@@ -6143,15 +6134,38 @@ impl<'a> Checker<'a> {
             .unwrap_or_default();
         let before = generics.len();
         generics.extend(self.trait_method_generics.get(&(tr, index)).cloned().unwrap_or_default());
+        let own_end = generics.len();
+
+        // `Self` is the receiver's type. Through a bound that is the
+        // parameter, and monomorphisation makes it the concrete type; through
+        // a `dyn` no method mentioning it is callable at all, which is what
+        // object safety is (§10.3).
+        //
+        // It is a slot of its own, solved before any argument is looked at,
+        // and not written into the signature: the receiver's type is the
+        // caller's, and a caller's `T` (or a default's `Self`) is numbered in
+        // the caller's own space, where it would be read as the method's `U`
+        // and unified with it.
+        let self_slot = self.types.param_ty(own_end as u32, "Self");
+        let map = [(self.types.self_param(), self_slot)];
+        let params: Vec<TyId> = params.iter().map(|p| replace_types(self.types, *p, &map)).collect();
+        let ret = replace_types(self.types, ret, &map);
+        generics.push(GenericDef {
+            name: "Self".to_string(),
+            ty: self.types.self_param(),
+            bounds: Vec::new(),
+            span,
+        });
         let mut subst: Vec<Option<TyId>> = vec![None; generics.len()];
+        subst[own_end] = Some(receiver.ty);
 
         if args.len() != params.len() {
             self.arity_error(&name.name, args.len(), params.len(), span, None);
         }
         let mut lowered = vec![receiver];
         lowered.extend(self.check_args(&params, &generics, &mut subst, &[], args, None));
-        let own = generics[before..].to_vec();
-        let targs = self.finish_subst(&own, &subst[before..], span);
+        let own = generics[before..own_end].to_vec();
+        let targs = self.finish_subst(&own, &subst[before..own_end], span);
         self.check_bounds(&own, &targs, span);
         if !targs.is_empty() {
             if let Some(trait_index) = self.trait_index_of(tr) {
@@ -10273,8 +10287,13 @@ impl<'a> Checker<'a> {
             if slot >= subst.len() {
                 return;
             }
+            let self_ty = self.types.self_param();
             match subst[slot] {
                 None => subst[slot] = Some(actual),
+                // The receiver's `Self` slot is solved by the receiver, not
+                // by an argument; one that disagrees with it is a plain
+                // mismatch, which the argument's own check reports.
+                Some(_) if generics[slot].ty == self_ty => {}
                 Some(prev) if prev != actual && !self.types.satisfies(actual, prev) => {
                     let (a, b) = (self.types.name(prev), self.types.name(actual));
                     let name = generics[slot].name.clone();

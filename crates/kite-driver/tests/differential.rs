@@ -5773,6 +5773,44 @@ fn main() {
         "[greet 1][greet 1]\n[greet 2][greet 2]\n[greet 5][greet 5]\n\
          [greet 6][greet 6]\n[q][q]\n",
     ),
+    // A bound's generic method whose signature mentions `Self`, called from
+    // a default (where `Self` is a parameter) and from a generic function
+    // whose first parameter is the bound one. The receiver's type was written
+    // into the signature in the caller's numbering, where it collided with
+    // the method's own `U`: E0209 "conflicting types for U".
+    (
+        "a-generic-method-mentioning-self-through-a-bound",
+        r#"trait Pipe {
+  fn val(self) -> int
+  fn conv<U>(self, o: Self, u: U) -> U
+  fn pipe<U>(self, f: fn(Self) -> U) -> U {
+    return f(self)
+  }
+  fn text(self) -> str {
+    return self.pipe(|y: Self| "v\(y.val())") + self.conv(self, "s")
+  }
+}
+struct P {
+  n: int
+}
+impl Pipe for P {
+  fn val(self) -> int {
+    return self.n
+  }
+  fn conv<U>(self, o: P, u: U) -> U {
+    return u
+  }
+}
+fn run<T: Pipe>(x: T) -> str {
+  return x.conv(x, "r") + x.pipe(|y: T| "\(y.val())")
+}
+fn main() {
+  io.print(P{ n: 5 }.text())
+  io.print(run(P{ n: 7 }))
+}
+"#,
+        "v5s\nr7\n",
+    ),
     // An `Option<fn(…)>` proved present is the function it holds, so it can
     // be called as written, after an `if` or an early return. The call
     // looked at the declared type and said it was not a function.
