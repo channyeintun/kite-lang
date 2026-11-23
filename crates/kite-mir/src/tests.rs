@@ -648,6 +648,40 @@ fn a_parameter_is_kept_unless_nothing_can_keep_it() {
     }
 }
 
+/// A keep or a stir at the far end of a long chain of calls reaches its first
+/// caller, and finding that out does not sweep the whole program once per
+/// link: a chain of three thousand functions, each declared before the one
+/// it calls, took 3 s when every function was re-examined until nothing
+/// changed (it takes a few milliseconds now), and the compiler works it out
+/// for each backend.
+#[test]
+fn a_keep_at_the_end_of_a_long_chain_reaches_its_start() {
+    let n = 3000;
+    let mut src = String::new();
+    for i in 0..n {
+        if i == n - 1 {
+            src.push_str(&format!(
+                "fn f{i}(xs: [int], n: int) -> [int] {{\n    io.print(n)\n    return xs\n}}\n\n"
+            ));
+        } else {
+            src.push_str(&format!(
+                "fn f{i}(xs: [int], n: int) -> [int] {{\n    return f{}(xs, n + 1)\n}}\n\n",
+                i + 1
+            ));
+        }
+    }
+    src.push_str("fn main() {\n    _ = f0([1], 0)\n}\n");
+    let (mir, _) = lower_async(&src);
+    let started = std::time::Instant::now();
+    let kept = Kept::of(&mir);
+    let took = started.elapsed();
+    let f0 = mir.fns.iter().position(|f| f.name == "f0").expect("f0");
+    assert!(kept.keeps(FnId(f0 as u32), 0), "`f0` does not keep what `f{}` returns", n - 1);
+    assert!(!kept.keeps(FnId(f0 as u32), 1), "`f0` keeps an int");
+    assert!(!kept.quiet(FnId(f0 as u32)), "`f0` is quiet though `f{}` prints", n - 1);
+    assert!(took < std::time::Duration::from_secs(1), "Kept::of took {:?}", took);
+}
+
 /// A field's map passed to a call glances at it only when the callee keeps
 /// nothing of it and is quiet: one that keeps it, or that writes through a
 /// field itself, or renders a value, ends the field's being the one holder.

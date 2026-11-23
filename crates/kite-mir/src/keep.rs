@@ -55,34 +55,48 @@ impl Kept {
     /// Work it out for every function of `program`, which must be past the
     /// state-machine transform: what a backend sees is what is judged.
     pub fn of(program: &Program) -> Kept {
-        let mut kept = Kept {
-            by_fn: program.fns.iter().map(|f| vec![false; f.param_count]).collect(),
-            stirs: stirs(program),
-        };
-        // The carriers of each parameter: the locals its value can be moved
-        // into. They do not depend on what other functions keep.
-        let carriers: Vec<Vec<Vec<bool>>> = program
-            .fns
-            .iter()
-            .map(|f| (0..f.param_count).map(|p| carriers(f, Local(p as u32))).collect())
-            .collect();
-        loop {
-            let mut changed = false;
-            for (fi, f) in program.fns.iter().enumerate() {
-                for (p, carrier) in carriers[fi].iter().enumerate() {
-                    if kept.by_fn[fi][p] {
-                        continue;
-                    }
-                    if keeps_any(f, carrier, &kept) {
-                        kept.by_fn[fi][p] = true;
-                        changed = true;
+        let mut by_fn: Vec<Vec<bool>> =
+            program.fns.iter().map(|f| vec![false; f.param_count]).collect();
+        // Who passes a parameter on to each parameter: when that one is found
+        // to keep, so is every parameter waiting on it. Propagating along
+        // these edges from the parameters that keep by their own uses reaches
+        // the same least fixed point as sweeping every function until nothing
+        // changes, in time linear in the program rather than in its size
+        // times the depth of its call graph.
+        let mut waiting: Vec<Vec<Vec<(usize, usize)>>> =
+            program.fns.iter().map(|f| vec![Vec::new(); f.param_count]).collect();
+        let mut found: Vec<(usize, usize)> = Vec::new();
+        for (fi, f) in program.fns.iter().enumerate() {
+            for p in 0..f.param_count {
+                // The carriers of the parameter: the locals its value can be
+                // moved into.
+                let carrier = carriers(f, Local(p as u32));
+                let (keeps, passed) = uses(f, &carrier);
+                let mut keeps = keeps;
+                for (callee, q) in passed {
+                    // A function or a parameter this has no answer for keeps.
+                    match waiting.get_mut(callee.index()).and_then(|ps| ps.get_mut(q)) {
+                        Some(w) => w.push((fi, p)),
+                        None => keeps = true,
                     }
                 }
-            }
-            if !changed {
-                return kept;
+                if keeps {
+                    found.push((fi, p));
+                }
             }
         }
+        for &(fi, p) in &found {
+            by_fn[fi][p] = true;
+        }
+        while let Some((g, q)) = found.pop() {
+            for &(fi, p) in &waiting[g][q] {
+                if !by_fn[fi][p] {
+                    by_fn[fi][p] = true;
+                    found.push((fi, p));
+                }
+            }
+        }
+        Kept { by_fn, stirs: stirs(program) }
     }
 
     /// Whether `callee` may keep its parameter `param`. A function or a
@@ -200,38 +214,53 @@ pub fn builtin_runs_code(builtin: Builtin) -> bool {
 /// for the reason the module gives for "keeps": a call that stirs does so
 /// through a finite chain of calls ending in one statement that does.
 fn stirs(program: &Program) -> Vec<bool> {
-    let mut stirs = vec![false; program.fns.len()];
-    loop {
-        let mut changed = false;
-        for (fi, f) in program.fns.iter().enumerate() {
-            if stirs[fi] {
-                continue;
-            }
-            let found = f.blocks.iter().flat_map(|b| &b.stmts).any(|s| match s {
-                Inst::Assign { value, .. } => stirs_at(value, &stirs),
+    let n = program.fns.len();
+    let mut stirs = vec![false; n];
+    // Each function's callers, so that one found to stir marks them in turn:
+    // the fixed point by propagation, as for "keeps".
+    let mut callers: Vec<Vec<usize>> = vec![Vec::new(); n];
+    let mut found: Vec<usize> = Vec::new();
+    for (fi, f) in program.fns.iter().enumerate() {
+        let mut own = false;
+        for s in f.blocks.iter().flat_map(|b| &b.stmts) {
+            match s {
+                Inst::Assign { value: Rvalue::Call { callee, .. }, .. } => {
+                    match callers.get_mut(callee.index()) {
+                        Some(c) => c.push(fi),
+                        // A function this has no answer for stirs.
+                        None => own = true,
+                    }
+                }
+                Inst::Assign { value, .. } => own |= stirs_at(value),
                 Inst::SetField { .. }
                 | Inst::SetIndex { .. }
                 | Inst::SlicePush { .. }
                 | Inst::MapSet { .. }
-                | Inst::MapRemove { .. } => false,
-            });
-            if found {
-                stirs[fi] = true;
-                changed = true;
+                | Inst::MapRemove { .. } => {}
             }
         }
-        if !changed {
-            return stirs;
+        if own {
+            stirs[fi] = true;
+            found.push(fi);
         }
     }
+    while let Some(g) = found.pop() {
+        for &fi in &callers[g] {
+            if !stirs[fi] {
+                stirs[fi] = true;
+                found.push(fi);
+            }
+        }
+    }
+    stirs
 }
 
-/// Whether evaluating `value` may stir, given what is known of each function.
-/// Exhaustive, with no catch-all.
-fn stirs_at(value: &Rvalue, stirs: &[bool]) -> bool {
+/// Whether evaluating `value` may stir by itself; a direct call stirs when
+/// its callee does, which [`stirs`] follows. Exhaustive, with no catch-all.
+fn stirs_at(value: &Rvalue) -> bool {
     use Rvalue as R;
     match value {
-        R::Call { callee, .. } => stirs.get(callee.index()).copied().unwrap_or(true),
+        R::Call { .. } => false,
         R::CallBuiltin { builtin, .. } => builtin_runs_code(*builtin),
         // A rendering can reach a `Display` the program wrote.
         R::ToStr { from, .. } => !crate::renders_itself(*from),
@@ -307,13 +336,24 @@ fn carriers(f: &Function, param: Local) -> Vec<bool> {
     }
 }
 
-/// Whether any carrier is read anywhere in `f` in a way that may keep it.
-fn keeps_any(f: &Function, carrier: &[bool], kept: &Kept) -> bool {
+/// Whether any carrier is read anywhere in `f` in a way that keeps it by
+/// itself, and the parameters of direct calls a carrier is passed to, which
+/// keep it when they keep.
+fn uses(f: &Function, carrier: &[bool]) -> (bool, Vec<(FnId, usize)>) {
     let is = |o: &Operand| matches!(o, Operand::Local(l) if carrier[l.index()]);
+    let mut passed = Vec::new();
     for b in &f.blocks {
         for s in &b.stmts {
             let keeping: Vec<&Operand> = match s {
-                Inst::Assign { value, .. } => kept_operands(value, kept),
+                Inst::Assign { value: Rvalue::Call { callee, args }, .. } => {
+                    for (q, a) in args.iter().enumerate() {
+                        if is(a) {
+                            passed.push((*callee, q));
+                        }
+                    }
+                    Vec::new()
+                }
+                Inst::Assign { value, .. } => kept_operands(value),
                 // Stored: into a field, an element, a slice, a map.
                 Inst::SetField { value, .. } | Inst::SetIndex { value, .. } => vec![value],
                 Inst::SlicePush { value, .. } => vec![value],
@@ -322,26 +362,26 @@ fn keeps_any(f: &Function, carrier: &[bool], kept: &Kept) -> bool {
                 Inst::MapRemove { .. } => Vec::new(),
             };
             if keeping.into_iter().any(is) {
-                return true;
+                return (true, passed);
             }
         }
         if let Terminator::Return(Some(o)) = &b.term {
             if is(o) {
-                return true;
+                return (true, passed);
             }
         }
     }
-    false
+    (false, passed)
 }
 
 /// The operands of `value` through which what they hold may be kept beyond
 /// the evaluation. A `Use` or `Unwrap` hands its operand to the destination,
-/// which [`carriers`] follows instead.
-fn kept_operands<'a>(value: &'a Rvalue, kept: &Kept) -> Vec<&'a Operand> {
+/// which [`carriers`] follows instead, and a direct call keeps what its callee
+/// keeps, which [`uses`] hands to [`Kept::of`].
+fn kept_operands(value: &Rvalue) -> Vec<&Operand> {
     use Rvalue as R;
     match value {
-        R::Use(_) | R::Unwrap { .. } => Vec::new(),
-        R::Call { callee, args } => kept.kept_args(*callee, args),
+        R::Use(_) | R::Unwrap { .. } | R::Call { .. } => Vec::new(),
         R::CallBuiltin { builtin, args } => {
             if builtin_keeps(*builtin) {
                 args.iter().collect()
