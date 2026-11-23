@@ -8287,6 +8287,14 @@ impl<'a> Checker<'a> {
                             return None;
                         }
                     }
+                    // A field whose type the parser could not read may be
+                    // the one that pinned it: that was reported where the
+                    // type is written.
+                    let fields: Vec<TyId> =
+                        self.types.struct_def(template).fields.iter().map(|f| f.ty).collect();
+                    if fields.iter().any(|&t| self.made_of_error(t)) {
+                        return None;
+                    }
                     let name = self.types.struct_def(template).name.clone();
                     self.diags.push(
                         Diagnostic::error(
@@ -10382,6 +10390,11 @@ impl<'a> Checker<'a> {
             match s {
                 Some(t) => solved.push(*t),
                 None => {
+                    // A field whose type the parser could not read may be
+                    // the one that pinned it, and was reported there.
+                    if declared.iter().any(|&t| self.made_of_error(t)) {
+                        return None;
+                    }
                     // A unit variant of a generic enum says nothing about the
                     // parameter — `Maybe.None` could be any `Maybe<T>` — so the
                     // binding has to.

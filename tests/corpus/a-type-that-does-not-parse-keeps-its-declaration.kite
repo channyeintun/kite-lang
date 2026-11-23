@@ -18,6 +18,17 @@ enum Shape {
 
 type Grid = [[1]] //~ ERROR E0100
 
+// A generic declaration whose field could not be read is not also a type
+// argument that nothing pins down.
+struct Cell<T> {
+    v: (T, 1) //~ ERROR E0100
+}
+
+enum Slot<T> {
+    Full(at: (T, 1)) //~ ERROR E0100
+    Empty
+}
+
 fn later() -> (, error) { //~ ERROR E0100
     check errors.new("x")
     return 1, nil
@@ -38,6 +49,8 @@ fn main() {
     }
     let f = |a: [1.5], b: int| b //~ ERROR E0100
     io.print(f([], 2))
+    let c = Cell{ v: (1, 1) }
+    let s = Slot.Full(at: (1, 1))
     match Shape.Dot(at: (1, 2)) {
         Dot(at) => io.print(1),
         Line(_, _) => io.print(2),
