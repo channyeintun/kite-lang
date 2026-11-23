@@ -73,11 +73,6 @@ struct Checkpoint {
     depth_reported: bool,
 }
 
-/// Whether a piece of a string is text with nothing in it.
-fn is_empty_text(part: &StrPart) -> bool {
-    matches!(part, StrPart::Text(span) if span.is_empty())
-}
-
 /// The bracket a closing bracket closes.
 fn opener_of(close: T) -> T {
     match close {
@@ -3431,16 +3426,16 @@ impl<'a> Parser<'a> {
         let text = |s: Span| &self.src[s.start as usize..s.end as usize];
         let mut parts = parts;
 
-        // The line break after the opening delimiter.
+        // The line break after the opening delimiter, with whatever spaces
+        // stand before it: they are as invisible as the break, and keeping
+        // them kept the break too, so `"""` with a trailing space began the
+        // string with a newline that the same text without one did not.
         if let Some(StrPart::Text(first)) = parts.first_mut() {
-            let skip = if text(*first).starts_with("\r\n") {
-                2
-            } else if text(*first).starts_with('\n') {
-                1
-            } else {
-                0
-            };
-            first.start += skip;
+            if let Some(at) = text(*first).find('\n') {
+                if text(*first)[..at].chars().all(|c| matches!(c, ' ' | '\t' | '\r')) {
+                    first.start += at as u32 + 1;
+                }
+            }
         }
 
         // The closing delimiter's line, which has to hold nothing but its
@@ -3450,12 +3445,13 @@ impl<'a> Parser<'a> {
             Some(StrPart::Text(last)) => match text(*last).rfind('\n') {
                 Some(at) if text(*last)[at + 1..].chars().all(|c| c == ' ' || c == '\t') => {
                     let indent = &self.src[last.start as usize + at + 1..last.end as usize];
-                    last.end = last.start + at as u32;
+                    let cr = text(*last)[..at].ends_with('\r') as usize;
+                    last.end = last.start + (at - cr) as u32;
                     indent
                 }
-                _ => return parts.into_iter().filter(|p| !is_empty_text(p)).collect(),
+                _ => return self.drop_carriage_returns(parts),
             },
-            _ => return parts.into_iter().filter(|p| !is_empty_text(p)).collect(),
+            _ => return self.drop_carriage_returns(parts),
         };
 
         let mut out = Vec::new();
@@ -3493,6 +3489,36 @@ impl<'a> Parser<'a> {
                         break;
                     }
                 }
+            }
+        }
+        self.drop_carriage_returns(out)
+    }
+
+    /// A block string's text pieces with the `\r` of every CRLF left out.
+    ///
+    /// A line break in the source is a line break, whether the file's editor
+    /// wrote it LF or CRLF, so a block string's lines never end in a `\r` the
+    /// author did not write as `\r`: the same program checked out on Windows
+    /// prints what it prints anywhere else. Each piece that holds one is cut
+    /// into two spans either side of it, as the dedent above cuts out
+    /// indentation, and the empty pieces go.
+    fn drop_carriage_returns(&self, parts: Vec<StrPart>) -> Vec<StrPart> {
+        let mut out = Vec::with_capacity(parts.len());
+        for part in parts {
+            let StrPart::Text(span) = part else {
+                out.push(part);
+                continue;
+            };
+            let mut from = span.start as usize;
+            let end = span.end as usize;
+            while let Some(at) = self.src[from..end].find("\r\n") {
+                if at > 0 {
+                    out.push(StrPart::Text(Span::new(self.file, from as u32, (from + at) as u32)));
+                }
+                from += at + 1;
+            }
+            if from < end {
+                out.push(StrPart::Text(Span::new(self.file, from as u32, end as u32)));
             }
         }
         out

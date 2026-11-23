@@ -812,6 +812,13 @@ fn a_block_string_with_holes_is_dedented() {
     // indentation to take off, and only the opening line break goes.
     let src = "\"\"\"\n    a \\(n)\n    b\"\"\"";
     assert_eq!(expr_sexp(src), r#"(str "    a " n "\n    b")"#);
+    // Spaces after the opening delimiter go with its line break, and a CRLF
+    // is a line break: no piece holds the `\r`, with the closing delimiter on
+    // its own line or not.
+    let src = "\"\"\"  \r\n        hello \\(n)\r\n        world\r\n        \"\"\"";
+    assert_eq!(expr_sexp(src), r#"(str "hello " n "\n" "world")"#);
+    let src = "\"\"\"\r\n    a \\(n)\r\n    b\"\"\"";
+    assert_eq!(expr_sexp(src), r#"(str "    a " n "\n    b")"#);
 }
 
 // ---- depth -------------------------------------------------------------------

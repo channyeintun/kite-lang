@@ -494,3 +494,15 @@ fn a_literal_starting_a_line_is_tight_in_a_broken_file_too() {
     let broken = format!("{}fn g( {{\n", good);
     assert!(fmt(&broken).starts_with(good), "{}", fmt(&broken));
 }
+
+/// A file with CRLF line endings comes out with LF ones throughout, the lines
+/// of a block string included. Those were copied as written, so the output
+/// held both kinds; a block string's line break is a line break however it was
+/// written (§2.4), so converting it changes nothing the program says.
+#[test]
+fn crlf_becomes_lf_inside_block_strings_too() {
+    let src = "fn main() {\r\n    let s = \"\"\"\r\n        a \\(1)\r\n        b\r\n        \"\"\"\r\n    io.print(s)\r\n}\r\n";
+    let out = idempotent(src);
+    assert!(!out.contains('\r'), "{:?}", out);
+    assert_eq!(out, src.replace("\r\n", "\n"));
+}

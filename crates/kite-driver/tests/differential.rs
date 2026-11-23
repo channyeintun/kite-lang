@@ -4905,6 +4905,26 @@ fn a_race_of_no_tasks_names_the_mistake() {
 /// says the program prints.
 const EXPECTED: &[(&str, &str, &str)] = &[
     (
+        // §2.4, in a file written with CRLF line endings: a line break in the
+        // source is a line break however it was written, so no line of a
+        // block string ends in `\r` — with a hole, without one, in a
+        // constant, and with the closing delimiter at the end of a line of
+        // text. Spaces after an opening `"""` go with its line break (`t`):
+        // they once kept it, and the string began with a newline.
+        "block-strings-in-a-crlf-file",
+        "let K = \"\"\"\r\n  k1\r\n  k2\r\n  \"\"\"\r\n\
+         fn codes(s: str) -> str {\r\n  var out = \"\"\r\n  for i in 0..s.len() {\r\n\
+         \x20   out = out + \" \\(s.code_at(i))\"\r\n  }\r\n  return out\r\n}\r\n\
+         fn main() {\r\n  let n = 7\r\n\
+         \x20 let a = \"\"\"\r\n    a\r\n    b\r\n    \"\"\"\r\n\
+         \x20 let h = \"\"\"\r\n    n=\\(n)\r\n    m\r\n    \"\"\"\r\n\
+         \x20 let t = \"\"\" \r\n    sp\r\n    \"\"\"\r\n\
+         \x20 let u = \"\"\"\r\n    x\r\n    y\"\"\"\r\n\
+         \x20 io.print(codes(a))\r\n  io.print(codes(h))\r\n  io.print(codes(t))\r\n\
+         \x20 io.print(codes(u))\r\n  io.print(codes(K))\r\n}\r\n",
+        " 97 10 98\n 110 61 55 10 109\n 115 112\n 32 32 32 32 120 10 32 32 32 32 121\n 107 49 10 107 50\n",
+    ),
+    (
         "defer-runs-per-registration",
         "fn note(s: str) {\n  io.print(s)\n}\n\
          fn fails() -> (int, error) {\n  return _, errors.new(\"boom\")\n}\n\

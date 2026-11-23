@@ -13975,7 +13975,16 @@ fn expr_defers(e: &ast::Expr) -> bool {
 /// opening delimiter and the one before the closing delimiter belong to the
 /// syntax rather than to the text, so both go.
 pub(crate) fn dedent_block(body: &str) -> String {
-    let body = body.strip_prefix("\r\n").or_else(|| body.strip_prefix('\n')).unwrap_or(body);
+    // A line break in the source is a line break, written LF or CRLF, so a
+    // block string's text never holds the `\r` of a Windows line ending — the
+    // parser's `dedent_parts` makes a string with holes in it agree.
+    let body = body.replace("\r\n", "\n");
+    // Spaces after the opening delimiter go with its line break: they cannot
+    // be seen, and keeping them kept the break as well.
+    let body = match body.find('\n') {
+        Some(at) if body[..at].chars().all(|c| c == ' ' || c == '\t') => &body[at + 1..],
+        _ => body.as_str(),
+    };
     // Everything after the last line break is the closing delimiter's own
     // indentation.
     let (text, indent) = match body.rfind('\n') {

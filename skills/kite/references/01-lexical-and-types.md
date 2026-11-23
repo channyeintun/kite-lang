@@ -294,7 +294,10 @@ Block strings use `"""` and strip the leading indentation of the **closing**
 delimiter from every line. There is no trailing newline. `docs/05-grammar.ebnf`
 writes `MultiString = '"""' NEWLINE …`, but the lexer does not require the
 newline: `"""one line"""` is a legal one-line block string, and text left on
-the opening line is kept verbatim.
+the opening line is kept verbatim. Spaces or tabs alone after the opening
+`"""` go with its line break, and a CRLF file gives the same string as an LF
+one: no line of a block string ends in `\r` unless `\r` is written. (Compilers
+through 0.1.9 kept a leading newline after `""" ` and a `\r` on every line.)
 
 ```kite
 fn main() {

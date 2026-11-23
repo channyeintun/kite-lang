@@ -168,8 +168,11 @@ Interpolation calls `Display.show` on the operand: a hole is an ordinary
 expression, evaluated where it stands, and holds exactly one.
 
 A block string is dedented the same way with holes in it as without: the line
-break after the opening `"""` goes, the closing delimiter's line goes, and that
-line's indentation comes off the front of every line.
+break after the opening `"""` goes (with any spaces or tabs before it), the
+closing delimiter's line goes, and that line's indentation comes off the front
+of every line. A line break in the source is a line break whether the file
+writes it LF or CRLF, so a block string's lines are joined by `\n` alone and
+never end in a `\r` that was not written as `\r`.
 
 `int`, `float`, `bool` and `str` render themselves; every other type renders
 through its own `Display`. Because a hole is an expression,
