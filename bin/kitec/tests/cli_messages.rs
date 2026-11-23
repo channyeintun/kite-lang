@@ -198,6 +198,7 @@ fn a_whole_program_example_and_its_fix_are_what_they_say() {
             if manifest {
                 let out = package(&format!("{}_fix", code), &fix);
                 assert!(out.status.success(), "{} fix:\n{}\n{}", code, fix, stderr(&out));
+                assert!(!stderr(&out).contains(&format!("[{}]", code)), "{} fix:\n{}", code, stderr(&out));
                 continue;
             }
             // A fix that shows only `main` keeps the example's declarations.
@@ -214,6 +215,9 @@ fn a_whole_program_example_and_its_fix_are_what_they_say() {
             std::fs::write(&file, &fix).expect("write");
             let out = kitec(&["check", file.to_str().unwrap()]);
             assert!(out.status.success(), "{} fix:\n{}\n{}", code, fix, stderr(&out));
+            // A warning's fix compiles with the warning still there: what is
+            // checked is that the code is gone.
+            assert!(!stderr(&out).contains(&format!("[{}]", code)), "{} fix:\n{}\n{}", code, fix, stderr(&out));
             checked += 1;
         }
         assert!(checked > 0, "{}: nothing checked", code);
