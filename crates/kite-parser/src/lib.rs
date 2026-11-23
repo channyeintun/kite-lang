@@ -2183,11 +2183,7 @@ impl<'a> Parser<'a> {
         let params = self.parse_params(true)?;
         self.expect(T::RParen)?;
 
-        let ret = if self.eat(T::Arrow) {
-            Some(self.declared_return_type()?)
-        } else {
-            None
-        };
+        let ret = self.signature_return()?;
         let sig_span = start.to(self.prev_span());
 
         // A trait method may declare no body.
@@ -2446,11 +2442,7 @@ impl<'a> Parser<'a> {
         let params = self.parse_params(false)?;
         self.expect(T::RParen)?;
 
-        let ret = if self.eat(T::Arrow) {
-            Some(self.declared_return_type()?)
-        } else {
-            None
-        };
+        let ret = self.signature_return()?;
         let span = start.to(self.prev_span());
         Some(ExternDecl { is_pub, host, name, params, ret, span, sig_span: span })
     }
@@ -2464,11 +2456,7 @@ impl<'a> Parser<'a> {
         let params = self.parse_params(true)?;
         self.expect(T::RParen)?;
 
-        let ret = if self.eat(T::Arrow) {
-            Some(self.declared_return_type()?)
-        } else {
-            None
-        };
+        let ret = self.signature_return()?;
 
         let sig_span = start.to(self.prev_span());
         let body = self.parse_block()?;
@@ -2634,6 +2622,23 @@ impl<'a> Parser<'a> {
         }
         let to = if self.pos > from { self.prev_span().end } else { start.start };
         Some(Type::Error(Span::new(self.file, start.start, to.max(start.start))))
+    }
+
+    /// What follows a declared function's parameter list: its `-> T`, if
+    /// it has one.
+    ///
+    /// `fn send(id: int, message: )) -> int` is a parameter whose type was
+    /// left out, and the `)` after it was taken for the list's: the second
+    /// `)` is that one mistake, already reported, and the signature goes on
+    /// after it — stopping there dropped the result type, and every call
+    /// was refused for using a `()`.
+    fn signature_return(&mut self) -> Option<Option<RetType>> {
+        if self.panicking {
+            while self.at(T::RParen) && !self.starts_line(self.pos) {
+                self.bump();
+            }
+        }
+        Some(if self.eat(T::Arrow) { Some(self.declared_return_type()?) } else { None })
     }
 
     /// The return type of a declared function, kept as an error type when it

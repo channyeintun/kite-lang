@@ -434,6 +434,13 @@ fn a_type_that_does_not_parse_keeps_its_declaration() {
              return ms\n}\n\nfn main() {\n    io.print(wait(Box{ v: 1 }, 2))\n}\n",
             5,
         ),
+        // The type left out, and its `)` taken for the list's: the second
+        // `)` is the same mistake, and the result type is still read.
+        (
+            "fn send(id: int, message: )) -> int {\n    return id\n}\n\nfn main() {\n    \
+             io.print(send(1, \"a\") + 1)\n}\n",
+            1,
+        ),
         // A closure whose parameter type could not be read is no function
         // type to print: it was `fn(<error>) -> int` in what refused it.
         (
