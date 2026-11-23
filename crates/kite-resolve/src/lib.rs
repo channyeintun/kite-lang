@@ -872,11 +872,30 @@ impl ResolveMap {
         out
     }
 
+    /// The name module `asking` gave the module `name` with `use … as …`,
+    /// when `name` is how that module is known elsewhere and not a name
+    /// `asking` has for anything.
+    pub fn imported_as(&self, asking: &str, name: &str) -> Option<String> {
+        let mut found = self
+            .modules
+            .aliases
+            .iter()
+            .filter(|((from, spelling), target)| {
+                from == asking
+                    && spelling != name
+                    && target.trim_start_matches('@').rsplit('/').next() == Some(name)
+            })
+            .map(|((_, spelling), _)| spelling.clone());
+        let first = found.next()?;
+        found.next().is_none().then_some(first)
+    }
+
     /// The diagnostic for `m.Name` naming a type, where `m` is a module
     /// `asking` imported and `Name` is no type in it: ``cannot find `Name` in
     /// module `m` ``, at the member, with the nearest public type of `m` when
     /// one is close. `None` when the head is not a module `asking` imported,
-    /// for the caller's own message.
+    /// for the caller's own message — unless the head is the name of a module
+    /// `asking` imported under another (`use models as m`), which is said.
     ///
     /// **The value case's message, for types.** A misspelt type through an
     /// imported module asked ``is that module imported?`` of a module the
@@ -892,7 +911,19 @@ impl ResolveMap {
         let [head, member] = segments else {
             return None;
         };
-        let module = self.modules.aliases.get(&(asking.to_string(), head.name.clone()))?;
+        let Some(module) = self.modules.aliases.get(&(asking.to_string(), head.name.clone())) else {
+            // `models.Inner` after `use models as m`: the module is there,
+            // under the name this file gave it.
+            let alias = self.imported_as(asking, &head.name)?;
+            return Some(
+                Diagnostic::error(code, format!("unknown type `{}.{}`", head.name, member.name))
+                    .with_primary(head.span, "no module of this name is in scope")
+                    .with_note(format!(
+                        "`{}` is imported here as `{}`, so this file writes `{}.{}`",
+                        head.name, alias, alias, member.name
+                    )),
+            );
+        };
         let prefix = format!("{}.", module);
         let members: Vec<&str> = self
             .types
@@ -2773,23 +2804,8 @@ impl<'a> FnResolver<'a> {
         self.diags.push(d);
     }
 
-    /// The name this module gave the module `name` with `use … as …`, when
-    /// `name` is how that module is known elsewhere and not a name this
-    /// module has for anything.
     fn imported_as(&self, name: &str) -> Option<String> {
-        let mut found = self
-            .map
-            .modules
-            .aliases
-            .iter()
-            .filter(|((asking, spelling), target)| {
-                *asking == self.module
-                    && spelling != name
-                    && target.trim_start_matches('@').rsplit('/').next() == Some(name)
-            })
-            .map(|((_, spelling), _)| spelling.clone());
-        let first = found.next()?;
-        found.next().is_none().then_some(first)
+        self.map.imported_as(&self.module, name)
     }
 
     /// Nearest name by edit distance, when it is close enough to be a likely
