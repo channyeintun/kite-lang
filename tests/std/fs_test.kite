@@ -113,6 +113,33 @@ fn listing_checks() -> [error] {
     }
     out.push(test.is_false(dots, "and `.` and `..` are not"))
     out.push(test.ok(fs.remove(path), "tidied up"))
+
+    // A name with a line break in it came back as two names, one on each side
+    // of the break, because the host separates names with one.
+    let odd = "\(fs.temp_dir())/kite-fs-test-two\nlines.txt"
+    let odd_err = fs.write(odd, "x")
+    out.push(test.ok(odd_err, "a file whose name has a line break"))
+    if odd_err != nil {
+        return out
+    }
+    let (with_odd, odd_list_err) = fs.list(fs.temp_dir())
+    out.push(test.ok(odd_list_err, "lists"))
+    if odd_list_err != nil {
+        return out
+    }
+    var whole = 0
+    var halves = 0
+    for name in with_odd {
+        if name == "kite-fs-test-two\nlines.txt" {
+            whole += 1
+        }
+        if name == "kite-fs-test-two" || name == "lines.txt" {
+            halves += 1
+        }
+    }
+    out.push(test.equal_int(whole, 1, "as one name"))
+    out.push(test.equal_int(halves, 0, "and not as two"))
+    out.push(test.ok(fs.remove(odd), "tidied up again"))
     return out
 }
 

@@ -94,13 +94,21 @@ pub fn write(path: str, body: str) -> error {
 
 /// The names in a directory, without `.` and `..`, in the order the host gives
 /// them — which is not sorted, on any platform worth relying on.
+///
+/// The host puts one name on each line, so a name with a line break in it
+/// would have come back as two. It writes that break as a NUL instead — no
+/// file name has one — and it is turned back into a line break here.
 pub fn list(path: str) -> ([str], error) {
     let (answer, err) = unwrap(list_dir(path), "list \(path)")
     check err
     if answer.len() == 0 {
         return [], nil
     }
-    return split_lines(answer), nil
+    var names: [str] = []
+    for name in split_lines(answer) {
+        names.push(replace(name, "\u{0}", "\n"))
+    }
+    return names, nil
 }
 
 /// Delete a file, or an empty directory.
