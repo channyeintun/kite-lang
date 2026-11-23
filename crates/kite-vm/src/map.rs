@@ -22,10 +22,14 @@
 //!   which no write can change. Its entries share a bucket and are found by
 //!   comparing, exactly as before. A struct with no `var` field cannot
 //!   change, and hashes by its fields.
-//! - A key can be as deep as the program makes it, and comparing it walks
-//!   all of it — but the hash looks at a bounded number of the values in it,
-//!   in a fixed order, which equal keys share; so hashing is cheap and never
-//!   recurses.
+//! - A key can be as deep as the program makes it, and the hash walks all of
+//!   it, in a fixed order that equal keys share, with a worklist rather than
+//!   recursion. Stopping early would have been cheaper per key, but keys that
+//!   differ only past the stopping point — board states, long paths — would
+//!   all share one bucket, and the map would be a scan again. Walking all of
+//!   it costs what building the key, or comparing it once, already did. The
+//!   walk ends: a key can only be cyclic through a `var` field, and a struct
+//!   with one is hashed without looking inside it.
 //!
 //! **First match wins**, as it did in the scan. Two entries can hold equal
 //! keys only when a `var` field changed one into the other, and a lookup must
@@ -47,10 +51,6 @@ use crate::Value;
 
 /// The most entries a map holds before it is given an index.
 const SMALL: usize = 8;
-
-/// How many values in a key the hash looks at. Equal keys agree on all of
-/// them, so stopping early only makes a collision likelier, never a miss.
-const HASH_BUDGET: usize = 32;
 
 const NONE: u32 = u32::MAX;
 
@@ -273,12 +273,7 @@ pub fn hash(key: &Value, keys: Keys<'_>) -> u64 {
     // A scalar key — the usual kind — is hashed without a worklist.
     if !h.scalar(key) {
         let mut work: Vec<Value> = vec![key.clone()];
-        let mut budget = HASH_BUDGET;
         while let Some(v) = work.pop() {
-            if budget == 0 {
-                break;
-            }
-            budget -= 1;
             if h.scalar(&v) {
                 continue;
             }

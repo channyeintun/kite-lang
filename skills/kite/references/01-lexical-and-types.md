@@ -574,9 +574,12 @@ Slices are **values**: assigning one and pushing to the copy leaves the original
 alone. Reading a missing map key gives `nil`, not a zero value.
 
 A map is hashed on the VM and natively, so a read, a write and a `remove` cost
-the same at any size there. A `--emit wasm` build still scans the entries on
-every read and copies them on every write, so a loop over a map of tens of
-thousands of entries is quadratic in the browser.
+the same at any size there — unless the key is, or holds, a struct with a
+`var` field: those are hashed by their type alone, since the field can change
+while the struct is a key, so such keys are compared one by one. A
+`--emit wasm` build still scans the entries on every read and copies them on
+every write, so a loop over a map of tens of thousands of entries is quadratic
+in the browser.
 
 ```kite
 fn main() {
@@ -642,8 +645,9 @@ fn main() {
 ```
 
 A loop that pushes thousands of times through a field copies the field's slice
-on each push; for a hot loop, build the slice in a `var` local and assign it to
-the field once.
+on each push, and one that writes or removes keys through a field copies the
+field's map on each write; for a hot loop, build the slice or map in a `var`
+local and assign it to the field once.
 
 ### An empty `[]` or `{}` has nothing to infer from
 

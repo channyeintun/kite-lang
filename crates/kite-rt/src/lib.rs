@@ -1394,9 +1394,6 @@ const MAP_NONE: u32 = u32::MAX;
 /// The "next" of a slot that is a hole.
 const MAP_HOLE: u32 = u32::MAX - 1;
 
-/// How many values in a key [`key_hash`] looks at.
-const HASH_BUDGET: usize = 32;
-
 #[inline]
 unsafe fn map_used(p: *const u8) -> usize {
     (obj_word1(p) & 0xFFFF_FFFF) as usize
@@ -1738,19 +1735,16 @@ pub extern "C" fn kite_rt_register_mutable_struct(id: u64) {
 ///
 /// The VM's rules: `-0.0` hashes as `0.0`, an error by its message, and a
 /// struct with a `var` field by its type, since the field can change while
-/// the struct is a key. At most [`HASH_BUDGET`] values in the key are looked
-/// at, in an order equal keys share, so a deep key is cheap to hash and the
-/// walk needs no recursion. Allocates nothing on the Kite heap.
+/// the struct is a key. All of the key is looked at, in an order equal keys
+/// share, with a worklist rather than recursion: keys that differ only deep
+/// inside would otherwise share a bucket (see the VM's `map` module). The
+/// walk ends because a key is cyclic only through a `var` field, which is not
+/// looked inside. Allocates nothing on the Kite heap.
 fn key_hash(key: u64, kk: u8) -> u32 {
     let mut h = KeyHasher(0);
     let mut work: Vec<(u64, u8)> = Vec::new();
     let mut next = Some((key, kk));
-    let mut budget = HASH_BUDGET;
     while let Some((v, k)) = next.take().or_else(|| work.pop()) {
-        if budget == 0 {
-            break;
-        }
-        budget -= 1;
         match k {
             kind::FLOAT => {
                 h.word(if f64::from_bits(v) == 0.0 { 0 } else { v });

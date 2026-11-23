@@ -236,3 +236,33 @@ fn a_long_map_literal_is_built_in_linear_time() {
     );
     vm_within("map-literal", &src, "200000 1\n", Duration::from_secs(20));
 }
+
+/// A key is hashed whole, so keys that differ only far inside still spread
+/// over the buckets. The hash once stopped after 32 values, and 5,000 slice
+/// keys that shared their first 40 elements all landed in one bucket: a scan
+/// again, 18 s on the VM and natively alike.
+#[test]
+fn keys_that_differ_only_deep_inside_are_still_hashed_apart() {
+    let src = r#"fn key(i: int) -> [int] {
+    var k: [int] = []
+    for j in 0..40 {
+        k.push(0)
+    }
+    k.push(i)
+    return k
+}
+
+fn main() {
+    var m: {[int]: int} = {}
+    for i in 0..20000 {
+        m[key(i)] = i
+    }
+    var s = 0
+    for i in 0..20000 {
+        s += or_else(m[key(i)], 0)
+    }
+    io.print("\(s) \(m.len())")
+}
+"#;
+    agrees_within("map-deep-keys", src, "199990000 20000\n", Duration::from_secs(20), false);
+}
