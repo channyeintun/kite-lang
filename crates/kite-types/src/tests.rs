@@ -283,6 +283,32 @@ fn the_var_fix_is_offered_only_where_it_compiles() {
     assert!(c.render().contains("help: make the binding mutable"), "{}", c.render());
 }
 
+/// Nor does the note say "declare it `var`" where that gives another error:
+/// it says what does work, and each of those compiles (the differential
+/// case `e0114-notes-followed-compile` follows them).
+#[test]
+fn the_var_note_names_what_compiles() {
+    // Captured elsewhere in the function: change a `var` copy, capture a `let`.
+    let c = body("  let xs = [1]\n  xs.push(2)\n  let f = || {\n    io.print(xs.len())\n  }\n  f()");
+    let out = c.render();
+    assert!(c.has("E0114"), "{}", out);
+    assert!(!out.contains("declare it `var`\n"), "{}", out);
+    assert!(out.contains("a captured binding cannot be `var`"), "{}", out);
+    assert!(out.contains("`var copy = xs`"), "{}", out);
+    // Written inside the closure that captured it: a copy made inside it.
+    let c = body("  let xs = [1]\n  let f = || {\n    xs.push(2)\n  }\n  f()");
+    let out = c.render();
+    assert!(out.contains("a closure cannot change what it captures"), "{}", out);
+    assert!(!out.contains("declare it `var`"), "{}", out);
+    // A `let` with no initialiser: the `var` takes its value where declared.
+    let c = body("  let xs: [int]\n  xs = [1]\n  xs.push(2)");
+    let out = c.render();
+    assert!(out.contains("declare it `var` with the value it is first given"), "{}", out);
+    // Where `var` compiles, the note still says so.
+    let c = body("  let xs = [1]\n  xs.push(2)");
+    assert!(c.render().contains("binding; declare it `var`"), "{}", c.render());
+}
+
 #[test]
 fn assigning_to_a_var_is_accepted() {
     ok_body("  var total = 0\n  total = 1\n  total += 2");

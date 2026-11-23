@@ -6477,6 +6477,38 @@ fn main() {
 "#,
         "no\n42\nhi!\nfirst\nthird\n21\n8\n16\njob 6\n4\n",
     ),
+    // What E0114's notes tell the reader to write, written: a `var` copy and
+    // a captured `let` of the result; a copy made inside the closure; a
+    // `var` given its value where it is declared. The notes said "declare
+    // it `var`" for each, which is E0211 or E0110.
+    (
+        "e0114-notes-followed-compile",
+        r#"fn main() {
+  let xs = [1]
+  var copy = xs
+  copy.push(2)
+  let done = copy
+  let f = || {
+    io.print(done.len())
+  }
+  f()
+  let g = || {
+    let ys = [1]
+    let h = || {
+      var copy = ys
+      copy.push(2)
+      io.print(copy.len())
+    }
+    h()
+  }
+  g()
+  var zs: [int] = [1]
+  zs.push(2)
+  io.print(zs.len())
+}
+"#,
+        "2\n2\n2\n",
+    ),
     // A named `async fn` used as a value is its starter, a function that
     // returns the task: passed where `fn(int) -> Task<int>` is wanted, bound
     // and called, or handed to `task.map`. It was typed `fn(int) -> int`, so

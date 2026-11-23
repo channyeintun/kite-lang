@@ -9610,21 +9610,40 @@ impl<'a> Checker<'a> {
             TyKind::Optional(inner) => self.container_noun(inner),
             _ => self.container_noun(ty),
         };
+        // `var` is the fix only where the binding may be one. Written inside
+        // a closure that captured it, the binding is the closure's copy, and
+        // a closure changes nothing it captures (E0211), `var` or not; what
+        // works is a copy of its own. A capture elsewhere in the function is
+        // found once the function has been read ([`Self::settle_var_fixes`]).
+        let fix = if self.closure_span.is_some_and(|r| !(decl.start >= r.start && decl.end <= r.end)) {
+            format!(
+                "but the closure captured `{}`, and a closure cannot change what it captures \
+                 (E0211): change a copy made inside it, `var copy = {}`",
+                name, name
+            )
+        } else if self.bare_lets.contains(&decl) {
+            // `let x: T` is given its value later, and a `var` may not be
+            // (E0110), so the `var` takes that value where it is declared.
+            format!("declare it `var` with the value it is first given, as in `var {} = …`", name)
+        } else {
+            "declare it `var`".to_string()
+        };
         let mut d = Diagnostic::error(codes::E0114, format!("`{}` cannot be {}", name, what))
             .with_primary(at, "this binding is immutable")
             .with_secondary(decl, "declared with `let` here")
             .with_note(match top {
                 None => format!(
                     "a {} is a copy-on-write value, so changing its contents changes the \
-                     binding; declare it `var`",
-                    noun
+                     binding; {}",
+                    noun, fix
                 ),
                 Some(inner) => format!(
                     "`{}` is held in `{}`, and a {} is a copy-on-write value: changing \
-                     anything inside it changes the binding; declare it `var`",
+                     anything inside it changes the binding; {}",
                     self.quoted(inner),
                     name,
-                    noun
+                    noun,
+                    fix
                 ),
             });
         if let Some(fix) = self.var_fix(decl) {
@@ -13960,9 +13979,43 @@ impl<'a> Checker<'a> {
         if refused.is_empty() {
             return;
         }
+        // The note that named the fix is taken back with it, and says what
+        // does work: a captured binding cannot be `var` (E0211), so the
+        // change is made on a `var` copy, and the closure captures a `let`
+        // of the finished value.
+        let names: Vec<(Span, String)> = self
+            .var_fixes
+            .iter()
+            .filter(|(kw, _)| refused.contains(kw))
+            .map(|(kw, decl)| (*kw, self.quoted(*decl)))
+            .collect();
         for i in from..self.diags.len() {
             let Some(d) = self.diags.get_mut(i) else { continue };
-            d.fixes.retain(|f| !(f.edits.len() == 1 && refused.contains(&f.edits[0].span)));
+            let before = d.fixes.len();
+            let mut taken = None;
+            d.fixes.retain(|f| {
+                let refuse = f.edits.len() == 1 && refused.contains(&f.edits[0].span);
+                if refuse {
+                    taken = Some(f.edits[0].span);
+                }
+                !refuse
+            });
+            if d.fixes.len() == before {
+                continue;
+            }
+            let Some(name) = names.iter().find(|(kw, _)| Some(*kw) == taken).map(|(_, n)| n) else {
+                continue;
+            };
+            for note in &mut d.notes {
+                if let Some(head) = note.strip_suffix("declare it `var`") {
+                    *note = format!(
+                        "{}but a closure captures `{}`, and a captured binding cannot be `var` \
+                         (E0211): change a `var` copy, `var copy = {}`, and give the closure a \
+                         `let` holding the result",
+                        head, name, name
+                    );
+                }
+            }
         }
     }
 
