@@ -2748,28 +2748,28 @@ impl<'a> Emitter<'a> {
     }
 
     fn stmt(&mut self, func: &mut Function, stmt: &mir::Inst) {
-        // A write-back marks the header it puts back as the field's alone
-        // when the local owned it — read before `release` clears the flag,
-        // since storing the local is what releases it. A suspension's spill
-        // of the same local into its frame is not one: it can come before the
-        // local holds anything.
+        // A write-back marks the header or map record it puts back as the
+        // field's alone when the local owned it — read before `release`
+        // clears the flag, since storing the local is what releases it. A
+        // suspension's spill of the same local into its frame is not one: it
+        // can come before the local holds anything.
         if let mir::Inst::SetField { base: holder, index, value: mir::Operand::Local(l) } = stmt {
             let base = mir::Operand::Local(*l);
             let holder_ty = match holder {
                 mir::Operand::Local(h) => self.f.locals[h.index()].ty,
                 _ => TyId::UNIT,
             };
-            if let (true, true, Some(&flag), Some(parts)) = (
+            if let (true, true, Some(&flag), Some((record, field, _))) = (
                 self.taken[l.index()],
                 mir::takeable_field(self.types, holder_ty, *index),
                 self.owned.get(&l.0),
-                self.slice_of(&base),
+                self.field_mark(&base),
             ) {
                 func.instruction(&Instruction::LocalGet(self.slots[l.index()]));
                 func.instruction(&Instruction::LocalGet(flag));
                 func.instruction(&Instruction::StructSet {
-                    struct_type_index: parts.header,
-                    field_index: 2,
+                    struct_type_index: record,
+                    field_index: field,
                 });
             }
         }
@@ -2791,16 +2791,16 @@ impl<'a> Emitter<'a> {
                         mir::Operand::Local(b) => self.f.locals[b.index()].ty,
                         _ => TyId::UNIT,
                     };
-                    if let (false, true, Some(parts)) = (
+                    if let (false, true, Some((record, field, _))) = (
                         self.glance[dst.index()],
                         mir::takeable_field(self.types, base_ty, *index),
-                        self.slice_of(&here),
+                        self.field_mark(&here),
                     ) {
                         func.instruction(&Instruction::LocalGet(self.slots[dst.index()]));
                         func.instruction(&Instruction::I32Const(0));
                         func.instruction(&Instruction::StructSet {
-                            struct_type_index: parts.header,
-                            field_index: 2,
+                            struct_type_index: record,
+                            field_index: field,
                         });
                     }
                 }
@@ -2815,11 +2815,20 @@ impl<'a> Emitter<'a> {
                         return;
                     }
                     let here = mir::Operand::Local(*dst);
-                    if let (mir::Rvalue::FieldTake { .. }, Some(parts)) = (value, self.slice_of(&here)) {
+                    if let (mir::Rvalue::FieldTake { .. }, Some((record, field, packed))) =
+                        (value, self.field_mark(&here))
+                    {
                         func.instruction(&Instruction::LocalGet(self.slots[dst.index()]));
-                        func.instruction(&Instruction::StructGetU {
-                            struct_type_index: parts.header,
-                            field_index: 2,
+                        func.instruction(&if packed {
+                            Instruction::StructGetU {
+                                struct_type_index: record,
+                                field_index: field,
+                            }
+                        } else {
+                            Instruction::StructGet {
+                                struct_type_index: record,
+                                field_index: field,
+                            }
                         });
                         func.instruction(&Instruction::LocalSet(flag));
                         return;
@@ -4509,6 +4518,16 @@ impl<'a> Emitter<'a> {
     }
 
     /// The storage, header and element type of an operand holding a slice.
+    /// Where the value in a local keeps the mark saying it is its field's
+    /// alone: a slice in its header, a map in its record (see `slices` and
+    /// `maps`). The record, the field, and whether it is a packed byte.
+    fn field_mark(&self, o: &mir::Operand) -> Option<(u32, u32, bool)> {
+        if let Some(parts) = self.slice_of(o) {
+            return Some((parts.header, 2, true));
+        }
+        self.map_of(o).map(|ml| (ml.record, maps::MARK, false))
+    }
+
     fn slice_of(&self, o: &mir::Operand) -> Option<SliceParts> {
         let mir::Operand::Local(l) = o else {
             return None;

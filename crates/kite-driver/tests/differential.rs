@@ -3436,6 +3436,24 @@ fn main() {
     q.m["self"] = q.m.len()
     io.print("own value: \(q.items[q.items.len() - 2]) \(q.items[q.items.len() - 1]) \(q.m["self"] != nil)")
 
+    // A map grown through the field past the size that has an index, then
+    // emptied in part — which leaves holes on Wasm — and written again,
+    // each state kept on the way.
+    var big = fresh()
+    for i in 0..30 {
+        big.put("b\(i)", i)
+    }
+    let full = big.m
+    for i in 0..20 {
+        big.m.remove("b\(i * 3 % 30)")
+    }
+    let holey = big.table()
+    big.m["b0"] = 100
+    big.put("b1", 101)
+    big.m.remove("b2")
+    io.print("indexed: \(full.len()) \(mp(holey)) now \(mp(big.m))")
+    io.print("indexed kept: \(full == big.m) \(holey == big.m) \(or_else(holey["b0"], -1)) \(or_else(full["b3"], -1)) \(or_else(big.m["b1"], -1))")
+
     let t = across()
     _ = t
 }
@@ -7036,6 +7054,8 @@ equal: false 21\n\
 near: 22 -1 11 true now 23 77\n\
 carried: 26 14 now 29 17\n\
 own value: 29 77 true\n\
+indexed: 31 {a=1,b1=1,b2=2,b4=4,b5=5,b7=7,b8=8,b10=10,b11=11,b13=13,b14=14,b16=16,b17=17,b19=19,b20=20,b22=22,b23=23,b25=25,b26=26,b28=28,b29=29} now {a=1,b1=101,b4=4,b5=5,b7=7,b8=8,b10=10,b11=11,b13=13,b14=14,b16=16,b17=17,b19=19,b20=20,b22=22,b23=23,b25=25,b26=26,b28=28,b29=29,b0=100}\n\
+indexed kept: false false -1 3 101\n\
 yield kept: [1,2,0,1,2] {a=1,k0=0,k1=1,k2=2} now [1,2,0,1,2,7] {a=1,k0=0,k1=1,k2=2,y=7}\n\
 task saw: [1,2,0,1,2,7] {a=1,k0=0,k1=1,k2=2,y=7} now [100,2,0,1,2,7,8] {k0=0,k1=1,k2=2,y=7}\n\
 await kept: [100,2,0,1,2,7,8] {k0=0,k1=1,k2=2,y=7} now [100,2,0,1,2,7,8,9] {k0=0,k1=1,k2=2,y=7,z=9}\n\

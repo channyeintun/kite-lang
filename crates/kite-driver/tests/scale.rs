@@ -392,13 +392,13 @@ fn main() {
     );
 }
 
-/// Writing and removing map entries through a struct field is linear on the
-/// VM and natively: a field, a nested field and `self`'s field in a `var self`
+/// Writing and removing map entries through a struct field is linear on all
+/// three backends: a field, a nested field and `self`'s field in a `var self`
 /// method, with lookups between the writes. Each write copied the whole map,
 /// as a push copied a field's slice: at two hundred thousand the native
-/// backend took a quarter of an hour. Not on Wasm, whose maps are still
-/// their entries alone, scanned and copied by every write wherever they are
-/// held (§3.2).
+/// backend took a quarter of an hour, and Wasm did not finish in two minutes
+/// even once its maps had an index, until the map's record kept the mark a
+/// slice's header keeps.
 #[test]
 fn a_map_written_through_a_field_is_written_in_place() {
     let src = r#"struct S {
@@ -441,7 +441,7 @@ fn main() {
         src,
         "100000 100000 200000 200000 199999\n",
         Duration::from_secs(20),
-        false,
+        true,
     );
 }
 
