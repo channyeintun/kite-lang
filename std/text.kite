@@ -29,10 +29,22 @@
 //   the absence of a dictionary, and CB is not implemented because nothing
 //   can be embedded in a run of Kite text to break around. One tailoring
 //   of our own: an emoji skin tone attaches to whatever it follows, as a
-//   combining mark does, not only to an emoji base (LB30b), so a line never
-//   breaks inside what `clusters` calls one character. The rules later
+//   combining mark does, not only to an emoji base (LB30b), so a line does
+//   not break between a letter and its skin tone. The two annexes are still
+//   two: UAX #14 allows a few breaks inside what `clusters` calls one
+//   character — after a space or a line feed before a mark, between a
+//   Prepend character and an ideograph or emoji, before a spacing mark that
+//   follows a character of another script — and `break_opportunities`
+//   reports them. A letter and the marks and vowel signs of its own script
+//   are never parted. The rules later
 //   revisions added — LB15a–LB15d, LB20a, LB28a — are not here, and East
 //   Asian Width is read only where LB30 needs it; the section says which.
+// - `clusters` is UAX #29's extended grapheme clusters as of **Unicode
+//   17.0**: every rule from GB3 to GB999, over the Grapheme_Cluster_Break,
+//   Extended_Pictographic and Indic_Conjunct_Break tables of that version, so
+//   the whole of GraphemeBreakTest 17.0 passes. Nothing is left out; the
+//   tailorings the annex offers are not applied. `wrap` cuts a word too wide
+//   for its line between these clusters, and `cell_width` counts them.
 // - `join_arabic` is the joining half of Arabic shaping: Joining_Type over
 //   the Arabic block's own letters, mapped to Arabic Presentation Forms-B,
 //   with the mandatory lam-alef ligature. It is **not HarfBuzz-quality
@@ -2941,10 +2953,11 @@ fn hangul_joins(before: LineBreak, here: LineBreak) -> bool {
 ///   an empty one, since they hang — and the word starts the next.
 /// - **A run too wide for any line is broken between characters** rather than
 ///   left to overflow — what CSS calls `overflow-wrap: break-word`. The break
-///   never falls before a combining mark, so an accent stays with its letter,
-///   nor beside a zero-width joiner or an emoji skin-tone modifier, so an emoji
-///   sequence stays whole, and every line holds at least one character, so a width too narrow for
-///   anything still makes progress rather than looping.
+///   falls only between `clusters`, so an accent stays with its letter, a
+///   vowel sign with its consonant, a Hangul syllable whole however it is
+///   written, and an emoji sequence whole; and every line holds at least one
+///   cluster, so a width too narrow for anything still makes progress rather
+///   than looping.
 ///
 /// ```kite
 /// let chars = |s: str| -> float { return s.len() as float }
@@ -3022,9 +3035,9 @@ fn hangs(code: int) -> bool {
     return c == LineBreak.SP || is_mandatory(c)
 }
 
-/// The longest prefix of `body[start..end]` that fits, cut between characters
-/// and never before a combining mark — and never shorter than one character,
-/// so that a line too narrow for anything still takes something.
+/// The longest prefix of `body[start..end]` that fits, cut between clusters —
+/// and never shorter than one cluster, so that a line too narrow for anything
+/// still takes something.
 fn split_point(body: str, start: int, end: int, width: float, measure: fn(str) -> float) -> int {
     var best = next_cluster(body, start, end)
     var m = next_cluster(body, best, end)
@@ -3038,130 +3051,562 @@ fn split_point(body: str, start: int, end: int, width: float, measure: fn(str) -
     return best
 }
 
-/// The position after the character at `i` and everything that stays with it:
-/// the marks attached to it, an emoji skin-tone modifier or tag character, a
-/// zero-width joiner, and — when the joiner is between two emoji — the emoji
-/// after it, so a family emoji, which is several people stuck together with
-/// joiners, is one cluster.
+/// The position after the cluster that begins at `i`: UAX #29's extended
+/// grapheme cluster, as `clusters` describes it. Each character after the
+/// first is asked, in turn, whether it stays with the one before it, and the
+/// first that does not ends the cluster. What the rules ask beyond the two
+/// characters on either side — whether an emoji and its Extend come before a
+/// joiner (GB11), whether a consonant and a virama come before a consonant
+/// (GB9c), and how many regional indicators are in a row (GB12, GB13) — is
+/// carried along as the walk goes.
 fn next_cluster(body: str, i: int, end: int) -> int {
-    var k = i + 1
-    // Two regional indicators are one flag.
-    if k < end && within(body.code_at(i), 0x1F1E6, 0x1F1FF) && within(body.code_at(k), 0x1F1E6, 0x1F1FF) {
-        k += 1
+    let first = body.code_at(i)
+    var before = grapheme_break(first)
+    // GB11: 1 is an emoji followed by nothing but Extend, 2 is that with a
+    // joiner after it, which is where the next emoji may join.
+    var emoji = 0
+    if before == GCB_PICTO {
+        emoji = 1
     }
-    // Whether the cluster so far is an emoji and what has attached to it,
-    // which is what UAX #29 rule GB11 asks before it joins across a ZWJ.
-    var emoji = pictographic(body.code_at(i))
-    // Where the cluster is in an Indic conjunct, which is what GB9c asks: 0 is
-    // not in one, 1 is a consonant followed by nothing but Extend and Linker,
-    // and 2 is the same with a Linker (a virama) among them, which is the state
-    // a consonant may join from.
+    // GB9c: 1 is a consonant followed by nothing but InCB Extend and Linker,
+    // and 2 is the same with a Linker (a virama) among them, which is the
+    // state a consonant may join from.
     var conjunct = 0
-    if incb_consonant(body.code_at(i)) {
+    if before == GCB_CONSONANT {
         conjunct = 1
     }
+    // GB12 and GB13: how many regional indicators end the cluster so far.
+    var flags = 0
+    if before == GCB_RI {
+        flags = 1
+    }
+    var k = i + 1
     for k < end {
-        let c = body.code_at(k)
-        if conjunct == 2 && incb_consonant(c) {
-            // Consonant, virama, consonant: क्ष is one cluster, and the
-            // consonant it ends in can begin the next conjunct.
-            k += 1
-            conjunct = 1
-        } else if c == 0x200D {
-            // A joiner stays with what is before it (GB9), and takes what
-            // follows it only from one emoji to another (GB11). It used to
-            // take whatever followed, so "a", ZWJ, "中" was one cluster one
-            // column wide, and a space after a stray joiner was swallowed.
-            // A joiner that joins nothing still ends no cluster: the marks
-            // and joiners after it attach as well (GB9), but no emoji after
-            // them is joined on, since only marks may stand between an emoji
-            // and the joiner GB11 joins across. A joiner is Extend to GB9c,
-            // so it does not end a conjunct either.
-            k += 1
-            if emoji && k < end && pictographic(body.code_at(k)) {
-                k += 1
-            } else {
-                emoji = false
-            }
-        } else if is_combining(c) || within(c, 0x1F3FB, 0x1F3FF) || within(c, 0xE0020, 0xE007F) {
-            k += 1
-            // Every one of these is Extend to GB9c — a skin-tone modifier and
-            // a tag character too — so none ends a conjunct; a virama is the
-            // Linker that lets one go on.
-            if conjunct > 0 && incb_linker(c) {
-                conjunct = 2
-            }
-        } else {
+        let code = body.code_at(k)
+        let after = grapheme_break(code)
+        if !stays(before, after, emoji, conjunct, flags) {
             break
         }
+        if after == GCB_PICTO {
+            emoji = 1
+        } else if emoji == 1 && after == GCB_ZWJ {
+            emoji = 2
+        } else if emoji != 1 || after != GCB_EXTEND {
+            emoji = 0
+        }
+        // InCB Extend is GCB Extend and the joiner, less the Linkers and the
+        // zero-width non-joiner, which is Extend to every rule but this one.
+        if after == GCB_CONSONANT {
+            conjunct = 1
+        } else if conjunct > 0 && incb_linker(code) {
+            conjunct = 2
+        } else if !(after == GCB_ZWJ || (after == GCB_EXTEND && code != 0x200C)) {
+            conjunct = 0
+        }
+        if after == GCB_RI {
+            flags += 1
+        } else {
+            flags = 0
+        }
+        before = after
+        k += 1
     }
     return k
 }
 
-/// Indic_Conjunct_Break=Consonant (Unicode 15.1, the same in 16.0): the
-/// consonants of the six scripts UAX #29 rule GB9c joins into conjuncts —
-/// Devanagari, Bengali, Gujarati, Oriya, Telugu and Malayalam — as 26 ranges.
-fn incb_consonant(c: int) -> bool {
-    if c < 0x915 || c > 0xD3A {
+/// Whether there is no cluster boundary between a character of property
+/// `before` and one of property `after` — UAX #29's rules GB3 to GB999, in
+/// the order the annex gives them, the first that applies deciding. GB1 and
+/// GB2, the boundaries at either end of the text, are the walk's own.
+fn stays(before: int, after: int, emoji: int, conjunct: int, flags: int) -> bool {
+    // GB3: CR × LF.
+    if before == GCB_CR && after == GCB_LF {
+        return true
+    }
+    // GB4 and GB5: a control, CR or LF ends a cluster and stands alone.
+    if before == GCB_CONTROL || before == GCB_CR || before == GCB_LF {
         return false
     }
-    return within(c, 0x915, 0x939) || within(c, 0x958, 0x95F) || within(c, 0x978, 0x97F) ||
-    within(c, 0x995, 0x9A8) || within(c, 0x9AA, 0x9B0) || c == 0x9B2 || within(c, 0x9B6, 0x9B9) ||
-    within(c, 0x9DC, 0x9DD) || c == 0x9DF || within(c, 0x9F0, 0x9F1) || within(c, 0xA95, 0xAA8) ||
-    within(c, 0xAAA, 0xAB0) || within(c, 0xAB2, 0xAB3) || within(c, 0xAB5, 0xAB9) || c == 0xAF9 ||
-    within(c, 0xB15, 0xB28) || within(c, 0xB2A, 0xB30) || within(c, 0xB32, 0xB33) ||
-    within(c, 0xB35, 0xB39) || within(c, 0xB5C, 0xB5D) || c == 0xB5F || c == 0xB71 ||
-    within(c, 0xC15, 0xC28) || within(c, 0xC2A, 0xC39) || within(c, 0xC58, 0xC5A) ||
-    within(c, 0xD15, 0xD3A)
+    if after == GCB_CONTROL || after == GCB_CR || after == GCB_LF {
+        return false
+    }
+    // GB6, GB7 and GB8: Hangul jamo and syllables join into one syllable —
+    // L before L, V, LV or LVT; LV or V before V or T; LVT or T before T.
+    if before == GCB_L && (after == GCB_L || after == GCB_V || after == GCB_LV || after == GCB_LVT) {
+        return true
+    }
+    if (before == GCB_LV || before == GCB_V) && (after == GCB_V || after == GCB_T) {
+        return true
+    }
+    if (before == GCB_LVT || before == GCB_T) && after == GCB_T {
+        return true
+    }
+    // GB9: × (Extend | ZWJ). GB9a: × SpacingMark. GB9b: Prepend ×.
+    if after == GCB_EXTEND || after == GCB_ZWJ || after == GCB_SPACING || before == GCB_PREPEND {
+        return true
+    }
+    // GB9c: Consonant [Extend Linker]* Linker [Extend Linker]* × Consonant.
+    if conjunct == 2 && after == GCB_CONSONANT {
+        return true
+    }
+    // GB11: ExtPict Extend* ZWJ × ExtPict.
+    if emoji == 2 && after == GCB_PICTO {
+        return true
+    }
+    // GB12 and GB13: regional indicators pair off into flags.
+    if before == GCB_RI && after == GCB_RI && flags % 2 == 1 {
+        return true
+    }
+    // GB999: everywhere else.
+    return false
 }
 
-/// Indic_Conjunct_Break=Linker (Unicode 15.1): the virama of each of those
-/// scripts. Extend is not a table of its own here: it is what GB9 attaches — a
-/// mark (`is_combining`), a skin-tone modifier, a tag character or a joiner —
-/// which differs from InCB=Extend only by a few spacing vowel signs (U+09BE,
-/// U+0B3E, U+0D3E and the like) that this module's GB9 does not attach either
-/// and that no real conjunct has between its virama and its consonant.
+// The values of Grapheme_Cluster_Break, as `grapheme_break` answers them. In
+// the table each is one hex digit: an entry is a code point with its value
+// written after it, `0x093E8` being U+093E, a SpacingMark.
+let GCB_OTHER = 0x0
+let GCB_CR = 0x1
+let GCB_LF = 0x2
+let GCB_CONTROL = 0x3
+let GCB_EXTEND = 0x4
+let GCB_ZWJ = 0x5
+let GCB_RI = 0x6
+let GCB_PREPEND = 0x7
+let GCB_SPACING = 0x8
+let GCB_L = 0x9
+let GCB_V = 0xA
+let GCB_T = 0xB
+let GCB_LV = 0xC
+let GCB_LVT = 0xD
+let GCB_PICTO = 0xE
+let GCB_CONSONANT = 0xF
+
+/// A code point's Grapheme_Cluster_Break property (Unicode 17.0), with the
+/// two other properties the rules read folded in where they fall: a
+/// character that is Extended_Pictographic answers `GCB_PICTO`, and one that is
+/// Indic_Conjunct_Break=Consonant answers `GCB_CONSONANT` — each of those is
+/// Other to Grapheme_Cluster_Break, so nothing is lost by folding.
+fn grapheme_break(code: int) -> int {
+    // Below the combining diacriticals, without the table.
+    if code < 0x0300 {
+        if code >= 0x20 && code < 0x7F {
+            return GCB_OTHER
+        }
+        if code == 0x0D {
+            return GCB_CR
+        }
+        if code == 0x0A {
+            return GCB_LF
+        }
+        if code < 0xA0 || code == 0xAD {
+            return GCB_CONTROL
+        }
+        if code == 0xA9 || code == 0xAE {
+            return GCB_PICTO
+        }
+        return GCB_OTHER
+    }
+    // Every entry starts a run that lasts until the next: find the last entry
+    // at or before `code`, and its last digit is the answer.
+    let r = grapheme_runs(code)
+    let key = code * 16 + 15
+    var lo = 0
+    var hi = r.len()
+    for lo < hi {
+        let mid = (lo + hi) / 2
+        if r[mid] <= key {
+            lo = mid + 1
+        } else {
+            hi = mid
+        }
+    }
+    let value = r[lo - 1] % 16
+    // The Hangul syllables are one run in the table: every twenty-eighth,
+    // from U+AC00, is LV, and the 27 after each are LVT.
+    if value == GCB_LV && (code - 0xAC00) % 28 != 0 {
+        return GCB_LVT
+    }
+    return value
+}
+
+/// Indic_Conjunct_Break=Linker (Unicode 17.0): the virama of each script
+/// rule GB9c joins conjuncts in — Devanagari, Bengali, Gujarati, Oriya,
+/// Telugu and Malayalam, then Myanmar, Khmer, Tai Tham, Balinese, Sundanese,
+/// Javanese, Meetei Mayek, Kharoshthi, Chakma, Tulu-Tigalari, Dives Akuru,
+/// Zanabazar Square, Soyombo and Kawi. Each is Extend to Grapheme_Cluster_Break.
 fn incb_linker(c: int) -> bool {
-    return c == 0x94D || c == 0x9CD || c == 0xACD || c == 0xB4D || c == 0xC4D || c == 0xD4D
+    if c < 0x1000 {
+        return c == 0x94D || c == 0x9CD || c == 0xACD || c == 0xB4D || c == 0xC4D || c == 0xD4D
+    }
+    return c == 0x1039 || c == 0x17D2 || c == 0x1A60 || c == 0x1B44 || c == 0x1BAB || c == 0xA9C0 ||
+    c == 0xAAF6 || c == 0x10A3F || c == 0x11133 || c == 0x113D0 || c == 0x1193E || c == 0x11A47 ||
+    c == 0x11A99 || c == 0x11F42
 }
 
-/// Extended_Pictographic, as far as GB11 needs it: the characters an emoji
-/// ZWJ sequence is made of. Listed by block rather than read from the Unicode
-/// database — the older symbol and arrow blocks emoji were drawn from, and the
-/// emoji planes from U+1F000 on, less the regional indicators and skin tones,
-/// which are not pictographs. Pictographic punctuation (‼, ⁉, ™, ©, ®) is
-/// counted too; a few non-emoji symbols in the listed blocks are as well,
-/// which matters only where one is followed by a joiner and an emoji.
-fn pictographic(c: int) -> bool {
-    if c < 0x2000 {
-        return c == 0xA9 || c == 0xAE
+/// The chunk of the Grapheme_Cluster_Break table `code` falls in: entries of
+/// a code point and a value, each starting a run of that value.
+/// Generated from the Unicode 17.0 character database — GraphemeBreakProperty,
+/// emoji-data's Extended_Pictographic and DerivedCoreProperties'
+/// Indic_Conjunct_Break=Consonant — from U+0300 on, as 1,345 runs in chunks of
+/// 32; a code point no entry names is Other. A few tests pick the chunk and a
+/// bisection finds the run within it, as `mark_ranges` does.
+fn grapheme_runs(code: int) -> [int] {
+    if code < 0xA984 {
+        if code < 0x108E {
+            if code < 0x0B72 {
+                if code < 0x09BF {
+                    if code < 0x0915 {
+                        if code < 0x06EE {
+                            return [
+                                0x03004, 0x03700, 0x04834, 0x048A0, 0x05914, 0x05BE0, 0x05BF4, 0x05C00,
+                                0x05C14, 0x05C30, 0x05C44, 0x05C60, 0x05C74, 0x05C80, 0x06007, 0x06060,
+                                0x06104, 0x061B0, 0x061C3, 0x061D0, 0x064B4, 0x06600, 0x06704, 0x06710,
+                                0x06D64, 0x06DD7, 0x06DE0, 0x06DF4, 0x06E50, 0x06E74, 0x06E90, 0x06EA4,
+                            ]
+                        }
+                        return [
+                            0x06EE0, 0x070F7, 0x07100, 0x07114, 0x07120, 0x07304, 0x074B0, 0x07A64,
+                            0x07B10, 0x07EB4, 0x07F40, 0x07FD4, 0x07FE0, 0x08164, 0x081A0, 0x081B4,
+                            0x08240, 0x08254, 0x08280, 0x08294, 0x082E0, 0x08594, 0x085C0, 0x08907,
+                            0x08920, 0x08974, 0x08A00, 0x08CA4, 0x08E27, 0x08E34, 0x09038, 0x09040,
+                        ]
+                    }
+                    return [
+                        0x0915F, 0x093A4, 0x093B8, 0x093C4, 0x093D0, 0x093E8, 0x09414, 0x09498,
+                        0x094D4, 0x094E8, 0x09500, 0x09514, 0x0958F, 0x09600, 0x09624, 0x09640,
+                        0x0978F, 0x09800, 0x09814, 0x09828, 0x09840, 0x0995F, 0x09A90, 0x09AAF,
+                        0x09B10, 0x09B2F, 0x09B30, 0x09B6F, 0x09BA0, 0x09BC4, 0x09BD0, 0x09BE4,
+                    ]
+                }
+                if code < 0x0B00 {
+                    if code < 0x0A51 {
+                        return [
+                            0x09BF8, 0x09C14, 0x09C50, 0x09C78, 0x09C90, 0x09CB8, 0x09CD4, 0x09CE0,
+                            0x09D74, 0x09D80, 0x09DCF, 0x09DE0, 0x09DFF, 0x09E00, 0x09E24, 0x09E40,
+                            0x09F0F, 0x09F20, 0x09FE4, 0x09FF0, 0x0A014, 0x0A038, 0x0A040, 0x0A3C4,
+                            0x0A3D0, 0x0A3E8, 0x0A414, 0x0A430, 0x0A474, 0x0A490, 0x0A4B4, 0x0A4E0,
+                        ]
+                    }
+                    return [
+                        0x0A514, 0x0A520, 0x0A704, 0x0A720, 0x0A754, 0x0A760, 0x0A814, 0x0A838,
+                        0x0A840, 0x0A95F, 0x0AA90, 0x0AAAF, 0x0AB10, 0x0AB2F, 0x0AB40, 0x0AB5F,
+                        0x0ABA0, 0x0ABC4, 0x0ABD0, 0x0ABE8, 0x0AC14, 0x0AC60, 0x0AC74, 0x0AC98,
+                        0x0ACA0, 0x0ACB8, 0x0ACD4, 0x0ACE0, 0x0AE24, 0x0AE40, 0x0AF9F, 0x0AFA4,
+                    ]
+                }
+                return [
+                    0x0B000, 0x0B014, 0x0B028, 0x0B040, 0x0B15F, 0x0B290, 0x0B2AF, 0x0B310,
+                    0x0B32F, 0x0B340, 0x0B35F, 0x0B3A0, 0x0B3C4, 0x0B3D0, 0x0B3E4, 0x0B408,
+                    0x0B414, 0x0B450, 0x0B478, 0x0B490, 0x0B4B8, 0x0B4D4, 0x0B4E0, 0x0B554,
+                    0x0B580, 0x0B5CF, 0x0B5E0, 0x0B5FF, 0x0B600, 0x0B624, 0x0B640, 0x0B71F,
+                ]
+            }
+            if code < 0x0E32 {
+                if code < 0x0D3D {
+                    if code < 0x0C55 {
+                        return [
+                            0x0B720, 0x0B824, 0x0B830, 0x0BBE4, 0x0BBF8, 0x0BC04, 0x0BC18, 0x0BC30,
+                            0x0BC68, 0x0BC90, 0x0BCA8, 0x0BCD4, 0x0BCE0, 0x0BD74, 0x0BD80, 0x0C004,
+                            0x0C018, 0x0C044, 0x0C050, 0x0C15F, 0x0C290, 0x0C2AF, 0x0C3A0, 0x0C3C4,
+                            0x0C3D0, 0x0C3E4, 0x0C418, 0x0C450, 0x0C464, 0x0C490, 0x0C4A4, 0x0C4E0,
+                        ]
+                    }
+                    return [
+                        0x0C554, 0x0C570, 0x0C58F, 0x0C5B0, 0x0C624, 0x0C640, 0x0C814, 0x0C828,
+                        0x0C840, 0x0CBC4, 0x0CBD0, 0x0CBE8, 0x0CBF4, 0x0CC18, 0x0CC24, 0x0CC38,
+                        0x0CC50, 0x0CC64, 0x0CC90, 0x0CCA4, 0x0CCE0, 0x0CD54, 0x0CD70, 0x0CE24,
+                        0x0CE40, 0x0CF38, 0x0CF40, 0x0D004, 0x0D028, 0x0D040, 0x0D15F, 0x0D3B4,
+                    ]
+                }
+                return [
+                    0x0D3D0, 0x0D3E4, 0x0D3F8, 0x0D414, 0x0D450, 0x0D468, 0x0D490, 0x0D4A8,
+                    0x0D4D4, 0x0D4E7, 0x0D4F0, 0x0D574, 0x0D580, 0x0D624, 0x0D640, 0x0D814,
+                    0x0D828, 0x0D840, 0x0DCA4, 0x0DCB0, 0x0DCF4, 0x0DD08, 0x0DD24, 0x0DD50,
+                    0x0DD64, 0x0DD70, 0x0DD88, 0x0DDF4, 0x0DE00, 0x0DF28, 0x0DF40, 0x0E314,
+                ]
+            }
+            if code < 0x0FBD {
+                return [
+                    0x0E320, 0x0E338, 0x0E344, 0x0E3B0, 0x0E474, 0x0E4F0, 0x0EB14, 0x0EB20,
+                    0x0EB38, 0x0EB44, 0x0EBD0, 0x0EC84, 0x0ECF0, 0x0F184, 0x0F1A0, 0x0F354,
+                    0x0F360, 0x0F374, 0x0F380, 0x0F394, 0x0F3A0, 0x0F3E8, 0x0F400, 0x0F714,
+                    0x0F7F8, 0x0F804, 0x0F850, 0x0F864, 0x0F880, 0x0F8D4, 0x0F980, 0x0F994,
+                ]
+            }
+            return [
+                0x0FBD0, 0x0FC64, 0x0FC70, 0x1000F, 0x102B0, 0x102D4, 0x10318, 0x10324,
+                0x10380, 0x10394, 0x103B8, 0x103D4, 0x103FF, 0x10400, 0x1050F, 0x10568,
+                0x10584, 0x105AF, 0x105E4, 0x1061F, 0x10620, 0x1065F, 0x10670, 0x106EF,
+                0x10714, 0x1075F, 0x10824, 0x10830, 0x10848, 0x10854, 0x10870, 0x108D4,
+            ]
+        }
+        if code < 0x2642 {
+            if code < 0x1BE7 {
+                if code < 0x1A7D {
+                    if code < 0x1810 {
+                        return [
+                            0x108EF, 0x108F0, 0x109D4, 0x109E0, 0x11009, 0x1160A, 0x11A8B, 0x12000,
+                            0x135D4, 0x13600, 0x17124, 0x17160, 0x17324, 0x17350, 0x17524, 0x17540,
+                            0x17724, 0x17740, 0x1780F, 0x17B44, 0x17B68, 0x17B74, 0x17BE8, 0x17C64,
+                            0x17C78, 0x17C94, 0x17D40, 0x17DD4, 0x17DE0, 0x180B4, 0x180E3, 0x180F4,
+                        ]
+                    }
+                    return [
+                        0x18100, 0x18854, 0x18870, 0x18A94, 0x18AA0, 0x19204, 0x19238, 0x19274,
+                        0x19298, 0x192C0, 0x19308, 0x19324, 0x19338, 0x19394, 0x193C0, 0x1A174,
+                        0x1A198, 0x1A1B4, 0x1A1C0, 0x1A20F, 0x1A558, 0x1A564, 0x1A578, 0x1A584,
+                        0x1A5F0, 0x1A604, 0x1A610, 0x1A624, 0x1A630, 0x1A654, 0x1A6D8, 0x1A734,
+                    ]
+                }
+                return [
+                    0x1A7D0, 0x1A7F4, 0x1A800, 0x1AB04, 0x1ADE0, 0x1AE04, 0x1AEC0, 0x1B004,
+                    0x1B048, 0x1B050, 0x1B0BF, 0x1B0D0, 0x1B13F, 0x1B344, 0x1B3E8, 0x1B424,
+                    0x1B45F, 0x1B4D0, 0x1B6B4, 0x1B740, 0x1B804, 0x1B828, 0x1B83F, 0x1BA18,
+                    0x1BA24, 0x1BA68, 0x1BA84, 0x1BAEF, 0x1BB00, 0x1BBBF, 0x1BBE0, 0x1BE64,
+                ]
+            }
+            if code < 0x25B6 {
+                if code < 0x2028 {
+                    return [
+                        0x1BE78, 0x1BE84, 0x1BEA8, 0x1BED4, 0x1BEE8, 0x1BEF4, 0x1BF40, 0x1C248,
+                        0x1C2C4, 0x1C348, 0x1C364, 0x1C380, 0x1CD04, 0x1CD30, 0x1CD44, 0x1CE18,
+                        0x1CE24, 0x1CE90, 0x1CED4, 0x1CEE0, 0x1CF44, 0x1CF50, 0x1CF78, 0x1CF84,
+                        0x1CFA0, 0x1DC04, 0x1E000, 0x200B3, 0x200C4, 0x200D5, 0x200E3, 0x20100,
+                    ]
+                }
+                return [
+                    0x20283, 0x202F0, 0x203CE, 0x203D0, 0x2049E, 0x204A0, 0x20603, 0x20700,
+                    0x20D04, 0x20F10, 0x2122E, 0x21230, 0x2139E, 0x213A0, 0x2194E, 0x219A0,
+                    0x21A9E, 0x21AB0, 0x231AE, 0x231C0, 0x2328E, 0x23290, 0x23CFE, 0x23D00,
+                    0x23E9E, 0x23F40, 0x23F8E, 0x23FB0, 0x24C2E, 0x24C30, 0x25AAE, 0x25AC0,
+                ]
+            }
+            return [
+                0x25B6E, 0x25B70, 0x25C0E, 0x25C10, 0x25FBE, 0x25FF0, 0x2600E, 0x26050,
+                0x260EE, 0x260F0, 0x2611E, 0x26120, 0x2614E, 0x26160, 0x2618E, 0x26190,
+                0x261DE, 0x261E0, 0x2620E, 0x26210, 0x2622E, 0x26240, 0x2626E, 0x26270,
+                0x262AE, 0x262B0, 0x262EE, 0x26300, 0x2638E, 0x263B0, 0x2640E, 0x26410,
+            ]
+        }
+        if code < 0x2B05 {
+            if code < 0x271D {
+                if code < 0x26C4 {
+                    return [
+                        0x2642E, 0x26430, 0x2648E, 0x26540, 0x265FE, 0x26610, 0x2663E, 0x26640,
+                        0x2665E, 0x26670, 0x2668E, 0x26690, 0x267BE, 0x267C0, 0x267EE, 0x26800,
+                        0x2692E, 0x26980, 0x2699E, 0x269A0, 0x269BE, 0x269D0, 0x26A0E, 0x26A20,
+                        0x26A7E, 0x26A80, 0x26AAE, 0x26AC0, 0x26B0E, 0x26B20, 0x26BDE, 0x26BF0,
+                    ]
+                }
+                return [
+                    0x26C4E, 0x26C60, 0x26C8E, 0x26C90, 0x26CEE, 0x26D00, 0x26D1E, 0x26D20,
+                    0x26D3E, 0x26D50, 0x26E9E, 0x26EB0, 0x26F0E, 0x26F60, 0x26F7E, 0x26FB0,
+                    0x26FDE, 0x26FE0, 0x2702E, 0x27030, 0x2705E, 0x27060, 0x2708E, 0x270E0,
+                    0x270FE, 0x27100, 0x2712E, 0x27130, 0x2714E, 0x27150, 0x2716E, 0x27170,
+                ]
+            }
+            return [
+                0x271DE, 0x271E0, 0x2721E, 0x27220, 0x2728E, 0x27290, 0x2733E, 0x27350,
+                0x2744E, 0x27450, 0x2747E, 0x27480, 0x274CE, 0x274D0, 0x274EE, 0x274F0,
+                0x2753E, 0x27560, 0x2757E, 0x27580, 0x2763E, 0x27650, 0x2795E, 0x27980,
+                0x27A1E, 0x27A20, 0x27B0E, 0x27B10, 0x27BFE, 0x27C00, 0x2934E, 0x29360,
+            ]
+        }
+        if code < 0xA6F2 {
+            return [
+                0x2B05E, 0x2B080, 0x2B1BE, 0x2B1D0, 0x2B50E, 0x2B510, 0x2B55E, 0x2B560,
+                0x2CEF4, 0x2CF20, 0x2D7F4, 0x2D800, 0x2DE04, 0x2E000, 0x302A4, 0x3030E,
+                0x30310, 0x303DE, 0x303E0, 0x30994, 0x309B0, 0x3297E, 0x32980, 0x3299E,
+                0x329A0, 0xA66F4, 0xA6730, 0xA6744, 0xA67E0, 0xA69E4, 0xA6A00, 0xA6F04,
+            ]
+        }
+        return [
+            0xA6F20, 0xA8024, 0xA8030, 0xA8064, 0xA8070, 0xA80B4, 0xA80C0, 0xA8238,
+            0xA8254, 0xA8278, 0xA8280, 0xA82C4, 0xA82D0, 0xA8808, 0xA8820, 0xA8B48,
+            0xA8C44, 0xA8C60, 0xA8E04, 0xA8F20, 0xA8FF4, 0xA9000, 0xA9264, 0xA92E0,
+            0xA9474, 0xA9528, 0xA9534, 0xA9540, 0xA9609, 0xA97D0, 0xA9804, 0xA9838,
+        ]
     }
-    if c < 0x1F000 {
-        return c == 0x203C || c == 0x2049 || c == 0x2122 || c == 0x2139 || within(c, 0x2194, 0x21AA) ||
-        within(c, 0x231A, 0x23FF) || c == 0x24C2 || within(c, 0x25AA, 0x25FE) || within(c, 0x2600, 0x27BF) ||
-        within(c, 0x2934, 0x2935) || within(c, 0x2B05, 0x2B55) || c == 0x3030 || c == 0x303D || c == 0x3297 ||
-        c == 0x3299
+    if code < 0x11C30 {
+        if code < 0x1133E {
+            if code < 0x10A05 {
+                if code < 0xABE9 {
+                    if code < 0xAA71 {
+                        return [
+                            0xA9840, 0xA989F, 0xA98C0, 0xA98FF, 0xA9B34, 0xA9B48, 0xA9B64, 0xA9BA8,
+                            0xA9BC4, 0xA9BE8, 0xA9C04, 0xA9C10, 0xA9E0F, 0xA9E54, 0xA9E60, 0xA9E7F,
+                            0xA9F00, 0xA9FAF, 0xA9FF0, 0xAA294, 0xAA2F8, 0xAA314, 0xAA338, 0xAA354,
+                            0xAA370, 0xAA434, 0xAA440, 0xAA4C4, 0xAA4D8, 0xAA4E0, 0xAA60F, 0xAA700,
+                        ]
+                    }
+                    return [
+                        0xAA71F, 0xAA740, 0xAA7AF, 0xAA7B0, 0xAA7C4, 0xAA7D0, 0xAA7EF, 0xAA800,
+                        0xAAB04, 0xAAB10, 0xAAB24, 0xAAB50, 0xAAB74, 0xAAB90, 0xAABE4, 0xAAC00,
+                        0xAAC14, 0xAAC20, 0xAAE0F, 0xAAEB8, 0xAAEC4, 0xAAEE8, 0xAAF00, 0xAAF58,
+                        0xAAF64, 0xAAF70, 0xABC0F, 0xABDB0, 0xABE38, 0xABE54, 0xABE68, 0xABE84,
+                    ]
+                }
+                return [
+                    0xABE98, 0xABEB0, 0xABEC8, 0xABED4, 0xABEE0, 0xAC00C, 0xD7A40, 0xD7B0A,
+                    0xD7C70, 0xD7CBB, 0xD7FC0, 0xFB1E4, 0xFB1F0, 0xFE004, 0xFE100, 0xFE204,
+                    0xFE300, 0xFEFF3, 0xFF000, 0xFF9E4, 0xFFA00, 0xFFF03, 0xFFFC0, 0x101FD4,
+                    0x101FE0, 0x102E04, 0x102E10, 0x103764, 0x1037B0, 0x10A00F, 0x10A014, 0x10A040,
+                ]
+            }
+            if code < 0x11182 {
+                if code < 0x11047 {
+                    return [
+                        0x10A054, 0x10A070, 0x10A0C4, 0x10A10F, 0x10A140, 0x10A15F, 0x10A180, 0x10A19F,
+                        0x10A360, 0x10A384, 0x10A3B0, 0x10A3F4, 0x10A400, 0x10AE54, 0x10AE70, 0x10D244,
+                        0x10D280, 0x10D694, 0x10D6E0, 0x10EAB4, 0x10EAD0, 0x10EFA4, 0x10F000, 0x10F464,
+                        0x10F510, 0x10F824, 0x10F860, 0x110008, 0x110014, 0x110028, 0x110030, 0x110384,
+                    ]
+                }
+                return [
+                    0x110470, 0x110704, 0x110710, 0x110734, 0x110750, 0x1107F4, 0x110828, 0x110830,
+                    0x110B08, 0x110B34, 0x110B78, 0x110B94, 0x110BB0, 0x110BD7, 0x110BE0, 0x110C24,
+                    0x110C30, 0x110CD7, 0x110CE0, 0x111004, 0x11103F, 0x111274, 0x1112C8, 0x1112D4,
+                    0x111350, 0x11144F, 0x111458, 0x11147F, 0x111480, 0x111734, 0x111740, 0x111804,
+                ]
+            }
+            return [
+                0x111828, 0x111830, 0x111B38, 0x111B64, 0x111BF8, 0x111C04, 0x111C10, 0x111C27,
+                0x111C40, 0x111C94, 0x111CD0, 0x111CE8, 0x111CF4, 0x111D00, 0x1122C8, 0x1122F4,
+                0x112328, 0x112344, 0x112380, 0x1123E4, 0x1123F0, 0x112414, 0x112420, 0x112DF4,
+                0x112E08, 0x112E34, 0x112EB0, 0x113004, 0x113028, 0x113040, 0x1133B4, 0x1133D0,
+            ]
+        }
+        if code < 0x1172C {
+            if code < 0x114C4 {
+                if code < 0x113C5 {
+                    return [
+                        0x1133E4, 0x1133F8, 0x113404, 0x113418, 0x113450, 0x113478, 0x113490, 0x1134B8,
+                        0x1134D4, 0x1134E0, 0x113574, 0x113580, 0x113628, 0x113640, 0x113664, 0x1136D0,
+                        0x113704, 0x113750, 0x11380F, 0x1138A0, 0x1138BF, 0x1138C0, 0x1138EF, 0x1138F0,
+                        0x11390F, 0x113B60, 0x113B84, 0x113B98, 0x113BB4, 0x113C10, 0x113C24, 0x113C30,
+                    ]
+                }
+                return [
+                    0x113C54, 0x113C60, 0x113C74, 0x113CA8, 0x113CB0, 0x113CC8, 0x113CE4, 0x113D17,
+                    0x113D24, 0x113D30, 0x113E14, 0x113E30, 0x114358, 0x114384, 0x114408, 0x114424,
+                    0x114458, 0x114464, 0x114470, 0x1145E4, 0x1145F0, 0x114B04, 0x114B18, 0x114B34,
+                    0x114B98, 0x114BA4, 0x114BB8, 0x114BD4, 0x114BE8, 0x114BF4, 0x114C18, 0x114C24,
+                ]
+            }
+            return [
+                0x114C40, 0x115AF4, 0x115B08, 0x115B24, 0x115B60, 0x115B88, 0x115BC4, 0x115BE8,
+                0x115BF4, 0x115C10, 0x115DC4, 0x115DE0, 0x116308, 0x116334, 0x1163B8, 0x1163D4,
+                0x1163E8, 0x1163F4, 0x116410, 0x116AB4, 0x116AC8, 0x116AD4, 0x116AE8, 0x116B04,
+                0x116B80, 0x1171D4, 0x1171E8, 0x1171F4, 0x117200, 0x117224, 0x117268, 0x117274,
+            ]
+        }
+        if code < 0x119E0 {
+            return [
+                0x1172C0, 0x1182C8, 0x1182F4, 0x118388, 0x118394, 0x1183B0, 0x11900F, 0x119070,
+                0x11909F, 0x1190A0, 0x1190CF, 0x119140, 0x11915F, 0x119170, 0x11918F, 0x119304,
+                0x119318, 0x119360, 0x119378, 0x119390, 0x1193B4, 0x1193F7, 0x119408, 0x119417,
+                0x119428, 0x119434, 0x119440, 0x119D18, 0x119D44, 0x119D80, 0x119DA4, 0x119DC8,
+            ]
+        }
+        return [
+            0x119E04, 0x119E10, 0x119E48, 0x119E50, 0x11A00F, 0x11A014, 0x11A0BF, 0x11A334,
+            0x11A398, 0x11A3A0, 0x11A3B4, 0x11A3F0, 0x11A474, 0x11A480, 0x11A50F, 0x11A514,
+            0x11A578, 0x11A594, 0x11A5CF, 0x11A847, 0x11A8A4, 0x11A978, 0x11A984, 0x11A9A0,
+            0x11B604, 0x11B618, 0x11B624, 0x11B658, 0x11B664, 0x11B678, 0x11B680, 0x11C2F8,
+        ]
     }
-    return (within(c, 0x1F000, 0x1FAFF) && !within(c, 0x1F1E6, 0x1F1FF) && !within(c, 0x1F3FB, 0x1F3FF)) ||
-    within(c, 0x1FC00, 0x1FFFD)
+    if code < 0x1F17E {
+        if code < 0x1D242 {
+            if code < 0x16D63 {
+                if code < 0x11D97 {
+                    return [
+                        0x11C304, 0x11C370, 0x11C384, 0x11C3E8, 0x11C3F4, 0x11C400, 0x11C924, 0x11CA80,
+                        0x11CA98, 0x11CAA4, 0x11CB18, 0x11CB24, 0x11CB48, 0x11CB54, 0x11CB70, 0x11D314,
+                        0x11D370, 0x11D3A4, 0x11D3B0, 0x11D3C4, 0x11D3E0, 0x11D3F4, 0x11D467, 0x11D474,
+                        0x11D480, 0x11D8A8, 0x11D8F0, 0x11D904, 0x11D920, 0x11D938, 0x11D954, 0x11D968,
+                    ]
+                }
+                return [
+                    0x11D974, 0x11D980, 0x11EF34, 0x11EF58, 0x11EF70, 0x11F004, 0x11F027, 0x11F038,
+                    0x11F04F, 0x11F110, 0x11F12F, 0x11F348, 0x11F364, 0x11F3B0, 0x11F3E8, 0x11F404,
+                    0x11F430, 0x11F5A4, 0x11F5B0, 0x134303, 0x134404, 0x134410, 0x134474, 0x134560,
+                    0x1611E4, 0x1612A8, 0x1612D4, 0x161300, 0x16AF04, 0x16AF50, 0x16B304, 0x16B370,
+                ]
+            }
+            return [
+                0x16D63A, 0x16D640, 0x16D67A, 0x16D6B0, 0x16F4F4, 0x16F500, 0x16F518, 0x16F880,
+                0x16F8F4, 0x16F930, 0x16FE44, 0x16FE50, 0x16FF04, 0x16FF20, 0x1BC9D4, 0x1BC9F0,
+                0x1BCA03, 0x1BCA40, 0x1CF004, 0x1CF2E0, 0x1CF304, 0x1CF470, 0x1D1654, 0x1D16A0,
+                0x1D16D4, 0x1D1733, 0x1D17B4, 0x1D1830, 0x1D1854, 0x1D18C0, 0x1D1AA4, 0x1D1AE0,
+            ]
+        }
+        if code < 0x1E4EC {
+            return [
+                0x1D2424, 0x1D2450, 0x1DA004, 0x1DA370, 0x1DA3B4, 0x1DA6D0, 0x1DA754, 0x1DA760,
+                0x1DA844, 0x1DA850, 0x1DA9B4, 0x1DAA00, 0x1DAA14, 0x1DAB00, 0x1E0004, 0x1E0070,
+                0x1E0084, 0x1E0190, 0x1E01B4, 0x1E0220, 0x1E0234, 0x1E0250, 0x1E0264, 0x1E02B0,
+                0x1E08F4, 0x1E0900, 0x1E1304, 0x1E1370, 0x1E2AE4, 0x1E2AF0, 0x1E2EC4, 0x1E2F00,
+            ]
+        }
+        return [
+            0x1E4EC4, 0x1E4F00, 0x1E5EE4, 0x1E5F00, 0x1E6E34, 0x1E6E40, 0x1E6E64, 0x1E6E70,
+            0x1E6EE4, 0x1E6F00, 0x1E6F54, 0x1E6F60, 0x1E8D04, 0x1E8D70, 0x1E9444, 0x1E94B0,
+            0x1F004E, 0x1F0050, 0x1F02CE, 0x1F0300, 0x1F094E, 0x1F0A00, 0x1F0AFE, 0x1F0B10,
+            0x1F0C0E, 0x1F0C10, 0x1F0CFE, 0x1F0D10, 0x1F0F6E, 0x1F1000, 0x1F170E, 0x1F1720,
+        ]
+    }
+    if code < 0x1F810 {
+        if code < 0x1F5C5 {
+            if code < 0x1F3F6 {
+                return [
+                    0x1F17EE, 0x1F1800, 0x1F18EE, 0x1F18F0, 0x1F191E, 0x1F19B0, 0x1F1AEE, 0x1F1E66,
+                    0x1F2000, 0x1F201E, 0x1F2100, 0x1F21AE, 0x1F21B0, 0x1F22FE, 0x1F2300, 0x1F232E,
+                    0x1F23B0, 0x1F23CE, 0x1F2400, 0x1F249E, 0x1F2600, 0x1F266E, 0x1F3220, 0x1F324E,
+                    0x1F3940, 0x1F396E, 0x1F3980, 0x1F399E, 0x1F39C0, 0x1F39EE, 0x1F3F10, 0x1F3F3E,
+                ]
+            }
+            return [
+                0x1F3F60, 0x1F3F7E, 0x1F3FB4, 0x1F400E, 0x1F4FE0, 0x1F4FFE, 0x1F53E0, 0x1F549E,
+                0x1F54F0, 0x1F550E, 0x1F5680, 0x1F56FE, 0x1F5710, 0x1F573E, 0x1F57B0, 0x1F587E,
+                0x1F5880, 0x1F58AE, 0x1F58E0, 0x1F590E, 0x1F5910, 0x1F595E, 0x1F5970, 0x1F5A4E,
+                0x1F5A60, 0x1F5A8E, 0x1F5A90, 0x1F5B1E, 0x1F5B30, 0x1F5BCE, 0x1F5BD0, 0x1F5C2E,
+            ]
+        }
+        return [
+            0x1F5C50, 0x1F5D1E, 0x1F5D40, 0x1F5DCE, 0x1F5DF0, 0x1F5E1E, 0x1F5E20, 0x1F5E3E,
+            0x1F5E40, 0x1F5E8E, 0x1F5E90, 0x1F5EFE, 0x1F5F00, 0x1F5F3E, 0x1F5F40, 0x1F5FAE,
+            0x1F6500, 0x1F680E, 0x1F6C60, 0x1F6CBE, 0x1F6D30, 0x1F6D5E, 0x1F6E60, 0x1F6E9E,
+            0x1F6EA0, 0x1F6EBE, 0x1F6F10, 0x1F6F3E, 0x1F7000, 0x1F7DAE, 0x1F8000, 0x1F80CE,
+        ]
+    }
+    if code < 0xE1000 {
+        return [
+            0x1F8100, 0x1F848E, 0x1F8500, 0x1F85AE, 0x1F8600, 0x1F888E, 0x1F8900, 0x1F8AEE,
+            0x1F8B00, 0x1F8BCE, 0x1F8C00, 0x1F8C2E, 0x1F8D00, 0x1F8D9E, 0x1F9000, 0x1F90CE,
+            0x1F93B0, 0x1F93CE, 0x1F9460, 0x1F947E, 0x1FA000, 0x1FA58E, 0x1FA600, 0x1FA6EE,
+            0x1FB000, 0x1FC00E, 0x1FFFE0, 0xE00003, 0xE00204, 0xE00803, 0xE01004, 0xE01F03,
+        ]
+    }
+    return [
+        0xE10000,
+    ]
 }
 
-/// `body` cut into clusters: each entry is one character with everything that
-/// stays with it — the combining marks and variation selectors after it, an
-/// emoji skin-tone modifier, a zero-width joiner, and a pair of regional
-/// indicators (a flag). A joiner between two emoji joins them into one entry,
-/// as UAX #29 has it; after anything else it stays with what is before it and
-/// joins nothing. Joined, the entries are `body` again.
+/// `body` cut into clusters — UAX #29's extended grapheme clusters, as of
+/// **Unicode 17.0**: each entry is what a reader takes for one character.
+/// Joined, the entries are `body` again.
 ///
-/// The same cut `wrap` makes when it must break inside a word. It is a
-/// reading of what the library knows as a mark (see `is_combining`), not the
-/// whole of Unicode's grapheme rules: a Hangul syllable written as separate
-/// jamo is several clusters. An Indic conjunct is one (GB9c, Unicode 15.1): a
-/// consonant, a virama, any marks or joiners, and the next consonant, in
-/// Devanagari, Bengali, Gujarati, Oriya, Telugu and Malayalam — the rule does
-/// not keep the scripts apart, so a virama of one joins a consonant of another.
-/// Marks between the virama and the consonant are read as Extend by
-/// `is_combining`, not by the property's own table.
+/// Every rule of the annex is applied, in its order: CR LF is one cluster,
+/// and any other control stands alone (GB3–GB5); Hangul jamo join into a
+/// syllable (GB6–GB8); a mark, a joiner, a variation selector, a skin-tone
+/// modifier or a tag character stays with what is before it (GB9), and so
+/// does a spacing mark — the vowel signs of Devanagari, Tamil, Myanmar or Thai
+/// SARA AM (GB9a); a Prepend character stays with what is after it (GB9b); a
+/// consonant, a virama and the next consonant are one conjunct (GB9c); a
+/// joiner between two emoji joins them (GB11); and regional indicators pair
+/// off into flags (GB12, GB13). GraphemeBreakTest 17.0 passes in full.
+/// Tailorings the annex mentions but does not make the default — legacy
+/// clusters, or Indic syllables beyond GB9c — are not applied.
 ///
 /// ```kite
 /// let parts = clusters("ae\u{301}b")
@@ -3171,8 +3616,9 @@ fn pictographic(c: int) -> bool {
 /// assert(clusters(family).len() == 1, "joined emoji are one entry")
 /// assert(clusters("a\u{200D}b").len() == 2, "a joiner after a letter joins nothing")
 /// assert(clusters("\u{915}\u{94D}\u{937}").len() == 1, "a conjunct is one entry")
-/// assert(clusters("\u{915}\u{94D}\u{200D}\u{937}").len() == 1, "with a joiner in it")
-/// assert(clusters("\u{915}\u{94D}a").len() == 2, "a virama before a letter that is no consonant")
+/// assert(clusters("\u{915}\u{93F}").len() == 1, "and so is a consonant with its vowel sign")
+/// assert(clusters("\u{1100}\u{1161}\u{11A8}").len() == 1, "jamo join into a syllable")
+/// assert(clusters("\r\n").len() == 1, "CR LF is one")
 /// ```
 pub fn clusters(body: str) -> [str] {
     var out: [str] = []
@@ -3188,50 +3634,67 @@ pub fn clusters(body: str) -> [str] {
 
 /// How many terminal columns `body` takes: 2 for each wide character (CJK
 /// ideographs, kana, Hangul syllables, fullwidth forms, emoji), 0 for what
-/// takes no room (marks, joiners, control and format characters) and 1 for the rest. A
-/// cluster is as wide as its first character — a family emoji is one wide
-/// glyph, not six — and a flag is 2. An Indic conjunct is the exception: it is
-/// one cluster, but a terminal gives each of its consonants a column, so क्ष
-/// is 2.
+/// takes no room (marks, joiners, control and format characters) and 1 for
+/// the rest, summed over the characters — less those a cluster draws into
+/// another. An emoji joined on by a zero-width joiner is drawn into the one
+/// before it, so a family is one wide glyph, not six; a Hangul jamo joined to
+/// the jamo or syllable before it is drawn into that, so a syllable written
+/// as jamo is the 2 of its initial; and a Prepend character is drawn on the
+/// character it is prepended to, which is as wide as the cluster is.
+/// Everything else in a cluster keeps the column a terminal gives it: each
+/// consonant of an Indic conjunct, so क्ष is 2, and a spacing vowel sign, so
+/// कि is 2 as well. A flag is 2.
 ///
 /// The wide blocks are listed rather than read from the Unicode database,
 /// as `bidi_class`'s are: the ranges below are the East Asian Wide and
 /// Fullwidth blocks and the emoji blocks, which is what a terminal draws two
 /// columns wide. Not listed, and so counted as 1: the emoji scattered through
 /// the older symbol blocks (U+2300–27BF, such as ☕), which a terminal
-/// usually draws two wide, and the Hangul jamo vowels and finals, which it
-/// draws over the initial before them.
+/// usually draws two wide, and a Hangul jamo vowel or final with no initial
+/// before it.
 ///
 /// ```kite
 /// assert(cell_width("abc") == 3, "one each")
 /// assert(cell_width("中文") == 4, "two each")
 /// assert(cell_width("e\u{301}") == 1, "a mark takes no room")
 /// assert(cell_width("\u{915}\u{94D}\u{937}") == 2, "a conjunct, a column for each consonant")
+/// assert(cell_width("\u{1100}\u{1161}\u{11A8}") == 2, "a syllable in jamo, the width of its initial")
 /// ```
 pub fn cell_width(body: str) -> int {
     var total = 0
     let n = body.len()
     var i = 0
     for i < n {
-        let c = body.code_at(i)
         let next = next_cluster(body, i, n)
-        if within(c, 0x1F1E6, 0x1F1FF) && within(body.code_at(i + 1), 0x1F1E6, 0x1F1FF) {
-            total += 2
-        } else {
-            total += code_width(c)
+        // The base is the first character that is not prepended to another.
+        // A Prepend character followed only by marks has nothing to be drawn
+        // on, so it is the base itself, and counts as it did on its own.
+        var base = i
+        for base + 1 < next && grapheme_break(body.code_at(base)) == GCB_PREPEND && starts(body.code_at(base + 1)) {
+            base += 1
         }
-        // A conjunct is one cluster (GB9c) but a terminal gives each of its
-        // consonants a column, as it did when each began a cluster of its own.
-        if incb_consonant(c) {
-            for j in i + 1..next {
-                if incb_consonant(body.code_at(j)) {
-                    total += 1
-                }
+        total += code_width(body.code_at(base))
+        for j in base + 1..next {
+            let d = body.code_at(j)
+            let g = grapheme_break(d)
+            // What is drawn into the base takes no column of its own: an emoji
+            // GB11 joined, a jamo GB6–GB8 joined, and a tag character, which
+            // spells an emoji's subdivision flag.
+            let drawn_in = g == GCB_PICTO || (g >= GCB_L && g <= GCB_LVT) || within(d, 0xE0020, 0xE007F)
+            if !drawn_in {
+                total += code_width(d)
             }
         }
         i = next
     }
     return total
+}
+
+/// Whether a character can be what a Prepend character is drawn on: anything
+/// but what GB9 and GB9a attach to the character before it.
+fn starts(code: int) -> bool {
+    let g = grapheme_break(code)
+    return g != GCB_EXTEND && g != GCB_ZWJ && g != GCB_SPACING
 }
 
 /// The columns one character takes by itself.

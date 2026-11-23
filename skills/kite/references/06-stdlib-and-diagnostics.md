@@ -1674,15 +1674,18 @@ stated.
 `bidi_runs(line) -> [Run]` (a `Run` has `body` and `rtl` — no offsets) ·
 `bidi_runs_with(line, base)` · `bidi_levels` · `bidi_visual` ·
 `is_combining(code)` · `join_arabic(run) -> str` ·
-`clusters(body) -> [str]` (what stays together: a character with its marks,
-a skin tone, an emoji joined by ZWJ, a flag, an Indic conjunct by GB9c) ·
+`clusters(body) -> [str]` (UAX #29 extended grapheme clusters, Unicode 17.0,
+every rule: CR LF, a character with its marks and spacing vowel signs, a
+Hangul syllable in jamo, a Prepend character with what follows, an Indic
+conjunct, an emoji ZWJ sequence, a flag) ·
 `cell_width(body) -> int` (terminal columns: 2 for wide characters and emoji,
-0 for marks and joiners, one per consonant of a conjunct) ·
+0 for marks and joiners, a column per consonant of a conjunct and per spacing
+vowel sign; a jamo syllable is the 2 of its initial, a Prepend sign takes none) ·
 `line_break_class(code) -> LineBreak` · `break_opportunities(body) -> [bool]` ·
 `wrap(body, width: float, measure: fn(str) -> float) -> [str]` — greedy lines
 over those opportunities, measured by the caller (`canvas.width_of` on a
 canvas, a character count in a terminal); trailing spaces hang, a mandatory
-break ends a line, and a run wider than the line is cut between characters. A
+break ends a line, and a run wider than the line is cut between clusters. A
 paragraph's indentation is kept, unless the first word does not fit after it:
 then the indentation ends a line of its own, empty since spaces hang, rather
 than the word being cut.
@@ -1691,6 +1694,7 @@ UAX #9 rules P2–P3, X1–X10, W1–W7, N0–N2, I1–I2, L1–L2 (not L3, L4, 
 UAX #14 as of Unicode 15.0, LB1–LB31, with SA treated as AL, CB unimplemented,
 the later LB15a–d, LB20a and LB28a not implemented, East Asian Width read
 only for LB30's openers, and a skin tone kept with whatever it follows;
+UAX #29 as of Unicode 17.0, GB3–GB999, all of GraphemeBreakTest passing;
 `is_combining` is every `Mn` and `Me` of Unicode 15.1, and `bidi_class`
 answers NSM from it, but its other classes are a listed subset; Arabic joining
 to Presentation Forms-B with the lam-alef ligature, not HarfBuzz.
