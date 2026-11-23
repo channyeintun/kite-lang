@@ -333,6 +333,13 @@ struct Rt {
     shapes: Shapes,
     /// String constants, as immortal old-generation objects.
     strings: Vec<u64>,
+    /// Where every [`CHAR_STRIDE`]-th character starts, in the few long
+    /// strings that are not ASCII most recently indexed, keyed by address —
+    /// see [`str_byte_at`]. An address names one object only until a
+    /// collection moves or frees it, so a minor collection drops the
+    /// nursery's entries and a major one drops them all.
+    char_marks: Vec<(u64, Vec<u32>)>,
+    char_marks_next: usize,
 
     // ---- the scheduler -------------------------------------------------
     tasks: Vec<Scheduled>,
@@ -516,6 +523,8 @@ pub extern "C" fn kite_rt_startup() {
             stack_maps: Vec::new(),
             shapes: Shapes::default(),
             strings: Vec::new(),
+            char_marks: Vec::new(),
+            char_marks_next: 0,
             tasks: Vec::new(),
             clock: 0,
             wake_request: None,
@@ -1132,6 +1141,7 @@ fn collect_minor() {
         unsafe { for_each_ref_slot(p, &mut |s| evac_slot(s, &mut queue)) };
     }
     rt().nursery_top = 0;
+    rt().char_marks.retain(|(p, _)| !in_nursery(*p));
 
     if rt().old_bytes > rt().threshold {
         collect_major();
@@ -1144,6 +1154,7 @@ fn collect_minor() {
 /// non-moving by design, which is what spares the runtime a read barrier.
 fn collect_major() {
     rt().major_collections += 1;
+    rt().char_marks.clear();
     let mut stack: Vec<*mut u8> = Vec::new();
     let mark_slot = |s: *mut u64, stack: &mut Vec<*mut u8>| {
         let v = unsafe { *s };
@@ -1899,13 +1910,51 @@ unsafe fn str_set_chars(s: u64, n: usize) {
 ///
 /// A string with as many characters as bytes is ASCII, so there the answer
 /// is `c` itself and indexing is constant time — the common case for the
-/// text a parser reads. Any other string is walked from the front.
+/// text a parser reads. A long string that is not ASCII has the start of
+/// every [`CHAR_STRIDE`]-th character found once, as the VM's has, so no
+/// more than that many are walked; a short one is walked from the front.
 unsafe fn str_byte_at(s: u64, c: usize) -> usize {
     let text = str_str(s);
     if str_chars(s) == text.len() {
         return c;
     }
-    text.char_indices().nth(c).map(|(b, _)| b).unwrap_or(text.len())
+    let (from, skip) = if text.len() > CHAR_STRIDE {
+        let marks = str_marks(s);
+        // The last mark, for `c == chars` on a whole number of strides.
+        let j = (c / CHAR_STRIDE).min(marks.len() - 1);
+        (marks[j] as usize, c - j * CHAR_STRIDE)
+    } else {
+        (0, c)
+    };
+    text[from..].char_indices().nth(skip).map_or(text.len(), |(b, _)| from + b)
+}
+
+const CHAR_STRIDE: usize = 64;
+const CHAR_MARKS_KEPT: usize = 4;
+
+/// The marks of a long string that is not ASCII, found in `Rt::char_marks`
+/// or made there: `marks[j]` is where character `j * CHAR_STRIDE` starts.
+/// Nothing here allocates on the Kite heap, so `s` cannot move meanwhile.
+unsafe fn str_marks<'a>(s: u64) -> &'a [u32] {
+    let rt = rt();
+    if let Some(at) = rt.char_marks.iter().position(|(p, _)| *p == s) {
+        return &rt.char_marks[at].1;
+    }
+    let marks: Vec<u32> = str_str(s)
+        .char_indices()
+        .step_by(CHAR_STRIDE)
+        .map(|(b, _)| b as u32)
+        .collect();
+    let at = if rt.char_marks.len() < CHAR_MARKS_KEPT {
+        rt.char_marks.push((s, marks));
+        rt.char_marks.len() - 1
+    } else {
+        let at = rt.char_marks_next;
+        rt.char_marks[at] = (s, marks);
+        rt.char_marks_next = (at + 1) % CHAR_MARKS_KEPT;
+        at
+    };
+    &rt.char_marks[at].1
 }
 
 /// How many bytes the `k` characters starting at byte `start` take — so a
@@ -2014,8 +2063,9 @@ pub extern "C" fn kite_rt_str_compare(a: u64, b: u64) -> i64 {
 
 // Every string operation counts characters, not bytes, because a string is
 // text rather than storage. The count is remembered in the header
-// ([`str_chars`]), and an ASCII string indexes by byte ([`str_byte_at`]), so
-// a loop over a long string's characters is linear rather than quadratic —
+// ([`str_chars`]), an ASCII string indexes by byte, and any other long one
+// through marks found once ([`str_byte_at`]), so a loop over a long
+// string's characters is linear rather than quadratic —
 // as the VM's is, and as the Wasm backend's array of scalars is anyway.
 
 #[no_mangle]

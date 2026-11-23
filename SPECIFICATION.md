@@ -263,10 +263,9 @@ generated glue converts synchronously through one fixed 64 KiB scratch page in
 4,096-scalar chunks, and retains no converted value after the call. On native
 and bytecode targets the storage is GC-managed UTF-8, indexed so that a loop
 over a string's characters is linear on every target: a string's length is
-counted once, and an ASCII string is indexed by byte (the bytecode VM also
-keeps where every 64th character starts in the long strings it is reading,
-while natively a character of a string that is not ASCII is found by walking
-to it). Kite programs observe
+counted once, an ASCII string is indexed by byte, and for the long strings
+that are not ASCII a program is reading, where every 64th character starts
+is found once and kept. Kite programs observe
 the same rule everywhere: indexing and length count Unicode scalar values,
 never bytes or UTF-16 code units.
 

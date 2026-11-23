@@ -2529,9 +2529,10 @@ async fn main() {
 }
 "#,
     ),
-    // A string remembers how many characters it holds, and an ASCII one is
-    // indexed by byte, natively; the VM keeps the offset of every
-    // sixty-fourth character of a long string it has been asked about. So
+    // A string remembers how many characters it holds, natively, and an
+    // ASCII one is indexed by byte; both the VM and the native runtime keep
+    // where every sixty-fourth character starts in a long string that is not
+    // ASCII, the runtime by address until a collection moves it. So
     // `slice` and `code_at` read by character at the ends, past them, across
     // a stride and across a multi-byte character, of strings both short and
     // long, ASCII and not — and of a slice and a concatenation, whose counts
@@ -3984,7 +3985,7 @@ fn slices_agree_natively_with_a_page_of_nursery() {
 }
 
 /// Reading a long string one character at a time is linear, on the VM and
-/// natively: `slice` and `code_at` walked from the front of the string —
+/// natively, ASCII or not: `slice` and `code_at` walked from the front of the string —
 /// natively they also counted all of it to clamp — so a loop over the
 /// characters of 128 KB took minutes, and `json.parse` of a 114 KB document
 /// took 12.7 s natively and 29 s on the VM. Here it is a fraction of a
@@ -3996,10 +3997,13 @@ fn a_long_string_is_read_by_character_in_linear_time() {
     let src = "fn main() {\n  var s = \"abcdefgh\"\n  for i in 0..14 {\n    s = s + s\n  }\n\
                \x20 var sum = 0\n  for i in 0..s.len() {\n\
                \x20   sum = sum + s.code_at(i) + s.slice(i, i + 1).len()\n  }\n\
-               \x20 let mixed = \"é\" + s\n  for i in 0..200 {\n\
-               \x20   sum = sum + mixed.code_at(mixed.len() - 1 - i)\n  }\n\
+               \x20 let mixed = \"é\" + s\n  for i in 0..mixed.len() {\n\
+               \x20   sum = sum + mixed.code_at(i) + mixed.slice(i, i + 1).len()\n  }\n\
                \x20 io.print(\"\\(s.len()) \\(sum)\")\n}\n";
-    let expected = "131072 13323908\n";
+    // The pieces the loops cut fill the nursery several times over, so
+    // natively `mixed` moves while it is being read, and the marks found for
+    // it where it was must not be used where it went.
+    let expected = "131072 26607850\n";
     let bound = std::time::Duration::from_secs(20);
     let started = std::time::Instant::now();
     assert_eq!(run_on_vm("long-string", src), expected);
