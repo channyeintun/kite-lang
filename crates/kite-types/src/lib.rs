@@ -3576,12 +3576,15 @@ impl<'a> Checker<'a> {
                     // binding, which has to look at it, as taking a pair apart
                     // hands its error to the name it binds (R1).
                     self.forget_copies(local_id);
-                    self.taint[local_id as usize] =
-                        if self.may_hold_failure(elem) && self.holds_obligation(&seq, &before) {
-                            Taint::Unchecked
-                        } else {
-                            Taint::Clean
-                        };
+                    let state = if self.may_hold_failure(elem) && self.holds_obligation(&seq, &before) {
+                        Taint::Unchecked
+                    } else {
+                        Taint::Clean
+                    };
+                    self.taint[local_id as usize] = state;
+                    // An element that is a tuple of failures has parts, as a
+                    // `let` of it does: `x.0` leaves `x.1` owed.
+                    self.reset_parts(local_id, state);
 
                     let body = self.loop_body(&f.body, sig);
                     let stmt = hir::Stmt::ForSlice {
@@ -3823,11 +3826,13 @@ impl<'a> Checker<'a> {
             self.locals[local as usize].ty = parts[i];
             self.init[local as usize] = Init::Assigned;
             self.forget_copies(local);
-            self.taint[local as usize] = if held && self.may_hold_failure(parts[i]) {
+            let state = if held && self.may_hold_failure(parts[i]) {
                 Taint::Unchecked
             } else {
                 Taint::Clean
             };
+            self.taint[local as usize] = state;
+            self.reset_parts(local, state);
             body_stmts.push(hir::Stmt::Let {
                 local: hir::LocalId(local),
                 init: Some(hir::Expr {
@@ -10899,9 +10904,17 @@ impl<'a> Checker<'a> {
             }
             if let (true, hir::Pattern::Binding { local, .. }) = (held, &pattern) {
                 self.forget_copies(local.0);
-                self.taint[local.index()] = if unseen { Taint::Unchecked } else { Taint::Clean };
+                let state = if unseen { Taint::Unchecked } else { Taint::Clean };
+                self.taint[local.index()] = state;
+                // The arm's name owes what a `let` of the same value owes: a
+                // tuple of failures has parts, so `x.0` leaves `x.1` owed, and
+                // a copy of a tuple some of whose failures were taken owes
+                // only the rest.
+                self.reset_parts(local.0, state);
                 if let (true, Some(src)) = (unseen, source) {
                     self.note_copy(local.0, src);
+                    let now = self.taint.clone();
+                    self.inherit_parts(local.0, src, &now);
                 }
             }
             if source.is_none() && open && matches!(arm.pattern, ast::Pattern::Wildcard(_)) {

@@ -1,0 +1,124 @@
+// A binding made by a pattern owes what a `let` binding owes. The name a bare
+// `match` arm binds, the arm after a `nil` arm of an optional, and a `for`
+// binding over a slice of tuples each hold a tuple of failures with parts of
+// its own, so taking one element leaves the others owed. Each had no parts,
+// so `x.0` settled the whole tuple and the failure in `x.1` was lost with no
+// report.
+
+fn f(i: int) -> error {
+    if i > 0 {
+        return errors.new("failure \(i)")
+    }
+    return nil
+}
+
+fn arm_of_a_binding() {
+    let t = (f(1), f(2)) //~ ERROR E0302
+    match t {
+        x => {
+            let a = x.0
+            if a != nil {
+                io.print(a.message())
+            }
+        }
+    }
+}
+
+fn arm_of_a_temporary() {
+    match (f(1), f(2)) {
+        x => { //~ ERROR E0302
+            let a = x.0
+            if a != nil {
+                io.print(a.message())
+            }
+        }
+    }
+}
+
+fn arm_behind_a_guard() {
+    let t = (f(1), f(2)) //~ ERROR E0302
+    match t {
+        x if x.0 != nil => io.print("first failed"),
+        _ => io.print("first fine"),
+    }
+}
+
+fn arm_after_nil() {
+    let o: Option<(error, error)> = (f(1), f(2)) //~ ERROR E0302
+    match o {
+        nil => io.print("none"),
+        x => {
+            let a = x.0
+            if a != nil {
+                io.print(a.message())
+            }
+        }
+    }
+}
+
+fn walked() {
+    let ts = [(f(1), f(2))]
+    for x in ts { //~ ERROR E0302
+        let a = x.0
+        if a != nil {
+            io.print(a.message())
+        }
+    }
+}
+
+fn walked_in_pairs() {
+    let ts = [((f(1), f(2)), 5)]
+    for (a, n) in ts { //~ ERROR E0302
+        let x = a.0
+        if x != nil {
+            io.print(x.message())
+        }
+        io.print(n)
+    }
+}
+
+// Every element taken is every failure looked at.
+fn arm_taken_whole() {
+    let t = (f(1), f(2))
+    match t {
+        x => {
+            let a = x.0
+            let b = x.1
+            if a != nil {
+                io.print(a.message())
+            }
+            if b != nil {
+                io.print(b.message())
+            }
+        }
+    }
+}
+
+// The arm's name is a copy, and a copy of a tuple one of whose failures was
+// taken owes only the rest, as `let x = t` does.
+fn arm_after_a_projection() {
+    let t = (f(1), f(2))
+    let a = t.0
+    if a != nil {
+        io.print(a.message())
+    }
+    match t {
+        x => {
+            let (_, b) = x
+            if b != nil {
+                io.print(b.message())
+            }
+        }
+    }
+}
+
+fn main() {
+    arm_of_a_binding()
+    arm_of_a_temporary()
+    arm_behind_a_guard()
+    arm_after_nil()
+    walked()
+    walked_in_pairs()
+    arm_taken_whole()
+    arm_after_a_projection()
+}

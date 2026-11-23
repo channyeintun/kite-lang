@@ -1258,6 +1258,10 @@ The rules:
 > yet taken.
 > A chain of them goes down a level at each step: `t.0.0` takes one element of
 > `t.0` and leaves `t.0.1` owed, exactly as `let u = t.0` then `u.0` does.
+> A name a pattern binds owes what a `let` of the same value owes: the name of
+> a bare `match` arm, or of the arm after a `nil` arm, and a `for` binding over
+> a slice of tuples are followed element by element like any other binding of
+> a tuple, so `match t { x => … }` then `x.0` leaves `x.1` owed.
 > A projection of a tuple no binding holds — `(f(1), f(2)).0`, `pair().0` —
 > leaves nothing that could take the other elements later, so each failure among
 > them is `E0302` at the projection: at its element in a literal, at the call
