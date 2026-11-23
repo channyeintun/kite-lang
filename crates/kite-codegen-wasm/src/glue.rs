@@ -2584,6 +2584,15 @@ fn json_ident(name: &str) -> String {
 /// and a canvas for a program that draws. Everything else a real page has is
 /// the real page's business.
 pub fn generate_page(title: &str) -> String {
+    // The title is a file's name, and a file may be called anything: `a<b>.kite`
+    // wrote a `<b>` element into the head. It is text in an element, so `&` and
+    // `<` are what has to go; `>` and `"` go too, since a name is not worth
+    // reasoning about.
+    let title = title
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;");
     strip_comments(&format!(
         r#"<!doctype html>
 <meta charset="utf-8">
@@ -2962,6 +2971,14 @@ fn ts_type(kite: &str) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A file called `a<b>&"x.kite` titled the page with markup.
+    #[test]
+    fn the_pages_title_is_escaped() {
+        let page = generate_page("a<b>&\"x");
+        assert!(page.contains("<title>a&lt;b&gt;&amp;&quot;x</title>"), "{}", &page[..200]);
+        assert!(!page.contains("<b>"));
+    }
 
     #[test]
     fn strings_are_escaped_for_javascript() {

@@ -143,29 +143,98 @@ fn without_uses(code: &str) -> String {
 /// the file's own items, where neither the `use` nor the statements under it
 /// are allowed, and the example failed with a syntax error it did not contain.
 pub fn augment(src: &str, tests: &[DocTest]) -> (String, Vec<String>) {
-    let mut hoisted: Vec<&str> = Vec::new();
+    let (out, names, _) = augment_mapped(src, tests);
+    (out, names)
+}
+
+/// Where a line of the augmented source came from: a 1-based line of the real
+/// file, and how many columns further left the text sits in the augmented
+/// line than in the real one (`///` and the wrapper's indent make the two
+/// differ).
+type Origin = (u32, i32);
+
+/// Which place in the real file each place in the augmented source stands for.
+///
+/// A diagnostic is found in the augmented source, whose lines are the file's
+/// only until the first fence. The fence's own lines come from a `///`
+/// comment, and the `use` lines of a fence are hoisted to the top, so a line
+/// number out of the augmented text names a line that is past the end of the
+/// file or in the wrong place in it. Compiling needs the augmented text;
+/// *reporting* wants the real file, so an editor or a terminal can jump to
+/// the line the mistake is on.
+pub struct Remap {
+    /// For each line of the augmented source, its origin.
+    origins: Vec<Origin>,
+    /// Byte offset of the start of each line of the augmented source.
+    augmented_starts: Vec<u32>,
+    /// Byte offset of the start of each line of the real file, and its length.
+    real_lines: Vec<(u32, u32)>,
+}
+
+impl Remap {
+    /// The offset in the real file that `at`, an offset in the augmented
+    /// source, stands for. Lines the compiler made up — a wrapper's header, a
+    /// closing brace — stand for the line of the fence that caused them.
+    pub fn offset(&self, at: u32) -> u32 {
+        let line = self.augmented_starts.partition_point(|&s| s <= at).saturating_sub(1);
+        let Some(&(real, shift)) = self.origins.get(line).or(self.origins.last()) else {
+            return at;
+        };
+        let column = at as i64 - self.augmented_starts.get(line).copied().unwrap_or(0) as i64;
+        let (start, len) = self.real_lines[(real as usize - 1).min(self.real_lines.len() - 1)];
+        start + (column + shift as i64).clamp(0, len as i64) as u32
+    }
+}
+
+/// [`augment`], and the map back from the augmented source to the real file.
+pub fn augment_mapped(src: &str, tests: &[DocTest]) -> (String, Vec<String>, Remap) {
+    let mut real_lines = Vec::new();
+    let mut start = 0u32;
+    for line in src.split('\n') {
+        real_lines.push((start, line.trim_end_matches('\r').len() as u32));
+        start += line.len() as u32 + 1;
+    }
+    // Where fence line `k` of a test is in the real file: the line after the
+    // fence's opening, and past the `///` and the one space after it that
+    // `extract` took off.
+    let real_line = |t: &DocTest, k: usize| -> Origin {
+        let line = t.line + 1 + k as u32;
+        let text = src.lines().nth(line as usize - 1).unwrap_or("");
+        let marker = text.find("///").or_else(|| text.find("//!")).map_or(0, |i| i + 3);
+        let space = text[marker.min(text.len())..].starts_with(' ') as usize;
+        (line, (marker + space) as i32)
+    };
+    let mut hoisted: Vec<(&str, Origin)> = Vec::new();
     for t in tests {
-        for line in t.code.lines().filter(|l| is_use(l)) {
+        for (k, line) in t.code.lines().enumerate().filter(|(_, l)| is_use(l)) {
             let line = line.trim_end();
-            let already = src.lines().any(|l| l.trim_end() == line) || hoisted.contains(&line);
+            let already = src.lines().any(|l| l.trim_end() == line)
+                || hoisted.iter().any(|(h, _)| *h == line);
             if !already {
-                hoisted.push(line);
+                hoisted.push((line, real_line(t, k)));
             }
         }
     }
     let mut out = String::new();
-    for line in &hoisted {
+    let mut origins: Vec<Origin> = Vec::new();
+    for (line, origin) in &hoisted {
         out.push_str(line);
         out.push('\n');
+        origins.push(*origin);
     }
     out.push_str(src);
+    origins.extend((1..=src.split('\n').count() as u32).map(|n| (n, 0)));
     let mut names = Vec::new();
     out.push('\n');
     for (i, t) in tests.iter().enumerate() {
         out.push('\n');
+        origins.push((t.line, 0));
         let code = without_uses(&t.code);
         if t.declares {
             out.push_str(&code);
+            for (k, _) in t.code.lines().enumerate().filter(|(_, l)| !is_use(l)) {
+                origins.push(real_line(t, k));
+            }
             continue;
         }
         // `pub`, because dead-code elimination is right about a private
@@ -173,15 +242,66 @@ pub fn augment(src: &str, tests: &[DocTest]) -> (String, Vec<String>) {
         // the program.
         let name = format!("doc_example_{}", i);
         out.push_str(&format!("pub fn {}() {{\n", name));
-        for line in code.lines() {
+        origins.push((t.line, 0));
+        for (k, l) in t.code.lines().enumerate().filter(|(_, l)| !is_use(l)) {
             out.push_str("    ");
-            out.push_str(line);
+            out.push_str(l);
             out.push('\n');
+            let (line, shift) = real_line(t, k);
+            origins.push((line, shift - 4));
         }
         out.push_str("}\n");
+        origins.push((t.line, 0));
         names.push(name);
     }
-    (out, names)
+    let mut augmented_starts = vec![0u32];
+    for (i, b) in out.bytes().enumerate() {
+        if b == b'\n' {
+            augmented_starts.push(i as u32 + 1);
+        }
+    }
+    (out, names, Remap { origins, augmented_starts, real_lines })
+}
+
+/// The diagnostics of a compiled, augmented source, rendered against the real
+/// file: every span that points into it is moved to where it was written.
+pub fn render_diagnostics(
+    compiled: &crate::Compilation,
+    path: &str,
+    src: &str,
+    remap: &Remap,
+) -> String {
+    use kite_span::{SourceMap, Span};
+    let mut sources = SourceMap::new();
+    let mut entry = None;
+    for (id, name) in compiled.sources.iter() {
+        let file = compiled.sources.file(id);
+        if name == path {
+            entry = Some(id);
+            sources.add(&file.name, src);
+        } else {
+            sources.add(&file.name, file.text.clone());
+        }
+    }
+    let moved = |span: Span| -> Span {
+        if Some(span.file) != entry {
+            return span;
+        }
+        let (start, end) = (remap.offset(span.start), remap.offset(span.end));
+        Span { file: span.file, start, end: end.max(start) }
+    };
+    let mut diags = kite_diag::DiagBag::new();
+    for d in compiled.diags.iter() {
+        let mut d = d.clone();
+        for label in &mut d.labels {
+            label.span = moved(label.span);
+        }
+        for edit in d.fixes.iter_mut().flat_map(|f| f.edits.iter_mut()) {
+            edit.span = moved(edit.span);
+        }
+        diags.push(d);
+    }
+    diags.render_all(&sources)
 }
 
 #[cfg(test)]

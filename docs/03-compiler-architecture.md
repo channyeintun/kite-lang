@@ -845,7 +845,7 @@ What holds these to their rules:
 - **`--explain E0301`** prints the full rationale, including *why* the rule
   exists, and a test fails if any code lacks one. An unknown code prints the
   whole list.
-- **`kitec fix`** applies every machine-applicable suggestion.
+- **`kitec fix`** applies every machine-applicable suggestion, then checks the file again and exits non-zero if errors remain.
 - **Source maps** are emitted for the Wasm target so browser stack traces name
   `.kite` files and lines — one entry per function, at the line it was declared
   on, because a MIR instruction has no span to do better with.

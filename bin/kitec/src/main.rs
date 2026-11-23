@@ -241,7 +241,15 @@ fn command() -> ExitCode {
             .file_stem()
             .and_then(|s| s.to_str())
             .unwrap_or("module");
-        let docs = kite_doc::extract(name, &src);
+        let (docs, diags) = kite_doc::extract_diagnosed(name, &src);
+        // A file that does not parse has a reference with the declaration the
+        // error is in missing from it. Said, and not printed as if whole.
+        if diags.has_errors() {
+            let mut sources = kite_span::SourceMap::new();
+            sources.add(&path, src.as_str());
+            eprint!("{}", diags.render_all(&sources));
+            return fail(&format!("cannot document `{}`, which does not parse", path));
+        }
         return answer(&kite_doc::markdown(&docs, !include_private));
     }
 
@@ -485,8 +493,12 @@ fn run_tests(result: &kite_driver::Compilation, path: &str, src: &str) -> ExitCo
         );
     }
     if tests.is_empty() && docs.is_empty() {
+        // Said in one line, and still a success: a file with nothing to test
+        // has not failed. A test is any `test_…` that takes no arguments;
+        // `-> (int, error)` is how one *reports* a failure, not what makes it
+        // a test, so the hint does not ask for it.
         eprintln!(
-            "no tests in `{}`\n\nnote: a test is a `fn test_…() -> (int, error)`, or a \
+            "no tests in `{}`: a test is a `fn test_…()` taking no arguments, or a \
              ```kite fence in a doc comment",
             path
         );
@@ -553,7 +565,7 @@ fn run_doc_tests(
     src: &str,
     docs: &[kite_driver::doctest::DocTest],
 ) -> (usize, usize) {
-    let (augmented, names) = kite_driver::doctest::augment(src, docs);
+    let (augmented, names, remap) = kite_driver::doctest::augment_mapped(src, docs);
     // **Never a release build**, whatever `--release` said. An example fails
     // by trapping — an `assert` that did not hold — and a release build drops
     // `assert`, so under `--release` every example with a wrong claim in it
@@ -561,14 +573,15 @@ fn run_doc_tests(
     // by returning an error rather than by asserting.
     let compiled = kite_driver::compile_with(path, &augmented, Emit::Kbc, false);
     if compiled.failed() {
-        // The diagnostics point into the augmented source, whose line numbers
-        // are not the file's past the first fence. So the fences are named by
-        // where they opened and the diagnostics are printed under them, rather
-        // than pretending to a location the reader could click.
+        // Every fence is named by where it opened, since one compilation
+        // fails for all of them. The diagnostics are moved back from the
+        // augmented source to the file, so each points at the line it was
+        // written on — an editor or a terminal can jump to it.
         for d in docs {
             let _ = writeln!(out, "FAILED   {}:{} (doc example)", path, d.line);
         }
-        let _ = write!(out, "{}", compiled.render_diagnostics());
+        let shown = kite_driver::doctest::render_diagnostics(&compiled, path, src, &remap);
+        let _ = write!(out, "{}", shown);
         return (docs.len(), docs.len());
     }
 
@@ -640,7 +653,7 @@ fn fix_file(path: &str, src: &str) -> ExitCode {
     if edits.is_empty() {
         eprintln!("nothing to fix in {}", path);
         eprint!("{}", result.render_diagnostics());
-        return ExitCode::SUCCESS;
+        return still_failing(&result);
     }
     // Back to front: an edit near the end cannot move one before it.
     edits.sort_by_key(|(start, _, _)| std::cmp::Reverse(*start));
@@ -657,10 +670,30 @@ fn fix_file(path: &str, src: &str) -> ExitCode {
                 if applied == 1 { "" } else { "es" },
                 path
             );
-            ExitCode::SUCCESS
+            // What is left is said, and the exit status says it too: the
+            // fixes are the ones the compiler could make, and a file that
+            // still does not compile is not one `kitec fix && ship` may pass.
+            let after = compile(path, &out, kite_driver::Emit::Check);
+            if after.diags.has_errors() {
+                eprint!("{}", after.render_diagnostics());
+            }
+            still_failing(&after)
         }
         Err(e) => fail(&format!("cannot write `{}`: {}", path, e)),
     }
+}
+
+/// How `kitec fix` ends: failing while the file still has errors.
+fn still_failing(result: &kite_driver::Compilation) -> ExitCode {
+    let errors = result.diags.error_count();
+    if errors == 0 {
+        return ExitCode::SUCCESS;
+    }
+    fail(&format!(
+        "{} error{} left that `kitec fix` cannot fix",
+        errors,
+        if errors == 1 { "" } else { "s" }
+    ))
 }
 
 /// `--emit native` — write the object file, then link it into an executable.

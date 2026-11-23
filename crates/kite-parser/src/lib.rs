@@ -7,7 +7,7 @@
 //! closing brace produces one diagnostic, not forty.
 
 use kite_ast::*;
-use kite_diag::{codes, DiagBag, Diagnostic, Fix};
+use kite_diag::{codes, DiagBag, Diagnostic, Edit, Fix};
 use kite_lexer::{Token, TokenKind as T};
 use kite_span::{FileId, Span};
 
@@ -1452,7 +1452,7 @@ impl<'a> Parser<'a> {
         open.holds = Holds::Fields;
 
         let mut fields = Vec::new();
-        let mut commas = false;
+        let mut commas = None;
         loop {
             self.skip_newlines();
             if self.at(T::RBrace) || self.at_end() || self.left_open(&open) {
@@ -1481,7 +1481,7 @@ impl<'a> Parser<'a> {
         Some(StructDecl { is_pub, name, generics, fields, derives, span: start.to(end) })
     }
 
-    fn parse_field_decl(&mut self, commas: &mut bool) -> Option<FieldDecl> {
+    fn parse_field_decl(&mut self, commas: &mut Option<usize>) -> Option<FieldDecl> {
         let start = self.span();
         let is_pub = self.eat(T::Pub);
         let is_var = self.eat(T::Var);
@@ -1501,22 +1501,42 @@ impl<'a> Parser<'a> {
     /// threw away the member after it, because a line ending in a comma
     /// continues onto the next, so the next member was on "the same line" and
     /// skipped with the comma.
-    fn end_member(&mut self, what: &str, commas: &mut bool) {
+    fn end_member(&mut self, what: &str, commas: &mut Option<usize>) {
         if !self.at(T::Comma) {
             self.expect_terminator();
             return;
         }
         let comma = self.bump().span;
-        if *commas || self.unwinding || self.panicking {
+        if self.unwinding || self.panicking {
             return;
         }
-        *commas = true;
+        // Deleting the comma is the whole fix only where a line break or the
+        // closing brace already follows it.
+        let removable = self.at(T::RBrace) || self.starts_line(self.pos);
+        if let Some(first) = *commas {
+            // One report per declaration, but every comma in it is fixed:
+            // `kitec fix` removed one per run and said "applied 1 fix" until
+            // the third. The later commas join the first one's fix. The index
+            // is checked, since a pass that backtracks truncates the bag.
+            if let Some(d) = self.diags.get_mut(first).filter(|d| d.code == Some(codes::E0100)) {
+                match d.fixes.first_mut() {
+                    Some(fix) => {
+                        if removable {
+                            fix.message = "remove the commas".to_string();
+                            fix.edits.push(Edit { span: comma, replacement: String::new() });
+                        }
+                    }
+                    None if removable => d.fixes.push(Fix::replace("remove the comma", comma, "")),
+                    None => {}
+                }
+            }
+            return;
+        }
+        *commas = Some(self.diags.len());
         let mut d = Diagnostic::error(codes::E0100, format!("{} are not separated by commas", what))
             .with_primary(comma, "remove this comma")
             .with_note("each one goes on a line of its own, and the line break is the separator");
-        // Deleting the comma is the whole fix only where a line break or the
-        // closing brace already follows it.
-        if self.at(T::RBrace) || self.starts_line(self.pos) {
+        if removable {
             d = d.with_fix(Fix::replace("remove the comma", comma, ""));
         }
         self.diags.push(d);
@@ -1551,7 +1571,7 @@ impl<'a> Parser<'a> {
         let mut open = self.open_brace(brace);
 
         let mut variants = Vec::new();
-        let mut commas = false;
+        let mut commas = None;
         loop {
             self.skip_newlines();
             if self.at(T::RBrace) || self.at_end() || self.left_open(&open) {
@@ -1578,7 +1598,7 @@ impl<'a> Parser<'a> {
         Some(EnumDecl { is_pub, name, generics, variants, derives, span: start.to(end) })
     }
 
-    fn parse_variant(&mut self, commas: &mut bool) -> Option<VariantDecl> {
+    fn parse_variant(&mut self, commas: &mut Option<usize>) -> Option<VariantDecl> {
         let start = self.span();
         let name = self.ident()?;
 

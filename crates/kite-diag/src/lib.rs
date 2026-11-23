@@ -188,6 +188,12 @@ impl DiagBag {
         self.diagnostics.iter()
     }
 
+    /// The diagnostic at `index`, for a pass that finds more to say about
+    /// something it has already reported.
+    pub fn get_mut(&mut self, index: usize) -> Option<&mut Diagnostic> {
+        self.diagnostics.get_mut(index)
+    }
+
     pub fn take(&mut self) -> Vec<Diagnostic> {
         std::mem::take(&mut self.diagnostics)
     }

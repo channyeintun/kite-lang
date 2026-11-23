@@ -217,6 +217,24 @@ fn a_standalone_image_tag_is_an_image() {
     assert!(html.contains("&lt;script&gt;"), "{}", html);
 }
 
+/// A list item that goes on over several lines is one item: `kitec doc` writes
+/// a member's second paragraph, fence and list indented under its bullet, and
+/// each of them was a block of its own after the list. Its `\<` is a `<`.
+#[test]
+fn a_list_item_holds_what_is_indented_under_it() {
+    let html = rendered(
+        "- `go` — Does a thing.\n\n  ```kite\n  let a = 1\n  ```\n\n  - one\n  - two\n- `stop`\n\nAfter \\<T> & more.\n",
+    );
+    assert_eq!(html.matches("<ul>").count(), 2, "{}", html);
+    assert!(html.contains("<li><p><code>go</code> — Does a thing.</p>\n<pre><code>"), "{}", html);
+    assert!(html.contains("<li>one</li><li>two</li>"), "{}", html);
+    assert!(html.contains("<li><code>stop</code></li></ul>"), "{}", html);
+    assert!(html.contains("<p>After &lt;T&gt; &amp; more.</p>"), "{}", html);
+    // Wrapped prose stays a plain item, not a paragraph in one.
+    let html = rendered("- one\n  wrapped\n- two\n");
+    assert_eq!(html.trim(), "<ul><li>one wrapped</li><li>two</li></ul>");
+}
+
 /// The Vite starter's Kite compiles, and every export crosses the boundary.
 ///
 /// The starter is the adoption story made concrete: a normal web project that

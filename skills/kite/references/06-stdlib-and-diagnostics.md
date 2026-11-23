@@ -1499,8 +1499,7 @@ entry file's text, and a module's are never read at all.
 
 ```
 $ kitec test proj/src/main.kite          # main calls money.test_double()
-no tests in `proj/src/main.kite`
-note: a test is a `fn test_…() -> (int, error)`, or a ```kite fence in a doc comment
+no tests in `proj/src/main.kite`: a test is a `fn test_…()` taking no arguments, or a ```kite fence in a doc comment
 ```
 
 Pointing `kitec test` at the module file instead recompiles that file alone, so
@@ -1745,7 +1744,7 @@ help: make the binding mutable
   │     ~~~
 ```
 
-`kitec fix cart.kite` applies that `help` in place.
+`kitec fix cart.kite` applies that `help` in place, then checks the file again: it prints what is left and exits non-zero while errors remain.
 
 ### Ranges
 
@@ -1960,7 +1959,8 @@ Notes worth having:
 - **`--emit ast|hir|mir|kbc`** dumps that stage to stdout and exits — with
   `run` too, which does not then run the program. Useful for confirming what
   the compiler actually did.
-- **`kitec test`** runs every `fn test_*() -> (int, error)` — `pub` or not,
+- **`kitec test`** runs every `fn test_*()` that takes no arguments (write
+  `-> (int, error)` so it can report a failure) — `pub` or not,
   `async` or not — and every ` ```kite ` doc comment example, reporting both —
   **in the entry file only**. A `use`d module's tests and doc examples are
   invisible to it; see `### test`.
@@ -1969,7 +1969,11 @@ Notes worth having:
   `use` lines runs with none of its sources beside it. It keeps the build mode
   it was made with: `assert` fires in a bundle made without `--release`.
 - **`kitec doc`** reads signatures from the parse, so it cannot describe a
-  function that is not there.
+  function that is not there. A file that does not parse is refused with its
+  syntax errors and a non-zero exit, not documented without the declaration the
+  error is in. Doc text is Markdown: a `<` that could open an HTML tag is
+  written `\<`, a fence left open is closed at the end of its comment, and a
+  `#` heading inside a doc is pushed below the entry's own.
 - **`kitec pkg`** needs a `kite.toml`; without one it says so. It resolves path
   and git dependencies, picks **one** version per name across the whole graph,
   and writes `kite.lock` with a content hash per dependency that is *verified*

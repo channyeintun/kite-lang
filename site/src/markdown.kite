@@ -242,6 +242,23 @@ fn spans(text: str) -> str {
     for i < text.len() {
         let c = text.code_at(i)
 
+        // `\<` and `\&`, which is how `kitec doc` writes a `<` or an `&` of
+        // its own prose that a Markdown reader would take for HTML. The text
+        // is escaped by now, so what follows the backslash is the entity.
+        if c == 92 {
+            let after = text.slice(i + 1, text.len())
+            if starts_with(after, "&lt;") {
+                out = out + "&lt;"
+                i += 5
+                continue
+            }
+            if starts_with(after, "&amp;") {
+                out = out + "&amp;"
+                i += 6
+                continue
+            }
+        }
+
         // `code` — with something between the backticks. An empty pair is
         // two literal backticks, which is what a ``` fence flattened into a
         // paragraph looks like, and treating it as a span swallows the fence.
@@ -465,12 +482,53 @@ fn is_digit_at(text: str, i: int) -> bool {
     return c >= 48 && c <= 57
 }
 
+/// The items of a list. An item that went on over more lines — a second
+/// paragraph, a fence, a nested list, as `kitec doc` writes a member's
+/// documentation — is a document of its own, and is rendered as one.
 fn items_html(items: [str]) -> str {
     var out = ""
     for item in items {
-        out = out + "<li>\(inline(item))</li>"
+        // Wrapped text is still one line of prose; only a blank line or a
+        // block of its own makes the item a document.
+        let parts = lines_of(item)
+        var plain = true
+        for k in 1..parts.len() {
+            if is_blank(parts[k]) || starts_block(parts[k]) {
+                plain = false
+            }
+        }
+        if plain {
+            out = out + "<li>\(inline(join(parts, " ")))</li>"
+        } else {
+            out = out + "<li>\(render(item))</li>"
+        }
     }
     return out
+}
+
+/// The text of the list item that starts at `lines[at]` — the bullet's own
+/// line and every line after it that is indented past the bullet, blank lines
+/// between them included — and the index of the first line that is not part
+/// of it.
+fn item_at(lines: [str], at: int, width: int) -> (str, int) {
+    var body: [str] = [lines[at].slice(width, lines[at].len())]
+    var i = at + 1
+    for i < lines.len() {
+        var j = i
+        for j < lines.len() && is_blank(lines[j]) {
+            j += 1
+        }
+        if j >= lines.len() || indent_of(lines[j]) < width {
+            break
+        }
+        for i < j {
+            body.push("")
+            i += 1
+        }
+        body.push(lines[i].slice(width, lines[i].len()))
+        i += 1
+    }
+    return (join(body, "\n"), i)
 }
 
 // ---- the block loop ---------------------------------------------------------
@@ -612,8 +670,9 @@ pub fn render(text: str) -> str {
         if bullet_width(line) > 0 {
             var items: [str] = []
             for i < lines.len() && bullet_width(lines[i]) > 0 {
-                items.push(lines[i].slice(bullet_width(lines[i]), lines[i].len()))
-                i += 1
+                let (item, next) = item_at(lines, i, bullet_width(lines[i]))
+                items.push(item)
+                i = next
             }
             out.push("<ul>\(items_html(items))</ul>")
             continue
@@ -622,8 +681,9 @@ pub fn render(text: str) -> str {
         if number_width(line) > 0 {
             var items: [str] = []
             for i < lines.len() && number_width(lines[i]) > 0 {
-                items.push(lines[i].slice(number_width(lines[i]), lines[i].len()))
-                i += 1
+                let (item, next) = item_at(lines, i, number_width(lines[i]))
+                items.push(item)
+                i = next
             }
             out.push("<ol>\(items_html(items))</ol>")
             continue

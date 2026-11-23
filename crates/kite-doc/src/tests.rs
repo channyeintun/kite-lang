@@ -202,3 +202,45 @@ fn every_entry_gets_its_own_anchor() {
     let out = markdown(&docs, true);
     assert!(out.contains("- [`Pair`](#pair)\n- [`pair`](#pair-1)\n"), "{}", out);
 }
+
+/// A member's documentation keeps its shape: the first line goes on the
+/// bullet and the rest is indented under it, so a second paragraph, a fence
+/// and a list stay what they were. All of it was joined into one line.
+#[test]
+fn a_members_documentation_keeps_its_lines() {
+    let docs = extract(
+        "sample",
+        "pub struct S {\n    a: int\n}\n\nimpl S {\n    /// Does a thing.\n    ///\n    /// ```kite\n    /// let s = S{ a: 1 }\n    ///\n    /// io.print(s.a)\n    /// ```\n    ///\n    /// - one\n    /// - two\n    pub fn go(self) {\n    }\n}\n",
+    );
+    let out = markdown(&docs, true);
+    let want = "- `pub fn go(self)` — Does a thing.\n\n  ```kite\n  let s = S{ a: 1 }\n\n  io.print(s.a)\n  ```\n\n  - one\n  - two\n";
+    assert!(out.contains(want), "{}", out);
+    // A doc that begins with a block goes under the signature.
+    let docs = extract("sample", "pub enum E {\n    /// - one\n    /// - two\n    A\n}\n");
+    assert!(markdown(&docs, true).contains("- `A`\n  - one\n  - two\n"), "{}", markdown(&docs, true));
+}
+
+/// Doc text is Markdown made into a page: a `<T>` in prose is escaped rather
+/// than read as a tag, raw HTML is not live, an unclosed fence is closed
+/// where its comment ends, and a heading inside a doc sits below the entry's.
+#[test]
+fn doc_text_is_made_safe_for_a_page() {
+    let src = "/// A pair with <T> & friends, and `Vec<T>` stays, &amp; too.\n/// <script>alert(1)</script>\n/// a < b is not a tag\n///\n/// # Heading\n///\n/// ```kite\n/// let a = <b>\npub fn first() {\n}\n\n/// Second.\npub fn second() {\n}\n";
+    let out = markdown(&extract("m", src), true);
+    assert!(out.contains("A pair with \\<T> & friends, and `Vec<T>` stays, \\&amp; too."), "{}", out);
+    assert!(out.contains("\\<script>alert(1)\\</script>"), "{}", out);
+    assert!(out.contains("a < b is not a tag"), "{}", out);
+    assert!(out.contains("\n### Heading\n"), "{}", out);
+    // The fence is closed before the next entry, so `## second` is a heading.
+    assert!(out.contains("let a = <b>\n```\n\n## second"), "{}", out);
+}
+
+/// What the parser said is returned with the docs, for a caller to refuse a
+/// file that did not parse.
+#[test]
+fn a_file_that_does_not_parse_says_so() {
+    let (_, diags) = extract_diagnosed("m", "pub fn f( {\n");
+    assert!(diags.has_errors());
+    let (_, diags) = extract_diagnosed("m", "pub fn f() {\n}\n");
+    assert!(!diags.has_errors());
+}

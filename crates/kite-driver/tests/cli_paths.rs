@@ -200,7 +200,8 @@ fn kitec_fix_edits_only_what_it_is_sure_of() {
     let unclosed = "fn main() {\n    var xs = [1]\n    xs.push(2\n    xs.push(3)\n    io.print(xs.len())\n}\n";
     let dir = scratch("fix-unclosed", "t.kite", unclosed);
     let Some((ok, _, err)) = kitec_in(&dir, &["fix", "t.kite"]) else { return };
-    assert!(ok, "{}", err);
+    // Nothing was fixable, and the file still fails: that is not a success.
+    assert!(!ok, "{}", err);
     assert!(err.contains("nothing to fix"), "{}", err);
     assert_eq!(std::fs::read_to_string(dir.join("t.kite")).expect("read"), unclosed);
     let _ = std::fs::remove_dir_all(&dir);
@@ -209,7 +210,8 @@ fn kitec_fix_edits_only_what_it_is_sure_of() {
     let guess = "fn main() {\n    let n = 1\n    io.print(\"n is \" n)\n}\n";
     let dir = scratch("fix-guess", "t.kite", guess);
     let Some((ok, _, err)) = kitec_in(&dir, &["fix", "t.kite"]) else { return };
-    assert!(ok, "{}", err);
+    // Nothing was fixable, and the file still fails: that is not a success.
+    assert!(!ok, "{}", err);
     assert!(err.contains("nothing to fix"), "{}", err);
     assert_eq!(std::fs::read_to_string(dir.join("t.kite")).expect("read"), guess);
     let _ = std::fs::remove_dir_all(&dir);
@@ -236,6 +238,79 @@ fn kitec_fix_edits_only_what_it_is_sure_of() {
     let Some((ok, out, err)) = kitec_in(&dir, &["run", "t.kite"]) else { return };
     assert!(ok, "{}", err);
     assert_eq!(out, "3\n");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `kitec fix` removes every stray comma of a struct in one run, and says what
+/// it left. It removed the first and reported "applied 1 fix" until the third
+/// run, and after a fix it exited 0 whatever was still wrong with the file.
+#[test]
+fn kitec_fix_finishes_the_job_and_reports_what_is_left() {
+    let commas = "struct P {\n    x: int,\n    y: int,\n    z: int\n}\n\nfn main() {\n    let p = P{ x: 1, y: 2, z: 3 }\n    io.print(p.x)\n}\n";
+    let dir = scratch("fix-commas", "t.kite", commas);
+    let Some((ok, _, err)) = kitec_in(&dir, &["fix", "t.kite"]) else { return };
+    assert!(ok, "{}", err);
+    assert!(err.contains("applied 2 fixes"), "{}", err);
+    let fixed = std::fs::read_to_string(dir.join("t.kite")).expect("read");
+    let declaration = fixed.lines().take(5).collect::<Vec<_>>().join("\n");
+    assert!(!declaration.contains(','), "{}", declaration);
+    let Some((ok, _, err)) = kitec_in(&dir, &["fix", "t.kite"]) else { return };
+    assert!(ok && err.contains("nothing to fix"), "a second run changes nothing: {}", err);
+    let _ = std::fs::remove_dir_all(&dir);
+
+    // A fix that leaves another error behind says so, and fails.
+    let left = "enum E {\n    A,\n    B\n}\n\nfn main() {\n    let n: int = \"s\"\n    io.print(n)\n}\n";
+    let dir = scratch("fix-left", "t.kite", left);
+    let Some((ok, _, err)) = kitec_in(&dir, &["fix", "t.kite"]) else { return };
+    assert!(!ok, "{}", err);
+    assert!(err.contains("applied 1 fix"), "{}", err);
+    assert!(err.contains("E0200"), "the error that is left is shown: {}", err);
+    assert!(err.contains("error left that `kitec fix` cannot fix"), "{}", err);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// An error inside a doc example is reported at the line of the `///` comment
+/// it was written on. The example is compiled appended to its module, and the
+/// span used to be printed as the line it landed on there: line 12 of an
+/// eight-line file.
+#[test]
+fn an_error_in_a_doc_example_points_at_the_line_it_was_written_on() {
+    let src = "/// Doubles.\n///\n/// ```kite\n/// let y: int = \"s\"\n/// ```\npub fn double(n: int) -> int {\n    return n * 2\n}\n";
+    let dir = scratch("doc-error-line", "t.kite", src);
+    let Some((ok, out, err)) = kitec_in(&dir, &["test", "t.kite"]) else { return };
+    assert!(!ok, "{}{}", out, err);
+    let shown = format!("{}{}", out, err);
+    assert!(shown.contains("t.kite:4:18"), "the fence's own line and column: {}", shown);
+    assert!(shown.contains("4 │ /// let y: int = \"s\""), "the real line is shown: {}", shown);
+    assert!(!shown.contains("t.kite:12"), "no line past the file's end: {}", shown);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A file with no tests says so in one line and still succeeds. The line used
+/// to describe a signature, `-> (int, error)`, that a test does not need.
+#[test]
+fn a_file_with_no_tests_says_so_in_one_line() {
+    let dir = scratch("no-tests", "t.kite", "fn main() {\n}\n");
+    let Some((ok, _, err)) = kitec_in(&dir, &["test", "t.kite"]) else { return };
+    assert!(ok, "{}", err);
+    assert_eq!(err.trim().lines().count(), 1, "{}", err);
+    assert!(err.contains("no tests in"), "{}", err);
+    assert!(err.contains("`fn test_…()` taking no arguments"), "{}", err);
+    assert!(!err.contains("(int, error)"), "{}", err);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `kitec doc` on a file that does not parse says what is wrong and fails. It
+/// printed "Nothing is exported from this module." and exited 0, which is the
+/// reference of a file whose one declaration was the one with the error.
+#[test]
+fn kitec_doc_refuses_a_file_that_does_not_parse() {
+    let dir = scratch("doc-syntax", "t.kite", "pub fn f( {\n}\n");
+    let Some((ok, out, err)) = kitec_in(&dir, &["doc", "t.kite"]) else { return };
+    assert!(!ok, "{}{}", out, err);
+    assert!(err.contains("E0100"), "{}", err);
+    assert!(err.contains("does not parse"), "{}", err);
+    assert!(out.is_empty(), "no reference is printed: {}", out);
     let _ = std::fs::remove_dir_all(&dir);
 }
 
