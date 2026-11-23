@@ -266,6 +266,12 @@ fn checks() -> [error] {
     let several = errors.join([errors.new("a is missing"), nil, errors.wrap(errors.new("gone"), "b"), errors.new("c")])
     out.push(test.equal_str(errors.message_or(several, "?"), "a is missing; b: gone; c", "join of several"))
     out.push(test.equal_str(errors.message_or(errors.root(several), "?"), "a is missing", "its cause is the first"))
+    // Joined in pairs now, so an odd count must still keep every message in order.
+    var seven: [error] = []
+    for i in 0..7 {
+        seven.push(errors.new("e\(i)"))
+    }
+    out.push(test.equal_str(errors.message_or(errors.join(seven), "?"), "e0; e1; e2; e3; e4; e5; e6", "join of seven, in order"))
 
     // ---- test ----
     // inf - inf is a NaN, which is within no tolerance, so equal infinities
