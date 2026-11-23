@@ -1,0 +1,24 @@
+// `return (1, nil)` writes the pair as a tuple, which a `(T, error)` function
+// does not take. One error, at the tuple, whose note shows `return 1, nil`;
+// the `nil` is not also "cannot infer a type" and the function is not also
+// reported as not returning.
+
+fn f() -> (int, error) {
+    return (1, nil) //~ ERROR E0203
+}
+
+fn g(n: int) -> (int, error) {
+    return (n, errors.new("no")) //~ ERROR E0203
+}
+
+fn main() {
+    let (a, e) = f()
+    if e != nil {
+        return
+    }
+    let (b, e2) = g(a)
+    if e2 != nil {
+        return
+    }
+    io.print(b)
+}

@@ -2838,6 +2838,35 @@ impl<'a> Checker<'a> {
                 }
                 Some((self.returning(hir::Stmt::Return { value: None, span: r.span }, r.span), Flow::Diverges))
             }
+            // `return (1, nil)` is the pair written as a tuple, which a
+            // `(T, error)` function does not take. It used to be three
+            // errors for the one slip — the tuple is one value, `nil` has no
+            // type to be given, and then the function "does not return".
+            // One error, with the line the reader meant.
+            Some(ast::ReturnValue::Single(ast::Expr::Tuple { elems, span: tuple_span }))
+                if sig.fallible
+                    && elems.len() == 2
+                    && (matches!(elems[1], ast::Expr::Nil(_))
+                        || !self
+                            .types
+                            .fallible_value(sig.ret)
+                            .is_some_and(|t| self.types.name(t).starts_with('('))) =>
+            {
+                for e in elems.iter().filter(|e| !matches!(e, ast::Expr::Nil(_))) {
+                    let _ = self.expr(e, None);
+                }
+                self.diags.push(
+                    Diagnostic::error(codes::E0203, "a fallible function returns two values")
+                        .with_primary(*tuple_span, "a tuple is one value, not two")
+                        .with_secondary(sig.name_span, "declared `(T, error)` here")
+                        .with_note(format!(
+                            "write `return {}, {}`, without the parentheses",
+                            self.text(elems[0].span()),
+                            self.text(elems[1].span()),
+                        )),
+                );
+                Some((hir::Stmt::Return { value: None, span: r.span }, Flow::Diverges))
+            }
             Some(ast::ReturnValue::Single(e)) if sig.fallible => {
                 let inner = self.types.fallible_value(sig.ret).unwrap_or(TyId::ERROR);
                 let want = (!self.unlearned_ret(sig.ret)).then_some(sig.ret);

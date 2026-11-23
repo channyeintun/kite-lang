@@ -587,7 +587,7 @@ fn run_doc_tests(
         (compiled, names, remap)
     };
     let mut docs: Vec<&kite_driver::doctest::DocTest> = docs.iter().collect();
-    let (mut compiled, mut names, mut remap) = build(&docs);
+    let (mut compiled, mut names, _) = build(&docs);
     let mut bad = 0;
     if compiled.failed() {
         // Is it the module? Then every fence is named, once, with the
@@ -612,7 +612,8 @@ fn run_doc_tests(
             }
         }
         docs = good;
-        (compiled, names, remap) = build(&docs);
+        let (again, again_names, remap) = build(&docs);
+        (compiled, names) = (again, again_names);
         if compiled.failed() {
             // Each fence compiles alone and they do not together: two of
             // them declare the same name, say. Nobody is singled out.
