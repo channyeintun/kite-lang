@@ -236,8 +236,18 @@ pub fn percent(part: float, whole: float) -> str {
 }
 
 /// An integer with thousands separators.
+///
+/// ```kite
+/// assert(grouped(-1234567) == "-1,234,567", "grouped")
+/// assert(grouped(-9223372036854775807 - 1) == "-9,223,372,036,854,775,808", "the smallest int")
+/// ```
+///
+/// The digits are the interpolated number's, less its sign, rather than
+/// those of `abs(n)`: the smallest `int` has no positive counterpart, and
+/// negating it trapped.
 pub fn grouped(n: int) -> str {
-    let digits = "\(abs(n))"
+    let written = "\(n)"
+    let digits = if n < 0 { written.slice(1, written.len()) } else { written }
     var out = ""
     var seen = 0
     var i = digits.len() - 1

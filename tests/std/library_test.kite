@@ -220,6 +220,10 @@ fn checks() -> [error] {
     out.push(test.equal_str(fmt.fixed(2.0, -1), "2", "a negative count of places is none"))
     out.push(test.equal_str(fmt.grouped(1234567), "1,234,567", "grouped"))
     out.push(test.equal_str(fmt.grouped(-12), "-12", "grouped keeps the sign"))
+    // abs(min_int()) has no answer, and negating it trapped.
+    out.push(test.equal_str(fmt.grouped(math.min_int()), "-9,223,372,036,854,775,808", "grouped(min_int)"))
+    out.push(test.equal_str(fmt.grouped(-123456), "-123,456", "grouped, a negative multiple of three digits"))
+    out.push(test.equal_str(fmt.grouped(0), "0", "grouped(0)"))
     out.push(test.equal_str(fmt.percent(1.0, 4.0), "25.0%", "percent"))
 
     // ---- time ----
