@@ -655,20 +655,78 @@ pub fn number_of(value: Option<Json>) -> Option<float> {
 }
 
 /// A whole number, or nil — for anything that is not a number, and for a
-/// number that is not whole or does not fit in an `int`.
+/// number that is not whole or that an `int` cannot be trusted to hold.
 ///
 /// The cast this used to be truncated `3.7` to 3 and saturated `1e30` to the
 /// largest `int`, and `@derive(Decode)` reads an `int` field through this, so
 /// a decoder that promises "expected a whole number" accepted both. JSON's one
 /// number type is a float, so `3.0` is the whole number 3.
+///
+/// **Only a number a float holds exactly is read as an `int`**: magnitude
+/// below 2⁵³. Past that two neighbouring integers share a float —
+/// `9007199254740993` reads as 9007199254740992 — so the value in the program
+/// would be a different number from the one in the document, and nothing would
+/// say so. It is nil instead. An integer that large is carried as text, which
+/// is how `of_int` writes it, and a text of digits that fits an `int` and
+/// is outside that range is read back here.
 pub fn int_of(value: Option<Json>) -> Option<int> {
     if value == nil {
         return nil
     }
     return match value {
-        Number(n) => whole_number(n),
+        Number(n) => exact_int(n),
+        Text(s) => big_int_text(s),
         other => nil,
     }
+}
+
+/// The largest integer below which a float holds every integer: 2⁵³.
+fn exact_limit() -> int {
+    return 9007199254740992
+}
+
+fn exact_int(n: float) -> Option<int> {
+    let whole = whole_number(n)
+    if whole == nil {
+        return nil
+    }
+    if whole <= -exact_limit() || whole >= exact_limit() {
+        return nil
+    }
+    return whole
+}
+
+/// A decimal integer written as text, when it is one `of_int` would have
+/// written that way: outside the exact range, and spelled the way an `int`
+/// is, so `"5"` and `"+9007199254740993"` are not numbers.
+fn big_int_text(s: str) -> Option<int> {
+    let n = parse_int(s)
+    if n == nil {
+        return nil
+    }
+    if n > -exact_limit() && n < exact_limit() {
+        return nil
+    }
+    if "\(n)" != s {
+        return nil
+    }
+    return n
+}
+
+/// An `int` as JSON — what `@derive(Encode)` writes for an `int` field.
+///
+/// JSON has one number type, read as a float by almost everything, and a float
+/// holds every integer only below 2⁵³. An `int` inside that range is a number;
+/// one outside it is written as a string of its digits, because the
+/// alternative is a number that silently reads back as a different one
+/// (`1234567890123456789` became `1234567890123456768`). `int_of` reads both
+/// forms, so a document written here round-trips, and another program sees a
+/// string where it would otherwise see a wrong number.
+pub fn of_int(n: int) -> Json {
+    if n > -exact_limit() && n < exact_limit() {
+        return Json.Number(n as float)
+    }
+    return Json.Text("\(n)")
 }
 
 fn whole_number(n: float) -> Option<int> {

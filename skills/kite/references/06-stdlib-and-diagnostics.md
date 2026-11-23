@@ -1225,8 +1225,13 @@ chain without unwrapping and a `Json` passes where an `Option<Json>` is wanted.
 
 `parse` reads RFC 8259 and nothing looser — `01`, `1.`, `\x` and a raw control
 character in a string are errors — and each number is the float nearest what
-was written. `int_of` is nil unless the number is whole and fits an `int`, so
-`@derive(Decode)` refuses `3.7` for an `int` field. `stringify` writes a number
+was written. `int_of` is nil unless the number is whole and below 2⁵³ in
+magnitude (a float holds every integer only there, so `9007199254740993` would
+read as a different number), so `@derive(Decode)` refuses `3.7` for an `int`
+field. `of_int(n) -> Json` is what `@derive(Encode)` writes for an `int`: a
+number inside that range, and outside it the decimal text as a string, which
+`int_of` reads back — so no `int` is silently changed in either direction.
+`stringify` writes a number
 that is whole and fits an `int` without a `.0`, and any other finite one as the
 float it is: 2⁶³ is `9223372036854775808.0`. JSON cannot spell an infinity or
 a NaN, so each is written `null`, as JavaScript's `JSON.stringify` does.

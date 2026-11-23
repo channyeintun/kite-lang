@@ -193,10 +193,13 @@ fn checks() -> [error] {
     out.push(test.is_true(json.int_of(parsed("9223372036854775808")) == nil, "2^63 does not fit"))
     out.push(test.equal_int(or_else(json.int_of(parsed("3.0")), 0), 3, "3.0 is the whole number 3"))
     out.push(test.equal_int(or_else(json.int_of(parsed("-12")), 0), -12, "a negative whole number"))
+    // The smallest int is a float exactly, but so is every neighbour a float
+    // cannot tell it from; it travels as text.
+    out.push(test.is_true(json.int_of(parsed("-9223372036854775808")) == nil, "a number past 2^53 is not read as an int"))
     out.push(test.equal_int(
-            or_else(json.int_of(parsed("-9223372036854775808")), 0),
+            or_else(json.int_of(parsed("\"-9223372036854775808\"")), 0),
             -9223372036854775807 - 1,
-            "the smallest int",
+            "the smallest int, as text",
         ))
     out.push(test.equal_int(json.int_or(parsed("{\"n\": 2.5}"), "n", -1), -1, "int_or falls back on a fraction"))
     let (_, fraction_err) = Row.decode(parsed("{\"id\": 3.7}"))
@@ -210,10 +213,37 @@ fn checks() -> [error] {
     let (row, row_err) = Row.decode(parsed("{\"id\": 42}"))
     out.push(test.ok(row_err, "Decode takes a whole number"))
 
+    // ---- an int a float cannot hold is not a number ----
+    //
+    // `1234567890123456789` was written `1234567890123456768`, and
+    // `9007199254740993` was read as 9007199254740992, both without a word.
+    out.push(test.is_true(json.int_of(parsed("9007199254740993")) == nil, "2^53 + 1 is not read as an int"))
+    out.push(test.is_true(json.int_of(parsed("9007199254740992")) == nil, "2^53 is ambiguous, so it is not read as an int"))
+    out.push(test.equal_int(or_else(json.int_of(parsed("9007199254740991")), 0), 9007199254740991, "2^53 - 1 is the last exact int"))
+    out.push(test.equal_str(json.stringify(json.of_int(42)), "42", "a small int is a number"))
+    out.push(test.equal_str(json.stringify(json.of_int(-9007199254740991)), "-9007199254740991", "a negative one too"))
+    out.push(test.equal_str(
+            json.stringify(json.of_int(1234567890123456789)),
+            "\"1234567890123456789\"",
+            "a big int is its digits as text",
+        ))
+    for n in [1234567890123456789, 9007199254740993, 9007199254740992, -9007199254740992, 9223372036854775807, 7] {
+        let (back, back_err) = Row.decode(parsed(json.stringify(Row{ id: n }.encode())))
+        if back_err != nil {
+            out.push(back_err)
+        } else {
+            out.push(test.equal_int(back.id, n, "the int \(n) comes back as it went"))
+        }
+    }
+    out.push(test.is_true(json.int_of(parsed("\"5\"")) == nil, "a small int is not read from text"))
+    out.push(test.is_true(json.int_of(parsed("\"+9007199254740993\"")) == nil, "text must be spelled as an int is"))
+    out.push(test.is_true(json.int_of(parsed("\"9223372036854775808\"")) == nil, "text past the range is nil"))
+    out.push(test.is_true(json.int_of(parsed("\"12abc\"")) == nil, "text that is not digits is nil"))
+
     return out
 }
 
-@derive(Decode)
+@derive(Encode, Decode)
 struct Row {
     id: int
 }

@@ -989,8 +989,10 @@ impl<'a> Writer<'a, '_> {
             Type::Path(p) => match path_text(p).as_str() {
                 // JSON has one numeric type, and `json.stringify` writes a
                 // whole number without a point, so an `int` survives the round
-                // trip as an `int`.
-                "int" => format!("{j}.Json.Number({} as float)", expr),
+                // trip as an `int` — unless it is too big for a float to hold,
+                // which `json.of_int` writes as its digits in a string rather
+                // than as a number that reads back as another.
+                "int" => format!("{j}.of_int({})", expr),
                 "float" => format!("{j}.Json.Number({})", expr),
                 "bool" => format!("{j}.Json.Bool({})", expr),
                 "str" => format!("{j}.Json.Text({})", expr),
