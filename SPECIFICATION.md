@@ -754,7 +754,9 @@ becomes `0`, `""`, or `nil`.
 The fields of a struct literal, and the named payload of a variant such as
 `Rect(h: f(), w: g())`, are evaluated in the order they are written, not the
 order they are declared in. `..base` is written first, so it is evaluated
-first, and once; the fields it supplies are read from that one value.
+first, and once; the fields it supplies are read from that one value, before
+any written field is evaluated — so a written field whose call changes the
+base through a `var` parameter does not change what the new value copies.
 
 ### 5.4 Slices and maps
 

@@ -11524,9 +11524,13 @@ impl<'a> Checker<'a> {
         // among the written ones.
         let holder = base.as_ref().map(|b| (self.synthetic_local("base", struct_ty, b.span), b.span));
 
-        // Fill the gaps from `..base`, or report them.
+        // Fill the gaps from `..base`, or report them. The gaps are read
+        // before any written field runs, because `..base` is written first:
+        // a struct is a reference, so a later field whose call writes the
+        // base through a `var` parameter would otherwise leak into the copy.
         let mut fields = Vec::with_capacity(field_count);
         let mut missing = Vec::new();
+        let written = std::mem::take(&mut order);
         for (i, slot) in given.into_iter().enumerate() {
             match slot {
                 Some(e) => fields.push(e),
@@ -11570,6 +11574,7 @@ impl<'a> Checker<'a> {
             return self.lit(ExprKind::Error, TyId::ERROR, lit.span);
         }
 
+        order.extend(written);
         let order = in_written_order(order);
         let built = hir::Expr {
             kind: ExprKind::StructNew { struct_id: sid, fields, order },

@@ -5329,6 +5329,23 @@ const EXPECTED: &[(&str, &str, &str)] = &[
         "base\n1 2 base\nclosure\nn 5\nn 6\n6 5\nlater 9\nlater 8\n8 9\nbase\nl\nb\na\nl\nn 1\nn 2\n2x1\n",
     ),
     (
+        // §5.3: the fields `..base` supplies are read before any written
+        // field runs. A struct is a reference, so a written field whose call
+        // changed the base through a `var` parameter leaked into the copy:
+        // both lines printed `99 7 99`, whichever field was declared first.
+        "base-fields-are-read-before-the-written-ones-run",
+        "struct Q {\n  var a: int\n  b: int\n}\n\
+         struct P {\n  b: int\n  var a: int\n}\n\
+         fn bump(var q: Q, s: str) -> int {\n  io.print(s)\n  q.a = 99\n  return 7\n}\n\
+         fn bump_p(var p: P) -> int {\n  io.print(\"bump p\")\n  p.a = 99\n  return 7\n}\n\
+         fn pick(q: Q) -> Q {\n  io.print(\"base\")\n  return q\n}\n\
+         fn main() {\n  var q = Q{ a: 1, b: 2 }\n  let r = Q{ ..pick(q), b: bump(q, \"b\") }\n\
+         \x20 io.print(\"\\(r.a) \\(r.b) \\(q.a)\")\n\
+         \x20 var p = P{ b: 2, a: 1 }\n  let s = P{ ..p, b: bump_p(p) }\n\
+         \x20 io.print(\"\\(s.a) \\(s.b) \\(p.a)\")\n}\n",
+        "base\nb\n1 7 99\nbump p\n1 7 99\n",
+    ),
+    (
         // §2.4, in a file written with CRLF line endings: a line break in the
         // source is a line break however it was written, so no line of a
         // block string ends in `\r` — with a hole, without one, in a
