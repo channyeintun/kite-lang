@@ -1,0 +1,29 @@
+// Text Kite has no token for is one report, and nothing after it is
+// reported on that account: a `#` comment to the end of its line, a backtick
+// string, a run of `?`, a `$`. The text stood where a value was, so the line
+// ends there; the next line is not read as the value.
+
+fn g(a: int, b: int) -> int {
+    return a + b
+}
+
+fn f() -> int {
+    return ? //~ ERROR E0002
+}
+
+fn main() {
+    # say hello //~ ERROR E0002
+    let s = `hello` //~ ERROR E0002
+    io.print(s)
+    let t = `unclosed //~ ERROR E0002
+    io.print(t)
+    let y = ??? //~ ERROR E0002
+    io.print(y)
+    var z = $ //~ ERROR E0002
+    z = 2
+    let w: int = $ //~ ERROR E0002
+    io.print(w + z)
+    io.print(g(1, $)) //~ ERROR E0002
+    io.print(g($, 2)) //~ ERROR E0002
+    io.print(f())
+}

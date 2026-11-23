@@ -864,8 +864,16 @@ impl<'a> Parser<'a> {
         if self.panicking || self.unwinding {
             return;
         }
+        // The token was reported already, and recovery came back to it:
+        // `let z = @` skipped its line up to the `@`, where a declaration
+        // may start, and read it again as a statement, so the one report was
+        // made twice at the one caret.
+        let again = self.last_error_at == Some(self.pos);
         self.panicking = true;
         self.last_error_at = Some(self.pos);
+        if again {
+            return;
+        }
         let found = self.peek();
         // What an unterminated string swallowed is missing because of it:
         // the `)` its line ended with, or — for a block string — everything
@@ -3106,8 +3114,14 @@ impl<'a> Parser<'a> {
 
         if matches!(self.peek(), T::Newline | T::RBrace | T::Eof) {
             let span = start.to(self.prev_span());
+            // `return ?`: the value was text the lexer skipped and reported,
+            // so it is an error, not a missing value — an E0203 beside the
+            // one report.
+            let value = self.after_skipped_character().then(|| {
+                ReturnValue::Single(Expr::Error(Span::empty_at(self.file, span.end)))
+            });
             self.expect_terminator();
-            return Some(Stmt::Return(ReturnStmt { value: None, span }));
+            return Some(Stmt::Return(ReturnStmt { value, span }));
         }
 
         // `return _, err` — the failure arm.
@@ -3924,7 +3938,22 @@ impl<'a> Parser<'a> {
                     // supplied, which leaves the call's meaning a guess.
                     let mut guessed = false;
                     self.skip_newlines();
-                    while !self.at(T::RParen) && !self.at_end() {
+                    while !self.at_end() {
+                        // `f($)`, `f(1, ?)`: an argument that was only text
+                        // the lexer skipped is an argument still, and an
+                        // error, so the call is not also short of one.
+                        if (self.at(T::RParen) || self.at(T::Comma)) && self.after_skipped_character() {
+                            arg_names.push(None);
+                            args.push(Expr::Error(Span::empty_at(self.file, self.span().start)));
+                            if self.eat(T::Comma) {
+                                self.skip_newlines();
+                                continue;
+                            }
+                            break;
+                        }
+                        if self.at(T::RParen) {
+                            break;
+                        }
                         // `Circle(radius: 2.0)` names its payload field. A
                         // plain `f(x)` does not.
                         let name = if self.at(T::Ident) && self.peek_at(1) == T::Colon {

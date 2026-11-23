@@ -70,6 +70,8 @@ pub fn tokenize_with_comments(
         comments: Vec::new(),
         delims: Vec::new(),
         pending_newline: false,
+        skipped: false,
+        break_after_skip: false,
         nesting: 0,
         nesting_reported: false,
         ran_to_end: false,
@@ -111,6 +113,8 @@ pub fn tokenize_range(
         comments: Vec::new(),
         delims: Vec::new(),
         pending_newline: false,
+        skipped: false,
+        break_after_skip: false,
         nesting: strings,
         nesting_reported: strings > 0,
         ran_to_end: false,
@@ -133,6 +137,16 @@ struct Lexer<'a> {
     /// significant, so multi-line argument lists work without trailing commas.
     delims: Vec<TokenKind>,
     pending_newline: bool,
+    /// Whether characters were skipped (an `E0002`) since the last token,
+    /// and whether a line break was crossed after them.
+    ///
+    /// **Text that is skipped to the end of its line ends that line.** `let
+    /// y = ???` lost its `???`, and the line break after `=` continued the
+    /// statement, so the next line became the value: `let y = io.print(y)`,
+    /// an E0200 and a `cannot find` beside the one report the `???` had. The
+    /// skipped text stood where the value was, so the line ends there.
+    skipped: bool,
+    break_after_skip: bool,
     /// How many `"…\(…"` layers deep the scanner currently is.
     ///
     /// `scan_string` and `skip_interpolation` call each other, so the nesting
@@ -194,7 +208,7 @@ impl<'a> Lexer<'a> {
 
             if self.pending_newline {
                 self.pending_newline = false;
-                if self.newline_is_significant(kind) {
+                if self.newline_is_significant(kind) || (self.break_after_skip && self.ends_a_skipped_line(kind)) {
                     self.out.push(Token {
                         kind: TokenKind::Newline,
                         span: Span::empty_at(self.file, start as u32),
@@ -212,6 +226,8 @@ impl<'a> Lexer<'a> {
                 _ => {}
             }
 
+            self.skipped = false;
+            self.break_after_skip = false;
             self.out.push(Token { kind, span });
         }
     }
@@ -237,6 +253,17 @@ impl<'a> Lexer<'a> {
         }
     }
 
+    /// Whether the line break after skipped text separates, whatever the
+    /// token before the text: everything [`Lexer::newline_is_significant`]
+    /// asks but whether that token continues its line.
+    fn ends_a_skipped_line(&self, next: TokenKind) -> bool {
+        if matches!(self.delims.last(), Some(TokenKind::LParen) | Some(TokenKind::LBracket)) {
+            return false;
+        }
+        self.last_kind().is_some()
+            && !matches!(next, TokenKind::Dot | TokenKind::Else | TokenKind::RParen | TokenKind::RBracket)
+    }
+
     // ---- trivia -----------------------------------------------------------
 
     /// Consume spaces, tabs, carriage returns, comments, and newlines, setting
@@ -248,6 +275,7 @@ impl<'a> Lexer<'a> {
                 Some(b'\n') => {
                     self.pos += 1;
                     self.pending_newline = true;
+                    self.break_after_skip |= self.skipped;
                 }
                 Some(b'/') if self.peek_at(1) == Some(b'/') => {
                     let start = self.pos;
@@ -742,6 +770,64 @@ impl<'a> Lexer<'a> {
                     ),
             );
             self.pending_newline = true;
+            return None;
+        }
+        self.skipped = true;
+        // `# say hello` is a comment in the reader's other language: one
+        // report, and the rest of the line goes with it. Read token by token
+        // it was three — the `#`, `say` not found, `hello` where a line break
+        // was wanted.
+        let line_end = self.src[start..self.limit].find('\n').map_or(self.limit, |i| start + i);
+        let to_text_end = |from: usize| self.src[from..line_end].trim_end().len() + from;
+        if ch == '#' {
+            self.pos = to_text_end(start);
+            let span = Span::new(self.file, start as u32, self.pos as u32);
+            self.diags.push(
+                Diagnostic::error(codes::E0002, "invalid character `#` in source")
+                    .with_primary(span, "Kite has no `#` comments")
+                    .with_note(
+                        "a comment is written `// …`; the rest of this line, from the `#`, is \
+                         skipped",
+                    ),
+            );
+            return None;
+        }
+        // A backtick string, to its closing backtick on the line or else to
+        // the end of the line, is one report for the same reason. It stops
+        // short of a bracket it did not open: in `f(`hello)` the `)` is the
+        // call's, and taking it would make the rest of the file the call.
+        if ch == '`' {
+            let mut depth = 0u32;
+            let mut end = None;
+            for (i, b) in self.src[self.pos..line_end].bytes().enumerate() {
+                match b {
+                    b'`' => {
+                        end = Some(self.pos + i + 1);
+                        break;
+                    }
+                    b'(' | b'[' | b'{' => depth += 1,
+                    b')' | b']' | b'}' if depth == 0 => {
+                        end = Some(self.pos + i);
+                        break;
+                    }
+                    b')' | b']' | b'}' => depth -= 1,
+                    _ => {}
+                }
+            }
+            self.pos = end.unwrap_or_else(|| to_text_end(start));
+            // Spaces before the bracket it stopped at are not the string's.
+            while self.pos > start + 1 && matches!(self.bytes[self.pos - 1], b' ' | b'\t') {
+                self.pos -= 1;
+            }
+            let span = Span::new(self.file, start as u32, self.pos as u32);
+            self.diags.push(
+                Diagnostic::error(codes::E0002, "a backtick does not start a string")
+                    .with_primary(span, "Kite has no backtick strings")
+                    .with_note(
+                        "a string is written `\"…\"`, and a value goes into one as `\\(…)`: \
+                         `\"total: \\(n)\"`",
+                    ),
+            );
             return None;
         }
         // `??`, `~~`: a run of one character is one mistake, and one report.

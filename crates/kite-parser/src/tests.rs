@@ -1659,3 +1659,14 @@ fn the_note_for_an_unnamed_walk_has_a_form_for_a_map() {
     assert!(note.contains("`for item in xs`") && note.contains("`for (k, _) in m`"), "{}", note);
     assert!(note.find("slice").unwrap() < note.find("`for item in xs`").unwrap(), "{}", note);
 }
+
+/// A token recovery comes back to is not reported a second time at the one
+/// caret: `var z = @` skipped its line to the `@`, where a declaration may
+/// start, and read it again as a statement.
+#[test]
+fn a_token_read_again_after_recovery_is_reported_once() {
+    for src in ["fn main() {\n    var z = @\n    io.print(1)\n}\n", "fn main() {\n    let z = 1 + @\n    io.print(1)\n}\n"] {
+        let p = parse_src(src);
+        assert_eq!(p.codes(), vec!["E0100"], "{}", p.render());
+    }
+}
