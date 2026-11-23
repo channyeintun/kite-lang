@@ -16104,8 +16104,8 @@ fn check_compared_params(
     // W<K>` that compares `K` wrong, and was reported at `W.new()` and again
     // at each `w.put(f)`, though none of those calls chose `K` — the
     // receiver's type did. A block's parameter is known by where it is
-    // declared, which its methods share; the first call says it, and the
-    // others in its file are labelled on it. A function's own parameter is
+    // declared, which its methods share; the first call in each file says
+    // it, and the others in that file are labelled on it. A function's own parameter is
     // chosen afresh by each call, so each call that chooses badly is a
     // mistake of its own.
     struct Report {
@@ -16117,7 +16117,12 @@ fn check_compared_params(
         others: Vec<(Span, usize)>,
     }
     let mut reports: Vec<Report> = Vec::new();
-    let mut by_cause: std::collections::HashMap<(Span, String), usize> = std::collections::HashMap::new();
+    // Keyed by file too: a call in another file is not labelled on the
+    // report, so merging it there would say nothing at all of that file's
+    // mistake. And a function's own parameter is keyed by its callee, so two
+    // functions a call reaches are each said, as they were.
+    let mut by_cause: std::collections::HashMap<(Span, u32, Option<usize>, String), usize> =
+        std::collections::HashMap::new();
     for call in &facts.calls {
         for (i, t) in call.targs.iter().enumerate() {
             let Some(at) = facts.compared[call.callee].get(i).copied().flatten() else {
@@ -16129,18 +16134,18 @@ fn check_compared_params(
             let block = resolved.fns[call.callee]
                 .owner
                 .map_or(0, |o| impl_generics.get(&o.block_index).map_or(0, |g| g.len()));
-            let declared = match sigs[call.callee].generics.get(i) {
-                Some(g) if i < block => g.span,
-                _ => call.span,
+            let (declared, own) = match sigs[call.callee].generics.get(i) {
+                Some(g) if i < block => (g.span, None),
+                _ => (call.span, Some(call.callee)),
             };
-            let key = (declared, format!("{}#{}", i, types.name(*t)));
+            let key = (declared, call.span.file.0, own, format!("{}#{}", i, types.name(*t)));
             match by_cause.get(&key) {
                 Some(&r) => {
                     let r = &mut reports[r];
                     if r.span == call.span || r.others.iter().any(|(s, _)| *s == call.span) {
                         continue;
                     }
-                    let earlier = (call.span.file.0, call.span.start) < (r.span.file.0, r.span.start);
+                    let earlier = call.span.start < r.span.start;
                     if earlier {
                         let old = (r.span, r.callee);
                         (r.callee, r.param, r.ty, r.span, r.at) = (call.callee, i, *t, call.span, at);
@@ -16169,12 +16174,10 @@ fn check_compared_params(
             .with_primary(r.span, format!("`{}` is {} here", param, types.with_article(r.ty)))
             .with_secondary(r.at, "compared here");
         let mut others = r.others;
-        others.sort_by_key(|(s, _)| (s.file.0, s.start));
+        others.sort_by_key(|(s, _)| s.start);
         for (s, callee) in others {
-            if s.file == r.span.file {
-                let by = last_segment(&resolved.fns[callee].name);
-                d = d.with_secondary(s, format!("and given to `{}` here", by));
-            }
+            let by = last_segment(&resolved.fns[callee].name);
+            d = d.with_secondary(s, format!("and given to `{}` here", by));
         }
         d = if types.mentions_host_value(r.ty) {
             d.with_note(

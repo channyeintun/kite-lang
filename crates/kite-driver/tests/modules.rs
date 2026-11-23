@@ -1518,6 +1518,37 @@ fn a_module_called_prelude_is_refused() {
     assert!(said.contains("E0403"), "{}", said);
 }
 
+/// An `impl` block's parameter given a type that cannot be compared is one
+/// report per file, at the first call there: a call in another file is not
+/// labelled on a report elsewhere, so folding it in would say nothing of that
+/// file's mistake. Each of the two files that gives `W` a function key is
+/// named.
+#[test]
+fn a_type_that_cannot_be_compared_is_reported_in_each_file_that_gives_it() {
+    let p = Project::new("compared-in-each-file");
+    p.file(
+        "w.kite",
+        "pub struct W<K> {\n  pub var m: { K: int }\n}\n\nimpl<K> W<K> {\n  \
+         pub fn new() -> W<K> {\n    return W{ m: { } }\n  }\n\n  \
+         pub fn put(var self, k: K) {\n    self.m[k] = 1\n  }\n}\n",
+    );
+    p.file(
+        "a.kite",
+        "use w\n\npub fn fa() -> int {\n  var x: w.W<fn() -> int> = w.W.new()\n  \
+         x.put(|| 2)\n  return x.m.len()\n}\n",
+    );
+    let main = p.file(
+        "main.kite",
+        "use w\nuse a\n\nfn main() {\n  var y: w.W<fn() -> int> = w.W.new()\n  \
+         y.put(|| 3)\n  y.put(|| 4)\n  io.print(a.fa() + y.m.len())\n}\n",
+    );
+    let said = p.run(&main).expect_err("E0201");
+    assert_eq!(said.matches("error[E0201]").count(), 2, "{}", said);
+    assert!(said.contains("a.kite:4:"), "{}", said);
+    assert!(said.contains("main.kite:5:"), "{}", said);
+    assert_eq!(said.matches("and given to `put` here").count(), 3, "{}", said);
+}
+
 /// A module's own constant hides the prelude's function of its name, so
 /// `max(1, 2)` beside `let max = 3` is E0205 — and its note says the
 /// constant hides the prelude's `max` and is what to rename, in the entry
