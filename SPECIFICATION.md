@@ -1082,7 +1082,9 @@ The rules:
 > does the same. Only `nil` leaves it Checked. A copy of another binding
 > — `let e = err`, `e = err`, a `match err { x => … }` arm — holds that
 > binding's failure: the two names share one obligation, met by inspecting
-> either. Reading it — testing it, checking it, returning it, taking it
+> either. A value `if` whose branches are each such a binding or `nil` adds
+> no obligation of its own — `let e = if x { c } else { nil }` holds `c`'s
+> failure or nothing, so `c` still answers for it. Reading it — testing it, checking it, returning it, taking it
 > apart, passing it on — inspects it, and R3 applies otherwise; a test
 > inspects it wherever it is written, so one in the right operand of `&&`
 > or `||` meets the obligation on every path, though it runs only on some —

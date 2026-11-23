@@ -2105,11 +2105,77 @@ impl<'a> Checker<'a> {
                 self.note_copy(local, src.0);
                 Taint::Unchecked
             }
+            // `if x { c } else { nil }` holds `c`'s failure or nothing, so
+            // `c` answers for it and the new name adds no obligation of its
+            // own. It is not a copy — on the `nil` path, testing the new name
+            // says nothing about `c` — so `c` still has to be looked at; but
+            // one failure left unread is one report, at `c`, not two.
+            // The same for `if x { c } else { d }`: each of `c` and `d` still
+            // has its failure to answer for. With one source and no `nil`
+            // branch it is a copy on every path, as `let e = c` is.
+            ExprKind::If { .. } => match self.only_from(value) {
+                Some((srcs, maybe_nil))
+                    if srcs.iter().all(|&s| {
+                        s != local && before.get(s as usize) == Some(&Taint::Unchecked)
+                    }) =>
+                {
+                    for &s in &srcs {
+                        self.keep_unread(s, before);
+                    }
+                    if let ([src], false) = (srcs.as_slice(), maybe_nil) {
+                        self.note_copy(local, *src);
+                        Taint::Unchecked
+                    } else {
+                        Taint::Clean
+                    }
+                }
+                _ if self.holds_obligation(value, before) => Taint::Unchecked,
+                _ => Taint::Clean,
+            },
             _ if self.holds_obligation(value, before) => Taint::Unchecked,
             _ => Taint::Clean,
         };
         self.taint[local as usize] = state;
         self.reset_parts(local, state);
+    }
+
+    /// The locals a value `if` yields on its branches that are not `nil`,
+    /// when every branch is a local or `nil`, and whether one is `nil`:
+    /// `if x { c } else { nil }` is `c` or nothing.
+    fn only_from(&self, e: &hir::Expr) -> Option<(Vec<u32>, bool)> {
+        // A condition that may have looked at a failure did so for real, and
+        // putting the branches' reads back would undo it: only conditions
+        // made of plain values are read through. Anything else is left to
+        // the general rule.
+        fn plain(c: &Checker<'_>, e: &hir::Expr) -> bool {
+            match &e.kind {
+                ExprKind::Bool(_) | ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Str(_) => true,
+                ExprKind::Local(id) => !c.may_hold_failure(c.locals[id.index()].ty),
+                ExprKind::Unary { operand, .. } => plain(c, operand),
+                ExprKind::Binary { lhs, rhs, .. } => plain(c, lhs) && plain(c, rhs),
+                _ => false,
+            }
+        }
+        fn leaves(c: &Checker<'_>, e: &hir::Expr, out: &mut Vec<Option<u32>>, nil: &mut bool) {
+            match &e.kind {
+                ExprKind::If { cond, then, else_ } => {
+                    if !plain(c, cond) {
+                        out.push(None);
+                    }
+                    leaves(c, then, out, nil);
+                    leaves(c, else_, out, nil);
+                }
+                ExprKind::Nil => *nil = true,
+                ExprKind::Local(id) => out.push(Some(id.0)),
+                _ => out.push(None),
+            }
+        }
+        let (mut found, mut nil) = (Vec::new(), false);
+        leaves(self, e, &mut found, &mut nil);
+        let mut srcs: Vec<u32> = found.into_iter().collect::<Option<Vec<u32>>>()?;
+        srcs.sort_unstable();
+        srcs.dedup();
+        (!srcs.is_empty()).then_some((srcs, nil))
     }
 
     /// A tuple of failures was just bound: each element that can hold one is
