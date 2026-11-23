@@ -5793,18 +5793,24 @@ impl<'a> Checker<'a> {
                                 format!("this is {}", self.types.with_article(ty)),
                             )
                             .with_secondary(decl, "declared here");
-                    // As a module's constant is told: a local of a prelude
-                    // function's name hides it, and `max(1, 2)` beside `let
-                    // max = 5` most likely meant the function.
+                    // As a module's constant is told: a local of a function's
+                    // name hides it, and `max(1, 2)` beside `let max = 5`
+                    // most likely meant the function — the one the name
+                    // would mean without the local, which is the module's
+                    // own `max` where it declares one, not the prelude's.
                     let written = p.text();
                     let prelude_fn = format!("{}.{}", kite_resolve::PRELUDE, written);
-                    if !written.contains('.')
-                        && self.resolved.fns.iter().any(|f| f.owner.is_none() && f.name == prelude_fn)
-                    {
+                    let hidden = (!written.contains('.'))
+                        .then(|| self.resolved.fn_by_name_in(&self.module, &written))
+                        .flatten()
+                        .map(|f| &self.resolved.fns[f as usize])
+                        .filter(|f| f.owner.is_none());
+                    if let Some(f) = hidden {
+                        let whose = if f.name == prelude_fn { "the prelude's" } else { "this module's" };
                         d = d.with_note(format!(
-                            "this local `{0}` hides the prelude's function `{0}`; to call that \
-                             function, rename the local",
-                            written
+                            "this local `{0}` hides {1} function `{0}`; to call that function, \
+                             rename the local",
+                            written, whose
                         ));
                     }
                     self.diags.push(d);

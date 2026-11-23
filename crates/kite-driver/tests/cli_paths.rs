@@ -579,6 +579,17 @@ fn a_local_that_hides_a_prelude_function_says_so() {
     assert!(err.contains("this local `max` hides the prelude's function `max`"), "{}", err);
     assert!(!err.contains("local `size` hides"), "{}", err);
     let _ = std::fs::remove_dir_all(&dir);
+    // Where the module declares its own `max`, that is what the local hides.
+    let dir = scratch(
+        "local-hides-own",
+        "t.kite",
+        "fn max(a: int, b: int) -> int {\n    return a\n}\n\nfn main() {\n    let max = 5\n    io.print(max(1, 2))\n}\n",
+    );
+    let Some((ok, _, err)) = kitec_in(&dir, &["check", "t.kite"]) else { return };
+    assert!(!ok, "{}", err);
+    assert!(err.contains("this local `max` hides this module's function `max`"), "{}", err);
+    assert!(!err.contains("prelude"), "{}", err);
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// A program given by a relative path has its manifests and its dependencies'
