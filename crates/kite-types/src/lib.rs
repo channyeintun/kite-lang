@@ -6622,24 +6622,60 @@ impl<'a> Checker<'a> {
         self.check_member_visible(module, is_pub, "field", &name, span, decl)
     }
 
+    /// When a struct is opaque here — declared in another module, with a
+    /// field that module did not mark `pub` — that module, the struct's name
+    /// and its private fields.
+    fn opaque_here(&self, sid: kite_hir::StructId) -> Option<(String, String, Vec<(String, Span)>)> {
+        let module = self.module_of_struct(sid)?;
+        if module == self.module {
+            return None;
+        }
+        let def = self.types.struct_def(sid);
+        let private: Vec<(String, Span)> =
+            def.fields.iter().filter(|f| !f.is_pub).map(|f| (f.name.clone(), f.span)).collect();
+        if private.is_empty() {
+            return None;
+        }
+        Some((module, def.name.clone(), private))
+    }
+
+    /// A struct pattern outside the struct's module needs every field to be
+    /// `pub`, as a literal does (§4.3): an opaque type cannot be taken apart,
+    /// not even by the fields it does publish. Reported once, at the path;
+    /// true when it was.
+    ///
+    /// **Naming only the public fields was a way in.** Each field a pattern
+    /// named was checked, and none was private, so `m.P{ k: k }` — or
+    /// `m.P{ k: k, .. }` — matched an opaque `m.P` from outside, which §4.3
+    /// says cannot be destructured.
+    fn check_destructurable(&mut self, sid: kite_hir::StructId, span: Span) -> bool {
+        let Some((module, name, private)) = self.opaque_here(sid) else { return false };
+        let fields: Vec<String> = private.iter().map(|(n, _)| format!("`{}`", n)).collect();
+        self.diags.push(
+            Diagnostic::error(
+                codes::E0401,
+                format!("`{}` cannot be taken apart outside module `{}`", name, module),
+            )
+            .with_primary(span, "not visible here")
+            .with_secondary(private[0].1, "this field is not marked `pub`")
+            .with_note(format!(
+                "{} {} private, which makes `{}` opaque outside its module: it can be held and \
+                 passed on, not destructured",
+                fields.join(", "),
+                if fields.len() == 1 { "is" } else { "are" },
+                name
+            ))
+            .with_note("bind it whole and read its `pub` fields with `.`"),
+        );
+        true
+    }
+
     /// A struct literal outside the struct's module needs every field to be
     /// `pub`: a private one cannot be named, and a literal cannot leave one
     /// out.
     fn check_constructible(&mut self, sid: kite_hir::StructId, span: Span) {
-        let Some(module) = self.module_of_struct(sid) else { return };
-        if module == self.module {
-            return;
-        }
-        let private: Vec<(String, Span)> = self
-            .types
-            .struct_def(sid)
-            .fields
-            .iter()
-            .filter(|f| !f.is_pub)
-            .map(|f| (f.name.clone(), f.span))
-            .collect();
-        let Some((_, first)) = private.first().cloned() else { return };
-        let name = self.types.struct_def(sid).name.clone();
+        let Some((module, name, private)) = self.opaque_here(sid) else { return };
+        let first = private[0].1;
         let fields: Vec<String> = private.iter().map(|(n, _)| format!("`{}`", n)).collect();
         self.diags.push(
             Diagnostic::error(
@@ -10874,6 +10910,9 @@ impl<'a> Checker<'a> {
                     return hir::Pattern::Wildcard;
                 }
 
+                // The fields are still checked, so what they bind has a type,
+                // but a field's own privacy is not reported a second time.
+                let opaque = self.check_destructurable(sid, path.span);
                 let mut out = Vec::new();
                 for f in fields {
                     let found = self
@@ -10894,7 +10933,9 @@ impl<'a> Checker<'a> {
                     };
                     // Taking a value apart reads its fields, so a private one
                     // is as out of reach here as through `.`.
-                    self.check_field_visible(sid, index, f.name.span);
+                    if !opaque {
+                        self.check_field_visible(sid, index, f.name.span);
+                    }
                     let sub = match &f.pattern {
                         Some(p) => self.pattern(p, fty),
                         // `Point{ x }` binds `x` to the field's value.

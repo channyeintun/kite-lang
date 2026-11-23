@@ -602,7 +602,9 @@ codes! {
          even one that starts from `..base`, since a literal has to give \
          every field. A `pub struct` with unmarked fields is an opaque \
          type: callers can hold it and pass it on, and its module exports \
-         the function that builds one.\n\
+         the function that builds one. Nor can a pattern take it apart, \
+         even one naming only its `pub` fields: `m.P{ k: k }` is refused, \
+         and `p.k` reads the field.\n\
          - A method or an associated function. Those in an `impl` block \
          are private unless they say `pub`: `s.secret()` and \
          `m.S.assoc()` are refused. The methods of a trait implementation \

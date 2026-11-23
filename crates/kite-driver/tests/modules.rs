@@ -1938,6 +1938,35 @@ fn a_use_matches_the_name_on_disk_exactly() {
     assert_eq!(p.run(&main).expect("compiles"), "3\n");
 }
 
+/// An opaque struct — a `pub struct` with a field its module did not mark
+/// `pub` — cannot be taken apart outside its module, not even by naming only
+/// the fields it publishes (§4.3). That was accepted, with or without `..`.
+#[test]
+fn an_opaque_struct_cannot_be_destructured_by_its_public_fields() {
+    let p = Project::new("opaque-pattern");
+    p.file(
+        "m.kite",
+        "pub struct P {\n  pub k: int\n  hidden: int\n}\n\n\
+         pub fn make() -> P {\n  return P{ k: 1, hidden: 2 }\n}\n",
+    );
+    for (name, pattern) in [("a.kite", "m.P{ k: k }"), ("b.kite", "m.P{ k: k, .. }")] {
+        let main = p.file(
+            name,
+            &format!(
+                "use m\n\nfn main() {{\n  let p = m.make()\n  match p {{\n    {} => io.print(k),\n  }}\n}}\n",
+                pattern
+            ),
+        );
+        let said = p.run(&main).expect_err("opaque");
+        assert!(said.contains("E0401"), "{}", said);
+        assert!(said.contains("cannot be taken apart outside module `m`"), "{}", said);
+        assert!(said.contains("1 previous error"), "{}", said);
+    }
+    // Reading a public field with `.` is still fine.
+    let main = p.file("ok.kite", "use m\n\nfn main() {\n  io.print(m.make().k)\n}\n");
+    assert_eq!(p.run(&main).expect("compiles"), "1\n");
+}
+
 /// A cycle back to the entry file is one error. The closing `use main`
 /// recorded a spelling for a module that does not exist — the entry is not a
 /// module — so `main.base()` behind it said `main` declares nothing public of
