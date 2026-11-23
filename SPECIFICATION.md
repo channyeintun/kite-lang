@@ -157,6 +157,20 @@ true  false
 nil
 ```
 
+A string, `"…"` or `"""…"""`, reads these escapes and no others:
+
+| Escape | Means |
+|---|---|
+| `\n` `\t` `\r` `\0` | line feed, tab, carriage return, NUL |
+| `\\` `\"` `\'` | a backslash, a double quote, a single quote |
+| `\u{…}` | the Unicode scalar value whose hex digits are between the braces |
+| `\(…)` | a hole (below), not an escape |
+
+`\u` must be followed by `{`, one or more hex digits and `}`: no sign, no
+other character, and the value must be a scalar value (at most `10FFFF`, and
+not a surrogate). `\u{4E2D}` is `中`. Anything else after a `\` — `\q`, `\u41`,
+`\u{41`, `\u{+41}`, `\u{110000}` — is `E0003`, reported at the escape.
+
 String interpolation uses `\(expr)`:
 
 ```kite
