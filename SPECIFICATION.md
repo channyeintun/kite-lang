@@ -1283,7 +1283,10 @@ pub fn load_config(path: str) -> (Config, error) {
 
 Rebinding `err` in the same scope is permitted, and is the one exception to the
 same-scope shadowing rule in [§4.1](#41-bindings) — but only because the previous
-`err` is provably Checked at that point.
+`err` is provably Checked at that point. The exception is the error slot of a
+two-name tuple binding, over an earlier binding that is an `error`; anything
+else a tuple binding redeclares in its own scope is [E0112](#16-diagnostics),
+as is a tuple binding that names one identifier twice, `let (a, a) = …`.
 
 ### 7.5 Handling a failure in place
 

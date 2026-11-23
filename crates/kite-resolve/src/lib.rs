@@ -653,6 +653,12 @@ pub struct ResolveMap {
     /// reports `E0112` at it only if both turn out to be bindings. Keyed by
     /// the second's span; the value is the first's.
     pub rebound: HashMap<Span, Span>,
+    /// The error slot of a tuple binding that redeclared a name already in
+    /// the same scope — `let (text, err) = …` after `let (bytes, err) = …`.
+    /// That is allowed only when the earlier binding is an `error` (§7.4),
+    /// which is a type, so the checker decides; keyed by the new binding's
+    /// span, the value is the local it shadows.
+    pub shadowed: HashMap<Span, u32>,
     /// Spans that also spell a struct field: the `x` of a shorthand
     /// `Point{ x }`, in a literal or a pattern. The one identifier serves two
     /// roles, so a tool that rewrites the binding's name — rename — must not
@@ -1815,6 +1821,7 @@ impl<'a> FnResolver<'a> {
                 return prev_id;
             }
             if allow_shadow {
+                self.map.shadowed.insert(name.span, prev_id);
                 let id = self.locals.len() as u32;
                 self.locals.push(LocalInfo {
                     name: name.name.clone(),
@@ -1925,8 +1932,13 @@ impl<'a> FnResolver<'a> {
                 for (i, e) in elems.iter().enumerate() {
                     if let BindElem::Name(n) = e {
                         // The error slot may shadow an earlier one in the same
-                        // scope; see `declare_maybe_shadowing`.
-                        let is_error_slot = elems.len() == 2 && i == 1;
+                        // scope; see `declare_maybe_shadowing`. Not the value
+                        // slot beside it: `let (a, a) = …` names one thing
+                        // twice, and kept the last.
+                        let twice = elems[..i]
+                            .iter()
+                            .any(|p| matches!(p, BindElem::Name(m) if m.name == n.name));
+                        let is_error_slot = elems.len() == 2 && i == 1 && !twice;
                         self.declare_maybe_shadowing(n, mutable, false, is_error_slot);
                     }
                 }

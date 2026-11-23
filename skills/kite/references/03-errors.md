@@ -56,7 +56,9 @@ fn main() {
 
 Three things to read off it: `_` in the value slot of a `return` means *no value*
 (it is not a zero value); `check err` propagates; and `err` may be rebound in the
-same scope, which no other binding may be.
+same scope, which no other binding may be. Only the error slot of a pair, and only over
+an earlier `error`: `let x = 1` then `let (y, x) = (2, 3)` is `E0112`, and so is
+`let (a, a) = …` (or `for (k, k) in …`), which names one thing twice.
 
 `_` is only allowed beside an error that is not nil: `return _, nil` is `E0200`,
 because the caller would be allowed to read a value that does not exist. An error

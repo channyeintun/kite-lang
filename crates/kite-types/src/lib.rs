@@ -7771,6 +7771,29 @@ impl<'a> Checker<'a> {
         let annotated = l.ty.as_ref().map(|t| self.resolve_type(t));
         let before = self.taint.clone();
         let checked = l.init.as_ref().map(|init| self.expr(init, annotated));
+        // The error slot may rebind a name already in this scope only when
+        // that name is an earlier error (§7.4). `let x = 1` then `let (y, x)
+        // = (2, 3)` redeclared `x` with nothing said.
+        for e in elems {
+            let ast::BindElem::Name(n) = e else { continue };
+            let Some(&prev) = self.resolved.shadowed.get(&n.span) else { continue };
+            let prev_ty = self.locals[prev as usize].ty;
+            if prev_ty != TyId::ERR && !self.types.is_poisoned(prev_ty) {
+                let first = self.locals[prev as usize].span;
+                self.diags.push(
+                    Diagnostic::error(
+                        codes::E0112,
+                        format!("`{}` is already declared in this scope", n.name),
+                    )
+                    .with_primary(n.span, "redeclared here")
+                    .with_secondary(first, format!("first declared here, as {}", self.types.with_article(prev_ty)))
+                    .with_note(
+                        "only an earlier `error` may be rebound in the same scope, as the \
+                         `err` of `let (v, err) = …`; give this binding another name",
+                    ),
+                );
+            }
+        }
         let checked = match checked {
             Some(value) if matches!(self.types.kind(value.ty), TyKind::Tuple(_)) => {
                 return self.let_tuple(elems, value, span, &before);
