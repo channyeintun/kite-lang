@@ -187,7 +187,7 @@ looks like it does the same thing. `axios.get<User>(url)` is a claim:
 TypeScript writes the type in and never reads a field, so a server that stops
 sending `age` yields an `undefined` somewhere later, far from the request.
 `User.decode(doc)` reads the fields, and a body without `age` comes back as
-`User.age: expected a whole number` — at the request, naming what was wrong.
+`User.age: missing` — at the request, naming what was wrong.
 The decoder comes from the struct, so unlike a validation schema kept beside
 the type there is no second copy to drift out of step.
 

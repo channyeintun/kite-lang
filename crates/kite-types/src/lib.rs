@@ -635,6 +635,7 @@ pub fn check_recording(
             locals: Vec::new(),
             init: Vec::new(),
             bare_lets: std::collections::HashSet::new(),
+            param_count: 0,
             captured_decls: std::collections::HashSet::new(),
             var_fixes: Vec::new(),
             taint: Vec::new(),
@@ -803,7 +804,7 @@ pub fn check_recording(
         }
     }
     fns.append(&mut lifted);
-    check_compared_params(&mut facts, resolved, &sigs, &types, diags);
+    check_compared_params(&mut facts, resolved, &sigs, &impl_generics, &types, diags);
 
     let vtables = build_vtables(resolved, &type_ids, &types);
 
@@ -1177,6 +1178,10 @@ struct Checker<'a> {
     /// The names of the `let`s declared without an initialiser. `var x: T` with
     /// none is E0110, so E0114 offers no `var` fix for one.
     bare_lets: std::collections::HashSet<Span>,
+    /// How many of `locals` are the function's own parameters (`self`
+    /// included): a parameter may be declared `var`, a loop's or a pattern's
+    /// binding may not.
+    param_count: usize,
     /// The declarations of the locals some closure in this function captures.
     /// A `var` cannot be captured (E0211), so E0114 offers no `var` fix for
     /// one — and the capture may come after the write, so the fixes offered
@@ -1545,6 +1550,7 @@ impl<'a> Checker<'a> {
             .collect();
 
         let param_count = params.len() + offset;
+        self.param_count = param_count;
 
         // Parameters always hold a value; everything else starts unassigned.
         self.init = (0..self.locals.len())
@@ -5337,70 +5343,138 @@ impl<'a> Checker<'a> {
         let crosses = generics
             .iter()
             .any(|g| g.bounds.iter().any(|b| self.is_share_bound(*b)));
-        let mut hargs = Vec::with_capacity(args.len());
+        // A closure literal that waits on what a later argument fixes is
+        // typed after the arguments that are not: `r(|| { return _, err }, 6)`
+        // against `r<T>(g: fn() -> (T, error), x: T)` learns `T` from the `6`,
+        // as §4.5 says a closure learns only what nothing else fixes. Such
+        // closures keep their written order among themselves. This is the
+        // order of checking only — the call still evaluates its arguments as
+        // written, and diagnostics are put in source order afterwards.
+        let mut hargs: Vec<Option<hir::Expr>> = Vec::with_capacity(args.len());
+        let mut waiting = Vec::new();
         for (i, a) in args.iter().enumerate() {
-            let declared = sig_params.get(i).copied();
-            // An argument is checked against the parameter type only once that
-            // type is fully known; until then it is checked on its own and used
-            // to fill parameters in.
-            // A hint stands in for a parameter nothing has settled yet, so an
-            // argument is typed by it without the parameter being fixed.
-            let want = if hints.iter().any(Option::is_some) {
-                let hinted: Vec<Option<TyId>> = subst
-                    .iter()
-                    .zip(hints.iter().chain(std::iter::repeat(&None)))
-                    .map(|(s, h)| s.or(*h))
-                    .collect();
-                declared.and_then(|d| self.apply_subst_opt(d, &hinted))
-            } else {
-                declared.and_then(|d| self.apply_subst_opt(d, subst))
-            };
-            // A closure for a function type not settled whole is told what of
-            // it is: each parameter the other arguments fixed, and whether the
-            // result is still the callee's to learn — which the closure's
-            // type then solves, as any other argument's does.
-            if want.is_none() && matches!(a, ast::Expr::Closure { .. }) {
-                if let Some(TyKind::Fn { params, ret }) = declared.map(|d| self.types.kind(d).clone()) {
-                    let params = params.iter().map(|p| self.apply_subst_opt(*p, subst)).collect();
-                    let fallible = self.types.fallible_value(ret).is_some();
-                    let ret = self.apply_subst_opt(ret, subst);
-                    self.closure_context = Some(ClosureContext { params, ret, fallible });
-                }
+            // What a hint stands in for counts as fixed, as it does for the
+            // argument's own wanted type.
+            let known: Vec<Option<TyId>> =
+                subst.iter().zip(hints.iter().chain(std::iter::repeat(&None))).map(|(s, h)| s.or(*h)).collect();
+            if self.closure_waits(a, sig_params.get(i).copied(), &known) {
+                waiting.push(i);
+                hargs.push(None);
+                continue;
             }
-            let e = self.expr(a, want);
-            self.closure_context = None;
-            let e = self.coerce(e, want);
-            let e = match declared {
-                Some(d) => {
-                    // A conflict is its own diagnostic, naming both sides;
-                    // a mismatch reported on top of it would say the same
-                    // thing again, less clearly.
-                    let before = self.diags.error_count();
-                    self.unify(d, e.ty, generics, subst, e.span);
-                    if self.diags.error_count() != before {
-                        e
-                    } else {
-                        // Converted again now the parameter is known: `get(7,
-                        // 3)` against `x: Option<T>` only learns that the
-                        // `7` must be wrapped once `T` is `int`, which is
-                        // after it was checked.
-                        let expected = self.apply_subst(d, subst);
-                        self.accept(e, expected, decl_span)
-                    }
-                }
-                None => e,
-            };
-            if crosses && declared.is_some_and(|d| matches!(self.types.kind(d), TyKind::Fn { .. })) {
-                self.require_share_captures(&e);
-            }
-            hargs.push(e);
+            let e = self.check_arg(a, sig_params.get(i).copied(), generics, subst, hints, decl_span, crosses);
+            hargs.push(Some(e));
         }
+        for i in waiting {
+            let e = self.check_arg(&args[i], sig_params.get(i).copied(), generics, subst, hints, decl_span, crosses);
+            hargs[i] = Some(e);
+        }
+        let hargs: Vec<hir::Expr> = hargs.into_iter().flatten().collect();
         for (slot, hint) in subst.iter_mut().zip(hints) {
             if slot.is_none() {
                 *slot = *hint;
             }
         }
         hargs
+    }
+
+    /// One argument of `check_args`, against its parameter's type as far as
+    /// `subst` has fixed it, solving what it can of the rest.
+    #[allow(clippy::too_many_arguments)]
+    fn check_arg(
+        &mut self,
+        a: &ast::Expr,
+        declared: Option<TyId>,
+        generics: &[GenericDef],
+        subst: &mut Vec<Option<TyId>>,
+        hints: &[Option<TyId>],
+        decl_span: Option<Span>,
+        crosses: bool,
+    ) -> hir::Expr {
+        // An argument is checked against the parameter type only once that
+        // type is fully known; until then it is checked on its own and used
+        // to fill parameters in.
+        // A hint stands in for a parameter nothing has settled yet, so an
+        // argument is typed by it without the parameter being fixed.
+        let want = if hints.iter().any(Option::is_some) {
+            let hinted: Vec<Option<TyId>> = subst
+                .iter()
+                .zip(hints.iter().chain(std::iter::repeat(&None)))
+                .map(|(s, h)| s.or(*h))
+                .collect();
+            declared.and_then(|d| self.apply_subst_opt(d, &hinted))
+        } else {
+            declared.and_then(|d| self.apply_subst_opt(d, subst))
+        };
+        // A closure for a function type not settled whole is told what of
+        // it is: each parameter the other arguments fixed, and whether the
+        // result is still the callee's to learn — which the closure's
+        // type then solves, as any other argument's does.
+        if want.is_none() && matches!(a, ast::Expr::Closure { .. }) {
+            if let Some(TyKind::Fn { params, ret }) = declared.map(|d| self.types.kind(d).clone()) {
+                let params = params.iter().map(|p| self.apply_subst_opt(*p, subst)).collect();
+                let fallible = self.types.fallible_value(ret).is_some();
+                let ret = self.apply_subst_opt(ret, subst);
+                self.closure_context = Some(ClosureContext { params, ret, fallible });
+            }
+        }
+        let e = self.expr(a, want);
+        self.closure_context = None;
+        let e = self.coerce(e, want);
+        let e = match declared {
+            Some(d) => {
+                // A conflict is its own diagnostic, naming both sides;
+                // a mismatch reported on top of it would say the same
+                // thing again, less clearly.
+                let before = self.diags.error_count();
+                self.unify(d, e.ty, generics, subst, e.span);
+                if self.diags.error_count() != before {
+                    e
+                } else {
+                    // Converted again now the parameter is known: `get(7,
+                    // 3)` against `x: Option<T>` only learns that the
+                    // `7` must be wrapped once `T` is `int`, which is
+                    // after it was checked.
+                    let expected = self.apply_subst(d, subst);
+                    self.accept(e, expected, decl_span)
+                }
+            }
+            None => e,
+        };
+        if crosses && declared.is_some_and(|d| matches!(self.types.kind(d), TyKind::Fn { .. })) {
+            self.require_share_captures(&e);
+        }
+        e
+    }
+
+    /// Whether a closure literal passed where `declared` is wanted needs
+    /// something only another argument can fix, so is better typed after
+    /// the rest: a parameter it does not annotate and nothing has fixed yet,
+    /// or the value of a fallible result nothing has fixed and its block
+    /// body cannot say, because no `return` in it gives one. Typed where it
+    /// stands, each of those is an error (E0211, E0209) whatever follows, so
+    /// typing it later changes nothing that compiled. A closure that can say
+    /// its own type — `|| 1`, `|| { return 6 }`, a `()` block — is typed
+    /// where it stands, so that what it fixes is known to the arguments
+    /// after it, as it always was.
+    fn closure_waits(&mut self, a: &ast::Expr, declared: Option<TyId>, known: &[Option<TyId>]) -> bool {
+        let ast::Expr::Closure { params, ret, body, .. } = a else { return false };
+        let Some(d) = declared else { return false };
+        if self.apply_subst_opt(d, known).is_some() {
+            return false;
+        }
+        let TyKind::Fn { params: wanted, ret: wanted_ret } = self.types.kind(d).clone() else {
+            return false;
+        };
+        let param_waits = params.iter().enumerate().any(|(i, p)| {
+            p.ty.is_none() && wanted.get(i).is_none_or(|w| self.apply_subst_opt(*w, known).is_none())
+        });
+        let ret_waits = ret.is_none()
+            && self.apply_subst_opt(wanted_ret, known).is_none()
+            && matches!(&**body, ast::ClosureBody::Block(b)
+                if (self.types.fallible_value(wanted_ret).is_some() || block_returns_pair(b))
+                    && !block_returns_value(b));
+        param_waits || ret_waits
     }
 
     /// A function handed to another task takes its captures with it, so each
@@ -5585,11 +5659,29 @@ impl<'a> Checker<'a> {
             Some(Res::Const(index)) => {
                 let value = self.const_expr(index, p.span);
                 let decl = self.resolved.consts[index as usize].span;
+                // A module's own constant hides the prelude's function of its
+                // name (§4.2), so `max(1, 2)` beside `let max = 100` most
+                // likely meant the prelude's `max`: dropping the `()` is not
+                // the fix then, and the prelude cannot be named any other
+                // way, so the constant's name is what has to change.
+                let written = p.text();
+                let prelude_fn = format!("{}.{}", kite_resolve::PRELUDE, written);
+                let hides = !written.contains('.')
+                    && self.resolved.fns.iter().any(|f| f.owner.is_none() && f.name == prelude_fn);
+                let note = if hides {
+                    format!(
+                        "this module's constant `{0}` hides the prelude's function `{0}`; \
+                         to call that function, rename the constant",
+                        written
+                    )
+                } else {
+                    "a constant is already a value; drop the `()`".to_string()
+                };
                 self.diags.push(
-                    Diagnostic::error(codes::E0205, format!("`{}` is not a function", p.text()))
+                    Diagnostic::error(codes::E0205, format!("`{}` is not a function", written))
                         .with_primary(span, format!("this is {}", self.types.with_article(value.ty)))
                         .with_secondary(decl, "declared as a constant here")
-                        .with_note("a constant is already a value; drop the `()`"),
+                        .with_note(note),
                 );
                 value
             }
@@ -7932,12 +8024,23 @@ impl<'a> Checker<'a> {
         // pin. (An empty `[]` or a `nil` is poison too, but there the missing
         // pin is the cause, and E0209's note is the fix.)
         let mut poisoned = Vec::new();
-        for init in &lit.fields {
+        // A closure field that waits on what a later field fixes is tried
+        // after the fields that do not, as a call's argument is:
+        // `Job{ run: || { return _, err }, seed: 6 }` learns `T` from `seed`.
+        // The real check below still goes in written order.
+        let mut queue: Vec<(&ast::FieldInit, bool)> = lit.fields.iter().map(|f| (f, true)).collect();
+        let mut next = 0;
+        while let Some(&(init, may_wait)) = queue.get(next) {
+            next += 1;
             let Some(declared) =
                 self.types.struct_def(template).field(&init.name.name).map(|(_, f)| f.ty)
             else {
                 continue;
             };
+            if may_wait && self.closure_waits(&init.value, Some(declared), &subst) {
+                queue.push((init, false));
+                continue;
+            }
             self.field_closure_context(init, declared, &subst);
             let v = self.expr(&init.value, None);
             self.closure_context = None;
@@ -9537,25 +9640,54 @@ impl<'a> Checker<'a> {
             return Some(());
         }
         let (name, decl, ty) = (local.name.clone(), local.span, local.ty);
+        let written_let = self.bare_lets.contains(&decl) || self.let_keyword_span(decl).is_some();
         let noun = match *self.types.kind(ty) {
             TyKind::Optional(inner) => self.container_noun(inner),
             _ => self.container_noun(ty),
         };
+        // `var` is the fix only where the binding may be one. Written inside
+        // a closure that captured it, the binding is the closure's copy, and
+        // a closure changes nothing it captures (E0211), `var` or not; what
+        // works is a copy of its own. A capture elsewhere in the function is
+        // found once the function has been read ([`Self::settle_var_fixes`]).
+        let fix = if self.closure_span.is_some_and(|r| !(decl.start >= r.start && decl.end <= r.end)) {
+            format!(
+                "but the closure captured `{}`, and a closure cannot change what it captures \
+                 (E0211): change a copy made inside it, `var copy = {}`",
+                name, name
+            )
+        } else if self.bare_lets.contains(&decl) {
+            // `let x: T` is given its value later, and a `var` may not be
+            // (E0110), so the `var` takes that value where it is declared.
+            format!("declare it `var` with the value it is first given, as in `var {} = …`", name)
+        } else if !written_let && (id as usize) >= self.param_count {
+            // A loop's binding (`for xs in …`), one a pattern names (`let
+            // (a, b) = …`, a `match` arm) and a closure's parameter have no
+            // `var` form: `for var xs`, `var (a, b)` and `|var xs|` do not
+            // parse. Only a function's own parameters may be `var`.
+            format!(
+                "`{}` cannot be made `var` where it is bound: change a copy, `var copy = {}`",
+                name, name
+            )
+        } else {
+            "declare it `var`".to_string()
+        };
         let mut d = Diagnostic::error(codes::E0114, format!("`{}` cannot be {}", name, what))
             .with_primary(at, "this binding is immutable")
-            .with_secondary(decl, "declared with `let` here")
+            .with_secondary(decl, if written_let { "declared with `let` here" } else { "declared here" })
             .with_note(match top {
                 None => format!(
                     "a {} is a copy-on-write value, so changing its contents changes the \
-                     binding; declare it `var`",
-                    noun
+                     binding; {}",
+                    noun, fix
                 ),
                 Some(inner) => format!(
                     "`{}` is held in `{}`, and a {} is a copy-on-write value: changing \
-                     anything inside it changes the binding; declare it `var`",
+                     anything inside it changes the binding; {}",
                     self.quoted(inner),
                     name,
-                    noun
+                    noun,
+                    fix
                 ),
             });
         if let Some(fix) = self.var_fix(decl) {
@@ -13892,9 +14024,43 @@ impl<'a> Checker<'a> {
         if refused.is_empty() {
             return;
         }
+        // The note that named the fix is taken back with it, and says what
+        // does work: a captured binding cannot be `var` (E0211), so the
+        // change is made on a `var` copy, and the closure captures a `let`
+        // of the finished value.
+        let names: Vec<(Span, String)> = self
+            .var_fixes
+            .iter()
+            .filter(|(kw, _)| refused.contains(kw))
+            .map(|(kw, decl)| (*kw, self.quoted(*decl)))
+            .collect();
         for i in from..self.diags.len() {
             let Some(d) = self.diags.get_mut(i) else { continue };
-            d.fixes.retain(|f| !(f.edits.len() == 1 && refused.contains(&f.edits[0].span)));
+            let before = d.fixes.len();
+            let mut taken = None;
+            d.fixes.retain(|f| {
+                let refuse = f.edits.len() == 1 && refused.contains(&f.edits[0].span);
+                if refuse {
+                    taken = Some(f.edits[0].span);
+                }
+                !refuse
+            });
+            if d.fixes.len() == before {
+                continue;
+            }
+            let Some(name) = names.iter().find(|(kw, _)| Some(*kw) == taken).map(|(_, n)| n) else {
+                continue;
+            };
+            for note in &mut d.notes {
+                if let Some(head) = note.strip_suffix("declare it `var`") {
+                    *note = format!(
+                        "{}but a closure captures `{}`, and a captured binding cannot be `var` \
+                         (E0211): change a `var` copy, `var copy = {}`, and give the closure a \
+                         `let` holding the result",
+                        head, name, name
+                    );
+                }
+            }
         }
     }
 
@@ -15246,6 +15412,24 @@ fn breaks_out(block: &ast::Block, label: Option<&str>) -> bool {
     in_block(block, label, false)
 }
 
+/// Whether a block body has a `return` that gives a value — `return v` or
+/// `return v, err` — anywhere outside the closures nested in it: what a
+/// closure whose result is learned from its `return`s learns it from.
+fn block_returns_value(b: &ast::Block) -> bool {
+    let mut value = false;
+    for s in &b.stmts {
+        visit_stmts(s, false, &mut |s| {
+            if let ast::Stmt::Return(r) = s {
+                value |= matches!(
+                    r.value,
+                    Some(ast::ReturnValue::Single(_)) | Some(ast::ReturnValue::Pair { .. })
+                );
+            }
+        });
+    }
+    value
+}
+
 /// Whether a block body returns a pair, or `_, err`, anywhere outside the
 /// closures nested in it: what makes a closure whose result is learned from
 /// its `return`s a fallible one.
@@ -15887,6 +16071,7 @@ fn check_compared_params(
     facts: &mut GenericFacts,
     resolved: &ResolveMap,
     sigs: &[Signature],
+    impl_generics: &std::collections::HashMap<usize, Vec<GenericDef>>,
     types: &Types,
     diags: &mut DiagBag,
 ) {
@@ -15929,7 +16114,31 @@ fn check_compared_params(
     // A default method's body is checked once per block that takes it, and
     // each copy records the calls it makes: the same call, at the same place,
     // choosing the same type, is one mistake however many copies made it.
-    let mut said: std::collections::HashSet<(Span, String)> = std::collections::HashSet::new();
+    //
+    // More than that, a block's parameter given one type is one cause however
+    // many calls reach it: `W<fn() -> int>` makes every method of `impl<K>
+    // W<K>` that compares `K` wrong, and was reported at `W.new()` and again
+    // at each `w.put(f)`, though none of those calls chose `K` — the
+    // receiver's type did. A block's parameter is known by where it is
+    // declared, which its methods share; the first call in each file says
+    // it, and the others in that file are labelled on it. A function's own parameter is
+    // chosen afresh by each call, so each call that chooses badly is a
+    // mistake of its own.
+    struct Report {
+        callee: usize,
+        param: usize,
+        ty: TyId,
+        span: Span,
+        at: Span,
+        others: Vec<(Span, usize)>,
+    }
+    let mut reports: Vec<Report> = Vec::new();
+    // Keyed by file too: a call in another file is not labelled on the
+    // report, so merging it there would say nothing at all of that file's
+    // mistake. And a function's own parameter is keyed by its callee, so two
+    // functions a call reaches are each said, as they were.
+    let mut by_cause: std::collections::HashMap<(Span, u32, Option<usize>, String), usize> =
+        std::collections::HashMap::new();
     for call in &facts.calls {
         for (i, t) in call.targs.iter().enumerate() {
             let Some(at) = facts.compared[call.callee].get(i).copied().flatten() else {
@@ -15938,34 +16147,67 @@ fn check_compared_params(
             if types.is_poisoned(*t) || equatable_given_params(types, *t, &mut Vec::new()) {
                 continue;
             }
-            let name = last_segment(&resolved.fns[call.callee].name).to_string();
-            let param = sigs[call.callee].generics.get(i).map(|g| g.name.clone()).unwrap_or_default();
-            let message = format!(
-                "`{}` compares its `{}` with `==`, and {} cannot be compared",
-                name,
-                param,
-                types.with_article(*t)
-            );
-            if !said.insert((call.span, message.clone())) {
-                continue;
-            }
-            let mut d = Diagnostic::error(codes::E0201, message)
-            .with_primary(call.span, format!("`{}` is {} here", param, types.with_article(*t)))
-            .with_secondary(at, "compared here");
-            d = if types.mentions_host_value(*t) {
-                d.with_note(
-                    "a host object has no structure Kite can see, so there is nothing to \
-                     compare field by field; `js.same(a, b)` asks the host whether two are \
-                     the same object",
-                )
-            } else {
-                d.with_note(
-                    "equality is structural, so every field must itself be equatable; \
-                     functions and trait objects are not",
-                )
+            let block = resolved.fns[call.callee]
+                .owner
+                .map_or(0, |o| impl_generics.get(&o.block_index).map_or(0, |g| g.len()));
+            let (declared, own) = match sigs[call.callee].generics.get(i) {
+                Some(g) if i < block => (g.span, None),
+                _ => (call.span, Some(call.callee)),
             };
-            diags.push(d);
+            let key = (declared, call.span.file.0, own, format!("{}#{}", i, types.name(*t)));
+            match by_cause.get(&key) {
+                Some(&r) => {
+                    let r = &mut reports[r];
+                    if r.span == call.span || r.others.iter().any(|(s, _)| *s == call.span) {
+                        continue;
+                    }
+                    let earlier = call.span.start < r.span.start;
+                    if earlier {
+                        let old = (r.span, r.callee);
+                        (r.callee, r.param, r.ty, r.span, r.at) = (call.callee, i, *t, call.span, at);
+                        r.others.push(old);
+                    } else {
+                        r.others.push((call.span, call.callee));
+                    }
+                }
+                None => {
+                    by_cause.insert(key, reports.len());
+                    reports.push(Report { callee: call.callee, param: i, ty: *t, span: call.span, at, others: Vec::new() });
+                }
+            }
         }
+    }
+    for r in reports {
+        let name = last_segment(&resolved.fns[r.callee].name).to_string();
+        let param = sigs[r.callee].generics.get(r.param).map(|g| g.name.clone()).unwrap_or_default();
+        let message = format!(
+            "`{}` compares its `{}` with `==`, and {} cannot be compared",
+            name,
+            param,
+            types.with_article(r.ty)
+        );
+        let mut d = Diagnostic::error(codes::E0201, message)
+            .with_primary(r.span, format!("`{}` is {} here", param, types.with_article(r.ty)))
+            .with_secondary(r.at, "compared here");
+        let mut others = r.others;
+        others.sort_by_key(|(s, _)| s.start);
+        for (s, callee) in others {
+            let by = last_segment(&resolved.fns[callee].name);
+            d = d.with_secondary(s, format!("and given to `{}` here", by));
+        }
+        d = if types.mentions_host_value(r.ty) {
+            d.with_note(
+                "a host object has no structure Kite can see, so there is nothing to \
+                 compare field by field; `js.same(a, b)` asks the host whether two are \
+                 the same object",
+            )
+        } else {
+            d.with_note(
+                "equality is structural, so every field must itself be equatable; \
+                 functions and trait objects are not",
+            )
+        };
+        diags.push(d);
     }
 }
 
