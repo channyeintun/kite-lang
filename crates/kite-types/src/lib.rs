@@ -7409,7 +7409,7 @@ impl<'a> Checker<'a> {
             // `Shape.Square(1.0)` on an enum is a variant that is not there
             // far more often than a function that is not, and it is reported
             // as the same line without its arguments is.
-            let written = self.text(p_span);
+            let written = self.quoted(p_span);
             let owner = match written.rsplit_once('.') {
                 Some((owner, _)) => owner.trim().to_string(),
                 None => type_name.clone(),
@@ -9109,7 +9109,7 @@ impl<'a> Checker<'a> {
                 Some(inner) => format!(
                     "`{}` is held in `{}`, and a {} is a copy-on-write value: changing \
                      anything inside it changes the binding; declare it `var`",
-                    self.text(inner),
+                    self.quoted(inner),
                     name,
                     noun
                 ),
@@ -9329,7 +9329,7 @@ impl<'a> Checker<'a> {
             _ => None,
         };
         let Some(id) = local else {
-            let what = self.text(inner.span()).to_string();
+            let what = self.quoted(inner.span());
             self.diags.push(
                 Diagnostic::error(
                     codes::E0301,
@@ -12571,6 +12571,12 @@ impl<'a> Checker<'a> {
         self.sources.span_text(span)
     }
 
+    /// The source of `span` as a message may quote it: on one line. See
+    /// [`one_line`].
+    fn quoted(&self, span: Span) -> String {
+        one_line(self.text(span))
+    }
+
     /// Decode a string literal's contents. Phase 1 handles escapes; string
     /// interpolation arrives with `Display` in Phase 2.
     /// `"a \(x) b"` becomes concatenation. Each hole is rendered with `ToStr`,
@@ -15411,3 +15417,37 @@ fn strip_int_suffix(text: &str) -> &str {
 
 #[cfg(test)]
 mod tests;
+
+/// Source text as a one-line message quotes it. A diagnostic's message is one
+/// line (`kite-diag`), and an expression written across two — `r .` then `e` —
+/// is the same expression, so a run of whitespace is one space and none is
+/// kept beside a `.`, which is how the formatter would write it. A string
+/// literal's own text is left as it is, apart from its line breaks.
+fn one_line(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let (mut in_string, mut escaped, mut pending_space) = (false, false, false);
+    for c in text.chars() {
+        if in_string {
+            let c = if c == '\n' || c == '\r' { ' ' } else { c };
+            out.push(c);
+            match c {
+                _ if escaped => escaped = false,
+                '\\' => escaped = true,
+                '"' => in_string = false,
+                _ => {}
+            }
+            continue;
+        }
+        if c.is_whitespace() {
+            pending_space = true;
+            continue;
+        }
+        if pending_space && !out.is_empty() && c != '.' && !out.ends_with('.') {
+            out.push(' ');
+        }
+        pending_space = false;
+        in_string = c == '"';
+        out.push(c);
+    }
+    out
+}

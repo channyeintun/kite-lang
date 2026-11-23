@@ -2392,3 +2392,23 @@ fn error_notes_name_fixes_that_compile_here() {
     let c = body("let c = errors.new(\"x\")\n  nowhere(c)");
     assert_eq!(c.codes(), vec!["E0111"], "{}", c.render());
 }
+
+/// A diagnostic's message is one line. E0301 and E0111 quoted the source as
+/// written, so `r .` then `e` on the next line put a line break (and the
+/// indentation after it) inside the header.
+#[test]
+fn a_quoted_expression_is_on_one_line() {
+    let c = run(
+        "struct R {\n    e: error\n}\n\nfn main() {\n    let r = R{ e: nil }\n    io.print(r .\n        e.message())\n}\n",
+    );
+    let out = c.render();
+    let header = out.lines().next().unwrap_or("");
+    assert_eq!(header, "error[E0301]: `r.e` may be nil, so it has no message", "{}", out);
+    assert!(out.contains("`let e = r.e`"), "{}", out);
+    let c = run(
+        "enum Shape {\n    Dot\n}\n\nfn main() {\n    let s = Shape \t . \t Nope(1)\n    io.print(s)\n}\n",
+    );
+    let out = c.render();
+    assert!(out.contains("`Shape` has no variant `Nope`"), "{}", out);
+    assert_eq!(one_line("a  .\n   b(\"x\n  y\")  +  c"), "a.b(\"x   y\") + c");
+}
