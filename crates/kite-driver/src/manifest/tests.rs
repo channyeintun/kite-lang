@@ -510,6 +510,9 @@ fn an_inline_table_takes_no_trailing_comma_and_no_repeated_key() {
     assert!(err.message.contains("trailing comma"), "{}", err);
     let err = parse(&format!("{head}x = {{ path = \"p\",, version = \"1\" }}\n")).expect_err("empty");
     assert!(err.message.contains("empty field"), "{}", err);
+    // One comma, before the first field: not "between two commas".
+    let err = parse(&format!("{head}x = {{ , path = \"p\" }}\n")).expect_err("leading comma");
+    assert!(err.message.contains("no comma before its first field"), "{}", err);
     let err = parse(&format!("{head}x = {{ path = \"p\", path = \"q\" }}\n")).expect_err("twice");
     assert!(err.message.contains("`path` is written twice"), "{}", err);
 }

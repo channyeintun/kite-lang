@@ -440,6 +440,9 @@ fn inline_table(value: &str, line: usize) -> Result<BTreeMap<String, String>, Ma
                 line,
                 message: if n == fields.len() - 1 {
                     "an inline table takes no trailing comma".to_string()
+                } else if n == 0 {
+                    // `{ , path = "…" }` has one comma, not two.
+                    "an inline table takes no comma before its first field".to_string()
                 } else {
                     "an inline table has an empty field between two commas".to_string()
                 },
