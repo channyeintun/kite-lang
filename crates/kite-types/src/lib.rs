@@ -7832,27 +7832,23 @@ impl<'a> Checker<'a> {
         // report a problem that the real check — which runs against the
         // specialisation — does not have. Its diagnostics are discarded.
         let trial = self.begin_trial();
+        // Closure fields whose value was poison in the trial: the error in
+        // the body is the cause of a parameter left unsolved, not a missing
+        // pin. (An empty `[]` or a `nil` is poison too, but there the missing
+        // pin is the cause, and E0209's note is the fix.)
+        let mut poisoned = Vec::new();
         for init in &lit.fields {
             let Some(declared) =
                 self.types.struct_def(template).field(&init.name.name).map(|(_, f)| f.ty)
             else {
                 continue;
             };
-            // A closure for a field whose function type is not settled yet is
-            // told what of it the fields before it fixed, and its block
-            // body's result is learned from its `return`s, as for a generic
-            // call's argument: `Job{ run: || { return true, nil } }` makes
-            // `Job`'s `T` a `bool`.
-            if matches!(init.value, ast::Expr::Closure { .. }) {
-                if let TyKind::Fn { params, ret } = self.types.kind(declared).clone() {
-                    let params = params.iter().map(|p| self.apply_subst_opt(*p, &subst)).collect();
-                    let fallible = self.types.fallible_value(ret).is_some();
-                    let ret = self.apply_subst_opt(ret, &subst);
-                    self.closure_context = Some(ClosureContext { params, ret, fallible });
-                }
-            }
+            self.field_closure_context(init, declared, &subst);
             let v = self.expr(&init.value, None);
             self.closure_context = None;
+            if matches!(init.value, ast::Expr::Closure { .. }) && self.made_of_error(v.ty) {
+                poisoned.push((init, declared));
+            }
             self.unify(declared, v.ty, &generics, &mut subst, v.span);
         }
         self.end_trial(trial);
@@ -7862,6 +7858,25 @@ impl<'a> Checker<'a> {
             match s {
                 Some(t) => args.push(*t),
                 None => {
+                    // The trial's diagnostics were discarded, so a closure
+                    // field that went wrong is checked again to say what it
+                    // was; only its errors are kept, and only if it has any.
+                    if !poisoned.is_empty() {
+                        let again = self.begin_trial();
+                        for &(init, declared) in &poisoned {
+                            self.field_closure_context(init, declared, &subst);
+                            self.expr(&init.value, None);
+                            self.closure_context = None;
+                        }
+                        let found = std::mem::replace(self.diags, DiagBag::new()).take();
+                        self.end_trial(again);
+                        if found.iter().any(|d| d.severity == kite_diag::Severity::Error) {
+                            for d in found {
+                                self.diags.push(d);
+                            }
+                            return None;
+                        }
+                    }
                     let name = self.types.struct_def(template).name.clone();
                     self.diags.push(
                         Diagnostic::error(
@@ -7879,6 +7894,22 @@ impl<'a> Checker<'a> {
             }
         }
         Some(self.types.instantiate_struct(template, &args))
+    }
+
+    /// A closure for a generic struct's field whose function type is not
+    /// settled yet is told what of it the fields before it fixed, and its
+    /// block body's result is learned from its `return`s, as for a generic
+    /// call's argument: `Job{ run: || { return true, nil } }` makes `Job`'s
+    /// `T` a `bool`.
+    fn field_closure_context(&mut self, init: &ast::FieldInit, declared: TyId, subst: &[Option<TyId>]) {
+        if matches!(init.value, ast::Expr::Closure { .. }) {
+            if let TyKind::Fn { params, ret } = self.types.kind(declared).clone() {
+                let params = params.iter().map(|p| self.apply_subst_opt(*p, subst)).collect();
+                let fallible = self.types.fallible_value(ret).is_some();
+                let ret = self.apply_subst_opt(ret, subst);
+                self.closure_context = Some(ClosureContext { params, ret, fallible });
+            }
+        }
     }
 
     /// The template a specialised struct came from, if it is one.
