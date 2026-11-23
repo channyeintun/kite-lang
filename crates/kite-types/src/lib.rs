@@ -7827,7 +7827,21 @@ impl<'a> Checker<'a> {
             else {
                 continue;
             };
+            // A closure for a field whose function type is not settled yet is
+            // told what of it the fields before it fixed, and its block
+            // body's result is learned from its `return`s, as for a generic
+            // call's argument: `Job{ run: || { return true, nil } }` makes
+            // `Job`'s `T` a `bool`.
+            if matches!(init.value, ast::Expr::Closure { .. }) {
+                if let TyKind::Fn { params, ret } = self.types.kind(declared).clone() {
+                    let params = params.iter().map(|p| self.apply_subst_opt(*p, &subst)).collect();
+                    let fallible = self.types.fallible_value(ret).is_some();
+                    let ret = self.apply_subst_opt(ret, &subst);
+                    self.closure_context = Some(ClosureContext { params, ret, fallible });
+                }
+            }
             let v = self.expr(&init.value, None);
+            self.closure_context = None;
             self.unify(declared, v.ty, &generics, &mut subst, v.span);
         }
         self.end_trial(trial);

@@ -5908,6 +5908,40 @@ fn main() {
 "#,
         "6\n3\n12\n1\ntrue\njob\n6\n7\n",
     ),
+    // A closure given to a generic struct's field is typed as a generic
+    // call's argument is: its parameters from the fields that fix them, and
+    // a block body's result from its `return`s, fallible where the field is.
+    // `Job{ run: || { return true, nil } }` was E0209, nothing pinning `T`.
+    (
+        "a-closure-in-a-generic-literal-solves-its-type",
+        r#"struct Job<T> {
+  run: fn() -> (T, error)
+}
+struct Holder<T> {
+  f: fn(T) -> int
+  v: T
+}
+struct Gen<T> {
+  g: fn() -> T
+}
+fn main() {
+  let j = Job{ run: || {
+    return true, nil
+  } }
+  let (b, e) = j.run()
+  if e == nil {
+    io.print(b)
+  }
+  let h = Holder{ f: |x| x + 1, v: 3 }
+  io.print(h.f(h.v))
+  let g = Gen{ g: || {
+    return "s"
+  } }
+  io.print(g.g())
+}
+"#,
+        "true\n4\ns\n",
+    ),
     // A named `async fn` used as a value is its starter, a function that
     // returns the task: passed where `fn(int) -> Task<int>` is wanted, bound
     // and called, or handed to `task.map`. It was typed `fn(int) -> int`, so

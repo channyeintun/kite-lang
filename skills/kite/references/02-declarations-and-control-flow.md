@@ -412,7 +412,8 @@ body that *produces* a value needs an explicit `-> T` unless the context states 
 annotated binding, a field, a parameter of type `fn() -> int`), because there is nothing
 else to check its `return` statements against; a block that only acts —
 `|| { increment(state) }` — needs nothing. The one place a block body's result is learned
-from its `return`s is a generic parameter whose result nothing has fixed yet: against
+from its `return`s is a generic parameter (or a generic struct's field, in its literal)
+whose result nothing has fixed yet: against
 `run<T>(g: fn() -> T)`, `run(|| { return 6 })` makes `T` an `int`, and a body returning
 `n, nil` or `_, err` makes it fallible for `fn() -> (T, error)`. Parameter types come from
 the context the closure is used in, so `apply(|x| x * 2, 21)` infers `x` from `apply`'s

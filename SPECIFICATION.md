@@ -656,7 +656,8 @@ Its result type comes from the same place, else from `-> T` written on it, else
 from an expression body's own type. A block body with none of these returns
 `()` — except where it is passed to a generic function's parameter whose result
 is a type parameter nothing else fixes, as `run<T>(g: fn() -> T)` or `map`'s
-`U`. Then its `return` statements say what it returns: `run(|| { return 6 })`
+`U`, or given to such a field of a generic struct's literal, as
+`Job{ run: || { … } }` for `struct Job<T> { run: fn() -> (T, error) }`. Then its `return` statements say what it returns: `run(|| { return 6 })`
 makes `T` an `int`, and where `fn() -> (T, error)` is wanted (or a `return`
 gives a pair or `_, err`) the closure is fallible, so `retry(|| { … return n,
 nil })` solves `T` from `n`. `-> (T, error)` written on a closure is the
