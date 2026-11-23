@@ -12231,22 +12231,18 @@ impl<'a> Checker<'a> {
         if let Some(s) = raw.strip_prefix("\"\"\"") {
             let body = s.strip_suffix("\"\"\"").unwrap_or(s);
             let dedented = dedent_block(body);
-            return self.decode_escapes(&dedented, span);
+            return decode_escapes_into(&dedented, raw, span, self.diags);
         }
         let s = raw.strip_prefix('"').unwrap_or(raw);
         let inner = s.strip_suffix('"').unwrap_or(s);
-        self.decode_escapes(inner, span)
+        decode_escapes_into(inner, raw, span, self.diags)
     }
 
     /// The text of one literal run inside an interpolated string. The parser
     /// has already excluded the quotes and the holes.
     fn text_run_value(&mut self, span: Span) -> String {
-        let raw = self.text(span).to_string();
-        self.decode_escapes(&raw, span)
-    }
-
-    fn decode_escapes(&mut self, inner: &str, span: Span) -> String {
-        decode_escapes_into(inner, span, self.diags)
+        let raw = self.text(span);
+        decode_escapes_into(raw, raw, span, self.diags)
     }
 
     /// Insert the wrap a `T` needs to stand where an `Option<T>` is wanted.
@@ -14447,14 +14443,28 @@ fn edit_distance(a: &str, b: &str) -> usize {
 /// A free function because two callers need it and only one of them has a
 /// [`Checker`]: a module-level constant is evaluated before any body is, so it
 /// has no function to be inside.
-pub(crate) fn decode_escapes_into(inner: &str, span: Span, diags: &mut DiagBag) -> String {
+///
+/// `source` is the text `span` covers, and `inner` is made from it: the same
+/// text, or a block string's with its quotes and indentation taken off. That
+/// removes only whitespace, never a `\\`, so the n-th escape of `inner` is the
+/// n-th of `source`, and an invalid one is underlined where it is written —
+/// it used to be the whole literal, which says less than the escape does.
+pub(crate) fn decode_escapes_into(
+    inner: &str,
+    source: &str,
+    span: Span,
+    diags: &mut DiagBag,
+) -> String {
     let mut out = String::with_capacity(inner.len());
     let mut chars = inner.chars();
+    let mut nth = 0;
     while let Some(c) = chars.next() {
         if c != '\\' {
             out.push(c);
             continue;
         }
+        nth += 1;
+        let at = |len: usize| escape_span(source, span, nth - 1, len);
         match chars.next() {
             Some('n') => out.push('\n'),
             Some('t') => out.push('\t'),
@@ -14486,17 +14496,20 @@ pub(crate) fn decode_escapes_into(inner: &str, span: Span, diags: &mut DiagBag) 
                     Some(c) => out.push(c),
                     None if !opened => diags.push(
                         Diagnostic::error(codes::E0003, "invalid unicode escape")
-                            .with_primary(span, "this `\\u` is not followed by `{`")
+                            .with_primary(at(2), "this `\\u` is not followed by `{`")
                             .with_note("a unicode escape is hex digits between braces: `\\u{41}`"),
                     ),
                     None if !closed => diags.push(
                         Diagnostic::error(codes::E0003, "unclosed unicode escape")
-                            .with_primary(span, "this `\\u{` is never closed")
+                            .with_primary(at(3), "this `\\u{` is never closed")
                             .with_note("a unicode escape is hex digits between braces: `\\u{41}`"),
                     ),
                     None => diags.push(
                         Diagnostic::error(codes::E0003, "invalid unicode escape")
-                            .with_primary(span, format!("`\\u{{{}}}` is not a character", hex)),
+                            .with_primary(
+                                at(hex.len() + 4),
+                                format!("`\\u{{{}}}` is not a character", hex),
+                            ),
                     ),
                 }
             }
@@ -14509,7 +14522,7 @@ pub(crate) fn decode_escapes_into(inner: &str, span: Span, diags: &mut DiagBag) 
             Some(other) => {
                 diags.push(
                     Diagnostic::error(codes::E0003, "invalid escape sequence")
-                        .with_primary(span, format!("`\\{}` is not recognised", other))
+                        .with_primary(at(1 + other.len_utf8()), format!("`\\{}` is not recognised", other))
                         .with_note("valid escapes: \\n \\t \\r \\0 \\\\ \\\" \\' \\u{...}"),
                 );
             }
@@ -14517,6 +14530,27 @@ pub(crate) fn decode_escapes_into(inner: &str, span: Span, diags: &mut DiagBag) 
         }
     }
     out
+}
+
+/// The span of the `nth` escape written in `source`, the text of `span`,
+/// `len` bytes long and kept inside `span`. Read as the lexer reads one: a
+/// `\\` and the character after it.
+fn escape_span(source: &str, span: Span, nth: usize, len: usize) -> Span {
+    let bytes = source.as_bytes();
+    let (mut i, mut seen) = (0, 0);
+    while i < bytes.len() {
+        if bytes[i] == b'\\' {
+            if seen == nth {
+                let start = span.start + i as u32;
+                return Span::new(span.file, start, (start + len as u32).min(span.end));
+            }
+            seen += 1;
+            i += 2;
+        } else {
+            i += 1;
+        }
+    }
+    span
 }
 
 pub(crate) fn parse_int(text: &str) -> Option<i64> {

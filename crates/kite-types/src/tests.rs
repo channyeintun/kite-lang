@@ -445,6 +445,21 @@ fn an_invalid_escape_is_reported() {
     assert!(c.has("E0003"), "{}", c.render());
 }
 
+/// E0003 underlines the escape, not the literal it is in — in a `"` string,
+/// after a hole, in a block string whose indentation comes off, and in a
+/// module constant.
+#[test]
+fn an_invalid_escape_is_underlined_where_it_is_written() {
+    let c = run("let K = \"k \\n \\y\"\nfn main() {\n  let n = 1\n  let a = \"a long prefix \\q and more\"\n  let b = \"\\u{110000} x\"\n  let c = \"\"\"\n    ok \\t\n      then \\z\n    \"\"\"\n  let d = \"x \\(n) é\\w\"\n  let e = \"\\u{41\"\n  io.print(\"\\(K)\\(a)\\(b)\\(c)\\(d)\\(e)\")\n}\n");
+    let spans: Vec<&str> = c
+        .diags
+        .iter()
+        .filter(|d| d.code.map(|c| c.0) == Some("E0003"))
+        .map(|d| c.sources.span_text(d.labels[0].span))
+        .collect();
+    assert_eq!(spans, vec!["\\y", "\\q", "\\u{110000}", "\\z", "\\w", "\\u{"], "{}", c.render());
+}
+
 // ---- cascade suppression --------------------------------------------------
 
 /// One mistake must yield one diagnostic. `TyId::ERROR` satisfies every
