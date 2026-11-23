@@ -213,6 +213,65 @@ fn a_misspelled_member_is_not_reported_as_a_missing_module() {
 /// The same for a module in scope without a `use`: `io.prnt` said
 /// ``cannot find `io` ``. One whose member is not near a builtin — `text.trim`
 /// with no `use std/text` — is a missing `use`, and is not told it is a typo.
+/// The near name offered for a misspelt member fits where it is written: a
+/// call is offered a function, never a trait or a type it cannot call.
+#[test]
+fn a_misspelled_call_is_offered_only_a_function() {
+    let p = Project::new("misspelled-call");
+    p.file(
+        "m.kite",
+        "pub trait Outer {\n  fn out(self) -> int\n}\n\n\
+         pub fn other() -> int {\n  return 1\n}\n\n\
+         pub fn inner() -> int {\n  return 2\n}\n",
+    );
+    let main = p.file("main.kite", "use m\n\nfn main() {\n  io.print(m.outer())\n}\n");
+    let said = p.run(&main).expect_err("misspelt");
+    assert!(said.contains("cannot find `outer` in module `m`"), "{}", said);
+    assert!(!said.contains("`Outer`"), "a trait cannot be called: {}", said);
+    let main = p.file("near.kite", "use m\n\nfn main() {\n  io.print(m.innr())\n}\n");
+    let said = p.run(&main).expect_err("misspelt");
+    assert!(said.contains("a similar name is in `m`: `inner`"), "{}", said);
+}
+
+/// An unknown bare type is told about the types this module can name, as it
+/// would write them — not other modules' private ones, nor modules it never
+/// imported — and about `m.Name` when an imported module has that type.
+#[test]
+fn an_unknown_type_lists_only_what_this_module_can_name() {
+    let p = Project::new("known-types");
+    p.file("m.kite", "pub struct Shown {\n  pub n: int\n}\n\nstruct Hidden {\n  n: int\n}\n");
+    p.file("other.kite", "pub struct Elsewhere {\n  pub n: int\n}\n");
+    p.file("b.kite", "use other\n\npub fn f() -> int {\n  return other.Elsewhere{ n: 1 }.n\n}\n");
+    let main = p.file(
+        "main.kite",
+        "use m as mm\nuse b\n\nfn main() {\n  let x: Zzzzzz = 1\n  let y: Shown = mm.Shown{ n: b.f() }\n}\n",
+    );
+    let said = p.run(&main).expect_err("unknown types");
+    assert!(said.contains("known types: bool, int, float, str, mm.Shown"), "{}", said);
+    assert!(!said.contains("Hidden"), "private: {}", said);
+    assert!(!said.contains("Elsewhere"), "not imported here: {}", said);
+    assert!(said.contains("write `mm.Shown`"), "{}", said);
+}
+
+#[test]
+fn a_misspelled_type_is_not_reported_as_a_missing_module() {
+    let p = Project::new("misspelled-type");
+    p.file("m.kite", "pub struct Pt {\n  pub x: int\n}\n");
+    for (name, body) in [
+        ("s1.kite", "  let p = m.Pnt{ x: 1 }\n  io.print(p.x)\n"),
+        ("s2.kite", "  let p: m.Pnt = m.Pt{ x: 1 }\n  io.print(p.x)\n"),
+        ("s3.kite", "  let p = m.Pt{ x: 1 }\n  match p {\n    m.Ptt{ x: x } => io.print(x),\n  }\n"),
+    ] {
+        let main = p.file(name, &format!("use m\n\nfn main() {{\n{}}}\n", body));
+        let said = p.run(&main).expect_err("misspelt");
+        assert!(said.contains("cannot find `P"), "{}", said);
+        assert!(said.contains("in module `m`"), "{}", said);
+        assert!(said.contains("a similar type is in `m`: `Pt`"), "{}", said);
+        assert!(!said.contains("is that module imported"), "{}", said);
+        assert!(said.contains("1 previous error"), "{}", said);
+    }
+}
+
 #[test]
 fn a_misspelled_builtin_is_not_reported_as_a_missing_module() {
     let p = Project::new("misspelled-builtin");
@@ -1132,6 +1191,27 @@ fn a_file_of_a_directory_module_cannot_import_its_sibling() {
     assert!(said.contains("E0404"), "{}", said);
     assert!(said.contains("lib/shape.kite` is already part of the module `lib`"), "{}", said);
     assert!(said.contains("lib/use_it.kite:1:1"), "at the `use`: {}", said);
+    assert!(said.contains("remove this `use`"), "{}", said);
+}
+
+/// A module inside a directory module, reaching one of that module's files
+/// by walking out, is not told to `use` the module that imports it — taking
+/// that advice was a cycle.
+#[test]
+fn a_nested_module_is_not_told_to_import_the_module_around_it() {
+    let p = Project::new("nested-member");
+    p.file(
+        "ui/view.kite",
+        "use widgets\n\npub struct View {\n  pub n: int\n}\n\n\
+         pub fn top() -> int {\n  return widgets.w().n\n}\n",
+    );
+    p.file("ui/widgets/w.kite", "use view\n\npub fn w() -> view.View {\n  return view.View{ n: 3 }\n}\n");
+    let main = p.file("main.kite", "use ui\n\nfn main() {\n  io.print(ui.top())\n}\n");
+    let said = p.run(&main).expect_err("one file, two modules");
+    assert!(said.contains("E0404"), "{}", said);
+    assert!(!said.contains("`use ui`"), "that would be a cycle: {}", said);
+    assert!(said.contains("cannot import `ui` back"), "{}", said);
+    assert!(said.contains("`ui` was loaded here"), "{}", said);
 }
 
 /// The same from outside, in either order: `use lib/shape` beside `use lib`.
@@ -1149,7 +1229,43 @@ fn a_file_of_a_directory_module_cannot_be_imported_on_its_own() {
         assert!(said.contains("E0404"), "{}", said);
         assert!(said.contains("is already"), "{}", said);
         assert!(said.contains("main.kite:2:1"), "at the second `use`: {}", said);
+        // And it points at the first one, and says which to change.
+        if uses.starts_with("use lib/shape") {
+            assert!(said.contains("`lib/shape` was imported on its own here"), "{}", said);
+            assert!(said.contains("remove the `use lib/shape`"), "{}", said);
+        } else {
+            assert!(said.contains("`lib` was loaded here"), "{}", said);
+            assert!(said.contains("remove this `use`: the `use lib` above reaches"), "{}", said);
+        }
     }
+}
+
+/// The notes are in the words the `use`s wrote, not the modules' identities:
+/// below a `kite.toml`, `lib` beside `src/main.kite` is the module `src/lib`,
+/// and "remove the `use src/lib/shape`" and "reach … as `src/lib.…`" named
+/// lines and code that are not there. The two `use`s in two files are told
+/// how to meet: the earlier `use lib/shape` becomes a `use lib`.
+#[test]
+fn a_member_imported_on_its_own_is_told_the_fix_in_the_words_written() {
+    let p = Project::new("member-alone-words");
+    p.file("kite.toml", "[package]\nname = \"app\"\nversion = \"0.1.0\"\n");
+    p.file("src/lib/shape.kite", "pub fn area() -> int {\n  return 4\n}\n");
+    p.file("src/lib/core.kite", "pub fn top() -> int {\n  return 1\n}\n");
+    p.file("src/other/o.kite", "use lib\npub fn o() -> int {\n  return lib.top()\n}\n");
+    let main = p.file(
+        "src/main.kite",
+        "use lib/shape\nuse other\nfn main() {\n  io.print(shape.area() + other.o())\n}\n",
+    );
+    let said = p.run(&main).expect_err("one file, two modules").replace('\\', "/");
+    assert!(said.contains("make the `use lib/shape` a `use lib`"), "{}", said);
+    assert!(said.contains("declares as `lib.…`"), "{}", said);
+    assert!(!said.contains("use src/"), "{}", said);
+    // And the other way round, from a module that is not the entry.
+    p.file("src/x/y.kite", "use lib/shape\npub fn y() -> int {\n  return shape.area()\n}\n");
+    let main = p.file("src/main.kite", "use lib\nuse x\nfn main() {\n  io.print(lib.top() + x.y())\n}\n");
+    let said = p.run(&main).expect_err("one file, two modules").replace('\\', "/");
+    assert!(said.contains("make this `use` a `use lib`: it reaches"), "{}", said);
+    assert!(said.contains("as `lib.…`"), "{}", said);
 }
 
 /// A diagnostic names a module by where it is, so two `util`s are told apart
@@ -1288,14 +1404,11 @@ fn a_manifest_that_does_not_read_is_reported_at_its_line() {
     assert!(said.contains("E0405"), "{}", said);
     assert!(said.contains("kite.toml:4"), "points at the line: {}", said);
     assert!(said.contains("has no `edition`"), "{}", said);
-    // And the `use` it broke says so, where an editor showing only the
-    // file's own diagnostics shows it.
-    assert!(said.contains("kite.toml` did not read (E0405)"), "{}", said);
-    // The cause first, and nothing after it but the `use` it broke: the
-    // manifest's error came last, under a `cannot find` at `a.hello`.
-    let (manifest, missing) = (said.find("E0405").unwrap(), said.find("E0400").unwrap());
-    assert!(manifest < missing, "the manifest is said first: {}", said);
-    assert!(!said.contains("E0111"), "`a.hello` is not a second error: {}", said);
+    // The one error: not a `cannot find module` for the `use` it broke, nor
+    // a `cannot find` at `a.hello` under that.
+    assert!(!said.contains("E0400"), "the `use` is not a second error: {}", said);
+    assert!(!said.contains("E0111"), "`a.hello` is not a third: {}", said);
+    assert!(said.contains("1 previous error"), "{}", said);
 }
 
 /// A directory module checked on its own, as an editor renaming a name its
@@ -1691,4 +1804,295 @@ fn a_syntax_error_in_an_imported_module_is_reported_once() {
     let said = p.run(&main).expect_err("does not parse");
     assert_eq!(said.matches("invalid character `$`").count(), 1, "{}", said);
     assert_eq!(said.matches("expected an expression").count(), 1, "{}", said);
+}
+
+/// `use dep` for a dependency whose directory holds no `.kite` file directly
+/// is `E0400`. It fell back to `dep.kite` beside the dependency's directory —
+/// a file outside the package, which the lockfile does not hash.
+#[test]
+fn a_dependency_root_never_falls_back_to_a_file_beside_it() {
+    let p = Project::new("dep-root-file");
+    p.file("dep/kite.toml", "[package]\nname = \"dep\"\nversion = \"0.1.0\"\n");
+    p.file("dep/sub/s.kite", "pub fn inside() -> str {\n  return \"inside\"\n}\n");
+    p.file("dep.kite", "pub fn outside() -> str {\n  return \"outside\"\n}\n");
+    p.file(
+        "app/kite.toml",
+        "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n\
+         [dependencies]\ndep = { path = \"../dep\" }\n",
+    );
+    let main = p.file("app/main.kite", "use dep\n\nfn main() {\n  io.print(dep.outside())\n}\n");
+    let said = p.run(&main).expect_err("the package has no root module");
+    assert!(said.contains("E0400"), "{}", said);
+    assert!(said.contains("no `.kite` file directly in it"), "{}", said);
+    assert!(!said.contains("dep.kite`"), "the file beside it is not looked for: {}", said);
+    // A module inside the package is still reached.
+    let inner = p.file("app/inner.kite", "use dep/sub\n\nfn main() {\n  io.print(sub.inside())\n}\n");
+    assert_eq!(p.run(&inner).expect("compiles"), "inside\n");
+    // And with the package's directory missing altogether, still not the file.
+    std::fs::remove_dir_all(p.dir.join("dep")).expect("remove");
+    let said = p.run(&main).expect_err("there is no package");
+    assert!(said.contains("E0400"), "{}", said);
+}
+
+/// A module reached through a symbolic link and directly is one module, and
+/// its own `use config` walks out from where it is, whichever `use` came
+/// first. It walked out along the route that loaded it, so swapping the two
+/// `use` lines changed which `config` it reached.
+#[cfg(unix)]
+#[test]
+fn a_module_reached_through_a_link_resolves_from_where_it_is() {
+    let p = Project::new("linked-route");
+    p.file("real/r.kite", "use config\n\npub fn f() -> str {\n  return config.c()\n}\n");
+    p.file("config.kite", "pub fn c() -> str {\n  return \"top\"\n}\n");
+    p.file("a/config.kite", "pub fn c() -> str {\n  return \"a\"\n}\n");
+    std::os::unix::fs::symlink("../real", p.dir.join("a/link")).expect("a link");
+    let body = "fn main() {\n  io.print(real.f())\n  io.print(link.f())\n}\n";
+    let one = p.file("m1.kite", &format!("use real\nuse a/link\n\n{}", body));
+    let two = p.file("m2.kite", &format!("use a/link\nuse real\n\n{}", body));
+    assert_eq!(p.run(&one).expect("compiles"), "top\ntop\n");
+    assert_eq!(p.run(&two).expect("compiles"), "top\ntop\n");
+}
+
+/// A dependency vendored inside the program is reachable by its name and by a
+/// path from the program. Its own `use util` resolved within whichever package
+/// the first `use` reached it through — the program's `util.kite` one way,
+/// `E0400` the other. One module belongs to one package: the second route is
+/// `E0404`, in either order.
+#[test]
+fn a_module_reached_as_part_of_two_packages_is_refused() {
+    let p = Project::new("two-packages-route");
+    p.file(
+        "kite.toml",
+        "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n[dependencies]\nd = \"src/vend/d\"\n",
+    );
+    p.file("src/util.kite", "pub fn secret() -> str {\n  return \"program\"\n}\n");
+    p.file("src/vend/d/kite.toml", "[package]\nname = \"d\"\nversion = \"1.0.0\"\n");
+    p.file("src/vend/d/inner/x.kite", "pub fn x() -> int {\n  return 1\n}\n");
+    let body = "fn main() {\n  io.print(inner.x())\n}\n";
+    for (name, uses) in [
+        ("src/m1.kite", "use vend/d/inner as vi\nuse d/inner\n"),
+        ("src/m2.kite", "use d/inner\nuse vend/d/inner as vi\n"),
+    ] {
+        let main = p.file(name, &format!("{}\n{}", uses, body));
+        let said = p.run(&main).expect_err("one module, two packages");
+        assert!(said.contains("E0404"), "{}", said);
+        assert!(said.contains("it was first reached here"), "{}", said);
+    }
+    // One route alone is fine.
+    let one = p.file("src/one.kite", &format!("use d/inner\n\n{}", body));
+    assert_eq!(p.run(&one).expect("compiles"), "1\n");
+}
+
+/// The program's package begins at its `kite.toml`, so a file of the package
+/// compiled on its own — `kitec test ui/u.kite` — reaches what it reaches when
+/// `main.kite` is the entry, and names modules the same way. Its own directory
+/// was the root, and `use config` beside `ui/` was `E0400`.
+#[test]
+fn a_file_checked_on_its_own_resolves_from_its_packages_root() {
+    let p = Project::new("root-at-manifest");
+    p.file("kite.toml", "[package]\nname = \"t\"\nversion = \"0.1.0\"\n");
+    p.file("config/c.kite", "pub fn name() -> str {\n  return \"cfg\"\n}\nfn hidden() {}\n");
+    p.file("main.kite", "use ui\n\nfn main() {\n  io.print(ui.title())\n}\n");
+    let ui = p.file(
+        "ui/u.kite",
+        "use config\n\npub fn title() -> str {\n  return \"ui:\" + config.name()\n}\n\n\
+         fn main() {\n  io.print(title())\n}\n",
+    );
+    assert_eq!(p.run(&ui).expect("compiles"), "ui:cfg\n");
+    let tests = kite_driver::compile_tests(&ui, &std::fs::read_to_string(&ui).unwrap(), false);
+    assert!(!tests.failed(), "{}", tests.render_diagnostics());
+    // Named from the root, as from `main.kite`.
+    let bad = p.file("ui/bad.kite", "use config\n\nfn main() {\n  config.hidden()\n}\n");
+    let said = p.run(&bad).expect_err("private");
+    assert!(said.contains("private to module `config`"), "{}", said);
+    // Without a manifest the entry's own directory is the root, as it was.
+    std::fs::remove_file(p.dir.join("kite.toml")).expect("remove");
+    let said = p.run(&ui).expect_err("no package above");
+    assert!(said.contains("E0400"), "{}", said);
+}
+
+/// A package only a dependency declares is named in a diagnostic as every
+/// `use` spells it. Its identities carry an `@` to keep them apart from the
+/// program's own modules, and the `@` was printed: `private to module @b`.
+#[test]
+fn a_package_only_a_dependency_declares_is_named_without_its_mark() {
+    let p = Project::new("marked-package");
+    p.file("b/kite.toml", "[package]\nname = \"b\"\nversion = \"1.0.0\"\n");
+    p.file("b/m.kite", "fn hid() -> int {\n  return 2\n}\n\npub struct T {\n  pub n: int\n}\n");
+    p.file(
+        "a/kite.toml",
+        "[package]\nname = \"a\"\nversion = \"1.0.0\"\n\n[dependencies]\nb = { path = \"../b\" }\n",
+    );
+    p.file(
+        "a/m.kite",
+        "use b\n\npub fn fa() -> int {\n  let x: int = b.T{ n: 1 }\n  return b.hid() + x\n}\n",
+    );
+    p.file(
+        "app/kite.toml",
+        "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n[dependencies]\na = { path = \"../a\" }\n",
+    );
+    let main = p.file("app/main.kite", "use a\n\nfn main() {\n  io.print(a.fa())\n}\n");
+    let said = p.run(&main).expect_err("private, and a mismatch");
+    assert!(said.contains("private to module `b`"), "{}", said);
+    assert!(said.contains("`b.T`"), "{}", said);
+    assert!(!said.contains("@b"), "{}", said);
+}
+
+/// But not where the program has a module of that name too: then there are
+/// two `b.T`s, and without the mark a mismatch between them read `expected
+/// b.T, found b.T`.
+#[test]
+fn a_mark_stays_where_the_program_has_a_module_of_the_name() {
+    let p = Project::new("marked-package-clash");
+    p.file("b/kite.toml", "[package]\nname = \"b\"\nversion = \"1.0.0\"\n");
+    p.file("b/b.kite", "pub struct T {\n  pub v: int\n}\n");
+    p.file(
+        "a/kite.toml",
+        "[package]\nname = \"a\"\nversion = \"1.0.0\"\n\n[dependencies]\nb = { path = \"../b\" }\n",
+    );
+    p.file("a/a.kite", "use b\n\npub fn get() -> b.T {\n  return b.T{ v: 1 }\n}\n");
+    p.file(
+        "app/kite.toml",
+        "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n[dependencies]\na = { path = \"../a\" }\n",
+    );
+    p.file("app/b.kite", "pub struct T {\n  pub v: int\n}\n");
+    let main = p.file(
+        "app/main.kite",
+        "use a\nuse b\n\nfn main() {\n  let t: b.T = a.get()\n  io.print(t.v)\n}\n",
+    );
+    let said = p.run(&main).expect_err("two types called b.T");
+    assert!(said.contains("expected `b.T`, found `@b.T`"), "{}", said);
+}
+
+/// A `use` matches a file's or a directory's name exactly, case included, on
+/// every system. Where the file system ignores case — macOS, Windows — `use
+/// Util` loaded `util.kite`, and the program was `cannot find module` on
+/// Linux.
+#[test]
+fn a_use_matches_the_name_on_disk_exactly() {
+    let p = Project::new("case-exact");
+    p.file("util.kite", "pub fn one() -> int {\n  return 1\n}\n");
+    p.file("lib/a.kite", "pub fn two() -> int {\n  return 2\n}\n");
+    let ignores_case = p.dir.join("UTIL.kite").is_file();
+    for (name, uses, call) in
+        [("m1.kite", "use Util", "Util.one()"), ("m2.kite", "use Lib", "Lib.two()")]
+    {
+        let main = p.file(name, &format!("{}\n\nfn main() {{\n  io.print({})\n}}\n", uses, call));
+        let said = p.run(&main).expect_err("not the name on disk");
+        assert!(said.contains("E0400"), "{}", said);
+        if ignores_case {
+            assert!(said.contains("spelled differently"), "{}", said);
+            assert!(!said.contains("no `.kite` file directly in it"), "{}", said);
+        }
+    }
+    let main = p.file("ok.kite", "use util\nuse lib\n\nfn main() {\n  io.print(util.one() + lib.two())\n}\n");
+    assert_eq!(p.run(&main).expect("compiles"), "3\n");
+}
+
+/// An opaque struct — a `pub struct` with a field its module did not mark
+/// `pub` — cannot be taken apart outside its module, not even by naming only
+/// the fields it publishes (§4.3). That was accepted, with or without `..`.
+#[test]
+fn an_opaque_struct_cannot_be_destructured_by_its_public_fields() {
+    let p = Project::new("opaque-pattern");
+    p.file(
+        "m.kite",
+        "pub struct P {\n  pub k: int\n  hidden: int\n}\n\n\
+         pub fn make() -> P {\n  return P{ k: 1, hidden: 2 }\n}\n",
+    );
+    for (name, pattern) in [("a.kite", "m.P{ k: k }"), ("b.kite", "m.P{ k: k, .. }")] {
+        let main = p.file(
+            name,
+            &format!(
+                "use m\n\nfn main() {{\n  let p = m.make()\n  match p {{\n    {} => io.print(k),\n  }}\n}}\n",
+                pattern
+            ),
+        );
+        let said = p.run(&main).expect_err("opaque");
+        assert!(said.contains("E0401"), "{}", said);
+        assert!(said.contains("cannot be taken apart outside module `m`"), "{}", said);
+        assert!(said.contains("1 previous error"), "{}", said);
+    }
+    // Reading a public field with `.` is still fine.
+    let main = p.file("ok.kite", "use m\n\nfn main() {\n  io.print(m.make().k)\n}\n");
+    assert_eq!(p.run(&main).expect("compiles"), "1\n");
+}
+
+/// A package that depends on itself through others is refused by `kitec
+/// run` and `check` as `kitec pkg` refuses it — even when no `use` reaches
+/// the package that closes the cycle, whose manifest the loader never read.
+#[test]
+fn a_package_cycle_is_refused_by_every_command() {
+    let p = Project::new("package-cycle");
+    let manifest = |name: &str, dependency: &str| {
+        format!("[package]\nname = \"{}\"\nversion = \"1.0.0\"\n\n[dependencies]\n{}\n", name, dependency)
+    };
+    p.file("a/kite.toml", &manifest("a", "b = \"../b\""));
+    p.file("a/a.kite", "pub fn f() -> int {\n  return 1\n}\n");
+    p.file("b/kite.toml", &manifest("b", "app = \"../app\""));
+    p.file("b/b.kite", "pub fn g() -> int {\n  return 2\n}\n");
+    p.file("app/kite.toml", &manifest("app", "a = \"../a\""));
+    let main = p.file("app/main.kite", "use a\n\nfn main() {\n  io.print(a.f())\n}\n");
+    let said = p.run(&main).expect_err("a package cycle");
+    assert!(said.contains("E0402"), "{}", said);
+    assert!(said.contains("dependency cycle: app -> a -> b -> app"), "{}", said);
+    assert!(said.contains("kite.toml:6"), "at the dependency on `a`: {}", said);
+    // Without the edge back, it compiles.
+    p.file("b/kite.toml", "[package]\nname = \"b\"\nversion = \"1.0.0\"\n");
+    assert_eq!(p.run(&main).expect("compiles"), "1\n");
+}
+
+/// One cause, one error. Building another module's private struct was
+/// ``private to module `m` `` and then ``cannot be built outside module `m` ``
+/// at the same span; `5 = x` was the parser's `E0114` and then the checker's
+/// `E0200`.
+#[test]
+fn a_private_struct_literal_and_a_literal_target_are_one_error_each() {
+    let p = Project::new("one-cause");
+    p.file("m.kite", "struct Hid {\n  n: int\n}\n\npub fn one() -> int {\n  return 1\n}\n");
+    let main = p.file(
+        "main.kite",
+        "use m\n\nfn main() {\n  let h = m.Hid{ n: 1 }\n  io.print(m.one())\n}\n",
+    );
+    let said = p.run(&main).expect_err("private");
+    assert!(said.contains("private to module `m`"), "{}", said);
+    assert!(said.contains("1 previous error"), "{}", said);
+    let main = p.file("assign.kite", "fn main() {\n  var x = 1\n  5 = x\n  io.print(x)\n}\n");
+    let said = p.run(&main).expect_err("not a place");
+    assert!(said.contains("E0114"), "{}", said);
+    assert!(said.contains("1 previous error"), "{}", said);
+}
+
+/// A cycle back to the entry file is one error. The closing `use main`
+/// recorded a spelling for a module that does not exist — the entry is not a
+/// module — so `main.base()` behind it said `main` declares nothing public of
+/// a name it declares `pub`.
+#[test]
+fn a_cycle_back_to_the_entry_is_one_error() {
+    let p = Project::new("entry-cycle-once");
+    p.file("helper/h.kite", "use main\n\npub fn f() -> int {\n  return main.base() + 1\n}\n");
+    let main = p.file(
+        "main.kite",
+        "use helper\n\npub fn base() -> int {\n  return 1\n}\n\nfn main() {\n  io.print(helper.f())\n}\n",
+    );
+    let said = p.run(&main).expect_err("a cycle");
+    assert!(said.contains("E0402"), "{}", said);
+    assert!(!said.contains("E0111"), "{}", said);
+    assert!(said.contains("1 previous error"), "{}", said);
+}
+
+/// A module that imports itself is told so, and to delete the line — not
+/// handed an empty chain and advice to extract a third module.
+#[test]
+fn a_module_that_imports_itself_is_told_so() {
+    let p = Project::new("self-import");
+    let entry = p.file("selfentry.kite", "use selfentry\n\nfn main() {\n  io.print(1)\n}\n");
+    let said = p.run(&entry).expect_err("a cycle of one");
+    assert!(said.contains("module `selfentry` imports itself"), "{}", said);
+    assert!(said.contains("remove this `use`"), "{}", said);
+    assert!(!said.contains("the chain is"), "{}", said);
+    p.file("ui/a.kite", "use ui\n\npub fn f() -> int {\n  return 1\n}\n");
+    let main = p.file("main.kite", "use ui\n\nfn main() {\n  io.print(ui.f())\n}\n");
+    let said = p.run(&main).expect_err("a cycle of one");
+    assert!(said.contains("module `ui` imports itself"), "{}", said);
 }

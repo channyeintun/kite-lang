@@ -18,18 +18,26 @@
 //! The flag is a run-time value rather than a static fact because a loop is
 //! exactly where the difference matters: the first `push` onto a slice a
 //! caller handed in copies, and the next hundred thousand go straight in.
+//!
+//! A map is a value in exactly the same way, and has room to spare and a
+//! hash index for the same reason (see `kite-rt`'s maps), so `m[k] = v` and
+//! `m.remove(k)` keep the same flag by the same rule. The VM's map shares
+//! itself through `Rc` as its slice does, and `Rc::make_mut` decides there.
 
 use kite_mir as mir;
 
-/// The slice locals `f` writes into or pushes onto: the ones that need an
-/// owned flag. Every other local only ever reads, so whether it shares its
-/// slice is nobody's business.
+/// The slice locals `f` writes into or pushes onto, and the map locals it
+/// writes into or removes from: the ones that need an owned flag. Every other
+/// local only ever reads, so whether it shares its value is nobody's
+/// business.
 pub fn written(f: &mir::Function) -> Vec<mir::Local> {
     let mut out: Vec<mir::Local> = Vec::new();
     for b in &f.blocks {
         for s in &b.stmts {
             let target = match s {
-                mir::Inst::SlicePush { local, .. } => Some(*local),
+                mir::Inst::SlicePush { local, .. }
+                | mir::Inst::MapSet { local, .. }
+                | mir::Inst::MapRemove { local, .. } => Some(*local),
                 mir::Inst::SetIndex {
                     base: mir::Operand::Local(l),
                     ..
@@ -47,14 +55,15 @@ pub fn written(f: &mir::Function) -> Vec<mir::Local> {
 }
 
 /// Whether an assignment of `value` leaves its destination the only holder
-/// of the slice it produced: a literal, a range (which copies), or a map's
-/// keys or values, each made on the spot. Anything read out of somewhere
+/// of the slice or map it produced: a literal, a range (which copies), or a
+/// map's keys or values, each made on the spot. Anything read out of somewhere
 /// else — a local, a call's answer, a field, an element — may be shared with
 /// where it came from, so the first write to it copies.
 pub fn fresh(value: &mir::Rvalue) -> bool {
     matches!(
         value,
         mir::Rvalue::SliceNew { .. }
+            | mir::Rvalue::MapNew { .. }
             | mir::Rvalue::SliceRange { .. }
             | mir::Rvalue::MapKeys { .. }
             | mir::Rvalue::MapValues { .. }
@@ -77,7 +86,7 @@ pub fn escaping_operands(stmt: &mir::Inst) -> Vec<&mir::Operand> {
     let value = match stmt {
         mir::Inst::Assign { value, .. } => value,
         mir::Inst::SetField { value, .. } => return vec![value],
-        // The base is the slice being written, which is not an escape.
+        // The base is the slice or map being written, which is not an escape.
         mir::Inst::SetIndex { value, .. } => return vec![value],
         mir::Inst::SlicePush { value, .. } => return vec![value],
         mir::Inst::MapSet { key, value, .. } => return vec![key, value],

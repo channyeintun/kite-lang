@@ -1,0 +1,58 @@
+// A value `if` whose branches are each a binding or `nil` holds one of those
+// bindings' failures or nothing, so the new name adds no obligation of its
+// own: each binding still answers for its failure, and a failure nobody looks
+// at is one report, at the binding that holds it. `let e = if x { c } else {
+// nil }` with nothing inspected used to be E0302 twice, at `c` and at `e`, and
+// testing only `c` was refused for `e`.
+
+fn get() -> error {
+    return errors.new("boom")
+}
+
+fn nothing_inspected(x: bool) {
+    let c = get() //~ ERROR E0302
+    let e = if x { c } else { nil }
+}
+
+// Testing the new name says nothing about `c` on the `nil` path.
+fn only_the_new_name_tested(x: bool) {
+    let c = get() //~ ERROR E0302
+    let e = if x { c } else { nil }
+    if e != nil {
+        io.print(e.message())
+    }
+}
+
+fn the_original_tested(x: bool) {
+    let c = get()
+    let e = if x { c } else { nil }
+    if c != nil {
+        io.print(c.message())
+    }
+}
+
+// One binding on every branch is a copy, as `let e = c` is.
+fn a_copy_on_every_branch(x: bool) {
+    let c = get()
+    let e = if x { c } else { c }
+    if e != nil {
+        io.print(e.message())
+    }
+}
+
+// A condition that tests the failure has looked at it.
+fn tested_in_the_condition() {
+    let c = get()
+    let e = if c != nil { c } else { nil }
+    if e != nil {
+        io.print(e.message())
+    }
+}
+
+fn main() {
+    nothing_inspected(true)
+    only_the_new_name_tested(true)
+    the_original_tested(true)
+    a_copy_on_every_branch(true)
+    tested_in_the_condition()
+}

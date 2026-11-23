@@ -25,6 +25,12 @@ pub fn lower(program: &hir::Program) -> Program {
         .collect();
     out.strings = strings.list;
     out.vtables = program.vtables.clone();
+    out.mutable_structs = (0..program.types.struct_count())
+        .map(|i| {
+            let def = program.types.struct_def(StructId(i as u32));
+            def.fields.iter().any(|f| f.mutable)
+        })
+        .collect();
     out
 }
 
@@ -248,7 +254,7 @@ impl<'a> FnLowerer<'a> {
         }
         let built = self.temp(e.ty);
         self.recycling(|me| {
-            let first = items[..LITERAL_WINDOW].iter().map(|a| me.operand(a)).collect();
+            let first = me.operands(&items[..LITERAL_WINDOW]);
             let value = if per == 1 {
                 Rvalue::SliceNew { elems: first }
             } else {
@@ -258,7 +264,7 @@ impl<'a> FnLowerer<'a> {
         });
         for item in items[LITERAL_WINDOW..].chunks(per) {
             self.recycling(|me| {
-                let ops: Vec<Operand> = item.iter().map(|a| me.operand(a)).collect();
+                let ops: Vec<Operand> = me.operands(item);
                 let mut ops = ops.into_iter();
                 match (ops.next(), ops.next()) {
                     (Some(value), None) => me.emit(Inst::SlicePush { local: built, value }),
@@ -341,14 +347,19 @@ impl<'a> FnLowerer<'a> {
             }
             hir::Stmt::Block(b) => self.block(b),
             hir::Stmt::SetIndex { base, index, value, .. } => {
-                let b = self.operand(base);
-                let i = self.operand(index);
-                let v = self.operand(value);
+                // The base is a local (the checker writes back any other
+                // holder), and it is the place written, not an operand read:
+                // fixing it in a temporary would store into a copy, and a
+                // value that reassigns the slice would lose the write.
+                let b = match base.kind {
+                    hir::ExprKind::Local(l) => Operand::Local(Local(l.0)),
+                    _ => self.operand(base),
+                };
+                let [i, v] = self.operands_fixed([index, value]);
                 self.emit(Inst::SetIndex { base: b, index: i, value: v });
             }
             hir::Stmt::MapSet { local, key, value, .. } => {
-                let k = self.operand(key);
-                let v = self.operand(value);
+                let [k, v] = self.operands_fixed([key, value]);
                 self.emit(Inst::MapSet { local: Local(local.0), key: k, value: v });
             }
             hir::Stmt::MapRemove { local, key, .. } => {
@@ -363,8 +374,7 @@ impl<'a> FnLowerer<'a> {
                 self.for_slice(*var, slice, body, label.as_deref())
             }
             hir::Stmt::SetField { base, index, value, .. } => {
-                let b = self.operand(base);
-                let v = self.operand(value);
+                let [b, v] = self.operands_fixed([base, value]);
                 self.emit(Inst::SetField { base: b, index: *index, value: v });
             }
             hir::Stmt::Expr(e) => {
@@ -722,8 +732,7 @@ impl<'a> FnLowerer<'a> {
                 Rvalue::Use(Operand::Local(t))
             }
             hir::ExprKind::Binary { op, lhs, rhs } => {
-                let l = self.operand(lhs);
-                let r = self.operand(rhs);
+                let [l, r] = self.operands_fixed([lhs, rhs]);
                 Rvalue::Binary { op: *op, lhs: l, rhs: r }
             }
             hir::ExprKind::Unary { op, operand } => {
@@ -733,26 +742,28 @@ impl<'a> FnLowerer<'a> {
             // Monomorphisation has already run, so every call is concrete and
             // `targs` is empty.
             hir::ExprKind::Call { callee, args, .. } => {
-                let args = args.iter().map(|a| self.operand(a)).collect();
+                let args = self.operands(args);
                 Rvalue::Call { callee: FnId(callee.0), args }
             }
             hir::ExprKind::CallVirtual { trait_id, method, args, .. } => {
-                let args = args.iter().map(|a| self.operand(a)).collect();
+                let args = self.operands(args);
                 Rvalue::CallVirtual { trait_id: *trait_id, method: *method, args }
             }
             hir::ExprKind::ClosureNew { func, captures, .. } => Rvalue::ClosureNew {
                 func: FnId(func.0),
-                captures: captures.iter().map(|c| self.operand(c)).collect(),
+                captures: self.operands(captures),
             },
 
-            hir::ExprKind::CallClosure { callee, args } => Rvalue::CallClosure {
-                callee: self.operand(callee),
-                args: args.iter().map(|a| self.operand(a)).collect(),
-            },
+            hir::ExprKind::CallClosure { callee, args } => {
+                let refs: Vec<&hir::Expr> = std::iter::once(&**callee).chain(args).collect();
+                let mut all = self.operand_refs(&refs).into_iter();
+                let callee = all.next().expect("the callee is the first operand");
+                Rvalue::CallClosure { callee, args: all.collect() }
+            }
 
             hir::ExprKind::StrOp { op, args } => Rvalue::StrOp {
                 op: *op,
-                args: args.iter().map(|a| self.operand(a)).collect(),
+                args: self.operands(args),
             },
 
             hir::ExprKind::Cast { value, to } => Rvalue::Cast {
@@ -769,12 +780,11 @@ impl<'a> FnLowerer<'a> {
             // type tag is what dispatch reads.
             hir::ExprKind::ToDyn { value, .. } => Rvalue::Use(self.operand(value)),
             hir::ExprKind::CallBuiltin { builtin, args } => {
-                let args = args.iter().map(|a| self.operand(a)).collect();
+                let args = self.operands(args);
                 Rvalue::CallBuiltin { builtin: *builtin, args }
             }
             hir::ExprKind::PairNew { value, error } => {
-                let v = self.operand(value);
-                let e = self.operand(error);
+                let [v, e] = self.operands_fixed([value, error]);
                 Rvalue::PairNew { value: v, error: e }
             }
             hir::ExprKind::PairValue { base } => {
@@ -798,10 +808,7 @@ impl<'a> FnLowerer<'a> {
                 Rvalue::ErrorAs { base: b, tag: *tag }
             }
             hir::ExprKind::ErrorNew { message, value, tag, cause } => {
-                let m = self.operand(message);
-                let v = self.operand(value);
-                let t = self.operand(tag);
-                let c = self.operand(cause);
+                let [m, v, t, c] = self.operands_fixed([message, value, tag, cause]);
                 Rvalue::ErrorNew { message: m, value: v, tag: t, cause: c }
             }
             hir::ExprKind::ErrorMessage { base } => {
@@ -818,7 +825,7 @@ impl<'a> FnLowerer<'a> {
             }
             hir::ExprKind::Yield => Rvalue::Yield,
             hir::ExprKind::CallExtern { index, args } => {
-                let args = args.iter().map(|a| self.operand(a)).collect();
+                let args = self.operands(args);
                 Rvalue::CallExtern { index: *index, args }
             }
             hir::ExprKind::Unwrap { value } => {
@@ -833,12 +840,11 @@ impl<'a> FnLowerer<'a> {
                 if let Some(built) = self.long_literal(e, entries, 2) {
                     return Rvalue::Use(Operand::Local(built));
                 }
-                let entries = entries.iter().map(|a| self.operand(a)).collect();
+                let entries = self.operands(entries);
                 Rvalue::MapNew { entries }
             }
             hir::ExprKind::MapGet { base, key } => {
-                let b = self.operand(base);
-                let k = self.operand(key);
+                let [b, k] = self.operands_fixed([base, key]);
                 Rvalue::MapGet { base: b, key: k }
             }
             hir::ExprKind::MapKeys { base } => {
@@ -854,19 +860,18 @@ impl<'a> FnLowerer<'a> {
                 Rvalue::MapLen { base: b }
             }
             hir::ExprKind::TupleNew { elems } => {
-                let elems = elems.iter().map(|a| self.operand(a)).collect();
+                let elems = self.operands(elems);
                 Rvalue::TupleNew { elems }
             }
             hir::ExprKind::SliceNew { elems } => {
                 if let Some(built) = self.long_literal(e, elems, 1) {
                     return Rvalue::Use(Operand::Local(built));
                 }
-                let elems = elems.iter().map(|a| self.operand(a)).collect();
+                let elems = self.operands(elems);
                 Rvalue::SliceNew { elems }
             }
             hir::ExprKind::Index { base, index } => {
-                let b = self.operand(base);
-                let i = self.operand(index);
+                let [b, i] = self.operands_fixed([base, index]);
                 Rvalue::IndexGet { base: b, index: i }
             }
             hir::ExprKind::SliceLen { base } => {
@@ -874,14 +879,11 @@ impl<'a> FnLowerer<'a> {
                 Rvalue::SliceLen { base: b }
             }
             hir::ExprKind::SliceGet { base, index } => {
-                let b = self.operand(base);
-                let i = self.operand(index);
+                let [b, i] = self.operands_fixed([base, index]);
                 Rvalue::SliceGet { base: b, index: i }
             }
             hir::ExprKind::SliceRange { base, start, end } => {
-                let b = self.operand(base);
-                let s = self.operand(start);
-                let e2 = self.operand(end);
+                let [b, s, e2] = self.operands_fixed([base, start, end]);
                 Rvalue::SliceRange { base: b, start: s, end: e2 }
             }
             hir::ExprKind::EnumNew { enum_id, variant, fields, order } => {
@@ -904,25 +906,62 @@ impl<'a> FnLowerer<'a> {
     /// out in `order` — the order they were written — or in declaration order
     /// when `order` is empty.
     ///
-    /// Each compound field goes into a temporary as it is evaluated, so only
-    /// the evaluation moves; a field that is a plain local is read when the
-    /// value is built, as [`Self::operand`] reads one for a call's arguments
-    /// too. That is the same value unless a later field assigns the local,
-    /// which only a `match` arm block can do — `Q{ y: a, u: match a { _ =>
-    /// { a = 7 } } }` reads `a` as 7 — and that holds for every operand list
-    /// this lowering builds, not only a reordered one.
+    /// Each field is fixed as it is evaluated, by [`Self::operand_refs`], so
+    /// only the evaluation moves.
     fn operands_in_order(&mut self, fields: &[hir::Expr], order: &[u32]) -> Vec<Operand> {
         if order.is_empty() {
-            return fields.iter().map(|a| self.operand(a)).collect();
+            return self.operands(fields);
         }
+        let mut seq: Vec<usize> = order.iter().map(|&i| i as usize).collect();
+        // Anything `order` leaves out goes last, in declaration order.
+        let mut placed = vec![false; fields.len()];
+        for &i in &seq {
+            placed[i] = true;
+        }
+        seq.extend((0..fields.len()).filter(|&i| !placed[i]));
+        let refs: Vec<&hir::Expr> = seq.iter().map(|&i| &fields[i]).collect();
         let mut out: Vec<Option<Operand>> = vec![None; fields.len()];
-        for &i in order {
-            out[i as usize] = Some(self.operand(&fields[i as usize]));
+        for (i, op) in seq.into_iter().zip(self.operand_refs(&refs)) {
+            out[i] = Some(op);
         }
-        out.into_iter()
-            .zip(fields)
-            .map(|(op, f)| op.unwrap_or_else(|| self.operand(f)))
-            .collect()
+        out.into_iter().map(|op| op.expect("every field is evaluated")).collect()
+    }
+
+    /// Operands evaluated in the order given.
+    fn operands(&mut self, es: &[hir::Expr]) -> Vec<Operand> {
+        let refs: Vec<&hir::Expr> = es.iter().collect();
+        self.operand_refs(&refs)
+    }
+
+    /// As [`Self::operands`], for a fixed number of them.
+    fn operands_fixed<const N: usize>(&mut self, es: [&hir::Expr; N]) -> [Operand; N] {
+        self.operand_refs(&es).try_into().unwrap_or_else(|_| unreachable!("one operand each"))
+    }
+
+    /// Operands evaluated in the order given, **each fixed where it is
+    /// evaluated** (§5.3).
+    ///
+    /// A compound operand goes into a temporary as it is evaluated, but a
+    /// plain local is named, not copied, so it is read when the value is
+    /// built — after every operand after it. That is the same value unless a
+    /// later operand writes the local, which only a `match` arm block can
+    /// do: `g(a, match a { _ => { a = 7 } })` passed 7. Such a local is copied
+    /// into a temporary where it stands; any other is left as it was, so the
+    /// code an ordinary operand list makes does not grow.
+    fn operand_refs(&mut self, es: &[&hir::Expr]) -> Vec<Operand> {
+        let mut out = Vec::with_capacity(es.len());
+        for (i, e) in es.iter().enumerate() {
+            if let hir::ExprKind::Local(l) = e.kind {
+                if es[i + 1..].iter().any(|later| later.writes(l)) {
+                    let t = self.temp(e.ty);
+                    self.assign(t, Rvalue::Use(Operand::Local(Local(l.0))));
+                    out.push(Operand::Local(t));
+                    continue;
+                }
+            }
+            out.push(self.operand(e));
+        }
+        out
     }
 
     /// Lower to a simple operand, introducing a temporary if the expression is

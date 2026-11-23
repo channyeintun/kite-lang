@@ -47,8 +47,14 @@ pub struct DocTest {
 /// still highlights the block — an info string's first word is the language,
 /// and every markdown renderer reads it that way.
 pub fn extract(src: &str, module: &str) -> Vec<DocTest> {
+    use kite_lexer::fence::{Line, Scanner};
     let mut out = Vec::new();
-    let mut in_fence = false;
+    // Which fences count is the Markdown reader's rule, shared with `kitec
+    // doc`: a fence closes on a fence of its own character and at least its
+    // own length, so a ```` ````text ```` block that holds a ` ```kite `
+    // example is text, as the page that shows it says.
+    let mut scan = Scanner::new();
+    let mut collecting = false;
     let mut code = String::new();
     let mut opened_at = 0u32;
 
@@ -63,18 +69,35 @@ pub fn extract(src: &str, module: &str) -> Vec<DocTest> {
         else {
             // A doc comment that stops mid-fence is a malformed comment rather
             // than a test. Drop it rather than compiling half an example.
-            in_fence = false;
+            scan = Scanner::new();
+            collecting = false;
             code.clear();
             continue;
         };
         let body = body.strip_prefix(' ').unwrap_or(body);
-        let trimmed = body.trim();
 
-        if in_fence {
-            if trimmed == "```" {
-                in_fence = false;
+        match scan.next(body) {
+            Line::Open("kite") => {
+                collecting = true;
+                code.clear();
+                opened_at = i as u32 + 1;
+            }
+            Line::Open("kite ignore") => {
+                // Consumed to its close so that the lines inside are not scanned
+                // for a fence of their own, but nothing is collected. `opened_at`
+                // of zero marks it.
+                collecting = true;
+                code.clear();
+                opened_at = 0;
+            }
+            Line::Open(_) => collecting = false,
+            Line::Inside if collecting => {
+                code.push_str(body);
+                code.push('\n');
+            }
+            Line::Close if collecting => {
+                collecting = false;
                 let taken = std::mem::take(&mut code);
-                // `opened_at` of zero marks the ignored fence above.
                 if opened_at != 0 && !taken.trim().is_empty() {
                     out.push(DocTest {
                         name: format!("{}:{}", module, opened_at),
@@ -83,23 +106,8 @@ pub fn extract(src: &str, module: &str) -> Vec<DocTest> {
                         code: taken,
                     });
                 }
-            } else {
-                code.push_str(body);
-                code.push('\n');
             }
-            continue;
-        }
-
-        if trimmed == "```kite" {
-            in_fence = true;
-            code.clear();
-            opened_at = i as u32 + 1;
-        } else if trimmed == "```kite ignore" {
-            // Consumed to its close so that the lines inside are not scanned
-            // for a fence of their own, but nothing is collected.
-            in_fence = true;
-            code.clear();
-            opened_at = 0;
+            _ => {}
         }
     }
     out
@@ -411,5 +419,19 @@ pub fn other() {}
         let found = extract(src, "m");
         assert_eq!(found.len(), 1, "only the unmarked fence is a test");
         assert_eq!(found[0].code, "io.print(1)\n");
+    }
+
+    /// A ` ```kite ` line inside a ```` ````text ```` fence is text, however
+    /// the page that shows it was written: the fence closes only on a fence of
+    /// its own length, so the example inside is not the end of it.
+    #[test]
+    fn a_kite_fence_inside_a_longer_fence_is_not_an_example() {
+        let src = "/// ````text\n/// ```kite\n/// this is an illustration\n/// ```\n/// ````\n///\n/// ```kite\n/// io.print(1)\n/// ```\n";
+        let found = extract(src, "m");
+        assert_eq!(found.len(), 1, "{:?}", found.iter().map(|f| &f.code).collect::<Vec<_>>());
+        assert_eq!(found[0].code, "io.print(1)\n");
+        // And `~~~` fences and indented blocks hold none either.
+        let src = "/// ~~~\n/// ```kite\n/// x\n/// ```\n/// ~~~\n///\n///     ```kite\n///     y\n///     ```\n";
+        assert!(extract(src, "m").is_empty());
     }
 }

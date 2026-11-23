@@ -12,6 +12,7 @@
 use kite_diag::{codes, DiagBag, Diagnostic};
 use kite_span::{FileId, Span};
 
+pub mod fence;
 mod kinds;
 pub use kinds::{keyword, TokenKind, KEYWORDS};
 

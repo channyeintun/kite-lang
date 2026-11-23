@@ -1,0 +1,90 @@
+// A `for cond` loop's body runs where its condition held, and a loop with
+// no `break` is left only where it failed, so each knows what the condition
+// proves, exactly as an `if`'s two sides do. Each accepted case here used to
+// be E0301 (or E0201 for the optional).
+
+fn f(n: int) -> error {
+    if n > 2 {
+        return errors.new("stop at \(n)")
+    }
+    return nil
+}
+
+fn g(n: int) -> (int, error) {
+    if n < 0 {
+        return _, errors.new("neg")
+    }
+    return n, nil
+}
+
+fn present_once_the_loop_ends() {
+    var n = 0
+    var e = f(n)
+    for e == nil {
+        n += 1
+        e = f(n)
+    }
+    io.print(e.message())
+}
+
+fn clean_in_the_body() {
+    let (v, e) = g(1)
+    var i = 0
+    for e == nil && i < 3 {
+        io.print(v)
+        i += 1
+    }
+}
+
+fn present_in_the_body() {
+    var o: Option<int> = 3
+    for o != nil {
+        io.print(o + 1)
+        o = nil
+    }
+}
+
+// A `break` leaves without the condition failing.
+fn left_by_a_break() {
+    var n = 0
+    var e = f(n)
+    for e == nil {
+        n += 1
+        if n > 10 {
+            break
+        }
+        e = f(n)
+    }
+    io.print(e.message()) //~ ERROR E0301
+}
+
+// A write in the body undoes what the condition proved.
+fn written_in_the_body() {
+    var o: Option<int> = 3
+    for o != nil {
+        o = nil
+        io.print(o + 1) //~ ERROR E0201
+    }
+}
+
+// An `||` that held proves neither side.
+fn either_side() {
+    let (v, e) = g(1)
+    var i = 0
+    for e == nil || i < 3 {
+        io.print(v) //~ ERROR E0301
+        i += 1
+        if i > 5 {
+            return
+        }
+    }
+}
+
+fn main() {
+    present_once_the_loop_ends()
+    clean_in_the_body()
+    present_in_the_body()
+    left_by_a_break()
+    written_in_the_body()
+    either_side()
+}

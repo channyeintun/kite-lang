@@ -364,7 +364,9 @@ path on which e is proved nil   : v ← Clean — through `&&`, `||` and `!`
                                   as logic allows
 check e                         : v ← Clean after it — the other path returned
 Task, tuple, slice or optional  : watched as the error is; taking it apart,
-holding one                       awaiting it or walking it hands each on
+holding one                       awaiting it or walking it hands each on;
+                                  `r == nil` on an optional reads nothing:
+                                  nil side Clean, present side Unchecked
 join(a, b)                      : Tainted if either is Tainted,
                                   else Unchecked if either is Unchecked
 loop top                        : join of the entry and what the body's end
@@ -465,6 +467,11 @@ expression trees:
    program's own `pub` functions, a closure's lifted body or a vtable.
    Reachability is exact, because a call names its target by index. This is
    what keeps the prelude, which is in every program, out of a `hello world`.
+   Types are not pruned here: the arena keeps every declaration. The Wasm
+   backend declares only the structs and enums a local, a signature, a vtable
+   or a field of one of those can name, a dispatcher only for a trait
+   something implements, and an import's signature only beside the import —
+   so importing a module and calling nothing in it costs no bytes.
 3. **Equality specialisation** — `==` inside a generic function was checked as
    a structural comparison, because nothing was known about the operand. Once
    specialisation has made it concrete, a primitive gets the primitive's own
@@ -526,8 +533,7 @@ every build:
 
 ```
 $ kitec build examples/page/main.kite --emit wasm --release --out dist
-  and dist/api.js with dist/api.d.ts
-wrote dist/app.wasm (… bytes), dist/app.js and dist/index.html
+wrote dist/app.wasm (… bytes), dist/app.js, dist/app.wasm.map, dist/index.html, dist/api.js and dist/api.d.ts
 ```
 
 **There is no per-symbol breakdown**, and this section used to show one — a
@@ -688,6 +694,20 @@ each one after them to what it has built, as the other backends build theirs
 a window at a time. Staged whole, a literal of seventy thousand constants
 took a register per element, and the VM refused it.
 
+V8 has a limit no validator checks: the machine code it compiles one function
+to must fit in half of its code space, and past that it aborts the process
+rather than refuse the module. A literal of 120,000 strings, an allocation
+each, was such a function at 1.9 MB of Wasm. So a literal longer than one
+`array.new_fixed` chunk (4,096 elements) has each run of constants in a chunk
+built by a function of its own, which the literal's function calls, and each
+element that reads a local stored in place with `array.set`; identical runs
+are one function. No function holds more than one chunk of a literal's
+constants, however long it is. This bounds the literal, not the code around
+it: an element that is not a constant — a string in a `[Option<str>]`, which
+is wrapped first, a struct literal, an interpolation — is computed by a statement of the literal's
+function before the literal is built, and a hundred thousand such statements
+are still one function that V8 may fail to compile.
+
 Not every MIR local is a Wasm local. One that lives within a single block,
 written there before anything reads it, shares a Wasm local of its type with
 others whose lives do not overlap; only a local that crosses a branch, or is
@@ -748,6 +768,18 @@ store of a reference into an owned slice that has been promoted is the second
 thing the write barrier covers. `tests/differential.rs` runs
 `slices-are-values` and `slices-grow-in-place-natively` on all three backends,
 and natively again with a nursery of one page.
+
+A map is the same kind of object: room to spare, and the same owned flag
+for every map local a function writes into or removes from, passed to
+`kite_rt_map_set` and `kite_rt_map_remove`. Its first payload slot is the
+count of entries (which `len` reads inline), then the entries in insertion
+order, and — past eight of room — a hash index after them: bucket heads, and
+per slot the key's hash and the next slot in its bucket. The index holds hashes
+of content and slot numbers, never an address, so evacuation copies it with the
+entries and it is still right. A removal from an indexed map leaves a zeroed
+hole that every reader skips, until the holes outnumber the entries and the map
+closes up. The VM keeps the same index beside a vector of entries
+(`kite-vm`'s `map` module); the Wasm backend's maps have none yet.
 
 A variadic construction stages its operands in a fixed window of 4,096 words,
 `KITE_RT_STAGE`, before the runtime call that allocates. A slice or map

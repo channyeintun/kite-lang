@@ -171,12 +171,12 @@ fn helper_checks() -> [error] {
 
     // ---- lines ----
     out.push(test.ok(fs.write(path, "a\r\n\nb\nlast"), "a file with every kind of line"))
-    let (lines, lines_err) = fs.read_lines(path)
+    let (mixed, lines_err) = fs.read_lines(path)
     out.push(test.ok(lines_err, "read_lines"))
     if lines_err != nil {
         return out
     }
-    out.push(test.equal_strs(lines, ["a", "", "b", "last"], "splits on \\n, drops \\r, keeps an empty line, takes a last line with no end"))
+    out.push(test.equal_strs(mixed, ["a", "", "b", "last"], "splits on \\n, drops \\r, keeps an empty line, takes a last line with no end"))
     out.push(test.ok(fs.write(path, "x\ny\n"), "a file ending in a newline"))
     let (two, two_err) = fs.read_lines(path)
     out.push(test.ok(two_err, "read_lines again"))
@@ -184,6 +184,15 @@ fn helper_checks() -> [error] {
         return out
     }
     out.push(test.equal_strs(two, ["x", "y"], "has no empty last line"))
+    // What ends a line is the prelude's `lines` rule, a lone `\r` included.
+    for body in ["a\rb", "a\r\r\nb", "x\r", "\r", "a\n\rb\r\n"] {
+        out.push(test.ok(fs.write(path, body), "a file with odd endings"))
+        let (odd, odd_err) = fs.read_lines(path)
+        out.push(test.ok(odd_err, "read_lines of it"))
+        if odd_err == nil {
+            out.push(test.equal_strs(odd, lines(body), "read_lines is lines of the text"))
+        }
+    }
     out.push(test.ok(fs.write(path, ""), "an empty file"))
     let (none, none_err) = fs.read_lines(path)
     out.push(test.ok(none_err, "read_lines of it"))

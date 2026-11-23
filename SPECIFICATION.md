@@ -134,9 +134,20 @@ A ` ```kite ` fence is compiled and run by `kitec test`, alongside the file's
 `test_…` functions. It is appended to the module it was written in, so
 everything the comment documents is in scope with no import to get wrong; a
 fence that declares a type or a function lands at file scope and is checked by
-compiling. ` ```kite ignore ` marks an illustration instead — a fence naming
+compiling. `kitec test` and `kitec doc` take one file: a file of a directory
+module tested on its own is compiled as that file alone, so its fences and
+`test_…` functions do not see what its sibling files declare — a directory
+module's tests that need them belong in a test file that imports the module.
+` ```kite ignore ` marks an illustration instead — a fence naming
 types the reader supplies, which most module headers do — and is not compiled.
-A fence tagged anything else is prose.
+A fence tagged anything else is prose, and what is inside it is text whatever it
+looks like: fences are read as CommonMark reads them, so one closes only on a
+fence of the same character at least as long as its opener (a ` ````text `
+fence can show a ` ```kite ` example without running it), and `~~~` fences and
+indented blocks are code too — so a `~~~kite` fence, or a longer backtick
+fence tagged `kite`, is an example like a ` ```kite ` one. `kitec doc` leaves
+code and `<https://…>` links as written, and backslash-escapes a `<` or `&` in
+the prose around them that a Markdown reader would take for HTML.
 
 ### 2.4 Literals
 
@@ -229,7 +240,11 @@ call and no `await` anywhere in it computes a value and throws it away, so it is
 `E0117` too: a line opening with `-` (a negation, not a subtraction carried
 over), one opening with `[` (a slice literal, not an index), and `done == true`
 written for `done = true`. A statement that holds a call, such as `f() + 1`, is
-something happening and is left alone.
+something happening and is left alone. An arm of a `match` statement is a
+statement in this sense too ([§9.2](#92-match)). An index that can trap, or an
+interpolation whose hole runs `show`, does not count as an effect — `n + 1` can
+overflow too — so a statement kept for that alone is written `_ = xs[i]` (as an
+arm, `{ _ = xs[i] }`), and the diagnostic says so.
 
 ---
 
@@ -335,6 +350,17 @@ Maps iterate in **insertion order**. Go randomises map iteration to prevent
 reliance on order; Kite instead guarantees an order, which is cheaper to reason
 about and removes an entire class of nondeterministic test failure.
 
+How fast a map is depends on the target today, and nothing else about it does.
+On the bytecode VM and natively a lookup, an insert and a removal cost about
+the same whatever the map's size: the entries are kept in insertion order with
+a hash index beside them, and the index is never observable. A key that is,
+or holds, a struct with a `var` field is the exception: the field can change
+while the struct is a key, so such a struct is hashed by its type alone, and
+the keys that differ only inside one are found by comparing them in turn, as
+every key once was. On `wasm32-gc` a map is still its entries alone — a
+lookup scans them and a write copies them — so there a loop over a map of `n`
+entries costs `n²` ([roadmap, Phase 4](docs/06-roadmap.md)).
+
 **There is no fixed-length array.** A `[N]T` was listed here for a long time
 and never existed in the compiler, and the resolution was to strike it rather
 than build it — because this document already said twice that it should not be
@@ -370,8 +396,10 @@ match maybe {
 **Narrowing** is what makes this ergonomic rather than tedious. Testing an
 optional against `nil` narrows it to the unwrapped type on the branch where it
 cannot be absent — in the `else` of `x == nil`, and in the `then` of `x != nil`.
-The same narrowing applies in a `match` arm once an earlier arm has covered
-`nil`. A write to a `var` ends its narrowing unless the value written cannot be
+A `for` condition narrows the same way: its body runs where the condition held,
+and a loop with no `break` is left only where it failed, so `for x == nil { … }`
+leaves `x` present. The same narrowing applies in a `match` arm once an earlier
+arm has covered `nil`. A write to a `var` ends its narrowing unless the value written cannot be
 nil either; inside a loop, that holds for every write the loop's body makes,
 since the body runs again after each of them.
 
@@ -483,7 +511,9 @@ a struct and pass it to what changes it.
 
 A constant shares the value name space with functions, so a module cannot
 declare both `fn limit` and `let limit`; a cycle among constants is
-[E0119](#16-diagnostics).
+[E0119](#16-diagnostics). A module's own constant shadows a prelude function of
+the same name, exactly as its own function would: after `let max = 100`, `max`
+is that constant everywhere in the module, and `max(1, 2)` there is an error.
 
 In a `match` pattern a constant's name is its value too, so `LIMIT => …` and
 `limits.MAX_BODY => …` match that one value, exactly as the literal would — they
@@ -759,8 +789,14 @@ becomes `0`, `""`, or `nil`.
 
 The fields of a struct literal, and the named payload of a variant such as
 `Rect(h: f(), w: g())`, are evaluated in the order they are written, not the
-order they are declared in. `..base` is written first, so it is evaluated
-first, and once; the fields it supplies are read from that one value.
+order they are declared in. Every operand list runs in written order — a call's
+arguments, the elements of a tuple, slice or map literal, the two sides of an
+operator — and each operand's value is fixed when it is evaluated: a later one
+that assigns a local, as a `match` arm block can, does not change what an
+earlier one read from it. `..base` is written first, so it is evaluated
+first, and once; the fields it supplies are read from that one value, before
+any written field is evaluated — so a written field whose call changes the
+base through a `var` parameter does not change what the new value copies.
 
 ### 5.4 Slices and maps
 
@@ -783,9 +819,15 @@ m.remove("a")         // takes the entry out; a key that is not there is not an 
 
 Map indexing returns `Option<V>`, never a zero value.
 
-A map literal that gives one key twice keeps the later entry. Where the two
-keys are literals or constants, so the compiler can see they are equal, that is
-a warning ([E0112](#16-diagnostics)): the earlier value is never seen.
+A map literal that gives one key twice holds one entry for it: the later value,
+under the key as it was first written. That is what `m[k] = v` does to a key
+already there — the value changes and the stored key stays — and it shows only
+for keys that are equal without being the same: `{-0.0: 1, 0.0: 2}` holds
+`-0.0` with `2`. A NaN equals nothing, itself included, so two NaN keys are two
+entries. Where the two keys are literals or constants — a negated number, a
+float compared by value, and a tuple of them included — so the compiler can see
+they are equal, that is a warning ([E0112](#16-diagnostics)): the earlier value
+is never seen.
 
 `remove` shifts the entries after it down, so insertion order keeps meaning what
 it says and `keys()` and `values()` still line up element for element. Its
@@ -843,6 +885,14 @@ anything is copied, so no code the program wrote runs between taking a copy and
 writing it back, and a call in an index that changes the same field is not
 undone by the write. Because these are values, a copy of `grid` or of `grid[i]`
 taken before the write still holds what it did.
+
+**`target op= value` reads its target last**, by the same rule. The target's
+operands and the right-hand side are evaluated first, in the order written; then
+the target's current value is read, combined and stored. That holds for a local
+and a field as for an element: `c.count += f(c)`, where `f` sets `c.count`
+through a `var` parameter, adds to what `f` stored — as `xs[0] += f(h)` does —
+and is not the same as `c.count = c.count + f(c)`, which reads `c.count` where it
+is written, first.
 
 A `let` binding at the root, or a field not declared `var`, is `E0114`, as the
 same assignment written out would be. A call's result is held by nothing, so
@@ -948,6 +998,13 @@ with the operands that iteration evaluated, and one in a branch not taken never
 registers. A closure is a function of its own: a `defer` in its body runs when
 the closure returns. Unlike Go, `defer` cannot modify the return value — it is
 purely for release of resources, which is the only use that survives scrutiny.
+
+For the same reason a deferred call's result goes nowhere, so a call whose
+result holds a failure — an `error`, a `(T, error)`, or the `Task` of one — may
+not be deferred (`E0302`, [R6](#73-correlated-results-and-taint-analysis)):
+it runs after the function has answered, and the failure would have nobody to
+reach. Go's `defer f.Close()` drops exactly that error. Defer a function that
+handles it instead.
 
 ### 6.4 `match`
 
@@ -1066,7 +1123,11 @@ The rules:
 > and `v` becomes Clean. A condition proves what logic says it does: `e ==
 > nil` and `!(e != nil)` when they hold, either side of an `&&` that held
 > (the right side included, which runs only then), and either side of an
-> `||` that did not.
+> `||` that did not. A `for` condition is one: the body runs where it held,
+> and a loop with no `break` is left where it did not. A `match` guard is a
+> condition too: its arm runs where
+> it held, and when the arm's pattern is `_` or a bare name, which matches
+> anything, the arms after it are reached only where it did not.
 >
 > **R5.** On any path where `e != nil`, `e` becomes Checked and `v` remains
 > Tainted permanently. The value slot on an error path holds no value at all —
@@ -1078,7 +1139,8 @@ The rules:
 > result is either yields the `Task` of a failure on its way, and the `Task`
 > is held to the same rules as what it will give — left as a statement it is
 > `E0302`, and bound to a name it is Unchecked until it is awaited, returned
-> or passed on.
+> or passed on. A deferred call binds nothing either, and runs when nothing
+> is left to hear of its failure, so deferring one of these is `E0302` too.
 >
 > **R7.** An `error`, or a whole `(T, error)`, bound to a single name makes
 > that binding Unchecked — by `let` or by `var`, whether it came straight from
@@ -1087,8 +1149,13 @@ The rules:
 > does the same. Only `nil` leaves it Checked. A copy of another binding
 > — `let e = err`, `e = err`, a `match err { x => … }` arm — holds that
 > binding's failure: the two names share one obligation, met by inspecting
-> either. Reading it — testing it, checking it, returning it, taking it
-> apart, passing it on — inspects it, and R3 applies otherwise; copying it
+> either. A value `if` whose branches are each such a binding or `nil` adds
+> no obligation of its own — `let e = if x { c } else { nil }` holds `c`'s
+> failure or nothing, so `c` still answers for it. Reading it — testing it, checking it, returning it, taking it
+> apart, passing it on — inspects it, and R3 applies otherwise; a test
+> inspects it wherever it is written, so one in the right operand of `&&`
+> or `||` meets the obligation on every path, though it runs only on some —
+> as `if e1 != nil || e2 != nil { … }` needs it to; copying it
 > is not reading it, and nor is a `match` whose every arm is `_` or a bare
 > name. Binding everything under one name is not a way out either, and nor
 > is a tuple literal: `let (n, e) = (1, f())` makes `e` Unchecked. The same
@@ -1096,7 +1163,15 @@ The rules:
 > these in it — what `task.both`, `task.all` and `task.timeout` answer
 > with — is Unchecked when bound, taking it apart or walking it with `for`
 > hands each failure in it to the name it is bound to, and counting it with
-> `len` is not reading it.
+> `len` is not reading it. A projection `r.0` takes one element of a tuple:
+> its failure goes where it lands, and the others are still owed, so the
+> tuple is settled once each has been taken; taken apart after that, it
+> binds only the failures not yet taken. A slice cannot be followed
+> element by element, so `rs[0]` counts as reading all of it. Nor is testing an optional against `nil`, which
+> asks only whether a failure is there: where it is nil there is none, and
+> where it is present the optional, narrowed to what it holds, is still
+> Unchecked — `if r == nil { return }` is followed by a test of the error
+> or a destructuring of the pair.
 
 R1–R5 are about bindings, and R6 and R7 close the shapes they leave open: a
 call written as a statement makes no binding, so nothing in R1–R5 ever sees it,
@@ -1109,9 +1184,12 @@ The analysis follows bindings, and what is bound to them. A failure stored
 into a struct field — by a literal, `Held{ e: f() }`, or by a write — or into
 a map entry or a slice element by index is handed on to that value, exactly
 as passing it to a call is, and is not followed there; read back out into a
-binding, `let e = h.e`, it is an obligation again. A slice of failures is a
-binding like any other, so `errs.push(f())` adds `f`'s failure to what `errs`
-answers for.
+binding, `let e = h.e`, it is an obligation again. A map is not followed
+either: `let m = {1: load(1)}` hands `load`'s failure on to the map, as a struct
+literal does. A slice of failures is a binding like any other, so
+`errs.push(f())` adds `f`'s failure to what `errs` answers for — and a walk over
+one counts as reading all of it, so leaving the walk early, by `break` or
+`return`, drops the failures of the elements it did not reach.
 
 To drop one deliberately, say so:
 
@@ -1134,7 +1212,9 @@ there when the next writes over it: `var e: error = nil` then
 `for i in 0..3 { e = f(i) }` is `E0302` at the write. A body whose end changes
 nothing is checked once; one that does is checked again from the join, which
 ends because the lattice has height two and a state can only get worse. What
-follows a loop is reached from its top and from every `break`.
+follows a loop is reached from its top and from every `break` — except after a
+`for { }`, which has no header to leave from and is left only by `break`, so
+`for { if err == nil { break } … }` leaves only where `err` was tested.
 
 In practice:
 
@@ -1174,7 +1254,7 @@ error[E0302]: `err` is not checked before this `return`
   │     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `err` goes out of scope here unchecked
   │
   = note: silently dropping errors is the single most common source of production failures in languages that permit it
-  = note: to propagate, write `check` on its own line; to handle it here, test `err != nil`
+  = note: handle it here: test `err != nil`
 
 error[E0301]: `parsed` is used before its error is checked
   ┌─ titles.kite:3:25
@@ -1184,7 +1264,7 @@ error[E0301]: `parsed` is used before its error is checked
 3 │     return json.text_or(parsed, "title", "untitled")
   │                         ^^^^^^ used here while still tainted
   │
-  = note: check it first: write `check err`, or test `err != nil`
+  = note: test `err != nil` first, and read it where that is false
   = note: in Go the value on a failure path is the zero value and flows onward looking valid; in Kite there is no value on that path at all
 ```
 
@@ -1233,7 +1313,10 @@ pub fn load_config(path: str) -> (Config, error) {
 
 Rebinding `err` in the same scope is permitted, and is the one exception to the
 same-scope shadowing rule in [§4.1](#41-bindings) — but only because the previous
-`err` is provably Checked at that point.
+`err` is provably Checked at that point. The exception is the error slot of a
+two-name tuple binding, over an earlier binding that is an `error`; anything
+else a tuple binding redeclares in its own scope is [E0112](#16-diagnostics),
+as is a tuple binding that names one identifier twice, `let (a, a) = …`.
 
 ### 7.5 Handling a failure in place
 
@@ -1488,9 +1571,14 @@ the function needs no `return` after it.
 
 A `match` in statement position discards its arms' values, so its arms need not
 agree in type: `0 => io.print("zero")` beside `_ => count()`, where `count`
-returns an `int`, is fine. An arm whose value is an `error` is still one dropped
-([E0302](#16-diagnostics)), as a bare call's would be. A `match` used as a value
-needs every arm to produce the same type.
+returns an `int`, is fine. Each arm is in statement position too: a `match` or
+`if` written as an arm discards its own branches' values, so they need not
+agree either, and an arm that does nothing — `0 => 1`, or `{ done == true }` —
+is [E0117](#16-diagnostics), exactly as the same line on its own is; `0 => ()`
+says that nothing happens, as `0 => {}` does, and is fine. An arm
+whose value is an `error` is still one dropped ([E0302](#16-diagnostics)), as a
+bare call's would be. A `match` used as a value needs every arm to produce the
+same type.
 
 ### 9.3 Patterns
 
@@ -2032,8 +2120,12 @@ fn start() -> error {
 outward.** The first place is the importing module's own directory — the
 directory a one-file module sits in, or a directory module itself — and then
 each directory enclosing it in turn, stopping at the root of the package the
-importing module belongs to: the entry file's directory for the program, the
-dependency's own directory for a module inside a dependency. The nearest match
+importing module belongs to: for the program, the nearest directory at or
+above the entry file that holds a `kite.toml`, or the entry file's own
+directory when none does; for a module inside a dependency, the dependency's
+own directory. So whichever file of a package is the entry — `kitec run
+main.kite`, or `kitec test ui/app.kite` on its own — a module finds the same
+modules, and is named by the same path below that root. The nearest match
 wins. So `ui/app.kite` above writing `use config` finds `ui/config/` if `ui`
 has one of its own and `config/` beside `ui/` otherwise, and a dependency never
 resolves a `use` into the program that imports it. A `use` that matches
@@ -2075,11 +2167,21 @@ and with no diagnostic. An alias is a convenience for the file that writes it.
 when they reach one file or directory: `use utils` inside `a/` and `use utils`
 inside `b/` are two modules when each finds a `utils` of its own, and one when
 both find the `utils` beside them, and `use dep/utils` and `use utils` are two
-modules, because every segment is honoured when the files are found. A `use`
+modules, because every segment is honoured when the files are found. A
+segment matches a file's or a directory's name exactly, case included, on
+every system — `use Util` does not find `util.kite`, even where the file
+system ignores case; it is `E0400`, with a note naming what is there. A `use`
 that finds nothing is `E0400` — never answered by some other module that
-happens to be spelled alike. A first segment naming one of the importing
+happens to be spelled alike. A module's own `use`s are looked for from where
+its source is, too — its real directory, past any symbolic link — so the route
+a `use` took to reach it does not change what its imports mean; and it
+belongs to one package, so reaching one module both through a dependency's
+name and by a path from the program is `E0404`. A first segment naming one of the importing
 package's declared dependencies roots there instead, so `use markdown/render`
-reaches inside the package.
+reaches inside the package. `use markdown` alone is the package's root
+module, which is its own directory and only that: a directory with no `.kite`
+file directly in it has no root module, and `use markdown` is then `E0400` —
+never a `markdown.kite` beside the package, which is not part of it.
 
 What a use site writes is a **spelling**, and by default it is the last
 segment. A spelling belongs to the module that writes it, so two modules may
@@ -2136,7 +2238,8 @@ define is an error rather than something ignored; so is a key or a table written
 twice, and a trailing comma in an inline table, as TOML says. Strings are TOML's
 two forms, `"…"` with its escapes and `'…'` as written. And a manifest that does not
 parse — or does not read at all, as one that is not UTF-8 — is `E0405` in every
-command that reads it.
+command that reads it, and the one error: a `use` it leaves unresolvable is not
+reported again.
 
 A package name means one thing across the whole program: two manifests naming
 one package from two places is an error. It does not take the name from the
@@ -2154,7 +2257,8 @@ build does on its way past, and fetches every checkout again to make it —
 beside the one it replaces, so a fetch that fails leaves that one in place.
 Anything else that changed — a dependency added or removed, a new version
 because the manifest now asks for one — is reported rather than refused, and
-resolution tries the versions the lockfile records before any newer one.
+resolution tries the versions the lockfile records before any newer one. A
+lockfile entry that writes a key twice is refused, as a manifest that does is.
 
 The digest is cryptographic because the party it is checked against is the one
 who chooses the bytes. It was FNV-1a, which is invertible, so a dependency's
@@ -2188,7 +2292,8 @@ broken by extracting the shared part.
 
 That holds between packages too: a package that depends on itself, directly or
 through others, is an error — `kitec pkg` names the chain (`a -> b -> a`) and
-writes no lockfile.
+writes no lockfile, and `kitec run`, `check`, `build` and `test` refuse to
+compile the program, with the same chain (`E0402`, at the program's manifest).
 
 ---
 

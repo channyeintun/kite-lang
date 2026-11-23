@@ -31,6 +31,16 @@
 //! the parser, which knows, says which are type brackets. Inside a
 //! declaration that does not parse it is read forward from each `<` instead,
 //! in `opens_type_arguments`.
+//!
+//! **The contract: formatting twice gives the same bytes as formatting once,
+//! for every input — or the input is refused.** In a declaration that does not
+//! parse the brackets are guesses, and a guess can depend on how the file was
+//! laid out (a comment before a line break), so one pass can change what the
+//! next one guesses. [`format`] therefore runs the layout again on its own
+//! output until it stops changing, and returns that: the result is a fixed
+//! point, so formatting it is the identity. A file that has not settled after
+//! a few passes is refused as [`FormatError::Unstable`] rather than handed
+//! back as a layout a second run would change.
 
 use kite_diag::{DiagBag, Severity};
 use kite_lexer::{Comment, Token, TokenKind as T};
@@ -52,6 +62,10 @@ pub enum FormatError {
     /// level, so the output grows with the square of the depth: 3,000 nested
     /// blocks are 36 KB in and 36 MB out.
     TooDeep { limit: usize },
+    /// Laying the file out again kept changing it. Only a file that does not
+    /// parse can do this (its brackets are guessed); it is refused so that
+    /// formatting twice never differs from formatting once.
+    Unstable,
 }
 
 impl fmt::Display for FormatError {
@@ -67,6 +81,10 @@ impl fmt::Display for FormatError {
                 "cannot format a file nested more than {} brackets deep \
                  (the compiler refuses expressions nested past 256 too)",
                 limit
+            ),
+            FormatError::Unstable => f.write_str(
+                "this file does not parse, and the formatter cannot settle on one layout for it; \
+                 fix its syntax errors first",
             ),
             FormatError::Unfaithful => f.write_str(
                 "the formatter could not lay this file out without changing what it says; \
@@ -111,6 +129,25 @@ fn nesting(tokens: &[Token]) -> usize {
 /// those bytes deleted. The formatter used to do exactly that and report
 /// success, so `let x = a ?? b` came back as `let x = a b`.
 pub fn format(src: &str) -> Result<String, FormatError> {
+    // A layout is final when laying it out again changes nothing (see the
+    // contract in the crate doc). A file that parses is final after one pass
+    // and the second only confirms it; a broken one may need another.
+    let mut current = format_pass(src)?;
+    for _ in 0..PASSES {
+        let next = format_pass(&current)?;
+        if next == current {
+            return Ok(current);
+        }
+        current = next;
+    }
+    Err(FormatError::Unstable)
+}
+
+/// How many times a layout may change before the file is called unstable.
+const PASSES: usize = 4;
+
+/// One pass of layout over `src`: what [`format`] repeats until it settles.
+fn format_pass(src: &str) -> Result<String, FormatError> {
     let mut diags = DiagBag::new();
     let (tokens, comments) = kite_lexer::tokenize_with_comments(FileId(0), src, &mut diags);
     if let Some(first) = diags.iter().find(|d| d.severity == Severity::Error) {

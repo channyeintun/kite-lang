@@ -90,7 +90,13 @@ test functions. Two shapes, and they do not mix:
   parse error (`expected a declaration`). Put the statements inside an `fn`.
 
 ` ```kite ignore ` marks an illustration and is not compiled. A fence tagged
-anything else is prose. This is the same convention `std/*.kite` uses.
+anything else is prose, and everything inside it is text: a fence closes only
+on a fence of the same character at least as long as its opener, so a
+` ````text ` fence can hold a ` ```kite ` example that is shown and not run;
+a `~~~kite` fence is an example like a ` ```kite ` one.
+`~~~` fences and indented blocks are code for `kitec doc` too, which leaves
+them, code spans (even over two lines) and `<https://…>` links as written. This
+is the same convention `std/*.kite` uses.
 
 ## 3. Semicolon insertion
 
@@ -197,7 +203,12 @@ a negated number and computes nothing. That is `E0117` too: an expression
 statement with no call and no `await` anywhere in it does nothing, and is
 refused whatever its shape — a leading `-`, a leading `[` (a slice literal, not
 an index into the line above), `done == true` typed for `done = true`, a bare
-`n + 1`. A statement holding a call, such as `f() + 1`, is left alone.
+`n + 1`. A statement holding a call, such as `f() + 1`, is left alone. An arm of
+a `match` statement is a statement too, so `0 => 1` and `0 => { done == true }`
+are `E0117` there. An index or an interpolation is not counted as an effect even
+though one can trap and the other runs `show`: to keep one for that alone, write
+`_ = xs[i]` (as an arm, `0 => { _ = xs[i] }`; the note says so). `0 => ()` is fine:
+like `0 => {}`, it says nothing happens.
 
 ```kite fails
 fn main() {
@@ -580,6 +591,14 @@ Method surfaces are tiny and the compiler tells you the whole list on a miss:
 Slices are **values**: assigning one and pushing to the copy leaves the original
 alone. Reading a missing map key gives `nil`, not a zero value.
 
+A map is hashed on the VM and natively, so a read, a write and a `remove` cost
+the same at any size there — unless the key is, or holds, a struct with a
+`var` field: those are hashed by their type alone, since the field can change
+while the struct is a key, so such keys are compared one by one. A
+`--emit wasm` build still scans the entries on every read and copies them on
+every write, so a loop over a map of tens of thousands of entries is quadratic
+in the browser.
+
 ```kite
 fn main() {
     var ys = [1, 2, 3]
@@ -604,7 +623,9 @@ fn main() {
 depth. The compiler copies each level out, changes the innermost and writes
 every level back — what you would otherwise write by hand — with the indices
 and the right-hand side evaluated once, first. So a copy of the outer slice
-taken before the write keeps its old contents: slices are values.
+taken before the write keeps its old contents: slices are values. Any `t op= v` —
+on a local, a field or an element — reads `t` after `v` has run: `c.n += f(c)`
+adds to whatever `f` stored in `c.n`, unlike `c.n = c.n + f(c)`.
 
 ```kite
 struct Board {
@@ -644,8 +665,9 @@ fn main() {
 ```
 
 A loop that pushes thousands of times through a field copies the field's slice
-on each push; for a hot loop, build the slice in a `var` local and assign it to
-the field once.
+on each push, and one that writes or removes keys through a field copies the
+field's map on each write; for a hot loop, build the slice or map in a `var`
+local and assign it to the field once.
 
 ### An empty `[]` or `{}` has nothing to infer from
 
@@ -673,9 +695,10 @@ fn main() {
 }
 ```
 
-A literal that gives one key twice, `{"a": 1, "a": 2}`, keeps the later entry; where both
-keys are literals or constants it is the `E0112` warning, since the earlier value is never
-seen.
+A literal that gives one key twice, `{"a": 1, "a": 2}`, keeps the later value under the key
+as first written (`{-0.0: 1, 0.0: 2}` holds `-0.0` with `2`; two NaN keys are two entries).
+Where both keys are literals or constants — negative numbers, floats and tuples of them
+included — it is the `E0112` warning, since the earlier value is never seen.
 
 ### Maps iterate in pairs
 
@@ -735,8 +758,8 @@ which is why the order is the insertion order `keys()` already promised.
 
 ### Dropping a key is `remove`, and assigning `nil` is not it
 
-`m.remove(key)` takes the entry out and shifts the ones after it down, so
-insertion order still means what it says. A key that is not there is not a
+`m.remove(key)` takes the entry out and the ones after it keep their order,
+so insertion order still means what it says. A key that is not there is not a
 mistake — dropping state for a row that never had any is the ordinary case —
 so a miss changes nothing and reports nothing.
 
@@ -804,7 +827,10 @@ fn main() {
 
 **Narrowing** unwraps an optional on the branch where it cannot be nil: the
 `else` of `x == nil`, the `then` of `x != nil`, the code after an early return
-guarded by `x == nil`, and a `match` arm once an earlier arm covered `nil`.
+guarded by `x == nil`, the body of `for x != nil { … }` and the code after a
+`for x == nil { … }` with no `break`, and a `match` arm once an earlier arm
+covered `nil`. (A `for` condition that tests an error does the same for the
+taint analysis: `for e == nil { … }` leaves `e` present.)
 
 ```kite
 struct User {

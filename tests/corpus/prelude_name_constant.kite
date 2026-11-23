@@ -1,0 +1,18 @@
+// A module's own constant shadows a prelude function of the same name, as
+// its own function does: one name, one meaning, in expressions and patterns.
+let max = 100
+let count = 3
+
+fn kind(n: int) -> str {
+    return match n {
+        max => "the constant",
+        _ => "other",
+    }
+}
+
+fn main() {
+    io.print(max + 1)
+    io.print(count * 2)
+    io.print(kind(100))
+    io.print(max(1, 2)) //~ ERROR E0205
+}

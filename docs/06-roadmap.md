@@ -580,7 +580,7 @@ WasmGC structs.**
 
 ```bash
 kitec build examples/hello.kite --emit wasm --out dist
-# wrote dist/app.wasm (1009 bytes) and dist/app.js
+# wrote dist/app.wasm (1009 bytes), dist/app.js and dist/app.wasm.map
 ```
 
 **1,009 bytes**, against a 10 KB budget. Shipping no garbage collector is what
@@ -664,10 +664,22 @@ Tuples lower as positional records, sharing the field machinery structs use.
 
 Maps lower as a record holding parallel key and value arrays, and lookup is a
 linear scan — which is what makes insertion order and first-match-wins
-obviously right. A hash index is an optimisation for later. A write builds new
-arrays and rebinds, so maps keep value semantics; one code path covers both
-replacing a key and appending one, because the scan yields either the key'''s
-index or the current length.
+obviously right. A write builds new arrays and rebinds, so maps keep value
+semantics; one code path covers both replacing a key and appending one,
+because the scan yields either the key's index or the current length.
+
+**Still so on Wasm, and no longer on the other two.** The VM and the native
+runtime keep a hash index beside the entries (round two of the fix phase), so
+a lookup, an insert and a removal cost about the same whatever the map's size,
+and natively a write goes into the map in place under the owned flag slices
+already had. On Wasm a loop over a map of `n` entries is still `n²`. Giving it
+an index is a redesign of this lowering rather than a change to it: the record
+becomes mutable with room to spare and an owned flag for maps; a hash for
+every key type, generated per type beside the generated `==` and agreeing with
+it (a struct with a `var` field hashed by its type alone, as the other two
+do); and holes left by a removal, skipped by every reader — `len`, `keys`,
+`values`, lookup, `==`, the literal's `dedup`. Each of those is code every
+map-using module carries, which the size budgets have to make room for.
 
 A trait object is a reference to a one-field root record holding the concrete
 type's identity, and each trait method gets a dispatcher that compares that
@@ -2668,7 +2680,9 @@ Nesting or a declared dependency is the answer until there is a syntax for it.
 *Later:* no syntax was needed. A `use` is looked for beside the importing
 module's own files first, then in each enclosing directory outward, stopping at
 the package's root — the entry file's directory, or the dependency's own — and
-the nearest match wins. So `ui/` reaches `config/` beside it, §13.1's own tree
+the nearest match wins. (The program's root was later made the directory of its
+`kite.toml` when it has one, so a file tested on its own resolves what it
+resolves when `main.kite` is the entry.) So `ui/` reaches `config/` beside it, §13.1's own tree
 compiles and is a test, a module's own nested `config/` still comes first, and
 a dependency still cannot resolve into the program that imports it. A module is
 still where its source is: `use config` from `ui/` and from the entry reach the

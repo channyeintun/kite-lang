@@ -292,6 +292,9 @@ struct Shapes {
     extern_sigs: Vec<Vec<u8>>,
     /// Per dispatch table: rows of `(type tag, method addresses)`, sorted.
     vtables: Vec<Vec<(u32, Vec<usize>)>>,
+    /// Per struct id, whether it has a `var` field: a map hashes such a
+    /// struct by its type alone (see [`key_hash`]).
+    mutable_structs: Vec<bool>,
 }
 
 struct Rt {
@@ -860,7 +863,7 @@ unsafe fn object_size_of(p: *const u8, shapes: &Shapes) -> usize {
         obj::ENUM => 8 * ((obj_word1(p) >> 32) as usize),
         obj::TUPLE => 8 * shapes.tuples[aux].len(),
         obj::SLICE => 8 * slice_cap(p),
-        obj::MAP => 16 * obj_word1(p) as usize,
+        obj::MAP => 8 * map_words(map_room(p)),
         obj::PAIR => 16,
         obj::ERR => 32,
         obj::CLOSURE => 8 + 8 * obj_word1(p) as usize,
@@ -903,15 +906,17 @@ unsafe fn for_each_ref_slot(p: *mut u8, f: &mut dyn FnMut(*mut u64)) {
                 }
             }
         }
+        // The used slots: a hole's are zero, which the collector passes over,
+        // and the index after the entries holds no references at all.
         obj::MAP => {
             let key_ref = (aux & 0xFF) as u8 == kind::REF;
             let val_ref = ((aux >> 8) & 0xFF) as u8 == kind::REF;
-            for i in 0..obj_word1(p) as usize {
+            for i in 0..map_used(p) {
                 if key_ref {
-                    f(slot(p, 2 * i));
+                    f(map_key(p, i));
                 }
                 if val_ref {
-                    f(slot(p, 2 * i + 1));
+                    f(map_value(p, i));
                 }
             }
         }
@@ -1340,6 +1345,322 @@ pub extern "C" fn kite_rt_closure_new(func: u64, argc: u64) -> u64 {
     p as u64
 }
 
+// ---------------------------------------------------------------------------
+// Maps
+// ---------------------------------------------------------------------------
+//
+// A map is one object: its entries in insertion order, and — past
+// [`MAP_SMALL`] of room — a hash index after them.
+//
+//   word 1       the slots used (low half) and the room (high half)
+//   slot 0       how many of the used slots are entries
+//   slots 1..    `room` pairs of key and value
+//   then         `2 * room` bucket heads of 32 bits, and per slot one word:
+//                its key's hash (low half) and the next slot in its bucket
+//
+// The index holds hashes and slot numbers, never an address, so it means the
+// same thing wherever the object is: the nursery's evacuation copies it with
+// the entries and it is still right, and so is a copy made for a write. The
+// hash is of a key's *content*, which is why that holds — see [`key_hash`].
+//
+// The entries are what the map is. Iteration, `keys()`, `==`, rendering and
+// the collector read them and nothing else; the index only says where a key
+// is. A removal from an indexed map leaves a hole — its slots zeroed, so the
+// collector sees nothing there, and its index word marked — so that removing
+// costs a constant rather than moving every later entry down. Everything that
+// reads the entries skips the holes, so what remains is in the order it was,
+// which is exactly what moving the entries down gave; once the holes
+// outnumber the entries the map closes up and lays its index out again.
+//
+// A map is a value, and a write goes straight into it only when the local
+// that holds it is the only thing that can see it — the owned flag the code
+// generator keeps for slices, kept for maps too (`kite-codegen-clif`'s
+// `slices` module). Otherwise the write lands in a copy, which the local then
+// owns. With room to spare and an index, a loop of inserts is linear, where
+// copying the map for every one of them, and scanning it, made it quadratic.
+//
+// The VM's map (`kite-vm`'s `map` module) is the specification for all of
+// it: the hash agrees with `==`, a struct with a `var` field hashes by its
+// type alone, and each bucket lists its slots in insertion order so that of
+// two equal keys — which only a `var` field can make — the earlier wins.
+
+/// The most room a map has with no index. A scan of this many is as fast as
+/// hashing.
+const MAP_SMALL: usize = 8;
+
+/// An empty bucket, or the end of one.
+const MAP_NONE: u32 = u32::MAX;
+
+/// The "next" of a slot that is a hole.
+const MAP_HOLE: u32 = u32::MAX - 1;
+
+#[inline]
+unsafe fn map_used(p: *const u8) -> usize {
+    (obj_word1(p) & 0xFFFF_FFFF) as usize
+}
+
+#[inline]
+unsafe fn map_room(p: *const u8) -> usize {
+    (obj_word1(p) >> 32) as usize
+}
+
+#[inline]
+unsafe fn set_map_used(p: *mut u8, used: usize) {
+    *(p as *mut u64).add(1) = used as u64 | ((map_room(p) as u64) << 32);
+}
+
+#[inline]
+unsafe fn map_live(p: *const u8) -> usize {
+    *slot(p, 0) as usize
+}
+
+#[inline]
+unsafe fn set_map_live(p: *mut u8, live: usize) {
+    *slot(p, 0) = live as u64;
+}
+
+#[inline]
+unsafe fn map_key(p: *const u8, i: usize) -> *mut u64 {
+    slot(p, 1 + 2 * i)
+}
+
+#[inline]
+unsafe fn map_value(p: *const u8, i: usize) -> *mut u64 {
+    slot(p, 2 + 2 * i)
+}
+
+#[inline]
+fn map_indexed(room: usize) -> bool {
+    room > MAP_SMALL
+}
+
+/// The payload words of a map with room for `room` entries.
+fn map_words(room: usize) -> usize {
+    1 + 2 * room + if map_indexed(room) { 2 * room } else { 0 }
+}
+
+/// The bucket heads: `2 * room` of them, a power of two.
+#[inline]
+unsafe fn map_heads(p: *const u8) -> *mut u32 {
+    slot(p, 1 + 2 * map_room(p)) as *mut u32
+}
+
+/// Slot `i`'s index word: its key's hash, and the next slot in its bucket.
+#[inline]
+unsafe fn map_link_word(p: *const u8, i: usize) -> *mut u64 {
+    slot(p, 1 + 3 * map_room(p) + i)
+}
+
+#[inline]
+unsafe fn map_bucket(p: *const u8, h: u32) -> *mut u32 {
+    map_heads(p).add(h as usize & (2 * map_room(p) - 1))
+}
+
+#[inline]
+unsafe fn map_is_hole(p: *const u8, i: usize) -> bool {
+    map_indexed(map_room(p)) && (*map_link_word(p, i) >> 32) as u32 == MAP_HOLE
+}
+
+/// The slots holding entries, in insertion order.
+unsafe fn map_entries(p: *const u8) -> impl DoubleEndedIterator<Item = usize> {
+    let holes = map_used(p) != map_live(p);
+    (0..map_used(p)).filter(move |&i| !holes || !map_is_hole(p, i))
+}
+
+/// The room a full map of `room` is given: twice as much, a power of two, so
+/// that a loop of inserts copies each entry a constant number of times. It
+/// once took twice the entries plus the new one, rounded up — which for a
+/// full map of a power of two is four times the room, and with the index
+/// sixteen words an entry.
+fn map_room_for_growth(room: usize) -> usize {
+    (2 * room).next_power_of_two().max(MAP_SMALL)
+}
+
+/// Exactly enough room for `n` entries, as a literal needs: an indexed map's
+/// room is a power of two.
+fn map_room_for(n: usize) -> usize {
+    if map_indexed(n) {
+        n.next_power_of_two()
+    } else {
+        n
+    }
+}
+
+/// A map with room for `room` entries and none in it, of the element kinds
+/// `aux` packs. May collect, so the caller roots what it holds.
+fn map_alloc(aux: u32, room: usize) -> *mut u8 {
+    if room > u32::MAX as usize / 2 {
+        trap(&format!("a map cannot hold more than {} entries", u32::MAX / 2));
+    }
+    let p = alloc(HEADER + 8 * map_words(room));
+    unsafe {
+        *(p as *mut u64) = word0(obj::MAP, aux);
+        *(p as *mut u64).add(1) = (room as u64) << 32;
+        set_map_live(p, 0);
+        if map_indexed(room) {
+            std::ptr::write_bytes(map_heads(p), 0xFF, 2 * room);
+        }
+    }
+    p
+}
+
+/// Fill the empty map `p` with `src`'s entries. Into the same room it is the
+/// whole of `src` as it is, holes and index included, so slot numbers mean
+/// what they meant; into other room the holes are closed up and the index,
+/// if `p` has one, laid out afresh. Allocates nothing.
+unsafe fn map_fill_from(p: *mut u8, src: *const u8) {
+    let room = map_room(p);
+    if room == map_room(src) {
+        std::ptr::copy_nonoverlapping(slot(src, 0), slot(p, 0), map_words(room));
+        set_map_used(p, map_used(src));
+        return;
+    }
+    let indexed = map_indexed(room);
+    let known = map_indexed(map_room(src));
+    let mut n = 0;
+    for i in map_entries(src) {
+        *map_key(p, n) = *map_key(src, i);
+        *map_value(p, n) = *map_value(src, i);
+        if indexed && known {
+            *map_link_word(p, n) = *map_link_word(src, i) & 0xFFFF_FFFF;
+        }
+        n += 1;
+    }
+    set_map_used(p, n);
+    set_map_live(p, n);
+    if indexed {
+        let kk = (obj_aux(p) & 0xFF) as u8;
+        map_relink(p, if known { None } else { Some(kk) });
+    }
+}
+
+/// Lay the index of `p`, which has no holes, out afresh: from the hashes its
+/// index words already hold, or, given the key kind, from the keys. Walking
+/// the slots from the back and putting each at the front of its bucket leaves
+/// every bucket in insertion order.
+unsafe fn map_relink(p: *mut u8, rehash: Option<u8>) {
+    std::ptr::write_bytes(map_heads(p), 0xFF, 2 * map_room(p));
+    for i in (0..map_used(p)).rev() {
+        let h = match rehash {
+            Some(kk) => key_hash(*map_key(p, i), kk),
+            None => *map_link_word(p, i) as u32,
+        };
+        let head = map_bucket(p, h);
+        *map_link_word(p, i) = h as u64 | ((*head as u64) << 32);
+        *head = i as u32;
+    }
+}
+
+/// Where `key` is among `p`'s entries — the earliest, should two hold equal
+/// keys. For an indexed map, also the last slot of the key's bucket (where a
+/// new entry is linked; [`MAP_NONE`] for an empty bucket) and the key's hash.
+///
+/// A map with no index is scanned, and a key that is a number is compared as
+/// one, in a loop the compiler can see through, rather than through a call to
+/// [`value_eq`] per entry that asks the key's kind each time.
+unsafe fn map_find(p: *const u8, key: u64, kk: u8) -> (Option<usize>, u32, u32) {
+    if !map_indexed(map_room(p)) {
+        let used = map_used(p);
+        let found = match kk {
+            kind::REF => (0..used).find(|&i| value_eq(*map_key(p, i), key, kind::REF)),
+            kind::FLOAT => {
+                let key = f64::from_bits(key);
+                (0..used).find(|&i| f64::from_bits(*map_key(p, i)) == key)
+            }
+            _ => (0..used).find(|&i| *map_key(p, i) == key),
+        };
+        return (found, MAP_NONE, 0);
+    }
+    let h = key_hash(key, kk);
+    let mut i = *map_bucket(p, h);
+    let mut last = MAP_NONE;
+    while i != MAP_NONE {
+        let link = *map_link_word(p, i as usize);
+        if link as u32 == h && value_eq(*map_key(p, i as usize), key, kk) {
+            return (Some(i as usize), last, h);
+        }
+        last = i;
+        i = (link >> 32) as u32;
+    }
+    (None, last, h)
+}
+
+/// Put a new entry in the next slot of `p`, which has room for it; `h` and
+/// `last` are what [`map_find`] answered for its key. No write barrier: the
+/// caller decides that.
+unsafe fn map_push(p: *mut u8, key: u64, value: u64, h: u32, last: u32) {
+    let at = map_used(p);
+    *map_key(p, at) = key;
+    *map_value(p, at) = value;
+    if map_indexed(map_room(p)) {
+        *map_link_word(p, at) = h as u64 | ((MAP_NONE as u64) << 32);
+        if last == MAP_NONE {
+            *map_bucket(p, h) = at as u32;
+        } else {
+            let w = map_link_word(p, last as usize);
+            *w = (*w & 0xFFFF_FFFF) | ((at as u64) << 32);
+        }
+    }
+    set_map_used(p, at + 1);
+    set_map_live(p, map_live(p) + 1);
+}
+
+/// Take the entry in slot `i` out of `p`, in place.
+unsafe fn map_take(p: *mut u8, i: usize) {
+    let used = map_used(p);
+    let live = map_live(p) - 1;
+    set_map_live(p, live);
+    if !map_indexed(map_room(p)) {
+        // The entries after it move down by one: what keeps insertion order
+        // meaning what it says.
+        std::ptr::copy(map_key(p, i + 1), map_key(p, i), 2 * (used - i - 1));
+        set_map_used(p, used - 1);
+        return;
+    }
+    let link = *map_link_word(p, i);
+    let after = (link >> 32) as u32;
+    let head = map_bucket(p, link as u32);
+    if *head == i as u32 {
+        *head = after;
+    } else {
+        let mut j = *head;
+        loop {
+            let w = map_link_word(p, j as usize);
+            let next = (*w >> 32) as u32;
+            if next == i as u32 {
+                *w = (*w & 0xFFFF_FFFF) | ((after as u64) << 32);
+                break;
+            }
+            j = next;
+        }
+    }
+    *map_link_word(p, i) = (link & 0xFFFF_FFFF) | ((MAP_HOLE as u64) << 32);
+    *map_key(p, i) = 0;
+    *map_value(p, i) = 0;
+    let holes = used - live;
+    if holes > MAP_SMALL && holes > live {
+        // Close up in place, keeping each entry's hash, and relink.
+        let mut n = 0;
+        for j in 0..used {
+            if (*map_link_word(p, j) >> 32) as u32 == MAP_HOLE {
+                continue;
+            }
+            *map_key(p, n) = *map_key(p, j);
+            *map_value(p, n) = *map_value(p, j);
+            *map_link_word(p, n) = *map_link_word(p, j);
+            n += 1;
+        }
+        set_map_used(p, n);
+        map_relink(p, None);
+    }
+}
+
+/// Whether a map of the element kinds `aux` packs holds references, which a
+/// write into an old one must tell the collector about.
+fn map_holds_refs(aux: u32) -> bool {
+    (aux & 0xFF) as u8 == kind::REF || ((aux >> 8) & 0xFF) as u8 == kind::REF
+}
+
 /// Build a map from `argc` staged words — alternating keys and values. A
 /// repeated key keeps its original position, exactly as the VM does, so
 /// insertion order stays well defined.
@@ -1350,16 +1671,11 @@ pub extern "C" fn kite_rt_map_new(key_kind: u64, val_kind: u64, argc: u64) -> u6
     let n = root_stage(argc, |i| {
         (if i % 2 == 0 { key_kind } else { val_kind }) as u8 == kind::REF
     });
-    // Allocate room for every staged pair; duplicates leave the tail unused,
-    // and the header's length is what says how much of it is real.
-    let p = alloc(HEADER + 16 * pairs);
-    unroot(n);
+    // Room for every staged pair; duplicates leave some unused.
     let aux = (key_kind as u32 & 0xFF) | ((val_kind as u32 & 0xFF) << 8);
-    unsafe {
-        *(p as *mut u64) = word0(obj::MAP, aux);
-        let len = insert_staged(p, 0, pairs, key_kind as u8);
-        *(p as *mut u64).add(1) = len as u64;
-    }
+    let p = map_alloc(aux, map_room_for(pairs));
+    unroot(n);
+    unsafe { insert_staged(p, pairs, key_kind as u8) };
     p as u64
 }
 
@@ -1373,7 +1689,6 @@ pub extern "C" fn kite_rt_map_extend(m: u64, argc: u64) -> u64 {
     let pairs = argc / 2;
     let mut m = m;
     unsafe {
-        let len = obj_word1(m as *const u8) as usize;
         let aux = obj_aux(m as *const u8);
         let key_kind = (aux & 0xFF) as u8;
         let val_kind = ((aux >> 8) & 0xFF) as u8;
@@ -1381,49 +1696,158 @@ pub extern "C" fn kite_rt_map_extend(m: u64, argc: u64) -> u64 {
         let n = root_stage(argc, |i| {
             (if i % 2 == 0 { key_kind } else { val_kind }) == kind::REF
         });
-        let p = alloc(HEADER + 16 * (len + pairs));
+        let p = map_alloc(aux, map_room_for(map_live(m as *const u8) + pairs));
         unroot(n + 1);
-        std::ptr::copy_nonoverlapping(m as *const u8, p, HEADER + 16 * len);
-        let len = insert_staged(p, len, pairs, key_kind);
-        *(p as *mut u64).add(1) = len as u64;
+        map_fill_from(p, m as *const u8);
+        insert_staged(p, pairs, key_kind);
         p as u64
     }
 }
 
-/// Add `pairs` staged key-value pairs to the `len` entries at `p`, which has
-/// room for all of them, and answer the new length. A key already present
-/// keeps its position and takes the later value — the VM's rule for a
-/// literal that names a key twice.
-unsafe fn insert_staged(p: *mut u8, mut len: usize, pairs: usize, key_kind: u8) -> usize {
+/// Add `pairs` staged key-value pairs to the map at `p`, which has room for
+/// all of them. A key already present keeps its position and takes the later
+/// value — the VM's rule for a literal that names a key twice. `p` is the
+/// newest object there is, so no barrier is needed: if it is old, it was
+/// born remembered (see [`alloc`]).
+unsafe fn insert_staged(p: *mut u8, pairs: usize, key_kind: u8) {
     for e in 0..pairs {
         let k = *stage_slot(2 * e);
         let v = *stage_slot(2 * e + 1);
-        match find_key(p, len, k, key_kind) {
-            Some(i) => *slot(p, 2 * i + 1) = v,
-            None => {
-                *slot(p, 2 * len) = k;
-                *slot(p, 2 * len + 1) = v;
-                len += 1;
+        match map_find(p, k, key_kind) {
+            (Some(i), _, _) => *map_value(p, i) = v,
+            (None, last, h) => map_push(p, k, v, h, last),
+        }
+    }
+}
+
+/// Record that struct `id` has a `var` field, so a map hashes it by its type
+/// alone: the field can change while the struct is a key.
+#[no_mangle]
+pub extern "C" fn kite_rt_register_mutable_struct(id: u64) {
+    let rt = rt();
+    ensure_len(&mut rt.shapes.mutable_structs, id as usize + 1);
+    rt.shapes.mutable_structs[id as usize] = true;
+}
+
+/// A key's hash, from its content alone and never an address — the objects
+/// it is made of move — and equal for keys `==` calls equal.
+///
+/// The VM's rules: `-0.0` hashes as `0.0`, an error by its message, and a
+/// struct with a `var` field by its type, since the field can change while
+/// the struct is a key. All of the key is looked at, in an order equal keys
+/// share, with a worklist rather than recursion: keys that differ only deep
+/// inside would otherwise share a bucket (see the VM's `map` module). The
+/// walk ends because a key is cyclic only through a `var` field, which is not
+/// looked inside. Allocates nothing on the Kite heap.
+fn key_hash(key: u64, kk: u8) -> u32 {
+    let mut h = KeyHasher(0);
+    let mut work: Vec<(u64, u8)> = Vec::new();
+    let mut next = Some((key, kk));
+    while let Some((v, k)) = next.take().or_else(|| work.pop()) {
+        match k {
+            kind::FLOAT => {
+                h.word(if f64::from_bits(v) == 0.0 { 0 } else { v });
+                continue;
+            }
+            kind::REF => {}
+            _ => {
+                h.word(v);
+                continue;
+            }
+        }
+        if v == 0 {
+            h.word(1);
+            continue;
+        }
+        unsafe {
+            let p = v as *const u8;
+            let aux = obj_aux(p);
+            // Children go on in reverse so they are hashed in order.
+            let fields = |kinds: &[u8], work: &mut Vec<(u64, u8)>| {
+                for (i, k) in kinds.iter().enumerate().rev() {
+                    work.push((*slot(p, i), *k));
+                }
+            };
+            match obj_kind(p) {
+                obj::STR => h.bytes(str_bytes(v)),
+                obj::STRUCT => {
+                    h.word(5);
+                    h.word(aux as u64);
+                    let shapes = &rt().shapes;
+                    if !shapes.mutable_structs.get(aux as usize).copied().unwrap_or(false) {
+                        fields(&shapes.structs[aux as usize], &mut work);
+                    }
+                }
+                obj::ENUM => {
+                    h.word(6);
+                    h.word(aux as u64);
+                    h.word(obj_word1(p));
+                    let variant = (obj_word1(p) & 0xFFFF_FFFF) as usize;
+                    fields(&rt().shapes.enums[aux as usize][variant], &mut work);
+                }
+                obj::TUPLE => {
+                    h.word(7);
+                    fields(&rt().shapes.tuples[aux as usize], &mut work);
+                }
+                obj::SLICE => {
+                    h.word(8);
+                    h.word(slice_len(p) as u64);
+                    for i in (0..slice_len(p)).rev() {
+                        work.push((*slot(p, i), aux as u8));
+                    }
+                }
+                obj::MAP => {
+                    h.word(9);
+                    h.word(map_live(p) as u64);
+                    let (kk, vk) = ((aux & 0xFF) as u8, ((aux >> 8) & 0xFF) as u8);
+                    for i in map_entries(p).rev() {
+                        work.push((*map_value(p, i), vk));
+                        work.push((*map_key(p, i), kk));
+                    }
+                }
+                obj::PAIR => {
+                    work.push((*slot(p, 1), kind::REF));
+                    work.push((*slot(p, 0), aux as u8));
+                }
+                // Two errors are equal when their messages are.
+                obj::ERR => work.push((*slot(p, 0), kind::REF)),
+                obj::BOX => work.push((*slot(p, 0), aux as u8)),
+                _ => h.word(4),
             }
         }
     }
-    len
+    h.finish() as u32
 }
 
-/// The position of the entry among the first `len` at `p` whose key is
-/// `key`, scanning in order.
-///
-/// Every map operation is this scan, so a key that is a number is compared
-/// as one here, in a loop the compiler can see through, rather than through
-/// a call to [`value_eq`] per entry that asks the key's kind each time.
-unsafe fn find_key(p: *const u8, len: usize, key: u64, key_kind: u8) -> Option<usize> {
-    match key_kind {
-        kind::REF => (0..len).find(|&i| value_eq(*slot(p, 2 * i), key, kind::REF)),
-        kind::FLOAT => {
-            let key = f64::from_bits(key);
-            (0..len).find(|&i| f64::from_bits(*slot(p, 2 * i)) == key)
+/// The VM's hasher: FxHash's step with a finishing mix, so the low bits a
+/// bucket is chosen by depend on all of the input.
+struct KeyHasher(u64);
+
+impl KeyHasher {
+    #[inline]
+    fn word(&mut self, w: u64) {
+        self.0 = (self.0.rotate_left(5) ^ w).wrapping_mul(0x51_7c_c1_b7_27_22_0a_95);
+    }
+
+    fn bytes(&mut self, b: &[u8]) {
+        self.word(b.len() as u64);
+        let mut chunks = b.chunks_exact(8);
+        for c in &mut chunks {
+            self.word(u64::from_le_bytes(c.try_into().unwrap()));
         }
-        _ => (0..len).find(|&i| *slot(p, 2 * i) == key),
+        let mut tail = [0u8; 8];
+        let rest = chunks.remainder();
+        tail[..rest.len()].copy_from_slice(rest);
+        self.word(u64::from_le_bytes(tail));
+    }
+
+    fn finish(&self) -> u64 {
+        let mut x = self.0;
+        x ^= x >> 33;
+        x = x.wrapping_mul(0xff51_afd7_ed55_8ccd);
+        x ^= x >> 33;
+        x = x.wrapping_mul(0xc4ce_b9fe_1a85_ec53);
+        x ^ (x >> 33)
     }
 }
 
@@ -1746,17 +2170,16 @@ pub extern "C" fn kite_rt_slice_get(s: u64, index: i64, wrap_kind: i64) -> u64 {
 
 #[no_mangle]
 pub extern "C" fn kite_rt_map_len(m: u64) -> i64 {
-    unsafe { obj_word1(m as *const u8) as i64 }
+    unsafe { map_live(m as *const u8) as i64 }
 }
 
 #[no_mangle]
 pub extern "C" fn kite_rt_map_get(m: u64, key: u64, key_kind: u64, wrap_kind: i64) -> u64 {
     unsafe {
         let p = m as *mut u8;
-        let len = obj_word1(p) as usize;
-        match find_key(p, len, key, key_kind as u8) {
+        match map_find(p, key, key_kind as u8).0 {
             Some(i) => {
-                let v = *slot(p, 2 * i + 1);
+                let v = *map_value(p, i);
                 if wrap_kind < 0 {
                     v
                 } else {
@@ -1768,71 +2191,83 @@ pub extern "C" fn kite_rt_map_get(m: u64, key: u64, key_kind: u64, wrap_kind: i6
     }
 }
 
-/// Copy the map and write through the copy; an existing key keeps its
-/// position, a new one is appended — the VM's rule, verbatim.
+/// `m[key] = value`, answering the map the local keeps: an existing key
+/// keeps its position and its stored key, a new one is appended — the VM's
+/// rule, verbatim.
+///
+/// With `owned` — the code generator's word that nothing but the local can
+/// see this map, as for [`kite_rt_slice_push`] — and room to spare, the write
+/// goes straight in. Otherwise it goes into a copy, with twice the room when
+/// the map was full, which the local then owns.
 #[no_mangle]
-pub extern "C" fn kite_rt_map_set(m: u64, key: u64, key_kind: u64, value: u64) -> u64 {
-    let mut m = m;
-    let mut key = key;
-    let mut value = value;
+pub extern "C" fn kite_rt_map_set(m: u64, key: u64, key_kind: u64, value: u64, owned: u8) -> u64 {
+    let (mut m, mut key, mut value) = (m, key, value);
+    let kk = key_kind as u8;
     unsafe {
-        let len = obj_word1(m as *const u8) as usize;
         let aux = obj_aux(m as *const u8);
-        let key_ref = (aux & 0xFF) as u8 == kind::REF;
-        let val_ref = ((aux >> 8) & 0xFF) as u8 == kind::REF;
-        let mut n = 1;
-        root(&mut m);
-        if key_ref {
-            root(&mut key);
-            n += 1;
+        let (found, last, h) = map_find(m as *const u8, key, kk);
+        let (used, room) = (map_used(m as *const u8), map_room(m as *const u8));
+        let p = if owned != 0 && (found.is_some() || used < room) {
+            m as *mut u8
+        } else {
+            let grown = if found.is_none() && used == room {
+                map_room_for_growth(room)
+            } else {
+                room
+            };
+            let key_ref = (aux & 0xFF) as u8 == kind::REF;
+            let val_ref = ((aux >> 8) & 0xFF) as u8 == kind::REF;
+            root(&mut m);
+            if key_ref {
+                root(&mut key);
+            }
+            if val_ref {
+                root(&mut value);
+            }
+            let p = map_alloc(aux, grown);
+            unroot(1 + usize::from(key_ref) + usize::from(val_ref));
+            map_fill_from(p, m as *const u8);
+            p
+        };
+        // A copy into other room has moved the entries; look again. The
+        // hash is of the key's content, so it held across the collection the
+        // copy may have run, but the slot numbers do not.
+        let (found, last, h) = if map_room(p) == room { (found, last, h) } else { map_find(p, key, kk) };
+        match found {
+            Some(i) => *map_value(p, i) = value,
+            None => map_push(p, key, value, h, last),
         }
-        if val_ref {
-            root(&mut value);
-            n += 1;
+        if map_holds_refs(aux) {
+            remember(p);
         }
-        let p = alloc(HEADER + 16 * (len + 1));
-        unroot(n);
-        std::ptr::copy_nonoverlapping(m as *const u8, p, HEADER + 16 * len);
-        if let Some(i) = find_key(p, len, key, key_kind as u8) {
-            *slot(p, 2 * i + 1) = value;
-            return p as u64;
-        }
-        *(p as *mut u64).add(1) = (len + 1) as u64;
-        *slot(p, 2 * len) = key;
-        *slot(p, 2 * len + 1) = value;
         p as u64
     }
 }
 
-/// A map without the entry `key` names, or the same map when it names none.
-///
-/// A copy, as every map write here is: maps are copy-on-write values, so the
-/// caller rebinds. The entries after the removed one move down by one, which
-/// is what keeps insertion order meaning what it says.
+/// `m.remove(key)`, answering the map the local keeps: the map itself when
+/// the key is not there — a miss changes nothing, identity included — and
+/// otherwise the map without that entry, in place when `owned` says so (as
+/// for [`kite_rt_map_set`]) and in a copy when not. On a miss the code
+/// generator leaves its owned flag as it was, since the answer is the map
+/// the flag already described.
 #[no_mangle]
-pub extern "C" fn kite_rt_map_remove(m: u64, key: u64, key_kind: u64) -> u64 {
+pub extern "C" fn kite_rt_map_remove(m: u64, key: u64, key_kind: u64, owned: u8) -> u64 {
     let mut m = m;
     unsafe {
-        let len = obj_word1(m as *const u8) as usize;
-        let Some(found) = find_key(m as *const u8, len, key, key_kind as u8) else {
+        let Some(i) = map_find(m as *const u8, key, key_kind as u8).0 else {
             return m;
         };
-        root(&mut m);
-        let p = alloc(HEADER + 16 * (len - 1));
-        unroot(1);
-        // The header carries the two element kinds, so it is copied whole
-        // rather than rebuilt from parts this function would have to know.
-        std::ptr::copy_nonoverlapping(m as *const u8, p, HEADER);
-        *(p as *mut u64).add(1) = (len - 1) as u64;
-        let mut out = 0;
-        for i in 0..len {
-            if i == found {
-                continue;
-            }
-            *slot(p, 2 * out) = *slot(m as *const u8, 2 * i);
-            *slot(p, 2 * out + 1) = *slot(m as *const u8, 2 * i + 1);
-            out += 1;
-        }
+        let p = if owned != 0 {
+            m as *mut u8
+        } else {
+            root(&mut m);
+            let p = map_alloc(obj_aux(m as *const u8), map_room(m as *const u8));
+            unroot(1);
+            // Into the same room, so slot `i` is still the entry.
+            map_fill_from(p, m as *const u8);
+            p
+        };
+        map_take(p, i);
         p as u64
     }
 }
@@ -1842,14 +2277,15 @@ pub extern "C" fn kite_rt_map_remove(m: u64, key: u64, key_kind: u64) -> u64 {
 fn map_side(m: u64, values: bool) -> u64 {
     let mut m = m;
     unsafe {
-        let len = obj_word1(m as *const u8) as usize;
+        let len = map_live(m as *const u8);
         let aux = obj_aux(m as *const u8);
         let elem_kind = if values { (aux >> 8) & 0xFF } else { aux & 0xFF };
         root(&mut m);
         let p = slice_alloc(elem_kind, len, len);
         unroot(1);
-        for i in 0..len {
-            *slot(p, i) = *slot(m as *const u8, 2 * i + usize::from(values));
+        let m = m as *const u8;
+        for (n, i) in map_entries(m).enumerate() {
+            *slot(p, n) = if values { *map_value(m, i) } else { *map_key(m, i) };
         }
         p as u64
     }
@@ -2209,16 +2645,15 @@ fn render_ref(p: u64, out: &mut String) {
                 out.push(']');
             }
             obj::MAP => {
-                let len = obj_word1(o) as usize;
                 let (kk, vk) = ((aux & 0xFF) as u8, ((aux >> 8) & 0xFF) as u8);
                 out.push('{');
-                for i in 0..len {
-                    if i > 0 {
+                for (n, i) in map_entries(o).enumerate() {
+                    if n > 0 {
                         out.push_str(", ");
                     }
-                    render(*slot(o, 2 * i), kk, out);
+                    render(*map_key(o, i), kk, out);
                     out.push_str(": ");
-                    render(*slot(o, 2 * i + 1), vk, out);
+                    render(*map_value(o, i), vk, out);
                 }
                 out.push('}');
             }
@@ -2366,12 +2801,11 @@ fn ref_eq(a: u64, b: u64, work: &mut Vec<(u64, u64, u8)>) -> bool {
             obj::MAP => {
                 // In order: the VM compares the entry vectors directly, so two
                 // maps built in different orders are different values.
-                let (la, lb) = (obj_word1(pa) as usize, obj_word1(pb) as usize);
                 let (kk, vk) = ((obj_aux(pa) & 0xFF) as u8, ((obj_aux(pa) >> 8) & 0xFF) as u8);
-                la == lb
-                    && (0..la).all(|i| {
-                        pair(work, *slot(pa, 2 * i), *slot(pb, 2 * i), kk)
-                            && pair(work, *slot(pa, 2 * i + 1), *slot(pb, 2 * i + 1), vk)
+                map_live(pa) == map_live(pb)
+                    && map_entries(pa).zip(map_entries(pb)).all(|(i, j)| {
+                        pair(work, *map_key(pa, i), *map_key(pb, j), kk)
+                            && pair(work, *map_value(pa, i), *map_value(pb, j), vk)
                     })
             }
             obj::PAIR => {
@@ -3170,6 +3604,7 @@ pub fn jit_symbols() -> Vec<(&'static str, *const u8)> {
         kite_rt_register_extern,
         kite_rt_register_vtable_method,
         kite_rt_register_stack_maps,
+        kite_rt_register_mutable_struct,
         kite_rt_struct_new,
         kite_rt_enum_new,
         kite_rt_tuple_new,
@@ -3257,6 +3692,18 @@ pub fn jit_symbols() -> Vec<(&'static str, *const u8)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A full map grows to twice its room, always a power of two (an
+    /// indexed map's bucket mask needs one), and always to more than it had.
+    #[test]
+    fn a_full_map_doubles_its_room() {
+        assert_eq!(map_room_for_growth(0), MAP_SMALL);
+        assert_eq!(map_room_for_growth(5), 16);
+        assert_eq!(map_room_for_growth(MAP_SMALL), 16);
+        for k in 4..24 {
+            assert_eq!(map_room_for_growth(1 << k), 2 << k);
+        }
+    }
 
     /// A stack, laid out by hand, one word per slot. Addresses grow with the
     /// index, as a real stack's do towards its base.

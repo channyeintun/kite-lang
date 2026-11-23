@@ -143,6 +143,8 @@ backend writes it at run time: `"\(1e21)"` is `"1e+21"`.
 In a `match` pattern a constant is its value as well: `LIMIT => …` (or `limits.MAX_BODY =>
 …`) matches that one value, like the literal would, and is never a binding that takes
 everything. A constant of the wrong type for the scrutinee is `E0200` at the pattern.
+A constant named like a prelude function (`let max = 100`) shadows it in that module, as
+your own function would: `max + 1` is `101`, and `max(1, 2)` is `E0205`.
 
 ```kite
 let LIMIT = 10
@@ -923,6 +925,30 @@ fn main() {
 fn main() {
     defer 1 + 2 //~ E0200
     io.print("x")
+}
+```
+
+A deferred call's result goes nowhere, so a call that answers with an `error`, a
+`(T, error)` or the `Task` of one cannot be deferred: it runs after the function has
+returned, and its failure would reach nobody (`E0302`). Defer a function that handles
+the error itself:
+
+```kite fails
+fn close(name: str) -> error {
+    return errors.new("close failed")
+}
+
+fn close_or_log(name: str) {
+    let err = close(name)
+    if err != nil {
+        io.print(err.message())
+    }
+}
+
+fn main() {
+    defer close("a") //~ E0302
+    defer close_or_log("b")
+    io.print("working")
 }
 ```
 

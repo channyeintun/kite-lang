@@ -263,6 +263,26 @@ fn assigning_to_a_let_is_rejected_with_a_var_fix() {
     assert!(out.contains("var total = 0"), "{}", out);
 }
 
+/// `kitec fix` applies every fix it is shown, so a "make the binding mutable"
+/// that gives another error is a trap. A `let x: int` with no initialiser would
+/// become a `var` with none (E0110); a `let` a closure captures would become a
+/// captured `var` (E0211). Neither gets the fix, and one that does compile does.
+#[test]
+fn the_var_fix_is_offered_only_where_it_compiles() {
+    let c = body("  let b: int\n  b = 1\n  b = 2");
+    assert!(c.has("E0114"), "{}", c.render());
+    assert!(!c.render().contains("make the binding mutable"), "{}", c.render());
+    let c = body("  let xs = [1]\n  let f = || {\n    xs.push(2)\n  }\n  f()");
+    assert!(c.has("E0114"), "{}", c.render());
+    assert!(!c.render().contains("make the binding mutable"), "{}", c.render());
+    // The write outside the closure, the capture after it: still a captured var.
+    let c = body("  let n = 1\n  n = 2\n  let f = || {\n    io.print(n)\n  }\n  f()");
+    assert!(c.has("E0114"), "{}", c.render());
+    assert!(!c.render().contains("make the binding mutable"), "{}", c.render());
+    let c = body("  let f = || {\n    let ys = [1]\n    ys.push(2)\n  }\n  f()");
+    assert!(c.render().contains("help: make the binding mutable"), "{}", c.render());
+}
+
 #[test]
 fn assigning_to_a_var_is_accepted() {
     ok_body("  var total = 0\n  total = 1\n  total += 2");
@@ -1119,6 +1139,38 @@ fn a_bare_error_statement_is_one_diagnostic() {
     assert_eq!(c.codes(), vec!["E0117"], "{}", c.render());
 }
 
+/// An inert statement that can still trap, or run `show`, is refused like any
+/// other, and the note names `_ = …` as the way to keep it for that alone;
+/// one that can do neither is not offered it.
+#[test]
+fn an_inert_index_or_interpolation_is_offered_a_discard() {
+    let c = run("fn main() {\n  let xs = [1, 2, 3]\n  xs[5]\n  _ = xs[5]\n}\n");
+    assert_eq!(c.codes(), vec!["E0117"], "{}", c.render());
+    assert!(c.render().contains("an index in it can still trap"), "{}", c.render());
+    assert!(c.render().contains("write `_ = …`"), "{}", c.render());
+
+    let c = run("fn main() {\n  let n = 1\n  \"\\(n)\"\n}\n");
+    assert_eq!(c.codes(), vec!["E0117"], "{}", c.render());
+    assert!(c.render().contains("an interpolation in it runs `show`"), "{}", c.render());
+
+    let c = run("fn main() {\n  let xs = [1, 2, 3]\n  let n = 1\n  n + 1\n  xs[0..2]\n}\n");
+    assert_eq!(c.codes(), vec!["E0117", "E0117"], "{}", c.render());
+    assert!(!c.render().contains("_ = …"), "{}", c.render());
+}
+
+/// An inert arm of a `match` statement is not on a line of its own, so its
+/// note says nothing about lines, and the way to keep one that can trap is
+/// one an arm can hold: `_ = …` is a statement, so it takes braces. `()`
+/// says nothing happens, as `{}` does, and is left alone.
+#[test]
+fn an_inert_arm_is_told_what_an_arm_can_hold() {
+    let c = run("fn main() {\n  let n = 1\n  let xs = [1]\n  match n {\n    0 => -1,\n    1 => [n],\n    2 => xs[3],\n    3 => (),\n    _ => {},\n  }\n}\n");
+    assert_eq!(c.codes(), vec!["E0117", "E0117", "E0117"], "{}", c.render());
+    assert!(!c.render().contains("a line that begins"), "{}", c.render());
+    assert!(c.render().contains("an arm that does nothing is written `{}`"), "{}", c.render());
+    assert!(c.render().contains("write `{ _ = … }`"), "{}", c.render());
+}
+
 /// An exclusive range from a number to itself matches nothing, exactly as a
 /// reversed one does.
 #[test]
@@ -1142,6 +1194,37 @@ fn a_map_literal_giving_one_key_twice_warns() {
     assert_eq!(twice.len(), 1, "{}", c.render());
     assert!(!c.diags.has_errors(), "must be a warning:\n{}", c.render());
     assert!(c.render().contains("the key \"a\" is given twice"), "{}", c.render());
+}
+
+/// Every key the compiler can see is compared: a negated number, a float by
+/// value (so `0.0` and `-0.0` are one key, and a NaN is never a duplicate),
+/// a constant standing for one, and a tuple of them.
+#[test]
+fn a_map_literal_key_of_any_literal_form_given_twice_warns() {
+    let c = run("let NEG = -1\n\
+                 fn main() {\n  let a = {-1: 1, NEG: 2}\n  let b = {1.5: 1, 1.5: 2}\n\
+                 \x20 let z = {0.0: 1, -0.0: 2}\n  let t = {(1, \"x\"): 1, (1, \"x\"): 2}\n\
+                 \x20 let nan = 0.0 / 0.0\n  let d = {(1, -2.5): 1, (1, 2.5): 2, (-1, -2.5): 3}\n\
+                 \x20 io.print(a.len() + b.len() + z.len() + t.len() + d.len())\n  io.print(nan)\n}\n");
+    let twice: Vec<String> = c
+        .diags
+        .iter()
+        .filter(|d| d.code == Some(codes::E0112))
+        .map(|d| d.message.clone())
+        .collect();
+    assert_eq!(
+        twice,
+        vec![
+            "the key -1 is given twice",
+            "the key 1.5 is given twice",
+            "the key -0.0 is given twice",
+            "the key (1, \"x\") is given twice",
+        ],
+        "{}",
+        c.render()
+    );
+    assert!(!c.diags.has_errors(), "must be warnings:\n{}", c.render());
+    assert!(c.render().contains("`0.0` and `-0.0` are equal, so they are one key"), "{}", c.render());
 }
 
 /// A built-in type with no text form cannot be given an `impl`, so E0207's
@@ -2182,6 +2265,27 @@ fn a_result_where_a_written_tuple_is_wanted_says_what_to_write() {
         fn main() {\n  let p = g()\n  let (v, err) = p\n  if err != nil {\n    return\n  }\n  io.print(v)\n}\n");
 }
 
+/// The same difference inside another type printed the same twice:
+/// "expected `Task<(int, error)>`, found `Task<(int, error)>`". It names the
+/// difference there too, and says the type cannot be written.
+#[test]
+fn a_result_inside_a_written_type_says_what_differs() {
+    let c = run("async fn load(n: int) -> (int, error) {\n  return n, nil\n}\n\
+        async fn main() {\n  var tasks: [Task<(int, error)>] = []\n  tasks.push(load(1))\n\
+        \x20 for t in tasks {\n    let (n, err) = await t\n    if err == nil {\n      io.print(n)\n    }\n  }\n}\n");
+    assert_eq!(c.codes(), vec!["E0200"], "{}", c.render());
+    let text = c.render();
+    assert!(!text.contains("found `Task<(int, error)>`"), "{}", text);
+    assert!(
+        text.contains("expected `Task<(int, error)>` of a tuple, found one of the result of a fallible call"),
+        "{}",
+        text
+    );
+    ok("async fn load(n: int) -> (int, error) {\n  return n, nil\n}\n\
+        async fn main() {\n  var tasks = [load(1)]\n  tasks.push(load(2))\n\
+        \x20 for t in tasks {\n    let (n, err) = await t\n    if err == nil {\n      io.print(n)\n    }\n  }\n}\n");
+}
+
 /// A default method's body is checked once per block that takes it, so a
 /// mistake in it that is not about the implementing type was reported once
 /// per `impl`, by the resolver and by the checker alike. It is reported once.
@@ -2275,4 +2379,70 @@ fn self_names_the_blocks_type_in_a_literal_and_a_path() {
         fn main() {\n  io.print(1)\n}\n");
     assert_eq!(c.codes(), vec!["E0204"], "{}", c.render());
     assert!(c.render().contains("known only by the trait's methods"), "{}", c.render());
+}
+
+/// An E0302 or E0301 note names only fixes that compile where it is shown:
+/// `check` where the body answers with an error and not in `main`, the
+/// binding's own name, and the import `errors.wrap` needs. A value that
+/// could not be checked is one mistake, not a second E0302 at the write.
+#[test]
+fn error_notes_name_fixes_that_compile_here() {
+    let c = body(
+        "var e = errors.new(\"x\")\n  e = errors.new(\"y\")\n  if e != nil {\n    io.print(e.message())\n  }",
+    );
+    assert_eq!(c.codes(), vec!["E0302"], "{}", c.render());
+    let text = c.render();
+    assert!(!text.contains("check e"), "{}", text);
+    assert!(text.contains("`e = errors.wrap(e, \"…\")` after `use std/errors`"), "{}", text);
+
+    let c = body("let e = errors.new(\"x\")\n  io.print(1)");
+    let text = c.render();
+    assert!(text.contains("test `e != nil`") && !text.contains("`check"), "{}", text);
+
+    let c = run("fn f() -> (int, error) {\n  return 1, nil\n}\n\
+        fn g() -> error {\n  let (v, oops) = f()\n  io.print(v)\n  return nil\n}\n\
+        fn main() {\n  _ = g()\n}\n");
+    let text = c.render();
+    assert!(text.contains("write `check oops`"), "{}", text);
+    assert!(text.contains("to propagate, write `check oops` on its own line"), "{}", text);
+
+    let c = run("fn f() -> (int, error) {\n  return 1, nil\n}\n\
+        fn main() {\n  let (v, oops) = f()\n  io.print(v)\n}\n");
+    let text = c.render();
+    assert!(!text.contains("`check"), "{}", text);
+
+    let c = body(
+        "var e = errors.new(\"x\")\n  e = errors.wrap(e, \"y\")\n  if e != nil {\n    io.print(e.message())\n  }",
+    );
+    assert_eq!(c.codes(), vec!["E0111"], "{}", c.render());
+    // Nor is a copy handed to a call that could not be found left unread.
+    let c = body(
+        "var e = errors.new(\"x\")\n  let c = e\n  e = errors.wrap(c, \"y\")\n  if e != nil {\n    io.print(e.message())\n  }",
+    );
+    assert_eq!(c.codes(), vec!["E0111"], "{}", c.render());
+    let c = body("let c = errors.new(\"x\")\n  nowhere(c)");
+    assert_eq!(c.codes(), vec!["E0111"], "{}", c.render());
+}
+
+/// A diagnostic's message is one line. E0301 and E0111 quoted the source as
+/// written, so `r .` then `e` on the next line put a line break (and the
+/// indentation after it) inside the header.
+#[test]
+fn a_quoted_expression_is_on_one_line() {
+    let c = run(
+        "struct R {\n    e: error\n}\n\nfn main() {\n    let r = R{ e: nil }\n    io.print(r .\n        e.message())\n}\n",
+    );
+    let out = c.render();
+    let header = out.lines().next().unwrap_or("");
+    assert_eq!(header, "error[E0301]: `r.e` may be nil, so it has no message", "{}", out);
+    assert!(out.contains("`let e = r.e`"), "{}", out);
+    let c = run(
+        "enum Shape {\n    Dot\n}\n\nfn main() {\n    let s = Shape \t . \t Nope(1)\n    io.print(s)\n}\n",
+    );
+    let out = c.render();
+    assert!(out.contains("`Shape` has no variant `Nope`"), "{}", out);
+    assert_eq!(one_line("a  .\n   b(\"x\n  y\")  +  c"), "a.b(\"x   y\") + c");
+    // A comment between the parts went with the line break.
+    assert_eq!(one_line("r . // why\n    e"), "r.e");
+    assert_eq!(one_line("f(\"a // b\")"), "f(\"a // b\")");
 }

@@ -56,7 +56,9 @@ fn main() {
 
 Three things to read off it: `_` in the value slot of a `return` means *no value*
 (it is not a zero value); `check err` propagates; and `err` may be rebound in the
-same scope, which no other binding may be.
+same scope, which no other binding may be. Only the error slot of a pair, and only over
+an earlier `error`: `let x = 1` then `let (y, x) = (2, 3)` is `E0112`, and so is
+`let (a, a) = …` (or `for (k, k) in …`), which names one thing twice.
 
 `_` is only allowed beside an error that is not nil: `return _, nil` is `E0200`,
 because the caller would be allowed to read a value that does not exist. An error
@@ -223,8 +225,8 @@ aliasing, no lifetimes.
 | R3 | an Unchecked binding going out of scope is `E0302` — at the end of its block, on the path of every `return`, `check`, `break` or `continue` that leaves it behind, and at a write over it (`e = nil`, `e = other`, `e = g()`) |
 | R4 | on a path where `e == nil` is proved, `e` becomes Checked and `v` Clean — by `e == nil` or `!(e != nil)`, by either side of an `&&` that held, by either side of an `||` that failed, and past `check errors.wrap(…)`, nested or not. An error test crosses `&&` and `\|\|`, so `if err == nil && v > 0 { … }` and `if err != nil \|\| v < 0 { return }` both read `v` cleanly (an optional's narrowing does not) |
 | R5 | on a path where `e != nil`, `e` becomes Checked and `v` stays Tainted **permanently** |
-| R6 | a bare-statement call whose type is `error` or `(T, error)` is `E0302` — and so is the `Task` of one: an `async fn` answering with an error, called and never awaited |
-| R7 | an `error` or a whole `(T, error)` bound to one name — `let` or `var`, from a call, `await`, a value `if`, a tuple literal, or assigned later with `e = f()` — is **Unchecked**; only `nil` is not. A copy of another binding (`let e = err`) shares that binding's obligation: inspect either name |
+| R6 | a bare-statement call whose type is `error` or `(T, error)` is `E0302` — and so is the `Task` of one: an `async fn` answering with an error, called and never awaited — and so is a `defer` of any of them |
+| R7 | an `error` or a whole `(T, error)` bound to one name — `let` or `var`, from a call, `await`, a value `if`, a tuple literal, or assigned later with `e = f()` — is **Unchecked**; only `nil` is not. A copy of another binding (`let e = err`) shares that binding's obligation: inspect either name. A test inspects wherever it is written, the right operand of `&&` or `\|\|` included: `if verbose && e != nil { … }` meets `e`'s obligation even when `verbose` is false |
 
 R2 in practice:
 
@@ -403,12 +405,19 @@ no methods (`E0205`), so destructure where you bind.
 **What the analysis does not follow:** a failure stored into a struct field
 (`Held{ e: f() }`, `h.e = f()`), a map entry, or a slice element by index is
 handed on to that value, like an argument, and nothing reports it if the value
-is never read. `errs.push(f())` *is* followed: a slice of errors is a binding.
+is never read. So is a map literal of results, `{1: load(1)}`. `errs.push(f())`
+*is* followed: a slice of errors is a binding. A `for` walk over a slice of
+results counts as reading all of it, so a `break` or `return` out of the walk
+drops the failures of the elements not yet reached, with no report.
 
 **A tuple, slice or optional of results is watched the same way** — the
 shapes `task.both`, `task.all` and `task.timeout` answer with. Bound to one name it is Unchecked
 (`rs.len()` does not count as reading it); taking it apart, or walking it with
-`for`, hands each failure to the name it lands in. Both results of
+`for`, hands each failure to the name it lands in. `r.0` takes one element of a
+tuple and leaves the others owed — the tuple is settled once each has been taken,
+and taking it apart afterwards binds only the failures not yet taken —
+but `rs[0]` on a slice counts as reading the whole slice, since a slice cannot be
+followed element by element. Both results of
 `task.both` arrive together, so deal with both before any exit — a `check` on
 the first leaves the second behind:
 
@@ -450,6 +459,29 @@ async fn main() {
 }
 ```
 
+Testing a `task.timeout` result against `nil` only asks whether the work came in
+time. Where it did, what it gave is still unread: after `if r == nil { return }`,
+`r` is the `error` (or the pair) and has to be tested (or taken apart) in turn:
+
+```kite
+use std/task
+
+async fn save() -> error {
+    return errors.new("disk full")
+}
+
+async fn main() {
+    let r = await task.timeout(save(), 100)
+    if r == nil {
+        io.print("timed out")
+        return
+    }
+    if r != nil {
+        io.print(r.message())
+    }
+}
+```
+
 The same holds however the failure got into a single binding — `var e = f()`,
 `let e = await f()`, `let e = if c { f() } else { g() }`, `let (n, e) = (1,
 f())`: the binding has to be looked at. Only `nil` starts out Checked.
@@ -472,6 +504,27 @@ fn main() {
     }
 }
 ```
+
+A guard is a test, though. An arm whose pattern is `_` or a bare name is passed
+over only when its guard came out false, so the arms after it know what the
+guard proved, and the arm itself runs knowing it held:
+
+```kite
+fn touch() -> error {
+    return errors.new("no")
+}
+
+fn main() {
+    let e = touch()
+    match e {
+        x if x != nil => io.print(x.message()),
+        _ => io.print("fine"),
+    }
+}
+```
+
+A guard behind a pattern that can fail (`1 if e != nil`) may never run, so it
+proves nothing to the arms after it.
 
 Writing over a binding that still holds an unchecked failure drops that
 failure, so it is `E0302` at the write, whatever is written:
@@ -516,7 +569,8 @@ fn main() {
 ```
 
 Test it inside the body before the next write — `if e != nil { break }` — or
-keep the error inside the loop.
+keep the error inside the loop. A `for { }` is left only by `break`, so the retry
+loop `for { if err == nil { break } … err = attempt() }` needs nothing after it.
 
 ## `check`
 
@@ -1000,7 +1054,7 @@ always on. Verified: `kitec run --release` on a program whose only failure is an
 | code | `--explain` title | triggered by |
 |---|---|---|
 | `E0301` | value used before its error was checked | reading a Tainted value; also `.message()` on an error not proved non-nil |
-| `E0302` | error is never checked | Unchecked binding out of scope; `let (v, _) = f()`; bare-statement fallible call |
+| `E0302` | error is never checked | Unchecked binding out of scope; `let (v, _) = f()`; bare-statement fallible call; `defer` of one |
 | `E0303` | `check` outside a fallible function | `check` where the return type has no error component |
 | `E0200` | type mismatch | `return a, b` in a non-fallible function; a non-`Error` type in an error slot; `check` on a non-`error`; `io.print(err)` |
 | `E0203` | missing return value | `return (1, nil)` in a fallible function (*a fallible function returns two values*); a missing `return` (*not every path returns a value*) |

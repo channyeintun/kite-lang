@@ -17,7 +17,8 @@ The deltas that will catch you out, in the order you will hit them:
    exactly like any other module (§4).
 5. **A `use` path is looked for beside the importing module, then outward**:
    in its own directory first, then each enclosing one, stopping at the
-   package's root (the entry file's directory, or the dependency's own). The
+   package's root (the directory of the program's `kite.toml` — the entry
+   file's own directory when there is none — or the dependency's own). The
    nearest wins, so sibling directory modules reach each other. A path is a
    name, never written from the file: `use ../one/a` and `use ./a` are one
    `E0100` each, whose note gives the path to write (`use one/a`).
@@ -167,7 +168,10 @@ async fn main() {
 
 Note the shape of the type: `async fn fetch(id: int) -> (str, error)` produces
 `Task<(str, error)>`, and `await` on it yields the pair, which is then
-destructured. The taint analysis (`E0302`) still applies across the `await` —
+destructured. That type cannot be written, though: `(str, error)` written as a
+type is a plain tuple, not a result, so `var ts: [Task<(str, error)>] = []` refuses
+`ts.push(fetch(1))` (`E0200`). Let a value give the type instead — `var ts =
+[fetch(1)]`. The taint analysis (`E0302`) still applies across the `await` —
 and before it: a task whose result holds an error is watched like the error
 itself. Called as a bare statement, or bound and never awaited, it is `E0302`,
 since its body would run and fail with nobody to hear it. Await it, return it,
@@ -216,9 +220,9 @@ and needs `use std/task`.
 | Builtin | Arity | Meaning |
 |---|---|---|
 | `task.yield()` | 0 | Suspend and let another task run. `async` only, else `E0521`. |
-| `task.park()` | 0 | Declare there is nothing to wait for but another task finishing, so a poll loop is not mistaken for progress. |
+| `task.park()` | 0 | Declare there is nothing to wait for but another task finishing, so a poll loop is not mistaken for progress. `async` only, else `E0521`. |
 | `task.wake_at(ms)` | 1 | Ask the scheduler to resume no earlier than this absolute millisecond. |
-| `task.wait_host()` | 0 | Suspend until the host hands something back. |
+| `task.wait_host()` | 0 | Suspend until the host hands something back. `async` only, else `E0521`. |
 | `task.finished(t)` | 1 | `bool` — has the task produced a value? |
 | `task.get(t)` | 1 | `T` — the task's result slot, read without suspending. |
 | `time.now()` | 0 | `int` milliseconds. Virtual under the bytecode VM and the web glue. |
@@ -533,8 +537,11 @@ fn main() {
 A file at `src/a/x.kite` writing `use config` is asking for `src/a/config/` or
 `src/a/config.kite` first, then `src/config/` or `src/config.kite` — each
 enclosing directory in turn, nearest first, and **no further than the
-package's root**: the entry file's directory for the program (here `src/`),
-the dependency's own directory for a module inside a dependency. A directory
+package's root**: for the program, the nearest directory at or above the entry
+that holds a `kite.toml` (here `myapp/`), or the entry file's own directory
+when there is none; the dependency's own directory for a module inside a
+dependency. So a file checked or tested on its own finds what it finds when
+the program's `main.kite` is the entry. A directory
 module is measured from its own directory, so `src/ui/app.kite` writing `use
 config` finds `src/ui/config/` if there is one and `src/config/` beside `ui/`
 otherwise — which is how two sibling directory modules import each other. A
@@ -544,6 +551,12 @@ Whichever place it is found from, the module is where its source is: `use
 config` written in `src/ui/` and in `src/main.kite` reach the one module, with
 one set of types. The `E0400` diagnostic lists every place it tried, nearest
 first, which is the fastest way to see where it looked.
+
+A module's own `use`s walk out from where its source really is (a symbolic
+link followed), so the route that reached it never changes what they mean. And
+a module belongs to one package: a dependency vendored inside the program,
+reached both as `use d/inner` and as `use vend/d/inner`, is `E0404` at the
+second `use`, in either order.
 
 The one exception is the first segment: if it names a declared dependency, the
 path roots there instead (§5).
@@ -644,7 +657,8 @@ in the importing program with no diagnostic.
 ### A module is where its source is — except for `std`
 
 A module is identified by the file or directory it was loaded from, and named
-by its path within its package: `a/util` for `a/util.kite` beside the entry,
+by its path within its package — below the directory of its `kite.toml`, or of
+the entry file when there is none: `a/util` for `a/util.kite` there,
 `md/util` for `util.kite` inside a dependency called `md`. That is the name a
 diagnostic uses — ``private to module `a/util` ``. So `use util` inside `a/`
 and `use util` inside `b/` are two modules, each spelled `util` in the file
@@ -653,7 +667,9 @@ module whose `util` does not exist gets `E0400` rather than whichever `util`
 somebody else loaded first.
 
 `use dep/utils` and `use utils` are two different modules, and every segment is
-honoured when the files are found. Two spellings coexist in one file as long as
+honoured when the files are found — and matched exactly, case included, on
+every system: on macOS `use Util` beside `util.kite` is `E0400` ("is there,
+spelled differently"), as it is on Linux. Two spellings coexist in one file as long as
 one is aliased:
 
 ```kite ignore
@@ -751,7 +767,10 @@ Same for a user module: with `use m`, where `m` exports `one`, `m.on()` is
 ``cannot find `on` in module `m` `` with the caret on `on` and the note "a
 similar name is in `m`: `one`". And for the modules in scope without a `use`
 when the member is near one of their builtins: `io.prnt` is ``cannot find
-`prnt` in module `io` `` with the note naming `print`.
+`prnt` in module `io` `` with the note naming `print`. A misspelt *type* of an
+imported module is said the same way — `m.Pnt` where `m` has `Pt` is
+``cannot find `Pnt` in module `m` `` with the note "a similar type is in `m`:
+`Pt`" — as `E0204` in an annotation or a literal and `E0111` in a pattern.
 
 ### The other module codes
 
@@ -760,10 +779,10 @@ when the member is near one of their builtins: `io.prnt` is ``cannot find
 | `E0400` | Module not found. Lists every directory and `.kite` file it looked for, nearest first. Also used for `use std/<not-a-std-module>`, and then lists the whole standard library. |
 | `E0401` | The item is not `pub`, so it is visible only inside its own module. Applies to functions, types (in expressions, signatures and `impl` headers), traits (implementing one from outside), enum variants, struct fields, methods and associated functions — and to a `pub type` alias of a type that is not `pub`, refused where the alias is. |
 | `E0406` | An `impl` outside its type's module: an extension method, or an imported trait implemented for an imported type. |
-| `E0402` | Import cycle. The diagnostic prints the chain (`a → b`). Extract the shared part into a third module. |
+| `E0402` | Import cycle. The diagnostic prints the chain (`a → b`). Extract the shared part into a third module. A module that imports itself (`use ui` in a file of `ui/`) is "imports itself": delete the `use`. |
 | `E0403` | Reserved standard-library name (above). |
-| `E0404` | One module spelling two modules alike — give one an alias — or two packages of one name reached from two different places, or one file reached as two modules: a file of a directory module imported on its own (`use shape` inside `lib/`, or `use lib/shape` beside `use lib`). |
-| `E0405` | A `kite.toml` that does not read. Reported at the offending line; a build no longer treats a broken manifest as no manifest. |
+| `E0404` | One module spelling two modules alike — give one an alias — or two packages of one name reached from two different places, or one file reached as two modules: a file of a directory module imported on its own (`use shape` inside `lib/`, or `use lib/shape` beside `use lib`) — or one module reached as part of two packages. |
+| `E0405` | A `kite.toml` that does not read. Reported at the offending line; a build no longer treats a broken manifest as no manifest. It is the one error: the `use`s it leaves unresolvable are not reported as `E0400` too. |
 | `E0111` | A qualified name whose module this module never imported — **or** an unknown member of one it did, reported at the member (above). |
 
 **An unmarked field makes a `pub struct` opaque outside its module**
@@ -810,7 +829,8 @@ shortcut = "../shortcut"
   and a `tag` goes only with `git`.
 - `tag` and `version` are mutually exclusive: a tag pins, a version resolves.
 - Package cycles are an error: `kitec pkg` names the chain (`a -> b -> a`), a package that
-  names itself is one, and no lockfile is written.
+  names itself is one, and no lockfile is written. `kitec run`/`check`/`build`/`test`
+  refuse the same program with `E0402` at the manifest, naming the same chain.
 - Names — package and dependency alike — are identifiers: ASCII letters,
   digits and `_`, not starting with a digit, at most 64. The name is written in
   a `use`, so `kite-md` could never be imported, and it becomes a directory
@@ -833,6 +853,11 @@ declared dependency wins over a sibling directory of the same name.
 use markdown/render        // the `render` module inside the `markdown` package
 use markdown               // the package's own root module — its top-level .kite files
 ```
+
+A package with no `.kite` file directly in its directory has no root module:
+`use markdown` is then `E0400`, never a `markdown.kite` lying beside the
+package's directory (that file is not the package's, and the lockfile does not
+hash it).
 
 Verified end to end: with `markdown = { path = "../markdown" }` in
 `app/kite.toml`, a `render/` directory and a top-level `lib.kite` in the

@@ -1216,11 +1216,96 @@ fn constant_keys_are_collapsed_as_the_literal_is_compiled() {
             "fn main() {{\n  let k = \"s0\"\n  let m = {{{}}}\n  io.print(m.len())\n}}\n",
             entries.join(", ")
         ));
-        wasmprinter::print_bytes(&b.module.bytes).unwrap().matches("\n  (func ").count()
+        // Functions that take something: the pieces a long literal's constant
+        // chunks are built by take nothing, and how many there are depends on
+        // which chunks read a local, which is not what this is about.
+        wasmprinter::print_bytes(&b.module.bytes)
+            .unwrap()
+            .lines()
+            .filter(|l| l.starts_with("  (func ") && l.contains("(param"))
+            .count()
     };
     let distinct = functions("\"s5000\": 9");
     assert_eq!(functions("\"s0\": 9"), distinct);
     assert_eq!(functions("k: 9"), distinct + 1);
+}
+
+/// The size of every function body in `bytes`, in order.
+fn body_sizes(bytes: &[u8]) -> Vec<usize> {
+    let mut sizes = Vec::new();
+    for payload in wasmparser::Parser::new(0).parse_all(bytes) {
+        if let Ok(wasmparser::Payload::CodeSectionEntry(body)) = payload {
+            sizes.push(body.range().len());
+        }
+    }
+    sizes
+}
+
+/// No function holds more than one chunk of a long literal of constants,
+/// whatever the literal's length. Inline, a hundred and twenty thousand
+/// strings were one function V8 could not compile, and it aborted the process
+/// rather than refuse the module. Identical runs are one piece. A local in
+/// every chunk does not keep the chunk's constants inline: each local is
+/// stored in place, and the constants around it are pieces still.
+#[test]
+fn a_long_literal_of_constants_is_built_by_functions_of_bounded_size() {
+    let built = |n: usize, entries: usize, distinct: bool| {
+        let elems: Vec<String> = (0..n)
+            .map(|i| match i {
+                _ if distinct && i % 4_000 == 3 => "a".to_string(),
+                _ if distinct => format!("\"s{}\"", i),
+                _ => "\"same\"".to_string(),
+            })
+            .collect();
+        let entries: Vec<String> =
+            (0..entries).map(|i| format!("\"k{}\": \"v{}\"", i, i)).collect();
+        valid(&format!(
+            "fn main() {{\n  let a = \"local\"\n  let xs = [a, {}]\n  io.print(xs.len())\n\
+             \x20 let m = {{{}}}\n  io.print(m.len())\n}}\n",
+            elems.join(", "),
+            entries.join(", ")
+        ))
+    };
+    // Forty thousand strings, and a map of twenty thousand of each: well
+    // over a megabyte of code, and no function of it past one chunk's worth.
+    let long = built(40_000, 20_000, true);
+    let widest = body_sizes(&long.module.bytes).into_iter().max().unwrap_or(0);
+    assert!(long.size() > 1 << 20, "{} bytes", long.size());
+    assert!(widest < 128 << 10, "a function of {} bytes", widest);
+    // A chunk of one string, wherever it falls, is one piece.
+    let same = built(40_000, 1, false);
+    let distinct = built(40_000, 1, true);
+    assert!(same.size() * 3 < distinct.size(), "{} bytes against {}", same.size(), distinct.size());
+}
+
+/// A type no code can hold a value of is not declared, nor is a trait's
+/// dispatcher when nothing implements it, nor an import's signature when the
+/// import is not declared. A type that only another type holds still is, and
+/// a type a vtable names. Each of these used to be in every module.
+#[test]
+fn only_what_the_code_can_name_is_declared() {
+    let hello = "fn main() {\n  io.print(\"hi\")\n}\n";
+    let base = valid(hello).size();
+    let unused = "struct Unused {\n  a: int\n  b: [str]\n}\n\n\
+        enum Also {\n  One(Unused)\n  Two\n}\n\n\
+        trait Lonely {\n  fn alone(self) -> Also\n}\n\n";
+    assert_eq!(valid(&format!("{}{}", unused, hello)).size(), base);
+    // The import signatures are the types ahead of the `rec` group: one per
+    // function imported, where there were thirty-one.
+    let text = wasmprinter::print_bytes(&valid(hello).module.bytes).unwrap();
+    let ahead = text.lines().take_while(|l| !l.contains("(rec")).filter(|l| l.contains("(type (;"));
+    let imported = text.lines().filter(|l| l.contains("(import \"kite\"") && l.contains("(func"));
+    assert_eq!(ahead.count(), imported.count(), "{}", text);
+    // Held only through another type's field, and through a vtable.
+    let held = valid(
+        "struct Inner {\n  n: int\n}\n\nstruct Outer {\n  inner: [Inner]\n}\n\n\
+         trait Area {\n  fn area(self) -> int\n}\n\nstruct Sq {\n  s: int\n}\n\n\
+         impl Area for Sq {\n  fn area(self) -> int {\n    return self.s * self.s\n  }\n}\n\n\
+         fn total(xs: [dyn Area]) -> int {\n  var t = 0\n  for x in xs {\n    t = t + x.area()\n  }\n  return t\n}\n\n\
+         fn main() {\n  let o = Outer{ inner: [Inner{ n: 1 }] }\n  io.print(o.inner[0].n)\n\
+         \x20 io.print(total([Sq{ s: 3 }]))\n}\n",
+    );
+    assert!(held.size() > base);
 }
 
 /// A stack frame gets a name, which is the half of §16 the map cannot do.

@@ -101,12 +101,8 @@ pub fn resolve_preferring(
             .edges
             .insert(root.name.clone(), root.dependencies.iter().map(|d| d.name.clone()).collect());
         if let Some(chain) = find_cycle(&root.name, &solver.edges) {
-            return Err(format!(
-                "dependency cycle: {}\n  a package that needs itself, directly or through others, \
-                 has nothing to be resolved before it; extract the shared part into a package of \
-                 its own",
-                chain.join(" -> ")
-            ));
+            let (first, why) = cycle_message(&chain);
+            return Err(format!("{}\n  {}", first, why));
         }
         let mut out: Vec<Resolved> = solver
             .chosen
@@ -120,6 +116,16 @@ pub fn resolve_preferring(
     }
 }
 
+/// What a package cycle is reported as, by `kitec pkg` and by every command
+/// that compiles: the chain, and why it cannot be.
+pub(crate) fn cycle_message(chain: &[String]) -> (String, &'static str) {
+    (
+        format!("dependency cycle: {}", chain.join(" -> ")),
+        "a package that needs itself, directly or through others, has nothing to be resolved \
+         before it; extract the shared part into a package of its own",
+    )
+}
+
 /// A cycle reachable from `from`, as the chain of names that closes it
 /// (`a -> b -> a`), or `None` if the graph below `from` is acyclic.
 ///
@@ -128,7 +134,10 @@ pub fn resolve_preferring(
 /// is built, and a cycle among versions an older candidate would not have had
 /// is reported rather than backtracked away: choosing between a cycle and a
 /// different version of a package is the manifest author's call.
-fn find_cycle(from: &str, edges: &BTreeMap<String, Vec<String>>) -> Option<Vec<String>> {
+pub(crate) fn find_cycle(
+    from: &str,
+    edges: &BTreeMap<String, Vec<String>>,
+) -> Option<Vec<String>> {
     fn walk<'a>(
         node: &'a str,
         edges: &'a BTreeMap<String, Vec<String>>,

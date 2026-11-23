@@ -1117,6 +1117,47 @@ fn main() {
 "#,
     ),
     (
+        // A `for cond` narrows its body where the condition held, and what
+        // follows a loop with no `break` where it failed.
+        "for-condition-narrows",
+        r#"fn f(n: int) -> error {
+    if n > 2 {
+        return errors.new("stop at \(n)")
+    }
+    return nil
+}
+
+fn next(n: int) -> Option<int> {
+    if n > 30 {
+        return nil
+    }
+    return n * 2
+}
+
+fn main() {
+    var n = 0
+    var e = f(n)
+    for e == nil {
+        n += 1
+        e = f(n)
+    }
+    io.print(e.message())
+    var o: Option<int> = 1
+    var total = 0
+    for o != nil {
+        total += o
+        o = next(o)
+    }
+    io.print(total)
+    var p: Option<str> = nil
+    for p == nil {
+        p = "found"
+    }
+    io.print(p + "!")
+}
+"#,
+    ),
+    (
         "interpolation",
         "fn main() {\n  let name = \"world\"\n  let n = 42\n  let pi = 2.5\n  let ok = true\n\
          \x20 io.print(\"hello, \\(name)!\")\n\
@@ -2365,6 +2406,290 @@ fn main() {
         nil => io.print("missing"),
         v => io.print(v),
     }
+}
+"#,
+    ),    // A map is its entries in insertion order with a hash index beside them
+    // past a few entries, and nothing the index does may show: every key
+    // kind `==` distinguishes, removals (which leave holes while indexed, and
+    // close up when the holes outnumber the entries), re-inserts, iteration
+    // after each, identity, a walk that changes the map, and a struct key
+    // whose `var` field changes after it is stored — still found by what it
+    // is now, and of two equal keys the earlier still wins.
+    (
+        "maps-are-indexed-and-keep-their-order",
+        r#"use std/errors
+
+struct P {
+    x: int
+    y: int
+}
+
+struct Cell {
+    var n: int
+}
+
+enum Shape {
+    Dot
+    Circle(r: int)
+    Rect(w: int, h: str)
+}
+
+fn show_int(m: { int: int }) -> str {
+    var out = ""
+    for (k, v) in m {
+        out = out + "\(k)=\(v) "
+    }
+    return out
+}
+
+fn ints() {
+    var m: { int: int } = { }
+    for i in 0..40 {
+        m[i * 7 % 41] = i
+    }
+    io.print(show_int(m))
+    for i in 0..40 {
+        if i % 3 == 0 {
+            m.remove(i * 7 % 41)
+        }
+    }
+    io.print(show_int(m))
+    for i in 0..40 {
+        m[i * 7 % 41] = i * 100
+    }
+    io.print(show_int(m))
+    var misses = 0
+    for i in 100..200 {
+        if m[i] == nil {
+            misses += 1
+        }
+    }
+    io.print("misses \(misses) len \(m.len())")
+    // Remove everything, then build again.
+    for k in m.keys() {
+        m.remove(k)
+    }
+    io.print("emptied \(m.len()) [\(show_int(m))]")
+    for i in 0..20 {
+        m[20 - i] = i
+    }
+    io.print(show_int(m))
+}
+
+fn floats() {
+    var m: { float: int } = { }
+    let nan = 0.0 / 0.0
+    for i in 0..30 {
+        m[i as float / 4.0] = i
+    }
+    m[nan] = 1
+    m[nan] = 2
+    m[-0.0] = 99
+    m[0.0 - 1.5] = 7
+    io.print("\(m.len()) \(or_else(m[0.0], -1)) \(or_else(m[-0.0], -1)) \(or_else(m[nan], -1))")
+    m.remove(-0.0)
+    m.remove(nan)
+    io.print("\(m.len()) \(or_else(m[0.0], -1))")
+    for (k, v) in m {
+        io.print("  \(k) \(v)")
+    }
+}
+
+fn strs() {
+    var m: { str: int } = { }
+    for i in 0..50 {
+        m["k\(i % 37)é"] = i
+    }
+    m.remove("k3é")
+    m.remove("k4é")
+    m["k3é"] = 333
+    var s = ""
+    for (k, v) in m {
+        s = s + "\(k):\(v),"
+    }
+    io.print(s)
+    io.print("\(or_else(m["k10é"], -1)) \(or_else(m["nope"], -1)) \(m.len())")
+}
+
+fn bools() {
+    var m: { bool: str } = { true: "t" }
+    m[false] = "f"
+    m[true] = "T"
+    m.remove(false)
+    m[false] = "F"
+    for (k, v) in m {
+        io.print("\(k) \(v)")
+    }
+}
+
+fn structs() {
+    var m: { P: int } = { }
+    for i in 0..30 {
+        m[P{ x: i % 6, y: i / 6 }] = i
+    }
+    m[P{ x: 2, y: 2 }] = 1000
+    m.remove(P{ x: 0, y: 0 })
+    var s = 0
+    for (k, v) in m {
+        s = s + k.x * 1000 + k.y * 10 + v
+    }
+    io.print("structs \(m.len()) \(s) \(or_else(m[P{ x: 2, y: 2 }], -1)) \(or_else(m[P{ x: 9, y: 9 }], -1))")
+}
+
+fn mutable() {
+    // A key that changes after it is stored: a lookup by what it is now
+    // finds it, and of two equal keys the earlier wins.
+    var cells: [Cell] = []
+    var m: { Cell: int } = { }
+    for i in 0..20 {
+        let c = Cell{ n: i }
+        cells.push(c)
+        m[c] = i
+    }
+    var c5 = cells[5]
+    c5.n = 105
+    var c9 = cells[9]
+    c9.n = 105
+    io.print("mutable \(or_else(m[Cell{ n: 105 }], -1)) \(or_else(m[Cell{ n: 5 }], -1)) \(m.len())")
+    m[Cell{ n: 105 }] = 7
+    m.remove(Cell{ n: 105 })
+    io.print("after \(or_else(m[Cell{ n: 105 }], -1)) \(m.len())")
+    var t = ""
+    for (k, v) in m {
+        t = t + "\(k.n):\(v) "
+    }
+    io.print(t)
+}
+
+fn enums() {
+    var m: { Shape: int } = { }
+    m[Dot] = 1
+    for i in 0..20 {
+        m[Circle(r: i)] = i
+        m[Rect(w: i, h: "h\(i % 3)")] = 100 + i
+    }
+    m.remove(Circle(r: 4))
+    m[Dot] = 2
+    io.print("enums \(m.len()) \(or_else(m[Dot], -1)) \(or_else(m[Rect(w: 5, h: "h2")], -1)) \(or_else(m[Circle(r: 4)], -1))")
+}
+
+fn tuples() {
+    var m: { (int, str): int } = { }
+    for i in 0..30 {
+        m[(i % 5, "s\(i % 7)")] = i
+    }
+    m.remove((1, "s1"))
+    var s = ""
+    for (k, v) in m {
+        s = s + "\(k.0)\(k.1)=\(v) "
+    }
+    io.print(s)
+}
+
+fn slices() {
+    var m: { [int]: int } = { }
+    var key: [int] = []
+    for i in 0..20 {
+        key.push(i % 4)
+        m[key] = i
+    }
+    m[[0, 1, 2]] = 99
+    m.remove([0])
+    io.print("slices \(m.len()) \(or_else(m[[0, 1, 2]], -1)) \(or_else(m[[0]], -1))")
+}
+
+fn optionals() {
+    var m: { Option<int>: int } = { }
+    for i in 0..20 {
+        m[i] = i
+    }
+    m[nil] = -5
+    m.remove(3)
+    let none: Option<int> = nil
+    io.print("optionals \(m.len()) \(or_else(m[none], 0)) \(or_else(m[7], 0)) \(or_else(m[3], 0))")
+}
+
+fn maps() {
+    var m: { { str: int }: int } = { }
+    for i in 0..20 {
+        var inner: { str: int } = { }
+        for j in 0..i {
+            inner["x\(j)"] = j
+        }
+        m[inner] = i
+    }
+    var probe: { str: int } = { }
+    for j in 0..12 {
+        probe["x\(j)"] = j
+    }
+    io.print("maps \(m.len()) \(or_else(m[probe], -1))")
+}
+
+fn identity() {
+    var m: { int: int } = { }
+    for i in 0..30 {
+        m[i] = i
+    }
+    let before = m
+    m.remove(1000)
+    io.print("miss keeps identity: \(ptr.same(before, m))")
+    m[5] = 50
+    io.print("write after sharing: \(ptr.same(before, m)) \(or_else(before[5], -1)) \(or_else(m[5], -1))")
+    let again = m
+    m.remove(6)
+    io.print("remove after sharing: \(ptr.same(again, m)) \(again.len()) \(m.len())")
+    io.print("equal: \(before == m) \(m == m)")
+}
+
+fn literals() {
+    let (three, one) = (3, 1)
+    let m = { three: "c", one: "a", 3: "C", 2: "b", 1: "A" }
+    var s = ""
+    for (k, v) in m {
+        s = s + "\(k)\(v)"
+    }
+    io.print(s)
+}
+
+fn walk_and_change() {
+    var m: { int: int } = { }
+    for i in 0..20 {
+        m[i] = i
+    }
+    for (k, v) in m {
+        if k % 2 == 0 {
+            m.remove(k + 1)
+            m[k + 100] = v
+        }
+    }
+    io.print(show_int(m))
+}
+
+fn errs() {
+    var m: { error: int } = { }
+    for i in 0..30 {
+        m[errors.new("e\(i % 12)")] = i
+    }
+    m.remove(errors.new("e3"))
+    io.print("errors \(m.len()) \(or_else(m[errors.new("e5")], -1)) \(or_else(m[errors.new("e3")], -1))")
+}
+
+fn main() {
+    ints()
+    errs()
+    floats()
+    strs()
+    bools()
+    structs()
+    mutable()
+    enums()
+    tuples()
+    slices()
+    optionals()
+    maps()
+    identity()
+    literals()
+    walk_and_change()
 }
 "#,
     ),
@@ -3987,13 +4312,15 @@ fn run_on_native_with(name: &str, src: &str, config: kite_codegen_clif::RunConfi
     (String::from_utf8(out).expect("output is valid UTF-8"), stats.minor_collections)
 }
 
-/// The slice programs, natively, under a collector made to run constantly.
+/// The slice and map programs, natively, under a collector made to run
+/// constantly.
 ///
 /// A slice written in place is the collector's business: once it has been
 /// promoted, a young element written into it is reachable only through the
 /// write barrier, and a slice grown past the nursery is born in the old
 /// generation. The default nursery of a megabyte never fills for these
-/// programs, so they run here too with one of a page. The string program is
+/// programs, so they run here too with one of a page. A map is written in
+/// place the same way, and its index moves with it. The string program is
 /// here because a string's character count lives in its header, which must
 /// move with it.
 #[test]
@@ -4006,7 +4333,12 @@ fn slices_agree_natively_with_a_page_of_nursery() {
         return;
     }
     let mut collections = 0;
-    for name in ["slices-are-values", "slices-grow-in-place-natively", "strings-index-by-character"] {
+    for name in [
+        "slices-are-values",
+        "slices-grow-in-place-natively",
+        "strings-index-by-character",
+        "maps-are-indexed-and-keep-their-order",
+    ] {
         let (_, src) = WASM_TARGET
             .iter()
             .chain(NATIVE_TARGET)
@@ -4143,6 +4475,42 @@ fn a_literal_past_either_frame_limit_compiles() {
     assert_eq!(vm, "20000 s19999\n");
     if node_available() {
         let dir = std::env::temp_dir().join(format!("kite-wide-literal-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("create work directory");
+        let wasm = run_on_wasm(name, &src, &dir);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(wasm, vm, "wasm");
+    }
+}
+
+/// A literal of a hundred and twenty thousand strings runs under V8 as it does
+/// on the VM. Written inline it was one function of 1.9 MB, which the
+/// validator accepts and V8 cannot compile: the engine aborted the process
+/// ("a single code object needs more than half of the code space"). A chunk of
+/// constants is a function of its own now (see the Wasm backend's `pieces`),
+/// and a local is stored in place: one in every chunk, as here, once kept all
+/// the constants inline and aborted V8 just the same. The names cycle through
+/// five, so the chunks are not all one piece; the map's chunks are pieces too.
+/// The native backend is left out: it is not what this is about, and it takes
+/// ten seconds to compile the literal in a debug build.
+#[test]
+fn a_literal_of_strings_too_long_for_one_v8_function_runs() {
+    let names = ["ant", "bee", "cat", "dog", "eel"];
+    let elems: Vec<String> = (1..120_000)
+        .map(|i| if i % 4_000 == 0 { "first".to_string() } else { format!("\"{}\"", names[i % 5]) })
+        .collect();
+    let entries: Vec<String> = (0..5_000).map(|i| format!("\"k{}\": \"v{}\"", i, i)).collect();
+    let src = format!(
+        "fn main() {{\n  let first = \"local\"\n  let xs = [first, {}]\n\
+         \x20 io.print(\"\\(xs.len()) \\(xs[0]) \\(xs[1]) \\(xs[4096]) \\(xs[8000]) \\(xs[119999])\")\n\
+         \x20 let m = {{{}}}\n  io.print(\"\\(m.len()) \\(m.keys()[4999]) \\(m.values()[4096])\")\n}}\n",
+        elems.join(", "),
+        entries.join(", ")
+    );
+    let name = "a-literal-too-long-for-one-v8-function";
+    let vm = run_on_vm(name, &src);
+    assert_eq!(vm, "120000 local bee bee local eel\n5000 k4999 v4096\n");
+    if node_available() {
+        let dir = std::env::temp_dir().join(format!("kite-v8-literal-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("create work directory");
         let wasm = run_on_wasm(name, &src, &dir);
         let _ = std::fs::remove_dir_all(&dir);
@@ -5019,6 +5387,83 @@ const EXPECTED: &[(&str, &str, &str)] = &[
          \x20 let s = Rect(h: n(1), w: n(2))\n\
          \x20 match s {\n    Rect(w, h) => io.print(\"\\(w)x\\(h)\"),\n    Dot => io.print(\"dot\"),\n  }\n}\n",
         "base\n1 2 base\nclosure\nn 5\nn 6\n6 5\nlater 9\nlater 8\n8 9\nbase\nl\nb\na\nl\nn 1\nn 2\n2x1\n",
+    ),
+    (
+        // §5.3: the fields `..base` supplies are read before any written
+        // field runs. A struct is a reference, so a written field whose call
+        // changed the base through a `var` parameter leaked into the copy:
+        // both lines printed `99 7 99`, whichever field was declared first.
+        "base-fields-are-read-before-the-written-ones-run",
+        "struct Q {\n  var a: int\n  b: int\n}\n\
+         struct P {\n  b: int\n  var a: int\n}\n\
+         fn bump(var q: Q, s: str) -> int {\n  io.print(s)\n  q.a = 99\n  return 7\n}\n\
+         fn bump_p(var p: P) -> int {\n  io.print(\"bump p\")\n  p.a = 99\n  return 7\n}\n\
+         fn pick(q: Q) -> Q {\n  io.print(\"base\")\n  return q\n}\n\
+         fn main() {\n  var q = Q{ a: 1, b: 2 }\n  let r = Q{ ..pick(q), b: bump(q, \"b\") }\n\
+         \x20 io.print(\"\\(r.a) \\(r.b) \\(q.a)\")\n\
+         \x20 var p = P{ b: 2, a: 1 }\n  let s = P{ ..p, b: bump_p(p) }\n\
+         \x20 io.print(\"\\(s.a) \\(s.b) \\(p.a)\")\n}\n",
+        "base\nb\n1 7 99\nbump p\n1 7 99\n",
+    ),
+    (
+        // §5.3: operands run in the order written and are fixed then. A
+        // local was named, not copied, so it was read when the value was
+        // built: a later operand's match arm block that assigned it changed
+        // an earlier argument, field, element, payload, key or capture.
+        "an-operand-is-fixed-where-it-is-written",
+        "struct Q {\n  u: ()\n  y: int\n}\nenum E {\n  V(u: (), y: int)\n}\n\
+         fn g(x: int, u: (), z: int) -> int {\n  return x * 100 + z\n}\n\
+         fn n(x: int) -> int {\n  io.print(\"n \\(x)\")\n  return x\n}\n\
+         fn main() {\n\
+         \x20 var a = 1\n  let r = g(a, match a {\n    _ => {\n      io.print(\"arm\")\n      a = 7\n    }\n  }, n(a))\n\
+         \x20 io.print(\"\\(r) \\(a)\")\n\
+         \x20 var b = 1\n  let q = Q{ y: b, u: match b {\n    _ => {\n      io.print(\"arm\")\n      b = 7\n    }\n  } }\n\
+         \x20 io.print(\"\\(q.y) \\(b)\")\n\
+         \x20 var c = 1\n  let t = (c, match c {\n    _ => {\n      io.print(\"arm\")\n      c = 7\n    }\n  }, n(c))\n\
+         \x20 io.print(\"\\(t.0) \\(t.2) \\(c)\")\n\
+         \x20 var d = 1\n  let e = V(y: d, u: match d {\n    _ => {\n      d = 9\n    }\n  })\n\
+         \x20 match e {\n    V(u, y) => io.print(\"\\(y) \\(d)\"),\n  }\n\
+         \x20 var k = \"k\"\n  let m = {k: match k {\n    _ => {\n      k = \"j\"\n    }\n  }}\n\
+         \x20 io.print(\"\\(m.keys()[0]) \\(k)\")\n\
+         \x20 var w = 1\n  let f = |x: int, u: ()| x * 10\n\
+         \x20 io.print(f(w, match w {\n    _ => {\n      w = 5\n    }\n  }))\n}\n",
+        "arm\nn 7\n107 7\narm\n1 7\narm\nn 7\n1 7 7\n1 9\nk j\n10\n",
+    ),
+    (
+        // §5.4: `target op= value` evaluates the target's operands and the
+        // value first, then reads the target, for a local and a field as for
+        // an element. A field was read before the value ran, so `c.count +=
+        // incr(c)` ignored what `incr` stored, unlike `xs[0] += …`.
+        "a-compound-assignment-reads-its-target-last",
+        "struct Counter {\n  var count: int\n}\n\
+         struct Holder {\n  var items: [int]\n}\n\
+         fn g(x: int, u: ()) -> int {\n  return x\n}\n\
+         fn incr(var c: Counter, s: str) -> int {\n  io.print(s)\n  c.count = 50\n  return 1\n}\n\
+         fn set(var h: Holder) -> int {\n  io.print(\"element\")\n  h.items[0] = 50\n  return 1\n}\n\
+         fn make(c: Counter) -> Counter {\n  io.print(\"target\")\n  return c\n}\n\
+         fn main() {\n\
+         \x20 var x = 1\n  x += g(1, match x {\n    _ => {\n      io.print(\"arm\")\n      x = 5\n    }\n  })\n  io.print(x)\n\
+         \x20 var c = Counter{ count: 0 }\n  make(c).count += incr(c, \"value\")\n  io.print(c.count)\n\
+         \x20 var h = Holder{ items: [0] }\n  h.items[0] += set(h)\n  io.print(h.items[0])\n\
+         \x20 var e = Counter{ count: 0 }\n  e.count = e.count + incr(e, \"plain\")\n  io.print(e.count)\n}\n",
+        "arm\n6\ntarget\nvalue\n51\nelement\n51\nplain\n1\n",
+    ),
+    (
+        // §5.4: `xs[i] = v` stores into the slice the local holds when the
+        // store happens. Fixing operands where they are written put the base
+        // in a temporary too, so a value that reassigned `xs` lost the write
+        // into a copy (`7 8`); and `ys[0] += v` reads the element after `v`
+        // has run, as `n += v` does, where it read it first (`11 8`).
+        "an-indexed-store-lands-in-the-slice-the-local-holds",
+        "fn one(u: ()) -> int {\n  return 1\n}\n\
+         fn main() {\n\
+         \x20 var xs = [10, 20]\n  xs[0] = one(match 0 {\n    _ => {\n      xs = [7, 8]\n    }\n  })\n\
+         \x20 io.print(\"\\(xs[0]) \\(xs[1])\")\n\
+         \x20 var ys = [10, 20]\n  ys[0] += one(match 0 {\n    _ => {\n      ys = [7, 8]\n    }\n  })\n\
+         \x20 io.print(\"\\(ys[0]) \\(ys[1])\")\n\
+         \x20 var zs = [10, 20]\n  zs[0] += one(match 0 {\n    _ => {\n      io.print(\"arm\")\n    }\n  })\n\
+         \x20 io.print(zs[0])\n}\n",
+        "1 8\n8 8\narm\n11\n",
     ),
     (
         // §2.4, in a file written with CRLF line endings: a line break in the
