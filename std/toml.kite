@@ -1035,6 +1035,124 @@ pub fn bool_at(doc: Toml, path: str, fallback: bool) -> bool {
     }
 }
 
+/// The strings of the array at a dotted path — and only the strings: an
+/// element that is not one is left out. Nothing at all if the path is absent
+/// or is not an array.
+///
+/// ```kite
+/// let (doc, err) = parse("[package]\nauthors = [\"ada\", \"grace\"]\n")
+/// if err != nil {
+///     return
+/// }
+/// assert(texts_at(doc, "package.authors") == ["ada", "grace"], "an array of strings")
+/// assert(texts_at(doc, "package.missing") == [], "absent")
+/// ```
+pub fn texts_at(doc: Toml, path: str) -> [str] {
+    var out: [str] = []
+    let found = at(doc, path)
+    if found == nil {
+        return out
+    }
+    let items = as_array(found)
+    if items == nil {
+        return out
+    }
+    for item in items {
+        match item {
+            Text(s) => {
+                out.push(s)
+            },
+            other => {
+            },
+        }
+    }
+    return out
+}
+
+/// The keys of the table at a dotted path, in the order the document wrote
+/// them. The empty path `""` is the document itself. Nothing at all if the
+/// path is absent or is not a table.
+///
+/// ```kite
+/// let (doc, err) = parse("[deps]\nb = 1\na = 2\n")
+/// if err != nil {
+///     return
+/// }
+/// assert(keys_at(doc, "deps") == ["b", "a"], "in document order")
+/// assert(keys_at(doc, "") == ["deps"], "the root")
+/// ```
+pub fn keys_at(doc: Toml, path: str) -> [str] {
+    var found: Option<Toml> = doc
+    if path.len() > 0 {
+        found = at(doc, path)
+    }
+    if found == nil {
+        return []
+    }
+    if !is_table(found) {
+        return []
+    }
+    return keys_of(as_table(found))
+}
+
+/// `doc` with `value` placed at a dotted path, making the tables on the way
+/// that are not there yet.
+///
+/// A value already at the path is replaced. A path that runs through something
+/// that is not a table — `a.b` where `a` is a number — is an error rather than
+/// a silent replacement of `a`, and so is an empty segment (`a..b`) and a
+/// `doc` that is not a table. The document given is not changed; the new one is
+/// returned. The result is as a program put it and no check is made of the
+/// rules a *document* must keep (an inline table written by hand is not closed
+/// to this).
+///
+/// ```kite
+/// let (doc, err) = parse("[a]\nx = 1\n")
+/// if err != nil {
+///     return
+/// }
+/// let (made, serr) = set(doc, "a.b.c", Toml.Int(2))
+/// if serr != nil {
+///     return
+/// }
+/// assert(emit(made) == "\n[a]\nx = 1\n\n[a.b]\nc = 2\n", "a table made on the way")
+/// ```
+pub fn set(doc: Toml, path: str, value: Toml) -> (Toml, error) {
+    if !is_table(doc) {
+        return _, errors.new("toml: set needs a table to put \(path) in")
+    }
+    let (table, err) = set_in(as_table(doc), split_dots(path), 0, value, path)
+    check err
+    return Toml.Table(table), nil
+}
+
+fn set_in(here: { str: Toml }, segments: [str], i: int, value: Toml, path: str) -> ({ str: Toml }, error) {
+    let key = segments[i]
+    if key.len() == 0 {
+        return _, errors.new("toml: `\(path)` has an empty segment")
+    }
+    var out: { str: Toml } = { }
+    for (name, held) in here {
+        out[name] = held
+    }
+    if i == segments.len() - 1 {
+        out[key] = value
+        return out, nil
+    }
+    let existing = here[key]
+    var inner: { str: Toml } = { }
+    if existing != nil {
+        if !is_table(existing) {
+            return _, errors.new("toml: `\(path)` runs through `\(key)`, which is not a table")
+        }
+        inner = as_table(existing)
+    }
+    let (deeper, err) = set_in(inner, segments, i + 1, value, path)
+    check err
+    out[key] = Toml.Table(deeper)
+    return out, nil
+}
+
 fn split_dots(path: str) -> [str] {
     var out: [str] = []
     var start = 0
