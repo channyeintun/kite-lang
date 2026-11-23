@@ -1092,6 +1092,25 @@ fn a_bare_error_statement_is_one_diagnostic() {
     assert_eq!(c.codes(), vec!["E0117"], "{}", c.render());
 }
 
+/// An inert statement that can still trap, or run `show`, is refused like any
+/// other, and the note names `_ = …` as the way to keep it for that alone;
+/// one that can do neither is not offered it.
+#[test]
+fn an_inert_index_or_interpolation_is_offered_a_discard() {
+    let c = run("fn main() {\n  let xs = [1, 2, 3]\n  xs[5]\n  _ = xs[5]\n}\n");
+    assert_eq!(c.codes(), vec!["E0117"], "{}", c.render());
+    assert!(c.render().contains("an index in it can still trap"), "{}", c.render());
+    assert!(c.render().contains("write `_ = …`"), "{}", c.render());
+
+    let c = run("fn main() {\n  let n = 1\n  \"\\(n)\"\n}\n");
+    assert_eq!(c.codes(), vec!["E0117"], "{}", c.render());
+    assert!(c.render().contains("an interpolation in it runs `show`"), "{}", c.render());
+
+    let c = run("fn main() {\n  let xs = [1, 2, 3]\n  let n = 1\n  n + 1\n  xs[0..2]\n}\n");
+    assert_eq!(c.codes(), vec!["E0117", "E0117"], "{}", c.render());
+    assert!(!c.render().contains("_ = …"), "{}", c.render());
+}
+
 /// An exclusive range from a number to itself matches nothing, exactly as a
 /// reversed one does.
 #[test]

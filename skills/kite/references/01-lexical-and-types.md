@@ -197,7 +197,11 @@ a negated number and computes nothing. That is `E0117` too: an expression
 statement with no call and no `await` anywhere in it does nothing, and is
 refused whatever its shape — a leading `-`, a leading `[` (a slice literal, not
 an index into the line above), `done == true` typed for `done = true`, a bare
-`n + 1`. A statement holding a call, such as `f() + 1`, is left alone.
+`n + 1`. A statement holding a call, such as `f() + 1`, is left alone. An arm of
+a `match` statement is a statement too, so `0 => 1` and `0 => { done == true }`
+are `E0117` there. An index or an interpolation is not counted as an effect even
+though one can trap and the other runs `show`: to keep one for that alone, write
+`_ = xs[i]` (the note says so).
 
 ```kite fails
 fn main() {

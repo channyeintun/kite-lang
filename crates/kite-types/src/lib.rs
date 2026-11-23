@@ -2873,14 +2873,27 @@ impl<'a> Checker<'a> {
     }
 
     fn if_stmt(&mut self, i: &ast::IfStmt, sig: &Signature) -> Option<(hir::Stmt, Flow)> {
+        self.if_parts(&i.cond, &i.then, i.else_.as_deref(), i.span, sig)
+    }
+
+    /// An `if` in statement position, from its parts: an `if` statement's,
+    /// or a value `if`'s written where its value is thrown away.
+    fn if_parts(
+        &mut self,
+        cond: &ast::Expr,
+        then: &ast::Block,
+        else_: Option<&ast::ElseBranch>,
+        span: Span,
+        sig: &Signature,
+    ) -> Option<(hir::Stmt, Flow)> {
         // `if err != nil { … }` is the explicit form of a check. Recognising it
         // here is what lets a hand-written test clean the value it guards.
-        let tested = self.error_facts(&i.cond, true);
+        let tested = self.error_facts(cond, true);
         // `if x == nil { … } else { … }` narrows `x` in whichever branch it
         // cannot be nil. Kite has no `?` sigil of any kind: an inline `if`
         // does the same work, in the open.
-        let narrowing = self.nil_test(&i.cond);
-        let cond = self.condition(&i.cond);
+        let narrowing = self.nil_test(cond);
+        let test = self.condition(cond);
         for (id, _) in tested {
             self.inspect(id);
         }
@@ -2889,10 +2902,10 @@ impl<'a> Checker<'a> {
         // merged at the join. A branch that diverges contributes nothing to the
         // join, because control never arrives from it.
         let entry = self.flow_state();
-        self.enter_branch(narrowing, &i.cond, true);
-        let (then, then_flow) = self.block(&i.then, sig);
+        self.enter_branch(narrowing, cond, true);
+        let (then_block, then_flow) = self.block(then, sig);
         if then_flow == Flow::Diverges {
-            self.report_unchecked_errors(Some(i.then.span));
+            self.report_unchecked_errors(Some(then.span));
         }
         let then_exit = self.flow_state();
         self.set_flow_state(entry);
@@ -2902,8 +2915,8 @@ impl<'a> Checker<'a> {
         // it arrives knowing the condition was false. An `else if` starts from
         // that knowledge too, so `if x == nil { … } else if c { … }` has `x`
         // narrowed in the second test's branches.
-        self.enter_branch(narrowing, &i.cond, false);
-        let (else_, else_flow) = match i.else_.as_deref() {
+        self.enter_branch(narrowing, cond, false);
+        let (else_block, else_flow) = match else_ {
             None => (None, Flow::Falls),
             Some(ast::ElseBranch::Block(b)) => {
                 let (blk, f) = self.block(b, sig);
@@ -2937,13 +2950,13 @@ impl<'a> Checker<'a> {
         self.set_flow_state(merged);
 
         // Without an `else`, control can always fall through.
-        let flow = if i.else_.is_none() {
+        let flow = if else_.is_none() {
             Flow::Falls
         } else {
             then_flow.merge(else_flow)
         };
 
-        Some((hir::Stmt::If { cond, then, else_, span: i.span }, flow))
+        Some((hir::Stmt::If { cond: test, then: then_block, else_: else_block, span }, flow))
     }
 
     fn for_stmt(&mut self, f: &ast::ForStmt, sig: &Signature) -> Option<(hir::Stmt, Flow)> {
@@ -7963,6 +7976,17 @@ impl<'a> Checker<'a> {
                  only thing it makes — bind it with `let`, or return it",
             ),
         };
+        // An index can trap and a hole runs `show`, which is not nothing:
+        // a statement written for that alone says so with `_ =`.
+        let what = match expr_may_trap(e) {
+            (true, true) => Some("an index in it can still trap, and an interpolation runs `show`"),
+            (true, false) => Some("an index in it can still trap"),
+            (false, true) => Some("an interpolation in it runs `show`"),
+            (false, false) => None,
+        };
+        if let Some(what) = what {
+            d = d.with_note(format!("{}; to evaluate it for that alone, write `_ = …`", what));
+        }
         self.diags.push(d);
         true
     }
@@ -9675,6 +9699,10 @@ impl<'a> Checker<'a> {
         // everything: every later arm then drew "unreachable", and a missing
         // variant nothing, for a mistake already reported once.
         let mut rejected = Vec::with_capacity(m.arms.len());
+        // Per arm of a `match` statement written as an expression: whether
+        // what its value holds was already settled where it was checked —
+        // reported as having no effect, or a statement in its own right.
+        let mut inert = Vec::new();
 
         for arm in &m.arms {
             self.set_flow_state(start.clone());
@@ -9763,10 +9791,12 @@ impl<'a> Checker<'a> {
             // In a `match` statement the arms' values are thrown away, so one
             // arm says nothing about what the next should be.
             let want = if discard { expected } else { expected.or(result_ty) };
-            let body = match &arm.body {
-                ast::MatchBody::Expr(e) => self.expr(e, want),
-                ast::MatchBody::Block(b) => self.match_block(b, want, discard),
+            let (body, settled) = match &arm.body {
+                ast::MatchBody::Expr(e) if discard => self.arm_statement(e),
+                ast::MatchBody::Expr(e) => (self.expr(e, want), false),
+                ast::MatchBody::Block(b) => (self.match_block(b, want, discard), false),
             };
+            inert.push(settled);
             // An arm producing a `T` where a `?T` is wanted is subsumption,
             // exactly as it is for a `let` or an argument — so `Text(s) => s`
             // and `other => nil` are arms of one `Option<str>` match rather
@@ -9872,8 +9902,10 @@ impl<'a> Checker<'a> {
         // or not the arms agree: `0 => fails(), _ => fails()` agrees on
         // `error`, and throws it away just the same.
         if discard {
-            for arm in &arms {
-                self.dropped_error(&arm.body);
+            for (arm, settled) in arms.iter().zip(&inert) {
+                if !settled {
+                    self.dropped_error(&arm.body);
+                }
             }
         }
         if disagree {
@@ -9937,6 +9969,44 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// An arm of a `match` statement written as an expression. It is in
+    /// statement position, as the match is: its value is thrown away.
+    ///
+    /// So a `match` or an `if` written there is a statement too — its
+    /// branches need not agree, as `0 => { match … }` already did not — and
+    /// what each branch holds is checked where it stands. Any other arm is an
+    /// expression statement, and one that does nothing is E0117 exactly as it
+    /// is on a line of its own: `0 => 1` computes a value nobody reads.
+    ///
+    /// Says whether what the arm's value holds was settled here — reported as
+    /// having no effect, or checked branch by branch — so that it is not
+    /// reported again as an error thrown away.
+    fn arm_statement(&mut self, e: &ast::Expr) -> (hir::Expr, bool) {
+        let sig = self.current_signature();
+        let stmt = match e {
+            ast::Expr::Match(m) => {
+                let (x, flow) = self.match_expr_with_flow(m, None, true);
+                Some((hir::Stmt::Expr(x), flow))
+            }
+            ast::Expr::If { cond, then, else_, span } => {
+                self.if_parts(cond, then, Some(else_), *span, &sig)
+            }
+            _ => {
+                let x = self.expr(e, None);
+                let inert = !self.types.is_poisoned(x.ty) && self.inert_statement(e);
+                return (x, inert);
+            }
+        };
+        let span = e.span();
+        match stmt {
+            Some((s, flow)) => {
+                let ty = if flow == Flow::Diverges { TyId::NEVER } else { TyId::UNIT };
+                (hir::Expr { kind: ExprKind::Block(hir::Block { stmts: vec![s] }), ty, span }, true)
+            }
+            None => (self.lit(ExprKind::Error, TyId::ERROR, span), true),
+        }
+    }
+
     /// A block arm.
     ///
     /// A block that *is* one expression yields it. Anything longer runs for its
@@ -9954,10 +10024,13 @@ impl<'a> Checker<'a> {
     /// when it is the whole block and every branch of it is one expression,
     /// it is one expression too — `2 => { if a { 1 } else { 0 } }` is `1` or
     /// `0`, not `()`. Only where the value is wanted: an arm of a `match`
-    /// statement runs its block for its effects, as it always has.
+    /// statement runs its block for its effects, as it always has — a single
+    /// expression in it included, which is a statement there and is checked
+    /// as one, so `0 => { done == true }` is E0117 as the same line under an
+    /// `if` is.
     fn match_block(&mut self, b: &ast::Block, expected: Option<TyId>, discard: bool) -> hir::Expr {
         match b.stmts.as_slice() {
-            [ast::Stmt::Expr(e)] => self.expr(e, expected),
+            [ast::Stmt::Expr(e)] if !discard => self.expr(e, expected),
             [ast::Stmt::If(i)] if !discard && if_is_value(i) => {
                 let else_ = i.else_.as_deref().expect("a value `if` has an `else`");
                 self.if_expr(&i.cond, &i.then, else_, i.span, expected)
@@ -14451,9 +14524,38 @@ fn visit_expr_stmts(e: &ast::Expr, closures: bool, f: &mut dyn FnMut(&ast::Stmt)
 /// it does not count. An expression the parser could not read counts, so that
 /// nothing is reported twice.
 fn expr_acts(e: &ast::Expr) -> bool {
+    expr_holds(e, &|x| matches!(x, ast::Expr::Call { .. } | ast::Expr::Await { .. } | ast::Expr::Error(_)))
+}
+
+/// What an inert expression can still do besides produce its value: an index
+/// can be out of range, and an interpolation's hole calls `show`, which may be
+/// the program's own. Neither is an effect for [`expr_acts`] — `n + 1` can
+/// overflow, and counting a trap would let every arithmetic slip through —
+/// but where one is there, `_ = …` is how to keep it, and E0117 says so.
+fn expr_may_trap(e: &ast::Expr) -> (bool, bool) {
+    let indexes = expr_holds(e, &|x| match x {
+        ast::Expr::Index { index, .. } => !matches!(**index, ast::Expr::Range { .. }),
+        _ => false,
+    });
+    let shows = expr_holds(e, &|x| match x {
+        ast::Expr::Interpolated { parts, .. } => parts.iter().any(|p| matches!(p, ast::StrPart::Hole(_))),
+        _ => false,
+    });
+    (indexes, shows)
+}
+
+/// Whether `hit` holds of an expression or of anything evaluated with it. A
+/// closure's body does not run where the closure is built, so it is not
+/// looked in; a statement in a branch other than an expression counts as a
+/// hit, since it may do anything.
+fn expr_holds(e: &ast::Expr, hit: &dyn Fn(&ast::Expr) -> bool) -> bool {
     use ast::Expr as E;
+    if hit(e) {
+        return true;
+    }
+    let sub = |x: &ast::Expr| expr_holds(x, hit);
     match e {
-        E::Call { .. } | E::Await { .. } | E::Error(_) => true,
+        E::Call { .. } | E::Await { .. } | E::Error(_) => false,
         E::Int(_)
         | E::ImpliedInt { .. }
         | E::Float(_)
@@ -14465,57 +14567,55 @@ fn expr_acts(e: &ast::Expr) -> bool {
         | E::SelfExpr(_)
         | E::Closure { .. } => false,
         E::Interpolated { parts, .. } => parts.iter().any(|p| match p {
-            ast::StrPart::Hole(h) => expr_acts(h),
+            ast::StrPart::Hole(h) => sub(h),
             ast::StrPart::Text(_) => false,
         }),
-        E::Unary { operand, .. } => expr_acts(operand),
-        E::Binary { lhs, rhs, .. } => expr_acts(lhs) || expr_acts(rhs),
-        E::Field { base, .. } => expr_acts(base),
-        E::Index { base, index, .. } => expr_acts(base) || expr_acts(index),
-        E::Range { start, end, .. } => expr_acts(start) || expr_acts(end),
-        E::Cast { expr, .. } | E::Paren { inner: expr, .. } => expr_acts(expr),
-        E::Tuple { elems, .. } | E::Slice { elems, .. } => elems.iter().any(expr_acts),
-        E::Map { entries, .. } => entries.iter().any(|m| expr_acts(&m.key) || expr_acts(&m.value)),
-        E::StructLit(l) => {
-            l.base.as_deref().is_some_and(expr_acts) || l.fields.iter().any(|f| expr_acts(&f.value))
-        }
+        E::Unary { operand, .. } => sub(operand),
+        E::Binary { lhs, rhs, .. } => sub(lhs) || sub(rhs),
+        E::Field { base, .. } => sub(base),
+        E::Index { base, index, .. } => sub(base) || sub(index),
+        E::Range { start, end, .. } => sub(start) || sub(end),
+        E::Cast { expr, .. } | E::Paren { inner: expr, .. } => sub(expr),
+        E::Tuple { elems, .. } | E::Slice { elems, .. } => elems.iter().any(sub),
+        E::Map { entries, .. } => entries.iter().any(|m| sub(&m.key) || sub(&m.value)),
+        E::StructLit(l) => l.base.as_deref().is_some_and(sub) || l.fields.iter().any(|f| sub(&f.value)),
         E::If { cond, then, else_, .. } => {
-            expr_acts(cond)
-                || block_acts(then)
+            sub(cond)
+                || block_holds(then, hit)
                 || match &**else_ {
-                    ast::ElseBranch::Block(b) => block_acts(b),
-                    ast::ElseBranch::If(i) => if_acts(i),
+                    ast::ElseBranch::Block(b) => block_holds(b, hit),
+                    ast::ElseBranch::If(i) => if_holds(i, hit),
                 }
         }
         E::Match(m) => {
-            expr_acts(&m.scrutinee)
+            sub(&m.scrutinee)
                 || m.arms.iter().any(|a| {
-                    a.guard.as_ref().is_some_and(expr_acts)
+                    a.guard.as_ref().is_some_and(sub)
                         || match &a.body {
-                            ast::MatchBody::Expr(e) => expr_acts(e),
-                            ast::MatchBody::Block(b) => block_acts(b),
+                            ast::MatchBody::Expr(e) => sub(e),
+                            ast::MatchBody::Block(b) => block_holds(b, hit),
                         }
                 })
         }
     }
 }
 
-/// As [`expr_acts`], for a block: anything but an inert expression statement
-/// may act.
-fn block_acts(b: &ast::Block) -> bool {
+/// As [`expr_holds`], for a block: anything but an expression statement
+/// counts.
+fn block_holds(b: &ast::Block, hit: &dyn Fn(&ast::Expr) -> bool) -> bool {
     b.stmts.iter().any(|s| match s {
-        ast::Stmt::Expr(e) => expr_acts(e),
+        ast::Stmt::Expr(e) => expr_holds(e, hit),
         _ => true,
     })
 }
 
-fn if_acts(i: &ast::IfStmt) -> bool {
-    expr_acts(&i.cond)
-        || block_acts(&i.then)
+fn if_holds(i: &ast::IfStmt, hit: &dyn Fn(&ast::Expr) -> bool) -> bool {
+    expr_holds(&i.cond, hit)
+        || block_holds(&i.then, hit)
         || match i.else_.as_deref() {
             None => false,
-            Some(ast::ElseBranch::Block(b)) => block_acts(b),
-            Some(ast::ElseBranch::If(i)) => if_acts(i),
+            Some(ast::ElseBranch::Block(b)) => block_holds(b, hit),
+            Some(ast::ElseBranch::If(i)) => if_holds(i, hit),
         }
 }
 
