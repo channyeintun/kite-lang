@@ -662,24 +662,33 @@ identical to the bytecode VM**, and a test asserts it so the two cannot drift.
 
 Tuples lower as positional records, sharing the field machinery structs use.
 
-Maps lower as a record holding parallel key and value arrays, and lookup is a
-linear scan — which is what makes insertion order and first-match-wins
-obviously right. A write builds new arrays and rebinds, so maps keep value
-semantics; one code path covers both replacing a key and appending one,
-because the scan yields either the key's index or the current length.
+Maps lowered at first as a record holding parallel key and value arrays, and
+lookup was a linear scan — which is what made insertion order and
+first-match-wins obviously right. A write built new arrays and rebound, so
+maps kept value semantics, and a loop over a map of `n` entries cost `n²`.
 
-**Still so on Wasm, and no longer on the other two.** The VM and the native
-runtime keep a hash index beside the entries (round two of the fix phase), so
-a lookup, an insert and a removal cost about the same whatever the map's size,
-and natively a write goes into the map in place under the owned flag slices
-already had. On Wasm a loop over a map of `n` entries is still `n²`. Giving it
-an index is a redesign of this lowering rather than a change to it: the record
-becomes mutable with room to spare and an owned flag for maps; a hash for
-every key type, generated per type beside the generated `==` and agreeing with
-it (a struct with a `var` field hashed by its type alone, as the other two
-do); and holes left by a removal, skipped by every reader — `len`, `keys`,
-`values`, lookup, `==`, the literal's `dedup`. Each of those is code every
-map-using module carries, which the size budgets have to make room for.
+**A hash map now, as on the other two.** The VM and the native runtime were
+given a hash index beside the entries in round two of the fix phase, and Wasm
+in round three: the record is mutable, with room to spare, the counts of slots
+used and of entries, an index past eight entries — bucket heads and a next
+slot per slot, so each bucket lists its entries in insertion order and the
+first equal key a lookup meets is the earliest — and the field mark a slice's
+header has. A write goes in place when the local owns the map, under the owned
+flag slices already had, and a write through a field when the mark says the
+field is its one holder; otherwise it copies first. A removal from an indexed
+map leaves a hole, which `keys`, `values` and `==` close up before they read
+the slots; that changes nothing a holder can see, nor does building the index
+where a lookup first wants it, so both are done to a shared map too. The hash
+is generated per key type and agrees with the generated `==`: `-0.0` as
+`0.0`, an error by its message, a struct with a `var` field by its type alone,
+as the other two do; an enum by its variant and that variant's payload. It
+reads a key three levels deep, into at most eight aggregates, and an enum
+inside its own payload by its variant alone, which bounds its code and stack;
+keys that differ only beyond that share a bucket and are compared. All of it is helper functions, one per map
+type and operation a program uses, so a program with no map is not a byte
+bigger. A small program with one `{str: int}` grew from 1,221 to 2,093 bytes
+released. 100,000 inserts, lookups and removals take a tenth of a second under
+Node, where they did not finish in a minute.
 
 A trait object is a reference to a one-field root record holding the concrete
 type's identity, and each trait method gets a dispatcher that compares that
@@ -2517,9 +2526,9 @@ segment naming a declared dependency roots there.
 
   *Closed later still:* a slice or map taken out of a field for a change is
   the field's own when nothing else holds it, so the change goes straight in
-  and a loop pushing through a field is linear on all three backends — and one
-  writing keys through a field on the VM and natively, Wasm maps being copied
-  by every write wherever they are held. The VM's take empties the field, so
+  and a loop pushing through a field, or writing keys through one, is linear
+  on all three backends (Wasm's maps since round three gave them an index and
+  their record the same mark). The VM's take empties the field, so
   the count says so; natively and on Wasm the field's slice or map carries a
   mark that the write-back sets and any read that could keep it clears
   (docs/03 §7). A level below a field — `b.rows[i].push(x)` — is still a copy

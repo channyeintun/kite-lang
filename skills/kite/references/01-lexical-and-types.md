@@ -591,13 +591,14 @@ Method surfaces are tiny and the compiler tells you the whole list on a miss:
 Slices are **values**: assigning one and pushing to the copy leaves the original
 alone. Reading a missing map key gives `nil`, not a zero value.
 
-A map is hashed on the VM and natively, so a read, a write and a `remove` cost
-the same at any size there — unless the key is, or holds, a struct with a
-`var` field: those are hashed by their type alone, since the field can change
-while the struct is a key, so such keys are compared one by one. A
-`--emit wasm` build still scans the entries on every read and copies them on
-every write, so a loop over a map of tens of thousands of entries is quadratic
-in the browser.
+A map is hashed on every backend, so a read, a write and a `remove` cost the
+same at any size — unless the key is, or holds, a struct with a `var` field:
+those are hashed by their type alone, since the field can change while the
+struct is a key, so such keys are compared one by one. A `--emit wasm` build
+also hashes a key only three levels deep, into at most eight tuples, structs,
+enums, slices or optionals, and an enum inside its own payload (a tree) by its
+variant alone, so keys that differ only beyond that are compared one by one
+there too.
 
 ```kite
 fn main() {
@@ -667,8 +668,7 @@ fn main() {
 A write through a field goes straight into the field's slice or map when
 nothing else holds it, so a loop that pushes, writes keys or removes them
 through a field (`q.items.push(v)`, `s.m[k] = v`, in a `var self` method too)
-is as fast as one on a local — a slice on every backend, a map on the VM and
-natively (a Wasm map copies on every write, wherever it is held). A read of
+is as fast as one on a local, on every backend. A read of
 the field that can keep what it read — into a binding, an argument, a
 capture — makes the next write copy, once; reading a length, an element or a
 key between the writes does not. One level further down, `b.rows[i].push(x)`

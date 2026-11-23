@@ -192,7 +192,8 @@ fn a_long_input_read_between_its_long_pieces_stays_linear() {
 /// inserted and then read back took half a minute on each. Here 100,000
 /// `int` keys are inserted out of order, read back, missed, and removed from
 /// the front — the removal that moved every later entry down — beside
-/// 50,000 `str` keys.
+/// 50,000 `str` keys. On Wasm, where every write also copied the map, this
+/// did not finish in a minute; it takes about a tenth of a second now.
 #[test]
 fn map_inserts_lookups_and_removals_are_constant_time() {
     let src = r#"fn main() {
@@ -222,7 +223,33 @@ fn map_inserts_lookups_and_removals_are_constant_time() {
     io.print("\(s) \(m.len()) \(t.len())")
 }
 "#;
-    agrees_within("map-ops", src, "6250025000 0 50000\n", Duration::from_secs(20), false);
+    agrees_within("map-ops", src, "6250025000 0 50000\n", Duration::from_secs(20), true);
+}
+
+/// `toml.parse` reads a document of many keys in linear time. Each plain
+/// `key = value` line went through a function that took the table, wrote the
+/// key into it and handed it back, and a map handed to a function is shared
+/// with the caller's, so every key copied the whole table: 30,000 keys took
+/// 32 s on the VM and natively and 6 s on Wasm, and these 40,000 about twice
+/// that. The section being read is held in a local now, and written in place.
+#[test]
+fn a_toml_document_of_many_keys_parses_in_linear_time() {
+    let src = r#"use std/toml
+
+fn main() {
+    var lines: [str] = ["first = 0", "[section.inner]"]
+    for i in 0..40000 {
+        lines.push("key\(i) = \"value \(i)\"")
+    }
+    let (doc, err) = toml.parse(join(lines, "\n"))
+    if err != nil {
+        io.print(err.message())
+        return
+    }
+    io.print("\(toml.text_at(doc, "section.inner.key39999", "?")) \(toml.at(doc, "first") == toml.Toml.Int(0))")
+}
+"#;
+    agrees_within("toml-keys", src, "value 39999 true\n", Duration::from_secs(20), true);
 }
 
 /// A map literal of two hundred thousand entries is built in linear time:
@@ -321,7 +348,8 @@ fn a_write_to_a_name_many_copies_lead_into_and_out_of_is_checked_quickly() {
 /// A key is hashed whole, so keys that differ only far inside still spread
 /// over the buckets. The hash once stopped after 32 values, and 5,000 slice
 /// keys that shared their first 40 elements all landed in one bucket: a scan
-/// again, 18 s on the VM and natively alike.
+/// again, 18 s on the VM and natively alike. Wasm's hash reads every element
+/// of a slice too (13 s there when its maps were scans).
 #[test]
 fn keys_that_differ_only_deep_inside_are_still_hashed_apart() {
     let src = r#"fn key(i: int) -> [int] {
@@ -345,7 +373,42 @@ fn main() {
     io.print("\(s) \(m.len())")
 }
 "#;
-    agrees_within("map-deep-keys", src, "199990000 20000\n", Duration::from_secs(20), false);
+    agrees_within("map-deep-keys", src, "199990000 20000\n", Duration::from_secs(20), true);
+}
+
+/// An enum key is hashed by its payload as well as its variant, on Wasm as
+/// on the other two. Wasm's hash read the variant alone, so every `Id(n)`
+/// shared one bucket and was found by comparing: 40,000 of them took ten
+/// seconds under Node where the VM took a tenth of one, and these 100,000
+/// would take about a minute.
+#[test]
+fn enum_keys_are_hashed_by_their_payload() {
+    let src = r#"enum Key {
+    Id(int)
+    Pair(a: int, b: str)
+    None
+}
+
+fn main() {
+    var m: {Key: int} = {}
+    for i in 0..100000 {
+        m[Id(i)] = i
+        if i % 4 == 0 {
+            m[Pair(a: i, b: "p")] = 1
+        }
+    }
+    m[None] = 2
+    var s = 0
+    for i in 0..100000 {
+        s += or_else(m[Id(i)], 0)
+    }
+    for i in 0..50000 {
+        m.remove(Id(i))
+    }
+    io.print("\(s) \(m.len()) \(or_else(m[Pair(a: 8, b: "p")], 0)) \(or_else(m[None], 0))")
+}
+"#;
+    agrees_within("map-enum-keys", src, "4999950000 75001 1 2\n", Duration::from_secs(20), true);
 }
 
 /// A slice or a map grown across suspensions is written in place, as it is
@@ -354,8 +417,8 @@ fn main() {
 /// its next write copied it whole: a hundred thousand pushes, each after a
 /// `yield`, took about twenty seconds on the VM and eight on Wasm, released,
 /// and `out.push(await t)` — `task.all` — cost the same. A suspension moves
-/// the locals into the frame and back out now, owned flags and all. Maps are
-/// timed without Wasm, as the map test above is.
+/// the locals into the frame and back out now, owned flags and all — a map's
+/// too, on Wasm since its maps were given an index (15 s there before).
 #[test]
 fn a_slice_or_a_map_grown_across_suspensions_is_written_in_place() {
     let slices = "async fn one(i: int) -> int {\n  return i\n}\n\n\
@@ -369,7 +432,7 @@ fn a_slice_or_a_map_grown_across_suspensions_is_written_in_place() {
     let maps = "pub async fn main() {\n  var m: {int: int} = {}\n  for i in 0..100000 {\n\
                 \x20   m[i] = i\n    task.yield()\n  }\n  for i in 0..50000 {\n\
                 \x20   m.remove(i)\n    task.yield()\n  }\n  io.print(\"\\(m.len()) \\(or_else(m[99999], -1))\")\n}\n";
-    agrees_within("map-across-yield", maps, "50000 99999\n", Duration::from_secs(20), false);
+    agrees_within("map-across-yield", maps, "50000 99999\n", Duration::from_secs(20), true);
 }
 
 /// Writing a slice through a struct field is linear on all three backends:
@@ -432,13 +495,13 @@ fn main() {
     );
 }
 
-/// Writing and removing map entries through a struct field is linear on the
-/// VM and natively: a field, a nested field and `self`'s field in a `var self`
+/// Writing and removing map entries through a struct field is linear on all
+/// three backends: a field, a nested field and `self`'s field in a `var self`
 /// method, with lookups between the writes. Each write copied the whole map,
 /// as a push copied a field's slice: at two hundred thousand the native
-/// backend took a quarter of an hour. Not on Wasm, whose maps are still
-/// their entries alone, scanned and copied by every write wherever they are
-/// held (§3.2).
+/// backend took a quarter of an hour, and Wasm did not finish in two minutes
+/// even once its maps had an index, until the map's record kept the mark a
+/// slice's header keeps.
 #[test]
 fn a_map_written_through_a_field_is_written_in_place() {
     let src = r#"struct S {
@@ -481,7 +544,7 @@ fn main() {
         src,
         "100000 100000 200000 200000 199999\n",
         Duration::from_secs(20),
-        false,
+        true,
     );
 }
 

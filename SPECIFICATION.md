@@ -350,16 +350,16 @@ Maps iterate in **insertion order**. Go randomises map iteration to prevent
 reliance on order; Kite instead guarantees an order, which is cheaper to reason
 about and removes an entire class of nondeterministic test failure.
 
-How fast a map is depends on the target today, and nothing else about it does.
-On the bytecode VM and natively a lookup, an insert and a removal cost about
-the same whatever the map's size: the entries are kept in insertion order with
-a hash index beside them, and the index is never observable. A key that is,
-or holds, a struct with a `var` field is the exception: the field can change
-while the struct is a key, so such a struct is hashed by its type alone, and
-the keys that differ only inside one are found by comparing them in turn, as
-every key once was. On `wasm32-gc` a map is still its entries alone — a
-lookup scans them and a write copies them — so there a loop over a map of `n`
-entries costs `n²` ([roadmap, Phase 4](docs/06-roadmap.md)).
+On every target a lookup, an insert and a removal cost about the same whatever
+the map's size: the entries are kept in insertion order with a hash index
+beside them, and the index is never observable. A key that is, or holds, a
+struct with a `var` field is the exception: the field can change while the
+struct is a key, so such a struct is hashed by its type alone, and the keys
+that differ only inside one are found by comparing them in turn, as every key
+once was. On `wasm32-gc` the hash also stops three levels into a key, after
+eight tuples, structs, enums, slices or optionals inside it, and at an enum
+met again inside its own payload, so keys that differ only beyond that are
+compared in turn in the same way ([roadmap, Phase 4](docs/06-roadmap.md)).
 
 **There is no fixed-length array.** A `[N]T` was listed here for a long time
 and never existed in the compiler, and the resolution was to strike it rather

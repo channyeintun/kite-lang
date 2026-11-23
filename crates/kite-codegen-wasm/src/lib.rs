@@ -613,9 +613,8 @@ struct TypeLayout {
     pair_record: std::collections::HashMap<TyId, u32>,
     /// One record per distinct tuple shape.
     tuple_record: std::collections::HashMap<TyId, u32>,
-    /// One record per distinct map shape, holding parallel key and value
-    /// arrays. Two arrays rather than an array of pairs keeps lookup a scan
-    /// over one contiguous run, and reuses the array machinery slices need.
+    /// One record per distinct map shape: parallel key and value arrays in
+    /// insertion order, and a hash index beside them. See `maps`.
     map_record: std::collections::HashMap<TyId, MapLayout>,
     /// The root record every dispatchable aggregate extends: one immutable i32
     /// holding the concrete type's identity.
@@ -1069,7 +1068,8 @@ pub fn compile_with(program: &mir::Program, types: &Types, debug_info: bool) -> 
         layout.tuple_record.insert(*s, next);
         next += 1;
     }
-    // A map needs three types: the record, and one array for each side.
+    // A map needs three types: the record, and one array for each side. Its
+    // index is made of the string array's type, which every module has.
     let maps = map_shapes(program, types);
     for m in &maps {
         let TyKind::Map(k, v) = *types.kind(*m) else {
@@ -1344,28 +1344,7 @@ pub fn compile_with(program: &mir::Program, types: &Types, debug_info: bool) -> 
             let Some(ml) = layout.map_layout(*m) else {
                 continue;
             };
-            let karr = ValType::Ref(RefType {
-                nullable: true,
-                heap_type: HeapType::Concrete(ml.keys),
-            });
-            let varr = ValType::Ref(RefType {
-                nullable: true,
-                heap_type: HeapType::Concrete(ml.values),
-            });
-            group.push(struct_subtype(
-                vec![
-                    FieldType {
-                        element_type: StorageType::Val(karr),
-                        mutable: false,
-                    },
-                    FieldType {
-                        element_type: StorageType::Val(varr),
-                        mutable: false,
-                    },
-                ],
-                None,
-                true,
-            ));
+            group.push(struct_subtype(maps::record_fields(ml, layout.str_array), None, true));
             for elem in [ml.key_ty, ml.value_ty] {
                 group.push(SubType {
                     is_final: true,
@@ -1673,6 +1652,7 @@ pub fn compile_with(program: &mir::Program, types: &Types, debug_info: bool) -> 
         base: eq_base,
         fns: &eq_fns,
         strings: string_runtime,
+        maps: &map_helpers,
     };
     let mut bodies: Vec<Function> = Vec::with_capacity(program.fns.len());
     let mut too_wide = Vec::new();
@@ -2406,24 +2386,16 @@ fn compile_fn(
     push_local(&mut locals, ValType::I32); // $pc
     let pc = (f.param_count + slots.declared.len()) as u32;
 
-    // A dedicated index register. This used to alias `$pc`, which happened to
-    // work because a terminator always rewrites the program counter before
-    // branching — but a scan clobbering it is not something to rely on.
-    push_local(&mut locals, ValType::I32);
-    let index_scratch = pc + 1;
-
-    // Two more i32 registers: the second holds a new length or a scan's
-    // cursor, the third a count. All of them are adjacent i32s, which the local
-    // declarations run-length encode, so the extra registers cost a function
-    // no bytes.
-    push_local(&mut locals, ValType::I32);
-    push_local(&mut locals, ValType::I32);
-    let mut next_local = index_scratch + 3;
+    // The map scans that once needed index registers here are helper
+    // functions of their own now (see `maps`).
+    let mut next_local = pc + 1;
 
     // One "owned" flag per slice local the function writes into or pushes
-    // onto: whether the header in that local, and the buffer it points at,
-    // are reachable from nowhere else — so a write may go straight into them.
-    // See `Emitter::release`, which is what keeps the flag honest.
+    // onto, and per map local it writes a key of or removes one from: whether
+    // the header in that local and the buffer it points at, or the map's
+    // record and its arrays, are reachable from nowhere else — so a write may
+    // go straight into them. See `Emitter::release`, which is what keeps the
+    // flag honest.
     let mut owned: std::collections::HashMap<u32, u32> = std::collections::HashMap::new();
     let taken: Vec<bool> = (0..f.locals.len())
         .map(|i| {
@@ -2437,7 +2409,9 @@ fn compile_fn(
     for b in &f.blocks {
         for s in &b.stmts {
             let target = match s {
-                mir::Inst::SlicePush { local, .. } => Some(local.0),
+                mir::Inst::SlicePush { local, .. }
+                | mir::Inst::MapSet { local, .. }
+                | mir::Inst::MapRemove { local, .. } => Some(local.0),
                 mir::Inst::SetIndex {
                     base: mir::Operand::Local(l),
                     ..
@@ -2454,8 +2428,8 @@ fn compile_fn(
         }
     }
 
-    // Two array registers per distinct map shape, so a map write can hold the
-    // arrays it is building while `array.copy` consumes its operands.
+    // Two array registers per distinct map shape, so a map literal can hold
+    // the arrays it is building while `array.copy` consumes its operands.
     let mut map_scratch: std::collections::HashMap<TyId, (u32, u32)> =
         std::collections::HashMap::new();
 
@@ -2614,7 +2588,6 @@ fn compile_fn(
             current_dst: None,
             slots: &slots.of,
             pc,
-            index_scratch,
             map_scratch: &map_scratch,
             slice_scratch: &slice_scratch,
             owned: &owned,
@@ -2716,10 +2689,7 @@ struct Emitter<'a> {
     /// The Wasm local each MIR local lives in. See `slots`.
     slots: &'a [u32],
     pc: u32,
-    /// An i32 local for an index that has to be read twice. The one after it
-    /// is a second (see [`Self::index_scratch2`]).
-    index_scratch: u32,
-    /// Per map shape, the two array registers a write builds into.
+    /// Per map shape, the two array registers a literal builds into.
     map_scratch: &'a std::collections::HashMap<TyId, (u32, u32)>,
     /// One register per distinct array type, keyed by that type's index in the
     /// Wasm type space rather than by Kite type — two Kite slices with the same
@@ -2778,28 +2748,28 @@ impl<'a> Emitter<'a> {
     }
 
     fn stmt(&mut self, func: &mut Function, stmt: &mir::Inst) {
-        // A write-back marks the header it puts back as the field's alone
-        // when the local owned it — read before `release` clears the flag,
-        // since storing the local is what releases it. A suspension's spill
-        // of the same local into its frame is not one: it can come before the
-        // local holds anything.
+        // A write-back marks the header or map record it puts back as the
+        // field's alone when the local owned it — read before `release`
+        // clears the flag, since storing the local is what releases it. A
+        // suspension's spill of the same local into its frame is not one: it
+        // can come before the local holds anything.
         if let mir::Inst::SetField { base: holder, index, value: mir::Operand::Local(l) } = stmt {
             let base = mir::Operand::Local(*l);
             let holder_ty = match holder {
                 mir::Operand::Local(h) => self.f.locals[h.index()].ty,
                 _ => TyId::UNIT,
             };
-            if let (true, true, Some(&flag), Some(parts)) = (
+            if let (true, true, Some(&flag), Some((record, field, _))) = (
                 self.taken[l.index()],
                 mir::takeable_field(self.types, holder_ty, *index),
                 self.owned.get(&l.0),
-                self.slice_of(&base),
+                self.field_mark(&base),
             ) {
                 func.instruction(&Instruction::LocalGet(self.slots[l.index()]));
                 func.instruction(&Instruction::LocalGet(flag));
                 func.instruction(&Instruction::StructSet {
-                    struct_type_index: parts.header,
-                    field_index: 2,
+                    struct_type_index: record,
+                    field_index: field,
                 });
             }
         }
@@ -2821,16 +2791,16 @@ impl<'a> Emitter<'a> {
                         mir::Operand::Local(b) => self.f.locals[b.index()].ty,
                         _ => TyId::UNIT,
                     };
-                    if let (false, true, Some(parts)) = (
+                    if let (false, true, Some((record, field, _))) = (
                         self.glance[dst.index()],
                         mir::takeable_field(self.types, base_ty, *index),
-                        self.slice_of(&here),
+                        self.field_mark(&here),
                     ) {
                         func.instruction(&Instruction::LocalGet(self.slots[dst.index()]));
                         func.instruction(&Instruction::I32Const(0));
                         func.instruction(&Instruction::StructSet {
-                            struct_type_index: parts.header,
-                            field_index: 2,
+                            struct_type_index: record,
+                            field_index: field,
                         });
                     }
                 }
@@ -2845,11 +2815,20 @@ impl<'a> Emitter<'a> {
                         return;
                     }
                     let here = mir::Operand::Local(*dst);
-                    if let (mir::Rvalue::FieldTake { .. }, Some(parts)) = (value, self.slice_of(&here)) {
+                    if let (mir::Rvalue::FieldTake { .. }, Some((record, field, packed))) =
+                        (value, self.field_mark(&here))
+                    {
                         func.instruction(&Instruction::LocalGet(self.slots[dst.index()]));
-                        func.instruction(&Instruction::StructGetU {
-                            struct_type_index: parts.header,
-                            field_index: 2,
+                        func.instruction(&if packed {
+                            Instruction::StructGetU {
+                                struct_type_index: record,
+                                field_index: field,
+                            }
+                        } else {
+                            Instruction::StructGet {
+                                struct_type_index: record,
+                                field_index: field,
+                            }
                         });
                         func.instruction(&Instruction::LocalSet(flag));
                         return;
@@ -2860,6 +2839,7 @@ impl<'a> Emitter<'a> {
                             | mir::Rvalue::SliceRange { .. }
                             | mir::Rvalue::MapKeys { .. }
                             | mir::Rvalue::MapValues { .. }
+                            | mir::Rvalue::MapNew { .. }
                     );
                     func.instruction(&Instruction::I32Const(i32::from(fresh)));
                     func.instruction(&Instruction::LocalSet(flag));
@@ -2879,30 +2859,15 @@ impl<'a> Emitter<'a> {
                     field_index: *index + self.layout.struct_shift(sid),
                 });
             }
-            // A call to the map type's `set` helper, which answers the map
-            // the local keeps. See `maps`.
+            // A call to the map type's `set` or `remove` helper, which writes
+            // in place when the local owns its map and copies it first when
+            // it does not, and answers the map the local keeps — which it then
+            // owns. See `maps`.
             mir::Inst::MapSet { local, key, value } => {
-                let map_ty = self.f.locals[local.index()].ty;
-                let Some(helper) = self.map_helpers.index(map_ty, maps::MapOp::Set) else {
-                    func.instruction(&Instruction::Unreachable);
-                    return;
-                };
-                func.instruction(&Instruction::LocalGet(self.slots[local.index()]));
-                self.operand(func, key);
-                self.operand(func, value);
-                func.instruction(&Instruction::Call(helper));
-                func.instruction(&Instruction::LocalSet(self.slots[local.index()]));
+                self.map_write(func, local.0, maps::MapOp::Set, &[key, value]);
             }
             mir::Inst::MapRemove { local, key } => {
-                let base = mir::Operand::Local(*local);
-                let map_ty = self.f.locals[local.index()].ty;
-                let (Some(ml), Some(&(kreg, vreg))) =
-                    (self.map_of(&base), self.map_scratch.get(&map_ty))
-                else {
-                    func.instruction(&Instruction::Unreachable);
-                    return;
-                };
-                self.map_drop(func, ml, &base, key, self.slots[local.index()], kreg, vreg);
+                self.map_write(func, local.0, maps::MapOp::Remove, &[key]);
             }
 
             // Slices are copy-on-write *values*: a write copies first unless
@@ -2981,6 +2946,29 @@ impl<'a> Emitter<'a> {
         func.instruction(&Instruction::LocalSet(self.slots[local as usize]));
         func.instruction(&Instruction::I32Const(1));
         func.instruction(&Instruction::LocalSet(flag));
+    }
+
+    /// `m[k] = v` or `m.remove(k)`: the same shape as [`Self::slice_write`].
+    fn map_write(&mut self, func: &mut Function, local: u32, op: maps::MapOp, args: &[&mir::Operand]) {
+        let map_ty = self.f.locals[local as usize].ty;
+        let (Some(helper), Some(&flag)) = (self.map_helpers.index(map_ty, op), self.owned.get(&local))
+        else {
+            func.instruction(&Instruction::Unreachable);
+            return;
+        };
+        func.instruction(&Instruction::LocalGet(self.slots[local as usize]));
+        func.instruction(&Instruction::LocalGet(flag));
+        for a in args {
+            self.operand(func, a);
+        }
+        func.instruction(&Instruction::Call(helper));
+        // A removal answers whether the local owns what it answers, since a
+        // miss hands back the map as it was; a write always owns its answer.
+        if op != maps::MapOp::Remove {
+            func.instruction(&Instruction::I32Const(1));
+        }
+        func.instruction(&Instruction::LocalSet(flag));
+        func.instruction(&Instruction::LocalSet(self.slots[local as usize]));
     }
 
     /// A slice's length, as the i32 the header holds.
@@ -3415,7 +3403,7 @@ impl<'a> Emitter<'a> {
                 func.instruction(&Instruction::LocalGet(kreg));
                 func.instruction(&Instruction::LocalGet(vreg));
                 if collapsed.is_some() {
-                    func.instruction(&Instruction::StructNew(ml.record));
+                    maps::new_record(func, ml, keys.len() as i32);
                 } else {
                     let ty = self.f.locals[self.current_dst.unwrap_or_default() as usize].ty;
                     match self.map_helpers.index(ty, maps::MapOp::Dedup) {
@@ -3426,11 +3414,6 @@ impl<'a> Emitter<'a> {
                 return true;
             }
 
-            // A map's keys or values as a slice, in insertion order. The map
-            // holds parallel arrays already, so this is a copy of one of them
-            // into a slice-shaped array — a copy rather than a share, because
-            // the two array types are declared separately and a slice is a
-            // value the caller may go on to modify.
             // A call across the declared boundary. The import was declared
             // from the same declaration this call came from, so the two cannot
             // disagree about its shape.
@@ -3455,6 +3438,11 @@ impl<'a> Emitter<'a> {
                 return def.ret != TyId::UNIT;
             }
 
+            // A map's keys or values as a slice, in insertion order: a copy
+            // of the slots in use into a slice-shaped array — a copy rather
+            // than a share, because the two array types are declared
+            // separately and a slice is a value the caller may go on to
+            // modify. A map that can have holes has them closed up first.
             mir::Rvalue::MapKeys { base } | mir::Rvalue::MapValues { base } => {
                 let keys = matches!(value, mir::Rvalue::MapKeys { .. });
                 let Some(ml) = self.map_of(base) else {
@@ -3462,7 +3450,7 @@ impl<'a> Emitter<'a> {
                     return true;
                 };
                 let elem = if keys { ml.key_ty } else { ml.value_ty };
-                let (src, field) = if keys { (ml.keys, 0) } else { (ml.values, 1) };
+                let (src, field) = if keys { (ml.keys, maps::KEYS) } else { (ml.values, maps::VALUES) };
                 let (Some(dst_ty), Some(header)) =
                     (self.layout.slice_type(elem), self.layout.slice_header(elem))
                 else {
@@ -3473,30 +3461,20 @@ impl<'a> Emitter<'a> {
                     func.instruction(&Instruction::Unreachable);
                     return true;
                 };
+                if let Some(pack) = self.map_operand_ty(base).and_then(|t| self.map_helpers.pack(t)) {
+                    self.operand(func, base);
+                    func.instruction(&Instruction::Call(pack));
+                }
                 // Length, then a fresh array of the slice's own type.
-                self.operand(func, base);
-                func.instruction(&Instruction::StructGet {
-                    struct_type_index: ml.record,
-                    field_index: field,
-                });
-                func.instruction(&Instruction::ArrayLen);
+                self.map_field(func, ml, base, maps::LEN);
                 func.instruction(&Instruction::ArrayNewDefault(dst_ty));
                 func.instruction(&Instruction::LocalSet(hold));
                 // array.copy takes dest, dest_offset, src, src_offset, len.
                 func.instruction(&Instruction::LocalGet(hold));
                 func.instruction(&Instruction::I32Const(0));
-                self.operand(func, base);
-                func.instruction(&Instruction::StructGet {
-                    struct_type_index: ml.record,
-                    field_index: field,
-                });
+                self.map_field(func, ml, base, field);
                 func.instruction(&Instruction::I32Const(0));
-                self.operand(func, base);
-                func.instruction(&Instruction::StructGet {
-                    struct_type_index: ml.record,
-                    field_index: field,
-                });
-                func.instruction(&Instruction::ArrayLen);
+                self.map_field(func, ml, base, maps::LEN);
                 func.instruction(&Instruction::ArrayCopy {
                     array_type_index_dst: dst_ty,
                     array_type_index_src: src,
@@ -3515,28 +3493,23 @@ impl<'a> Emitter<'a> {
                     func.instruction(&Instruction::Unreachable);
                     return true;
                 };
-                self.operand(func, base);
-                func.instruction(&Instruction::StructGet {
-                    struct_type_index: ml.record,
-                    field_index: 0,
-                });
-                func.instruction(&Instruction::ArrayLen);
+                self.map_field(func, ml, base, maps::LIVE);
                 func.instruction(&Instruction::I64ExtendI32U);
                 return true;
             }
 
-            // Lookup is a linear scan over the key array. A hash index is an
-            // optimisation for later; a scan is what makes the semantics —
-            // insertion order, and first match wins — obviously right.
+            // A call to the map type's `get` helper. See `maps`.
             mir::Rvalue::MapGet { base, key } => {
-                let Some((ml, found)) = self
-                    .map_of(base)
-                    .and_then(|m| Some((m, self.optional_answer(m.value_ty)?)))
+                let Some(helper) = self
+                    .map_operand_ty(base)
+                    .and_then(|t| self.map_helpers.index(t, maps::MapOp::Get))
                 else {
                     func.instruction(&Instruction::Unreachable);
                     return true;
                 };
-                self.map_scan(func, ml, base, key, found);
+                self.operand(func, base);
+                self.operand(func, key);
+                func.instruction(&Instruction::Call(helper));
                 return true;
             }
 
@@ -4447,214 +4420,6 @@ impl<'a> Emitter<'a> {
         };
     }
 
-    /// A second i32 register, for a new length.
-    fn index_scratch2(&self, _func: &Function) -> u32 {
-        self.index_scratch + 1
-    }
-
-    /// `m.remove(k)`: the same two arrays, one entry shorter.
-    ///
-    /// A key that is not there is not a mistake — dropping state for a row
-    /// that never had any is the ordinary case — so a miss leaves the local
-    /// holding the map it already had, and nothing is allocated.
-    ///
-    /// The entries after the removed one move down by one rather than a
-    /// tombstone being left, because insertion order is part of what a Kite
-    /// map is, and `keys()` walks the array directly.
-    ///
-    /// Eight parameters: the layout, the two scratch registers and the
-    /// destination are all worked out by the caller, which is the one that has
-    /// the `MapLayout` and the scratch table.
-    #[allow(clippy::too_many_arguments)]
-    fn map_drop(
-        &mut self,
-        func: &mut Function,
-        ml: MapLayout,
-        base: &mir::Operand,
-        key: &mir::Operand,
-        dst: u32,
-        kreg: u32,
-        vreg: u32,
-    ) {
-        let pos = self.index_scratch;
-        let len = self.index_scratch2(func);
-
-        // Scan for the key, leaving `pos` at its index or at the length. The
-        // same walk the `set` helper opens with (see `maps`).
-        func.instruction(&Instruction::I32Const(0));
-        func.instruction(&Instruction::LocalSet(pos));
-        func.instruction(&Instruction::Block(BlockType::Empty));
-        func.instruction(&Instruction::Loop(BlockType::Empty));
-        func.instruction(&Instruction::LocalGet(pos));
-        self.map_field(func, ml, base, 0);
-        func.instruction(&Instruction::ArrayLen);
-        func.instruction(&Instruction::I32GeU);
-        func.instruction(&Instruction::BrIf(1));
-        self.map_field(func, ml, base, 0);
-        func.instruction(&Instruction::LocalGet(pos));
-        func.instruction(&Instruction::ArrayGet(ml.keys));
-        self.operand(func, key);
-        self.key_equality(func, ml.key_ty);
-        func.instruction(&Instruction::BrIf(1));
-        func.instruction(&Instruction::LocalGet(pos));
-        func.instruction(&Instruction::I32Const(1));
-        func.instruction(&Instruction::I32Add);
-        func.instruction(&Instruction::LocalSet(pos));
-        func.instruction(&Instruction::Br(0));
-        func.instruction(&Instruction::End); // loop
-        func.instruction(&Instruction::End); // block
-
-        // Found only when the scan stopped short of the end.
-        self.map_field(func, ml, base, 0);
-        func.instruction(&Instruction::ArrayLen);
-        func.instruction(&Instruction::LocalGet(pos));
-        func.instruction(&Instruction::I32GtU);
-        func.instruction(&Instruction::If(BlockType::Empty));
-
-        // `len` becomes the *new* length, which is what both arrays are built
-        // at and what the tail copy is measured against.
-        self.map_field(func, ml, base, 0);
-        func.instruction(&Instruction::ArrayLen);
-        func.instruction(&Instruction::I32Const(1));
-        func.instruction(&Instruction::I32Sub);
-        func.instruction(&Instruction::LocalSet(len));
-
-        // Keys: [0, pos) then [pos + 1, old length), landing at `pos`.
-        //
-        // Either copy may be empty — removing the first entry or the last —
-        // and a zero-length `array.copy` is a no-op rather than a trap, so
-        // neither end is a special case.
-        func.instruction(&Instruction::LocalGet(len));
-        func.instruction(&Instruction::ArrayNewDefault(ml.keys));
-        func.instruction(&Instruction::LocalSet(kreg));
-        self.copy_around(func, ml.keys, kreg, ml, base, 0, pos, len);
-
-        func.instruction(&Instruction::LocalGet(len));
-        func.instruction(&Instruction::ArrayNewDefault(ml.values));
-        func.instruction(&Instruction::LocalSet(vreg));
-        self.copy_around(func, ml.values, vreg, ml, base, 1, pos, len);
-
-        func.instruction(&Instruction::LocalGet(kreg));
-        func.instruction(&Instruction::LocalGet(vreg));
-        func.instruction(&Instruction::StructNew(ml.record));
-        func.instruction(&Instruction::LocalSet(dst));
-        func.instruction(&Instruction::End); // if
-    }
-
-    /// Copy one of a map's arrays into `into`, skipping index `pos`.
-    ///
-    /// `field` is 0 for keys and 1 for values; `len` holds the destination's
-    /// length, which is one less than the source's.
-    #[allow(clippy::too_many_arguments)]
-    fn copy_around(
-        &mut self,
-        func: &mut Function,
-        array: u32,
-        into: u32,
-        ml: MapLayout,
-        base: &mir::Operand,
-        field: u32,
-        pos: u32,
-        len: u32,
-    ) {
-        // The head: dst[0..pos] = src[0..pos]
-        func.instruction(&Instruction::LocalGet(into));
-        func.instruction(&Instruction::I32Const(0));
-        self.map_field(func, ml, base, field);
-        func.instruction(&Instruction::I32Const(0));
-        func.instruction(&Instruction::LocalGet(pos));
-        func.instruction(&Instruction::ArrayCopy {
-            array_type_index_dst: array,
-            array_type_index_src: array,
-        });
-
-        // The tail: dst[pos..len] = src[pos + 1..len + 1]
-        func.instruction(&Instruction::LocalGet(into));
-        func.instruction(&Instruction::LocalGet(pos));
-        self.map_field(func, ml, base, field);
-        func.instruction(&Instruction::LocalGet(pos));
-        func.instruction(&Instruction::I32Const(1));
-        func.instruction(&Instruction::I32Add);
-        func.instruction(&Instruction::LocalGet(len));
-        func.instruction(&Instruction::LocalGet(pos));
-        func.instruction(&Instruction::I32Sub);
-        func.instruction(&Instruction::ArrayCopy {
-            array_type_index_dst: array,
-            array_type_index_src: array,
-        });
-    }
-
-    /// Emit a linear scan for `key`, leaving `Option<V>` on the stack.
-    ///
-    /// ```text
-    /// block $end (result optref)
-    ///   block $miss
-    ///     loop $scan
-    ///       i >= len  -> br $miss
-    ///       keys[i] == key -> box(values[i]) ; br $end
-    ///       i += 1 ; br $scan
-    ///     end
-    ///   end
-    ///   ref.null none
-    /// end
-    /// ```
-    fn map_scan(
-        &mut self,
-        func: &mut Function,
-        ml: MapLayout,
-        base: &mir::Operand,
-        key: &mir::Operand,
-        (result, wrap): (ValType, Option<u32>),
-    ) {
-        let i = self.index_scratch;
-        func.instruction(&Instruction::I32Const(0));
-        func.instruction(&Instruction::LocalSet(i));
-
-        func.instruction(&Instruction::Block(BlockType::Result(result)));
-        func.instruction(&Instruction::Block(BlockType::Empty));
-        func.instruction(&Instruction::Loop(BlockType::Empty));
-
-        // Past the end?
-        func.instruction(&Instruction::LocalGet(i));
-        self.map_field(func, ml, base, 0);
-        func.instruction(&Instruction::ArrayLen);
-        func.instruction(&Instruction::I32GeU);
-        func.instruction(&Instruction::BrIf(1));
-
-        // Key match?
-        self.map_field(func, ml, base, 0);
-        func.instruction(&Instruction::LocalGet(i));
-        func.instruction(&Instruction::ArrayGet(ml.keys));
-        self.operand(func, key);
-        self.key_equality(func, ml.key_ty);
-
-        func.instruction(&Instruction::If(BlockType::Empty));
-        self.map_field(func, ml, base, 1);
-        func.instruction(&Instruction::LocalGet(i));
-        func.instruction(&Instruction::ArrayGet(ml.values));
-        if let Some(box_idx) = wrap {
-            func.instruction(&Instruction::StructNew(box_idx));
-        }
-        // 0 = if, 1 = loop, 2 = the miss block, 3 = the result block.
-        func.instruction(&Instruction::Br(3));
-        func.instruction(&Instruction::End);
-
-        func.instruction(&Instruction::LocalGet(i));
-        func.instruction(&Instruction::I32Const(1));
-        func.instruction(&Instruction::I32Add);
-        func.instruction(&Instruction::LocalSet(i));
-        func.instruction(&Instruction::Br(0));
-
-        func.instruction(&Instruction::End); // loop
-        func.instruction(&Instruction::End); // miss block
-
-        func.instruction(&Instruction::RefNull(HeapType::Abstract {
-            shared: false,
-            ty: wasm_encoder::AbstractHeapType::None,
-        }));
-        func.instruction(&Instruction::End); // result block
-    }
-
     fn map_field(&mut self, func: &mut Function, ml: MapLayout, base: &mir::Operand, field: u32) {
         self.operand(func, base);
         func.instruction(&Instruction::StructGet {
@@ -4663,39 +4428,17 @@ impl<'a> Emitter<'a> {
         });
     }
 
-    /// Compare two keys already on the stack, leaving an `i32`: the same
-    /// comparison the map helpers make. See [`maps::key_equality`].
-    fn key_equality(&mut self, func: &mut Function, key_ty: TyId) {
-        maps::key_equality(func, key_ty, self.keys());
-    }
-
-    /// What comparing two keys needs, from this function's context.
-    fn keys(&self) -> maps::KeyEquality<'a> {
-        maps::KeyEquality {
-            types: self.types,
-            layout: self.layout,
-            strings: self.strings,
-            eq: self.eq,
-        }
-    }
-
-    /// What a lookup that may miss answers with, for a payload of `payload`:
-    /// the optional's type, and the box to wrap a found value in.
-    ///
-    /// `Option<Option<T>>` is `Option<T>` — the checker flattens it — so when
-    /// the payload is already optional the found value *is* the answer and is
-    /// not boxed again. A map of optional values or a slice of them used to
-    /// look for a box around an optional, find none, and trap.
+    /// What a lookup that may miss answers with. See [`maps::answer`].
     fn optional_answer(&self, payload: TyId) -> Option<(ValType, Option<u32>)> {
-        if matches!(self.types.kind(payload), TyKind::Optional(_)) {
-            return Some((val_type_with(payload, self.types, self.layout), None));
-        }
-        let boxed = self.layout.option_type(payload)?;
-        let result = ValType::Ref(RefType {
-            nullable: true,
-            heap_type: HeapType::Concrete(boxed),
-        });
-        Some((result, Some(boxed)))
+        maps::answer(payload, self.types, self.layout)
+    }
+
+    /// The map type an operand holds.
+    fn map_operand_ty(&self, o: &mir::Operand) -> Option<TyId> {
+        let mir::Operand::Local(l) = o else {
+            return None;
+        };
+        Some(self.f.locals[l.index()].ty)
     }
 
     fn map_of(&self, o: &mir::Operand) -> Option<MapLayout> {
@@ -4770,6 +4513,16 @@ impl<'a> Emitter<'a> {
     }
 
     /// The storage, header and element type of an operand holding a slice.
+    /// Where the value in a local keeps the mark saying it is its field's
+    /// alone: a slice in its header, a map in its record (see `slices` and
+    /// `maps`). The record, the field, and whether it is a packed byte.
+    fn field_mark(&self, o: &mir::Operand) -> Option<(u32, u32, bool)> {
+        if let Some(parts) = self.slice_of(o) {
+            return Some((parts.header, 2, true));
+        }
+        self.map_of(o).map(|ml| (ml.record, maps::MARK, false))
+    }
+
     fn slice_of(&self, o: &mir::Operand) -> Option<SliceParts> {
         let mir::Operand::Local(l) = o else {
             return None;
