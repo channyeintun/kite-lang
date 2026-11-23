@@ -697,12 +697,18 @@ impl Loader {
         diags: &mut DiagBag,
     ) -> Loader {
         let mut loader = Loader { provided, files, ..Loader::default() };
-        let package = match dir {
-            Some(dir) => loader.program_package(dir, Some(dir.to_path_buf()), sources, diags),
-            None => Package::default(),
+        let (dir, package) = match dir {
+            Some(dir) => {
+                let mut package = loader.program_package(dir, sources, diags);
+                let (dir, root) =
+                    loader.rooted(dir, &package).unwrap_or((dir.to_path_buf(), dir.to_path_buf()));
+                package.root = Some(root);
+                (Some(dir), package)
+            }
+            None => (None, Package::default()),
         };
         loader.direct = package.dependencies.clone();
-        let scope = Scope { dir: dir.map(Path::to_path_buf), prefix: String::new(), package };
+        let scope = Scope { dir, prefix: String::new(), package };
         loader.note_derives(entry);
         // **The entry file is on the stack from the start.** It is not loaded
         // as a module, so it never was — and a module importing it back was
@@ -744,13 +750,22 @@ impl Loader {
         diags: &mut DiagBag,
     ) -> Loader {
         let mut loader = Loader { files, ..Loader::default() };
-        // Measured from the directory above, as a `use` written beside it
-        // would measure it, so the module is named by its own directory.
-        let root = dir.parent().filter(|p| !p.as_os_str().is_empty()).map(Path::to_path_buf);
-        let package = loader.program_package(dir, root, sources, diags);
-        loader.direct = package.dependencies.clone();
+        // Measured from the package's root, as the program measures it, or
+        // failing a manifest above it from the directory above, as a `use`
+        // written beside it would — so the module is named by its own
+        // directory either way.
         let prefix = dir.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
-        let found = Found::Path { at: dir.to_path_buf(), is_dir: true, package, prefix };
+        let mut package = loader.program_package(dir, sources, diags);
+        let (at, root) = match loader.rooted(dir, &package) {
+            Some((at, root)) => (at, Some(root)),
+            None => {
+                let above = dir.parent().filter(|p| !p.as_os_str().is_empty());
+                (dir.to_path_buf(), above.map(Path::to_path_buf))
+            }
+        };
+        package.root = root;
+        loader.direct = package.dependencies.clone();
+        let found = Found::Path { at, is_dir: true, package, prefix };
         let identity = found.identity();
         let mut stack = Vec::new();
         loader.load_one(found, identity, Span::empty_at(entry, 0), &mut stack, sources, diags);
@@ -783,14 +798,15 @@ impl Loader {
     /// Looked for *upwards*, because a program is usually `src/main.kite` and
     /// the manifest is beside `src/`. Nothing is fetched here — `kitec pkg`
     /// does that, once, on purpose.
+    ///
+    /// Its `root` is left for the caller: see [`Loader::rooted`].
     fn program_package(
         &mut self,
         dir: &Path,
-        root: Option<PathBuf>,
         sources: &mut SourceMap,
         diags: &mut DiagBag,
     ) -> Package {
-        let mut package = Package { root, ..Package::default() };
+        let mut package = Package::default();
         // From the absolute directory, so `kitec run main.kite` inside `src/`
         // finds the manifest beside `src/` exactly as `kitec run src/main.kite`
         // does from above it.
@@ -806,6 +822,29 @@ impl Loader {
             here = directory.parent();
         }
         package
+    }
+
+    /// Where the program's package begins, when its manifest is in a
+    /// directory above `dir`: `dir` spelled from the top, and that directory.
+    /// `None` when there is no manifest above, and the caller's own root
+    /// stands.
+    ///
+    /// **The package's root is the directory of its manifest.** It was the
+    /// entry file's directory, so a file checked or tested on its own was the
+    /// root of a package of its own: `kitec test ui/u.kite` could not reach
+    /// the `config/` beside `ui/` that `kitec run main.kite` reaches from the
+    /// same file, and named every module from `ui/`. Measured from the
+    /// manifest, a module is found, and named, the same whichever file of the
+    /// package is the entry. Both are spelled from the top, since a module
+    /// identity is a path below the root and a root above a relative `dir`
+    /// cannot be spelled relative to it.
+    fn rooted(&self, dir: &Path, package: &Package) -> Option<(PathBuf, PathBuf)> {
+        let manifest = package.manifest.as_ref()?;
+        let whole = self.files.absolute(dir);
+        if whole == *manifest || !whole.starts_with(manifest) {
+            return None;
+        }
+        Some((whole, manifest.clone()))
     }
 
     /// The manifest `package`'s dependencies were to come from, when it was

@@ -134,7 +134,11 @@ A ` ```kite ` fence is compiled and run by `kitec test`, alongside the file's
 `test_…` functions. It is appended to the module it was written in, so
 everything the comment documents is in scope with no import to get wrong; a
 fence that declares a type or a function lands at file scope and is checked by
-compiling. ` ```kite ignore ` marks an illustration instead — a fence naming
+compiling. `kitec test` and `kitec doc` take one file: a file of a directory
+module tested on its own is compiled as that file alone, so its fences and
+`test_…` functions do not see what its sibling files declare — a directory
+module's tests that need them belong in a test file that imports the module.
+` ```kite ignore ` marks an illustration instead — a fence naming
 types the reader supplies, which most module headers do — and is not compiled.
 A fence tagged anything else is prose.
 
@@ -2056,8 +2060,12 @@ fn start() -> error {
 outward.** The first place is the importing module's own directory — the
 directory a one-file module sits in, or a directory module itself — and then
 each directory enclosing it in turn, stopping at the root of the package the
-importing module belongs to: the entry file's directory for the program, the
-dependency's own directory for a module inside a dependency. The nearest match
+importing module belongs to: for the program, the nearest directory at or
+above the entry file that holds a `kite.toml`, or the entry file's own
+directory when none does; for a module inside a dependency, the dependency's
+own directory. So whichever file of a package is the entry — `kitec run
+main.kite`, or `kitec test ui/app.kite` on its own — a module finds the same
+modules, and is named by the same path below that root. The nearest match
 wins. So `ui/app.kite` above writing `use config` finds `ui/config/` if `ui`
 has one of its own and `config/` beside `ui/` otherwise, and a dependency never
 resolves a `use` into the program that imports it. A `use` that matches

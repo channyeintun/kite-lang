@@ -17,7 +17,8 @@ The deltas that will catch you out, in the order you will hit them:
    exactly like any other module (§4).
 5. **A `use` path is looked for beside the importing module, then outward**:
    in its own directory first, then each enclosing one, stopping at the
-   package's root (the entry file's directory, or the dependency's own). The
+   package's root (the directory of the program's `kite.toml` — the entry
+   file's own directory when there is none — or the dependency's own). The
    nearest wins, so sibling directory modules reach each other.
 6. **A module is where its source is**, so `util` inside `a/` and `util` inside
    `b/` are two modules, and so are `dep/utils` and `utils` — but the standard
@@ -532,8 +533,11 @@ fn main() {
 A file at `src/a/x.kite` writing `use config` is asking for `src/a/config/` or
 `src/a/config.kite` first, then `src/config/` or `src/config.kite` — each
 enclosing directory in turn, nearest first, and **no further than the
-package's root**: the entry file's directory for the program (here `src/`),
-the dependency's own directory for a module inside a dependency. A directory
+package's root**: for the program, the nearest directory at or above the entry
+that holds a `kite.toml` (here `myapp/`), or the entry file's own directory
+when there is none; the dependency's own directory for a module inside a
+dependency. So a file checked or tested on its own finds what it finds when
+the program's `main.kite` is the entry. A directory
 module is measured from its own directory, so `src/ui/app.kite` writing `use
 config` finds `src/ui/config/` if there is one and `src/config/` beside `ui/`
 otherwise — which is how two sibling directory modules import each other. A
@@ -647,7 +651,8 @@ in the importing program with no diagnostic.
 ### A module is where its source is — except for `std`
 
 A module is identified by the file or directory it was loaded from, and named
-by its path within its package: `a/util` for `a/util.kite` beside the entry,
+by its path within its package — below the directory of its `kite.toml`, or of
+the entry file when there is none: `a/util` for `a/util.kite` there,
 `md/util` for `util.kite` inside a dependency called `md`. That is the name a
 diagnostic uses — ``private to module `a/util` ``. So `use util` inside `a/`
 and `use util` inside `b/` are two modules, each spelled `util` in the file

@@ -1769,3 +1769,31 @@ fn a_module_reached_as_part_of_two_packages_is_refused() {
     let one = p.file("src/one.kite", &format!("use d/inner\n\n{}", body));
     assert_eq!(p.run(&one).expect("compiles"), "1\n");
 }
+
+/// The program's package begins at its `kite.toml`, so a file of the package
+/// compiled on its own — `kitec test ui/u.kite` — reaches what it reaches when
+/// `main.kite` is the entry, and names modules the same way. Its own directory
+/// was the root, and `use config` beside `ui/` was `E0400`.
+#[test]
+fn a_file_checked_on_its_own_resolves_from_its_packages_root() {
+    let p = Project::new("root-at-manifest");
+    p.file("kite.toml", "[package]\nname = \"t\"\nversion = \"0.1.0\"\n");
+    p.file("config/c.kite", "pub fn name() -> str {\n  return \"cfg\"\n}\nfn hidden() {}\n");
+    p.file("main.kite", "use ui\n\nfn main() {\n  io.print(ui.title())\n}\n");
+    let ui = p.file(
+        "ui/u.kite",
+        "use config\n\npub fn title() -> str {\n  return \"ui:\" + config.name()\n}\n\n\
+         fn main() {\n  io.print(title())\n}\n",
+    );
+    assert_eq!(p.run(&ui).expect("compiles"), "ui:cfg\n");
+    let tests = kite_driver::compile_tests(&ui, &std::fs::read_to_string(&ui).unwrap(), false);
+    assert!(!tests.failed(), "{}", tests.render_diagnostics());
+    // Named from the root, as from `main.kite`.
+    let bad = p.file("ui/bad.kite", "use config\n\nfn main() {\n  config.hidden()\n}\n");
+    let said = p.run(&bad).expect_err("private");
+    assert!(said.contains("private to module `config`"), "{}", said);
+    // Without a manifest the entry's own directory is the root, as before.
+    std::fs::remove_file(p.dir.join("kite.toml")).expect("remove");
+    let said = p.run(&ui).expect_err("no package above");
+    assert!(said.contains("E0400"), "{}", said);
+}

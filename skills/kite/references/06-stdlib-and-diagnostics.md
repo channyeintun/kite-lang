@@ -1512,7 +1512,11 @@ no tests in `proj/src/main.kite`: a test is a `fn test_…()` taking no argument
 
 Pointing `kitec test` at the module file instead recompiles that file alone, so
 everything it took from its siblings is gone —
-`error[E0204]: unknown type 'Amount'` for a struct declared next door.
+`error[E0204]: unknown type 'Amount'` for a struct declared next door. (What it
+*imports* is still found as the program finds it, when the package has a
+`kite.toml`: the walk outward stops at the manifest's directory, not at the
+file's. Without a manifest the file's own directory is the root.) `kitec test`
+and `kitec doc` take a file, not a directory: `kitec test lib` is `cannot read`.
 
 So a module's tests are runnable exactly two ways. Either they live in the same
 file as the code they test, and that file is self-contained — one file *is* a
