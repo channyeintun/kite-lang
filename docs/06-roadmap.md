@@ -580,7 +580,7 @@ WasmGC structs.**
 
 ```bash
 kitec build examples/hello.kite --emit wasm --out dist
-# wrote dist/app.wasm (1009 bytes) and dist/app.js
+# wrote dist/app.wasm (1009 bytes), dist/app.js and dist/app.wasm.map
 ```
 
 **1,009 bytes**, against a 10 KB budget. Shipping no garbage collector is what

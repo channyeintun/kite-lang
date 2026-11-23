@@ -807,8 +807,7 @@ refreshes the module beside it:
 
 ```
 $ kitec build main.kite --emit wasm --out .
-  and ./api.js with ./api.d.ts
-wrote ./app.wasm (2743 bytes) and ./app.js
+wrote ./app.wasm (2743 bytes), ./app.js, ./app.wasm.map, ./api.js and ./api.d.ts
 note: ./index.html was already there and was left alone
 ```
 

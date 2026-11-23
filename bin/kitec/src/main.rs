@@ -319,11 +319,13 @@ fn command() -> ExitCode {
         // has to be beside it or a browser asks for something that is not
         // there. §16 is what requires it: a trap in a Kite island should name
         // a `.kite` file rather than `wasm-function[37]`.
+        let mut map_written = None;
         if let Some(map) = result.wasm_source_map(Some(std::path::Path::new(dir))) {
             let map_path = format!("{}/{}", dir, kite_driver::SOURCE_MAP_NAME);
             if let Err(e) = std::fs::write(&map_path, map) {
                 return fail(&format!("cannot write `{}`: {}", map_path, e));
             }
+            map_written = Some(map_path);
         }
         // A page to open, so a compiled program is something to look at rather
         // than three files and instructions.
@@ -365,43 +367,39 @@ fn command() -> ExitCode {
         // cannot open a socket, so this is a second entry point rather than
         // another group in the glue — and a program that only fetches never
         // sees it.
-        if kite_driver::listens(&module.hosts) {
-            let serve_path = format!("{}/serve.mjs", dir);
+        let serve_path = format!("{}/serve.mjs", dir);
+        let listens = kite_driver::listens(&module.hosts);
+        if listens {
             if let Err(e) = std::fs::write(&serve_path, kite_driver::generate_server("app.wasm")) {
                 return fail(&format!("cannot write `{}`: {}", serve_path, e));
             }
-            eprintln!(
-                "wrote {} ({} bytes), {}, {} and {}\n\
-                 note: this program listens — run it with `node {}`",
-                wasm_path,
-                module.bytes.len(),
-                js_path,
-                html_path,
-                serve_path,
-                serve_path
-            );
-            return ExitCode::SUCCESS;
+        }
+        // Every file written is named: the module first with its size, then
+        // the rest in the order a reader meets them.
+        let mut also = vec![js_path.clone()];
+        also.extend(map_written);
+        if !page_kept {
+            also.push(html_path.clone());
         }
         if has_api {
-            eprintln!("  and {} with {}", api_js_path, api_dts_path);
+            also.push(api_js_path.clone());
+            also.push(api_dts_path.clone());
         }
-        if page_kept {
-            eprintln!(
-                "wrote {} ({} bytes) and {}\n\
-                 note: {} was already there and was left alone",
-                wasm_path,
-                module.bytes.len(),
-                js_path,
-                html_path
-            );
+        if listens {
+            also.push(serve_path.clone());
+        }
+        let last = also.pop().expect("app.js is always written");
+        let list = if also.is_empty() {
+            format!(" and {}", last)
         } else {
-            eprintln!(
-                "wrote {} ({} bytes), {} and {}",
-                wasm_path,
-                module.bytes.len(),
-                js_path,
-                html_path
-            );
+            format!(", {} and {}", also.join(", "), last)
+        };
+        eprintln!("wrote {} ({} bytes){}", wasm_path, module.bytes.len(), list);
+        if page_kept {
+            eprintln!("note: {} was already there and was left alone", html_path);
+        }
+        if listens {
+            eprintln!("note: this program listens — run it with `node {}`", serve_path);
         }
         return ExitCode::SUCCESS;
     }

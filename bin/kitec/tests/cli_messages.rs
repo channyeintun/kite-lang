@@ -175,3 +175,27 @@ fn fix_names_the_other_file_whose_errors_it_left() {
     let out = kitec(&["fix", dir.join("m.kite").to_str().unwrap()]);
     assert!(out.status.success(), "{}", stderr(&out));
 }
+
+/// `kitec build --emit wasm` named `app.wasm`, `app.js` and `index.html` and
+/// left out the source map it also wrote.
+#[test]
+fn build_names_every_file_it_wrote() {
+    let dir = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("build_names");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let src = dir.join("h.kite");
+    std::fs::write(&src, "fn main() {\n    io.print(1)\n}\n").unwrap();
+    let out_dir = dir.join("out");
+    let out = kitec(&["build", src.to_str().unwrap(), "--emit", "wasm", "--out", out_dir.to_str().unwrap()]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let said = stderr(&out);
+    let mut written: Vec<String> = std::fs::read_dir(&out_dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
+        .collect();
+    written.sort();
+    assert!(written.contains(&"app.wasm.map".to_string()), "{:?}", written);
+    for name in &written {
+        assert!(said.contains(name.as_str()), "{} is written and not named: {}", name, said);
+    }
+}

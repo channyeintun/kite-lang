@@ -528,8 +528,7 @@ every build:
 
 ```
 $ kitec build examples/page/main.kite --emit wasm --release --out dist
-  and dist/api.js with dist/api.d.ts
-wrote dist/app.wasm (… bytes), dist/app.js and dist/index.html
+wrote dist/app.wasm (… bytes), dist/app.js, dist/app.wasm.map, dist/index.html, dist/api.js and dist/api.d.ts
 ```
 
 **There is no per-symbol breakdown**, and this section used to show one — a
