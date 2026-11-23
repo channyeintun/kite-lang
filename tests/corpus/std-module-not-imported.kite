@@ -1,0 +1,22 @@
+// A standard-library module the file does not `use`, written with a member
+// it has, is one E0111 (E0204 for a type) whose note says the `use` to add —
+// the same words for every module. `errors.new` needs no `use`, and
+// `errors.wrap` on the line under it said only "cannot find `errors`".
+
+fn f() -> error {
+    return errors.new("boom")
+}
+
+fn shape(j: json.Json) -> int { //~ ERROR E0204
+    return 1
+}
+
+fn main() {
+    var e = f()
+    e = errors.wrap(e, "…") //~ ERROR E0111
+    let (j, je) = json.parse("1") //~ ERROR E0111
+    let c = text.clusters("ab") //~ ERROR E0111
+    if e != nil {
+        io.print(e.message())
+    }
+}

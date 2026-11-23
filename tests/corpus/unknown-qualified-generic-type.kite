@@ -1,0 +1,32 @@
+// A module-qualified type with arguments whose qualifier is no module the
+// file imports is unknown, once, in every place a type is written — as it is
+// without the arguments. `bogus.Thing<int>` said nothing at all, and the
+// program ran. A built-in type or a type parameter given arguments says it
+// takes none, not that it is unknown.
+
+struct Holder {
+    a: bogus.Thing<int> //~ ERROR E0204
+}
+
+enum E {
+    A(x: bogus.Thing<int>) //~ ERROR E0204
+    B
+}
+
+fn g(x: bogus.Thing<int>) { } //~ ERROR E0204
+
+fn k() -> sync.Nope<str> { //~ ERROR E0204
+    return nil
+}
+
+fn h<T>(x: T<int>) { } //~ ERROR E0204
+
+fn main() {
+    let e: bogus.Thing<int> = nil //~ ERROR E0204
+    var xs: [bogus.Thing<int>] = [] //~ ERROR E0204
+    let o: Option<bogus.Thing<int>> = nil //~ ERROR E0204
+    let f = |x: bogus.Thing<int>| 1 //~ ERROR E0204
+    let c = 3 as bogus.Thing<int> //~ ERROR E0204
+    let a: int<str> = 1 //~ ERROR E0204
+    let r: error<int> = nil //~ ERROR E0204
+}

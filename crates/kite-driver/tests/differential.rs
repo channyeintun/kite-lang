@@ -7720,6 +7720,60 @@ fn main() {
 "#,
         "no\n42\nhi!\nfirst\nthird\n21\n8\n16\njob 6\n4\n",
     ),
+    // The place a closure stands in is looked through `Option` (§4.5), for
+    // waiting as for being told what is known: `ap_opt(|n| n + 1, 41)`
+    // against `f: Option<fn(T) -> T>` was E0211, and the fallible form two
+    // errors, though the same calls against a plain `fn(T) -> T` compiled.
+    (
+        "a-closure-for-an-optional-function-learns-what-a-later-argument-fixes",
+        r#"use std/errors
+fn ap_opt<T>(f: Option<fn(T) -> T>, x: T) -> T {
+  if f == nil {
+    return x
+  }
+  return f(x)
+}
+fn ap_opt_r<T>(x: T, f: Option<fn(T) -> T>) -> T {
+  return ap_opt(f, x)
+}
+fn r3<T>(g: Option<fn() -> (T, error)>, x: T) -> T {
+  if g == nil {
+    return x
+  }
+  let (v, err) = g()
+  if err != nil {
+    return x
+  }
+  return v
+}
+fn made<T>(g: Option<fn() -> T>) -> int {
+  return 1
+}
+struct Job<T> {
+  run: Option<fn(T) -> T>
+  seed: T
+}
+fn main() {
+  io.print(ap_opt(|n| n + 1, 41))
+  io.print(ap_opt_r(41, nil))
+  io.print(r3(|| {
+    return _, errors.new("y")
+  }, 6))
+  io.print(r3(|| {
+    return 7, nil
+  }, 6))
+  io.print(made(|| {
+    return "s"
+  }))
+  let j = Job{ run: |n| n * 2, seed: 5 }
+  let run = j.run
+  if run != nil {
+    io.print(run(j.seed))
+  }
+}
+"#,
+        "42\n41\n6\n7\n1\n10\n",
+    ),
     // What E0114's notes tell the reader to write, written: a `var` copy and
     // a captured `let` of the result; a copy made inside the closure; a
     // `var` given its value where it is declared; a copy of a loop's or a

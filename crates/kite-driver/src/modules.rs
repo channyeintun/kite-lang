@@ -55,6 +55,24 @@ pub fn std_module(name: &str) -> Option<&'static str> {
     STD_MODULES.iter().find(|(n, _)| *n == name).map(|(_, src)| *src)
 }
 
+/// Whether the standard library's module `module` declares a public item
+/// called `member` — a function, a type, a trait or a constant. Read from the
+/// embedded source's top-level `pub` lines, and asked only for the note on an
+/// `E0111` (see [`kite_resolve::Modules::std_declares`]), so no compile pays
+/// for it that has no such error.
+pub fn std_declares(module: &str, member: &str) -> bool {
+    let Some(src) = std_module(module) else { return false };
+    src.lines().any(|line| {
+        let Some(rest) = line.strip_prefix("pub ") else { return false };
+        let rest = rest.strip_prefix("async ").unwrap_or(rest);
+        ["fn ", "struct ", "enum ", "trait ", "let ", "type "].iter().any(|kw| {
+            rest.strip_prefix(kw).and_then(|r| r.strip_prefix(member)).is_some_and(|after| {
+                !after.starts_with(|c: char| c.is_alphanumeric() || c == '_')
+            })
+        })
+    })
+}
+
 /// Whether a module name is the standard library's to spell (`E0403`): one of
 /// its modules, a module its builtins are reached through — `io`, `draw`,
 /// `ptr` — or `prelude`.
