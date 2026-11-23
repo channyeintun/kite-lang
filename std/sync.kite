@@ -103,6 +103,80 @@ pub async fn update<T>(var m: Mutex<T>, f: fn(T) -> T) {
     release(m, f(held))
 }
 
+// ---- Queue ------------------------------------------------------------------
+
+/// A first-in, first-out queue for handing values from one task to another:
+/// one side [`put`]s, the other [`take`]s, and a taker with nothing to take
+/// waits rather than polling.
+///
+/// ```kite
+/// use std/task
+///
+/// async fn produce(var q: Queue<int>) {
+///     for n in 1..4 {
+///         put(q, n * 10)
+///         task.yield()
+///     }
+/// }
+///
+/// async fn consume(var q: Queue<int>) -> int {
+///     var total = 0
+///     for i in 0..3 {
+///         total += await take(q)
+///     }
+///     return total
+/// }
+///
+/// async fn run() -> int {
+///     var q: Queue<int> = queue()
+///     let taker = consume(q)
+///     let giver = produce(q)
+///     await giver
+///     return await taker
+/// }
+///
+/// fn main() {
+///     _ = run()
+/// }
+/// ```
+///
+/// Unlike [`Mutex`] and [`Atomic`], a queue is not `Share`: the compiler's
+/// exemption names those two and nothing else, so a queue is handed between
+/// tasks of one program as a `var` parameter, as above.
+pub struct Queue<T> {
+    var items: [T]
+}
+
+pub fn queue<T>() -> Queue<T> {
+    return Queue{ items: [] }
+}
+
+/// Add a value at the back. Never waits: the queue has no bound.
+pub fn put<T>(var q: Queue<T>, value: T) {
+    q.items.push(value)
+}
+
+/// The value at the front, taken off the queue, waiting until there is one.
+///
+/// Parked between looks, as [`lock`] is, so a taker waiting on a producer
+/// that sleeps lets the clock move on rather than holding it still.
+pub async fn take<T>(var q: Queue<T>) -> T {
+    for {
+        if q.items.len() > 0 {
+            let front = q.items[0]
+            q.items = q.items[1..]
+            return front
+        }
+        task.park()
+        task.yield()
+    }
+}
+
+/// How many values are waiting. For diagnostics, as [`is_held`] is.
+pub fn size<T>(q: Queue<T>) -> int {
+    return q.items.len()
+}
+
 // ---- Atomic -----------------------------------------------------------------
 
 /// An integer that can be read and written as one step.
