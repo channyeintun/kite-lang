@@ -163,11 +163,12 @@ pub fn status(code: int, body: str) -> Response {
 /// a line break, a control character or a character past U+00FF in a value, is
 /// not sent — `respond` says why, and [`run`] answers 500 instead of putting it
 /// on the wire. A name that frames the message — `Content-Length`,
-/// `Transfer-Encoding`, `Connection`, `Keep-Alive`, `Upgrade`, `TE`, `Trailer` — is refused
-/// the same way: the host knows the body's length in bytes and a handler does not, and a
-/// wrong one lets the body be read as the next response on the connection. A name added twice
-/// goes out twice, which is what `Set-Cookie` needs, and a
-/// `Content-Type` here replaces the default `text/plain`. This is not what
+/// `Transfer-Encoding`, `Connection`, `Keep-Alive`, `Upgrade`, `TE`, `Trailer`,
+/// `Proxy-Connection` — is refused the same way: the host knows the body's
+/// length in bytes and a handler does not, and a wrong one lets the body be
+/// read as the next response on the connection. A name added twice goes out
+/// twice, which is what `Set-Cookie` needs, and a `Content-Type` here replaces
+/// the default `text/plain`. This is not what
 /// [`header`] reads: that is what arrived, and a response built in Kite
 /// arrived from nowhere.
 ///
@@ -1050,8 +1051,10 @@ pub fn request_header(request: Request, name: str) -> Option<str> {
 /// What counts as a line is the host's: the Node server joins a header sent
 /// twice into one line with a comma (`1, 2`, which RFC 9110 §5.3 says is the
 /// same header), so there it is one entry to split at the commas, and a host
-/// that keeps each line gives one entry for each. Do not split a header whose
-/// single value may hold a comma (`Date`, `User-Agent`).
+/// that keeps each line gives one entry for each. Node also joins `Cookie`
+/// with `; `, and keeps only the first of a header that may appear once
+/// (`Host`, `Content-Type`, `User-Agent`, `Authorization` and their kin). Do not
+/// split a header whose single value may hold a comma (`Date`, `User-Agent`).
 ///
 /// ```kite
 /// let r = Request{ method: "GET", path: "/", body: "", headers: "X-Tag: a\nx-tag: b\nOther: c" }

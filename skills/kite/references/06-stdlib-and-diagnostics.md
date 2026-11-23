@@ -1111,7 +1111,8 @@ text**, because a newline in a value would otherwise become a separator; it
 refuses a name that is not a token, a line break in either, a NUL, another
 control character or a character past U+00FF in a value (percent-encode it
 first), a name that frames the message (`Content-Length`, `Transfer-Encoding`,
-`Connection`, `Keep-Alive`, `Upgrade`, `TE`, `Trailer`: the host writes the length), and a
+`Connection`, `Keep-Alive`, `Upgrade`, `TE`, `Trailer`, `Proxy-Connection`: the host writes
+the length), and a
 status outside 200 to 599 (a 1xx is interim, never the last word) or a body on a 204 or 304 ·
 `run(server, [Route]) -> (int, error)` sends the headers a handler added with
 `with_header(response, name, value)`, and answers 500 (and carries on) to a
