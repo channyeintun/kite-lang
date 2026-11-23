@@ -2408,6 +2408,290 @@ fn main() {
     }
 }
 "#,
+    ),    // A map is its entries in insertion order with a hash index beside them
+    // past a few entries, and nothing the index does may show: every key
+    // kind `==` distinguishes, removals (which leave holes while indexed, and
+    // close up when the holes outnumber the entries), re-inserts, iteration
+    // after each, identity, a walk that changes the map, and a struct key
+    // whose `var` field changes after it is stored — still found by what it
+    // is now, and of two equal keys the earlier still wins.
+    (
+        "maps-are-indexed-and-keep-their-order",
+        r#"use std/errors
+
+struct P {
+    x: int
+    y: int
+}
+
+struct Cell {
+    var n: int
+}
+
+enum Shape {
+    Dot
+    Circle(r: int)
+    Rect(w: int, h: str)
+}
+
+fn show_int(m: { int: int }) -> str {
+    var out = ""
+    for (k, v) in m {
+        out = out + "\(k)=\(v) "
+    }
+    return out
+}
+
+fn ints() {
+    var m: { int: int } = { }
+    for i in 0..40 {
+        m[i * 7 % 41] = i
+    }
+    io.print(show_int(m))
+    for i in 0..40 {
+        if i % 3 == 0 {
+            m.remove(i * 7 % 41)
+        }
+    }
+    io.print(show_int(m))
+    for i in 0..40 {
+        m[i * 7 % 41] = i * 100
+    }
+    io.print(show_int(m))
+    var misses = 0
+    for i in 100..200 {
+        if m[i] == nil {
+            misses += 1
+        }
+    }
+    io.print("misses \(misses) len \(m.len())")
+    // Remove everything, then build again.
+    for k in m.keys() {
+        m.remove(k)
+    }
+    io.print("emptied \(m.len()) [\(show_int(m))]")
+    for i in 0..20 {
+        m[20 - i] = i
+    }
+    io.print(show_int(m))
+}
+
+fn floats() {
+    var m: { float: int } = { }
+    let nan = 0.0 / 0.0
+    for i in 0..30 {
+        m[i as float / 4.0] = i
+    }
+    m[nan] = 1
+    m[nan] = 2
+    m[-0.0] = 99
+    m[0.0 - 1.5] = 7
+    io.print("\(m.len()) \(or_else(m[0.0], -1)) \(or_else(m[-0.0], -1)) \(or_else(m[nan], -1))")
+    m.remove(-0.0)
+    m.remove(nan)
+    io.print("\(m.len()) \(or_else(m[0.0], -1))")
+    for (k, v) in m {
+        io.print("  \(k) \(v)")
+    }
+}
+
+fn strs() {
+    var m: { str: int } = { }
+    for i in 0..50 {
+        m["k\(i % 37)é"] = i
+    }
+    m.remove("k3é")
+    m.remove("k4é")
+    m["k3é"] = 333
+    var s = ""
+    for (k, v) in m {
+        s = s + "\(k):\(v),"
+    }
+    io.print(s)
+    io.print("\(or_else(m["k10é"], -1)) \(or_else(m["nope"], -1)) \(m.len())")
+}
+
+fn bools() {
+    var m: { bool: str } = { true: "t" }
+    m[false] = "f"
+    m[true] = "T"
+    m.remove(false)
+    m[false] = "F"
+    for (k, v) in m {
+        io.print("\(k) \(v)")
+    }
+}
+
+fn structs() {
+    var m: { P: int } = { }
+    for i in 0..30 {
+        m[P{ x: i % 6, y: i / 6 }] = i
+    }
+    m[P{ x: 2, y: 2 }] = 1000
+    m.remove(P{ x: 0, y: 0 })
+    var s = 0
+    for (k, v) in m {
+        s = s + k.x * 1000 + k.y * 10 + v
+    }
+    io.print("structs \(m.len()) \(s) \(or_else(m[P{ x: 2, y: 2 }], -1)) \(or_else(m[P{ x: 9, y: 9 }], -1))")
+}
+
+fn mutable() {
+    // A key that changes after it is stored: a lookup by what it is now
+    // finds it, and of two equal keys the earlier wins.
+    var cells: [Cell] = []
+    var m: { Cell: int } = { }
+    for i in 0..20 {
+        let c = Cell{ n: i }
+        cells.push(c)
+        m[c] = i
+    }
+    var c5 = cells[5]
+    c5.n = 105
+    var c9 = cells[9]
+    c9.n = 105
+    io.print("mutable \(or_else(m[Cell{ n: 105 }], -1)) \(or_else(m[Cell{ n: 5 }], -1)) \(m.len())")
+    m[Cell{ n: 105 }] = 7
+    m.remove(Cell{ n: 105 })
+    io.print("after \(or_else(m[Cell{ n: 105 }], -1)) \(m.len())")
+    var t = ""
+    for (k, v) in m {
+        t = t + "\(k.n):\(v) "
+    }
+    io.print(t)
+}
+
+fn enums() {
+    var m: { Shape: int } = { }
+    m[Dot] = 1
+    for i in 0..20 {
+        m[Circle(r: i)] = i
+        m[Rect(w: i, h: "h\(i % 3)")] = 100 + i
+    }
+    m.remove(Circle(r: 4))
+    m[Dot] = 2
+    io.print("enums \(m.len()) \(or_else(m[Dot], -1)) \(or_else(m[Rect(w: 5, h: "h2")], -1)) \(or_else(m[Circle(r: 4)], -1))")
+}
+
+fn tuples() {
+    var m: { (int, str): int } = { }
+    for i in 0..30 {
+        m[(i % 5, "s\(i % 7)")] = i
+    }
+    m.remove((1, "s1"))
+    var s = ""
+    for (k, v) in m {
+        s = s + "\(k.0)\(k.1)=\(v) "
+    }
+    io.print(s)
+}
+
+fn slices() {
+    var m: { [int]: int } = { }
+    var key: [int] = []
+    for i in 0..20 {
+        key.push(i % 4)
+        m[key] = i
+    }
+    m[[0, 1, 2]] = 99
+    m.remove([0])
+    io.print("slices \(m.len()) \(or_else(m[[0, 1, 2]], -1)) \(or_else(m[[0]], -1))")
+}
+
+fn optionals() {
+    var m: { Option<int>: int } = { }
+    for i in 0..20 {
+        m[i] = i
+    }
+    m[nil] = -5
+    m.remove(3)
+    let none: Option<int> = nil
+    io.print("optionals \(m.len()) \(or_else(m[none], 0)) \(or_else(m[7], 0)) \(or_else(m[3], 0))")
+}
+
+fn maps() {
+    var m: { { str: int }: int } = { }
+    for i in 0..20 {
+        var inner: { str: int } = { }
+        for j in 0..i {
+            inner["x\(j)"] = j
+        }
+        m[inner] = i
+    }
+    var probe: { str: int } = { }
+    for j in 0..12 {
+        probe["x\(j)"] = j
+    }
+    io.print("maps \(m.len()) \(or_else(m[probe], -1))")
+}
+
+fn identity() {
+    var m: { int: int } = { }
+    for i in 0..30 {
+        m[i] = i
+    }
+    let before = m
+    m.remove(1000)
+    io.print("miss keeps identity: \(ptr.same(before, m))")
+    m[5] = 50
+    io.print("write after sharing: \(ptr.same(before, m)) \(or_else(before[5], -1)) \(or_else(m[5], -1))")
+    let again = m
+    m.remove(6)
+    io.print("remove after sharing: \(ptr.same(again, m)) \(again.len()) \(m.len())")
+    io.print("equal: \(before == m) \(m == m)")
+}
+
+fn literals() {
+    let (three, one) = (3, 1)
+    let m = { three: "c", one: "a", 3: "C", 2: "b", 1: "A" }
+    var s = ""
+    for (k, v) in m {
+        s = s + "\(k)\(v)"
+    }
+    io.print(s)
+}
+
+fn walk_and_change() {
+    var m: { int: int } = { }
+    for i in 0..20 {
+        m[i] = i
+    }
+    for (k, v) in m {
+        if k % 2 == 0 {
+            m.remove(k + 1)
+            m[k + 100] = v
+        }
+    }
+    io.print(show_int(m))
+}
+
+fn errs() {
+    var m: { error: int } = { }
+    for i in 0..30 {
+        m[errors.new("e\(i % 12)")] = i
+    }
+    m.remove(errors.new("e3"))
+    io.print("errors \(m.len()) \(or_else(m[errors.new("e5")], -1)) \(or_else(m[errors.new("e3")], -1))")
+}
+
+fn main() {
+    ints()
+    errs()
+    floats()
+    strs()
+    bools()
+    structs()
+    mutable()
+    enums()
+    tuples()
+    slices()
+    optionals()
+    maps()
+    identity()
+    literals()
+    walk_and_change()
+}
+"#,
     ),
 ];
 
@@ -4028,13 +4312,15 @@ fn run_on_native_with(name: &str, src: &str, config: kite_codegen_clif::RunConfi
     (String::from_utf8(out).expect("output is valid UTF-8"), stats.minor_collections)
 }
 
-/// The slice programs, natively, under a collector made to run constantly.
+/// The slice and map programs, natively, under a collector made to run
+/// constantly.
 ///
 /// A slice written in place is the collector's business: once it has been
 /// promoted, a young element written into it is reachable only through the
 /// write barrier, and a slice grown past the nursery is born in the old
 /// generation. The default nursery of a megabyte never fills for these
-/// programs, so they run here too with one of a page. The string program is
+/// programs, so they run here too with one of a page. A map is written in
+/// place the same way, and its index moves with it. The string program is
 /// here because a string's character count lives in its header, which must
 /// move with it.
 #[test]
@@ -4047,7 +4333,12 @@ fn slices_agree_natively_with_a_page_of_nursery() {
         return;
     }
     let mut collections = 0;
-    for name in ["slices-are-values", "slices-grow-in-place-natively", "strings-index-by-character"] {
+    for name in [
+        "slices-are-values",
+        "slices-grow-in-place-natively",
+        "strings-index-by-character",
+        "maps-are-indexed-and-keep-their-order",
+    ] {
         let (_, src) = WASM_TARGET
             .iter()
             .chain(NATIVE_TARGET)

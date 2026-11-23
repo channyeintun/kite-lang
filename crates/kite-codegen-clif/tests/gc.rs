@@ -130,6 +130,9 @@ fn old_objects_written_after_promotion_are_remembered() {
     );
 }
 
+/// A map written in place allocates only as its room doubles, so it takes
+/// two thousand entries and the noise after them to fill this nursery often
+/// enough — three hundred did when every write copied the map.
 #[test]
 fn maps_and_closures_survive_collections() {
     if unsupported_here() {
@@ -137,12 +140,12 @@ fn maps_and_closures_survive_collections() {
     }
     agree_with_gc(
         "fn main() {\n  var m: {str: int} = {}\n\
-         \x20 for i in 0..300 {\n    m[\"k\\(i)\"] = i * i\n  }\n\
+         \x20 for i in 0..2000 {\n    m[\"k\\(i)\"] = i * i\n  }\n\
          \x20 io.print(m.len())\n\
          \x20 let a = m[\"k7\"]\n  io.print(if a == nil { -1 } else { a })\n\
-         \x20 let z = m[\"k299\"]\n  io.print(if z == nil { -1 } else { z })\n\
+         \x20 let z = m[\"k1999\"]\n  io.print(if z == nil { -1 } else { z })\n\
          \x20 let base = 1000\n  let f = |x: int| x + base\n\
-         \x20 var noise = 0\n  for i in 0..200 {\n\
+         \x20 var noise = 0\n  for i in 0..600 {\n\
          \x20   var pad: [str] = []\n    for j in 0..10 {\n      pad.push(\"x\\(j)\")\n    }\n\
          \x20   noise = noise + pad.len()\n  }\n\
          \x20 io.print(f(1))\n  io.print(noise)\n}\n",
@@ -176,6 +179,32 @@ fn a_loop_of_pushes_is_linear() {
     assert!(
         stats.minor_collections < 100,
         "{} collections for 40,000 writes to one slice: each write is copying it",
+        stats.minor_collections
+    );
+}
+
+/// A loop of map inserts, replacements and removals is linear, measured the
+/// same way: every `m[k] = v` and `m.remove(k)` copied the whole map, so once
+/// it outgrew the nursery each one was a collection of its own. Written in
+/// place, with an index, the map is reallocated only as its room doubles.
+#[test]
+fn a_loop_of_map_writes_is_linear() {
+    if unsupported_here() {
+        return;
+    }
+    let src = "fn main() {\n  var m: {int: int} = {}\n\
+               \x20 for i in 0..20000 {\n    m[i * 7 % 20000] = i\n  }\n\
+               \x20 for i in 0..20000 {\n    m[i] = i * 3\n  }\n\
+               \x20 for i in 0..10000 {\n    m.remove(i * 2)\n  }\n\
+               \x20 var sum = 0\n  for (k, v) in m {\n    sum = sum + k + v\n  }\n\
+               \x20 io.print(m.len())\n  io.print(sum)\n}\n";
+    let vm = common::run_vm(src);
+    let config = RunConfig { nursery_bytes: Some(SMALL_NURSERY), ..RunConfig::default() };
+    let (native, stats) = common::run_native_with(src, config);
+    assert_eq!(vm, native, "the VM and the collected native run disagree");
+    assert!(
+        stats.minor_collections < 100,
+        "{} collections for 50,000 writes to one map: each write is copying it",
         stats.minor_collections
     );
 }

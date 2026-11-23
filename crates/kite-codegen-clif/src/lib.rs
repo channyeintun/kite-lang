@@ -130,6 +130,7 @@ const RUNTIME: &[(&str, &[Type], Option<Type>)] = &[
     ("kite_rt_register_extern_sig", &[I64, I64, I64], None),
     ("kite_rt_register_vtable_method", &[I64, I64, I64, I64], None),
     ("kite_rt_register_stack_maps", &[I64], None),
+    ("kite_rt_register_mutable_struct", &[I64], None),
     ("kite_rt_struct_new", &[I64, I64], Some(I64)),
     ("kite_rt_enum_new", &[I64, I64, I64], Some(I64)),
     ("kite_rt_tuple_new", &[I64, I64], Some(I64)),
@@ -153,8 +154,8 @@ const RUNTIME: &[(&str, &[Type], Option<Type>)] = &[
     ("kite_rt_slice_get", &[I64, I64, I64], Some(I64)),
     ("kite_rt_map_len", &[I64], Some(I64)),
     ("kite_rt_map_get", &[I64, I64, I64, I64], Some(I64)),
-    ("kite_rt_map_set", &[I64, I64, I64, I64], Some(I64)),
-    ("kite_rt_map_remove", &[I64, I64, I64], Some(I64)),
+    ("kite_rt_map_set", &[I64, I64, I64, I64, I8], Some(I64)),
+    ("kite_rt_map_remove", &[I64, I64, I64, I8], Some(I64)),
     ("kite_rt_map_keys", &[I64], Some(I64)),
     ("kite_rt_map_values", &[I64], Some(I64)),
     ("kite_rt_str_const", &[I64], Some(I64)),
@@ -561,6 +562,7 @@ fn define_init<M: Module>(
         "kite_rt_register_extern_sig",
         "kite_rt_register_vtable_method",
         "kite_rt_register_stack_maps",
+        "kite_rt_register_mutable_struct",
     ] {
         let fid = cx.rt(name);
         refs.insert(name, cx.module.declare_func_in_func(fid, b.func));
@@ -587,6 +589,12 @@ fn define_init<M: Module>(
         let ptr = init.b.ins().symbol_value(I64, gv);
         let (idx, n) = (init.i(i as u64), init.i(*len as u64));
         init.call("kite_rt_register_struct_shape", &[idx, ptr, n]);
+    }
+    for (i, mutable) in cx.program.mutable_structs.iter().enumerate() {
+        if *mutable {
+            let idx = init.i(i as u64);
+            init.call("kite_rt_register_mutable_struct", &[idx]);
+        }
     }
     for (e, v, data, len) in &enum_shapes {
         let gv = cx.module.declare_data_in_func(*data, init.b.func);
@@ -839,9 +847,9 @@ struct FnLower<'a, 'b, M: Module> {
     direct: Vec<bool>,
     /// The value each direct local was given, once it has been.
     values: Vec<Option<Value>>,
-    /// One `i8` owned flag per slice local the function writes into, by
-    /// local index: whether nothing but that local can reach its slice, so a
-    /// write may go straight in. See the `slices` module.
+    /// One `i8` owned flag per slice or map local the function writes into,
+    /// by local index: whether nothing but that local can reach its slice or
+    /// map, so a write may go straight in. See the `slices` module.
     owned: HashMap<usize, Variable>,
     blocks: Vec<cranelift_codegen::ir::Block>,
     /// Function references imported into this function, on first use.
@@ -1309,9 +1317,10 @@ impl<'a, 'b, M: Module> FnLower<'a, 'b, M> {
         }
     }
 
-    /// `xs.push(v)` or `xs[i] = v`: the runtime writes in place when the
-    /// flag says the local owns its slice and copies when it does not, and
-    /// either way answers the slice the local keeps — which it then owns.
+    /// `xs.push(v)`, `xs[i] = v` or `m[k] = v`: the runtime writes in place
+    /// when the flag says the local owns its slice or map and copies when it
+    /// does not, and either way answers the one the local keeps — which it
+    /// then owns.
     fn slice_write(&mut self, local: mir::Local, name: &'static str, args: &[Value]) {
         let cur = self.b.use_var(self.vars[local.index()]);
         let flag = self.owned[&local.index()];
@@ -1366,22 +1375,29 @@ impl<'a, 'b, M: Module> FnLower<'a, 'b, M> {
                 let w = self.operand_word(value);
                 self.slice_write(*local, "kite_rt_slice_push", &[w]);
             }
+            // Maps are values the same way, decided by the same flag.
             mir::Inst::MapSet { local, key, value } => {
-                let cur = self.b.use_var(self.vars[local.index()]);
                 let kw = self.operand_word(key);
                 let key_kind = self.kind(self.operand_ty(key));
                 let vw = self.operand_word(value);
                 let kk = self.iconst(key_kind as i64);
-                let new = self.call_rt("kite_rt_map_set", &[cur, kw, kk, vw]).unwrap();
-                self.b.def_var(self.vars[local.index()], new);
+                self.slice_write(*local, "kite_rt_map_set", &[kw, kk, vw]);
             }
+            // A removal that finds nothing answers the map it was given, which
+            // is no more the local's own than it was: the flag is set only when
+            // the answer is a different map — a copy, which nothing else holds.
             mir::Inst::MapRemove { local, key } => {
                 let cur = self.b.use_var(self.vars[local.index()]);
                 let kw = self.operand_word(key);
                 let key_kind = self.kind(self.operand_ty(key));
                 let kk = self.iconst(key_kind as i64);
-                let new = self.call_rt("kite_rt_map_remove", &[cur, kw, kk]).unwrap();
+                let flag = self.owned[&local.index()];
+                let owned = self.b.use_var(flag);
+                let new = self.call_rt("kite_rt_map_remove", &[cur, kw, kk, owned]).unwrap();
                 self.b.def_var(self.vars[local.index()], new);
+                let moved = self.b.ins().icmp(cranelift_codegen::ir::condcodes::IntCC::NotEqual, new, cur);
+                let now = self.b.ins().bor(owned, moved);
+                self.b.def_var(flag, now);
             }
         }
     }
@@ -1755,8 +1771,10 @@ impl<'a, 'b, M: Module> FnLower<'a, 'b, M> {
                 self.def(dst, v);
             }
             mir::Rvalue::MapLen { base } => {
+                // The count of entries is a map's first payload slot, after
+                // the two header words (see `kite-rt`'s maps).
                 let m = self.operand(base);
-                let v = self.b.ins().load(I64, MemFlagsData::trusted(), m, 8);
+                let v = self.b.ins().load(I64, MemFlagsData::trusted(), m, 16);
                 self.def(dst, v);
             }
             mir::Rvalue::MapGet { base, key } => {

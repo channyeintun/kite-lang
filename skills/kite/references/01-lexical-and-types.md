@@ -573,6 +573,14 @@ Method surfaces are tiny and the compiler tells you the whole list on a miss:
 Slices are **values**: assigning one and pushing to the copy leaves the original
 alone. Reading a missing map key gives `nil`, not a zero value.
 
+A map is hashed on the VM and natively, so a read, a write and a `remove` cost
+the same at any size there — unless the key is, or holds, a struct with a
+`var` field: those are hashed by their type alone, since the field can change
+while the struct is a key, so such keys are compared one by one. A
+`--emit wasm` build still scans the entries on every read and copies them on
+every write, so a loop over a map of tens of thousands of entries is quadratic
+in the browser.
+
 ```kite
 fn main() {
     var ys = [1, 2, 3]
@@ -637,8 +645,9 @@ fn main() {
 ```
 
 A loop that pushes thousands of times through a field copies the field's slice
-on each push; for a hot loop, build the slice in a `var` local and assign it to
-the field once.
+on each push, and one that writes or removes keys through a field copies the
+field's map on each write; for a hot loop, build the slice or map in a `var`
+local and assign it to the field once.
 
 ### An empty `[]` or `{}` has nothing to infer from
 
@@ -728,8 +737,8 @@ which is why the order is the insertion order `keys()` already promised.
 
 ### Dropping a key is `remove`, and assigning `nil` is not it
 
-`m.remove(key)` takes the entry out and shifts the ones after it down, so
-insertion order still means what it says. A key that is not there is not a
+`m.remove(key)` takes the entry out and the ones after it keep their order,
+so insertion order still means what it says. A key that is not there is not a
 mistake — dropping state for a row that never had any is the ordinary case —
 so a miss changes nothing and reports nothing.
 

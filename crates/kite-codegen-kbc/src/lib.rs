@@ -305,6 +305,9 @@ pub struct Chunk {
     pub entry: Option<u32>,
     /// Dispatch tables, one per trait used as an object.
     pub vtables: Vec<VTable>,
+    /// Per struct id, whether it has a `var` field — `kite_mir::Program`'s,
+    /// carried through for the maps, which hash such a struct by its type.
+    pub mutable_structs: Vec<bool>,
 }
 
 /// A trait's dispatch table: rows keyed by the receiver's runtime type tag.

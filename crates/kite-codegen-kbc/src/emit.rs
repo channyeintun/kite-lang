@@ -38,6 +38,7 @@ pub fn compile(program: &mir::Program) -> Chunk {
                 VTable { rows }
             })
             .collect(),
+        mutable_structs: program.mutable_structs.clone(),
     }
 }
 

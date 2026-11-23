@@ -94,6 +94,14 @@ fn agrees_within(name: &str, src: &str, expected: &str, bound: Duration, wasm: b
     }
 }
 
+/// The VM prints `expected` within `bound`.
+fn vm_within(name: &str, src: &str, expected: &str, bound: Duration) {
+    let _turn = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+    let (out, took) = on_vm(name, src);
+    assert_eq!(out, expected, "the VM");
+    assert!(took < bound, "the VM took {:?}", took);
+}
+
 /// Reading a long string one character at a time is linear, on the VM and
 /// natively, ASCII or not: `slice` and `code_at` walked from the front of the
 /// string — natively they also counted all of it to clamp — so a loop over
@@ -174,4 +182,87 @@ fn a_long_input_read_between_its_long_pieces_stays_linear() {
                \x20   sum = sum + piece.code_at(70) + piece.len()\n    i = i + 100\n  }\n\
                \x20 io.print(\"\\(s.len()) \\(sum)\")\n}\n";
     agrees_within("long-pieces", src, "1600000 3152000\n", Duration::from_secs(20), false);
+}
+
+/// A map is a hash map, as §3.2 says: an insert, a lookup that finds its
+/// key, one that does not, and a removal each cost about the same whatever
+/// the map's size. Every one of them was a scan of the entries on every
+/// backend, so a loop over a map of `n` entries cost `n²`: 80,000 `str` keys
+/// inserted and then read back took half a minute on each. Here 100,000
+/// `int` keys are inserted out of order, read back, missed, and removed from
+/// the front — the removal that moved every later entry down — beside
+/// 50,000 `str` keys.
+#[test]
+fn map_inserts_lookups_and_removals_are_constant_time() {
+    let src = r#"fn main() {
+    var m: {int: int} = {}
+    for i in 0..100000 {
+        m[i * 7919 % 100000] = i
+    }
+    var s = 0
+    for i in 0..100000 {
+        s += or_else(m[i], 0)
+    }
+    for i in 0..100000 {
+        if m[i + 100000] == nil {
+            s += 1
+        }
+    }
+    var t: {str: int} = {}
+    for i in 0..50000 {
+        t["k\(i)"] = i
+    }
+    for i in 0..50000 {
+        s += or_else(t["k\(i)"], 0)
+    }
+    for i in 0..100000 {
+        m.remove(i)
+    }
+    io.print("\(s) \(m.len()) \(t.len())")
+}
+"#;
+    agrees_within("map-ops", src, "6250025000 0 50000\n", Duration::from_secs(20), false);
+}
+
+/// A map literal of two hundred thousand entries is built in linear time:
+/// each entry was looked for among those before it, so a literal of 40,000
+/// took seconds on every backend, and this one half a minute on the VM.
+#[test]
+fn a_long_map_literal_is_built_in_linear_time() {
+    let entries: Vec<String> = (0..200_000).map(|i| format!("{}: {}", i * 7919 % 200_000, i)).collect();
+    let src = format!(
+        "fn main() {{\n  let m = {{{}}}\n  io.print(\"\\(m.len()) \\(or_else(m[7919], -1))\")\n}}\n",
+        entries.join(", ")
+    );
+    vm_within("map-literal", &src, "200000 1\n", Duration::from_secs(20));
+}
+
+/// A key is hashed whole, so keys that differ only far inside still spread
+/// over the buckets. The hash once stopped after 32 values, and 5,000 slice
+/// keys that shared their first 40 elements all landed in one bucket: a scan
+/// again, 18 s on the VM and natively alike.
+#[test]
+fn keys_that_differ_only_deep_inside_are_still_hashed_apart() {
+    let src = r#"fn key(i: int) -> [int] {
+    var k: [int] = []
+    for j in 0..40 {
+        k.push(0)
+    }
+    k.push(i)
+    return k
+}
+
+fn main() {
+    var m: {[int]: int} = {}
+    for i in 0..20000 {
+        m[key(i)] = i
+    }
+    var s = 0
+    for i in 0..20000 {
+        s += or_else(m[key(i)], 0)
+    }
+    io.print("\(s) \(m.len())")
+}
+"#;
+    agrees_within("map-deep-keys", src, "199990000 20000\n", Duration::from_secs(20), false);
 }

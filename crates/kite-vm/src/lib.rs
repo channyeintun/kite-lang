@@ -15,6 +15,10 @@ use std::cell::RefCell;
 use std::io::Write;
 use std::rc::Rc;
 
+mod map;
+pub use map::MapValue;
+use map::Keys;
+
 /// The maximum call depth before the VM reports a trap.
 ///
 /// Frames live in a vector on the heap and a Kite call is not a Rust call, so
@@ -41,8 +45,9 @@ pub enum Value {
     /// A map. Entries are kept in insertion order, which the specification
     /// guarantees: Go randomises map iteration to stop people relying on it,
     /// and Kite instead promises an order, which is cheaper to reason about and
-    /// removes a class of nondeterministic test failure.
-    Map(Rc<Vec<(Value, Value)>>),
+    /// removes a class of nondeterministic test failure. A hash index beside
+    /// the entries finds a key; see the `map` module.
+    Map(Rc<MapValue>),
     /// A tuple: a positional record, read by index like a struct's fields.
     Tuple(Rc<Vec<Value>>),
     /// An enum value: which variant, and its payload.
@@ -157,7 +162,7 @@ fn drop_iteratively(mut work: Vec<Value>) {
             }
             Value::Map(rc) => {
                 if let Ok(entries) = Rc::try_unwrap(rc) {
-                    for (k, v) in entries {
+                    for (k, v) in entries.into_entries() {
                         work.push(k);
                         work.push(v);
                     }
@@ -548,7 +553,9 @@ impl fmt::Display for Value {
                 Value::Tuple(items) => bracketed(&mut stack, "(", items, ")"),
                 Value::Map(entries) => {
                     stack.push(Piece::Text("}"));
-                    for (i, (k, v)) in entries.iter().enumerate().rev() {
+                    let n = entries.len();
+                    for (j, (k, v)) in entries.iter().rev().enumerate() {
+                        let i = n - 1 - j;
                         stack.push(Piece::Value(v.clone()));
                         stack.push(Piece::Text(": "));
                         stack.push(Piece::Value(k.clone()));
@@ -1379,17 +1386,15 @@ impl<'a> Vm<'a> {
                 }
 
                 Op::NewMap { dst, base: arg_base, count } => {
-                    let mut entries: Vec<(Value, Value)> = Vec::new();
+                    let keys = self.keys();
+                    let mut entries = MapValue::default();
                     let mut i = 0;
                     while i + 1 < count as usize {
                         let k = self.regs[base + arg_base as usize + i].clone();
                         let v = self.regs[base + arg_base as usize + i + 1].clone();
                         // A repeated key keeps its original position, so
                         // insertion order stays well defined.
-                        match entries.iter_mut().find(|(ek, _)| *ek == k) {
-                            Some(slot) => slot.1 = v,
-                            None => entries.push((k, v)),
-                        }
+                        entries.set(k, v, keys);
                         i += 2;
                     }
                     self.set(base, dst, Value::Map(Rc::new(entries)));
@@ -1400,16 +1405,13 @@ impl<'a> Vm<'a> {
                     let Value::Map(entries) = m else {
                         return Err(Trap::TypeConfusion { op: "map index", found: m.type_name() });
                     };
-                    let v = entries
-                        .iter()
-                        .find(|(ek, _)| *ek == k)
-                        .map(|(_, v)| v.clone())
-                        .unwrap_or(Value::Nil);
+                    let v = entries.get(&k, self.keys()).cloned().unwrap_or(Value::Nil);
                     self.set(base, dst, v);
                 }
 
                 Op::MapSet { obj, key, src } => {
                     let (k, v) = (self.get(base, key), self.get(base, src));
+                    let keys = self.keys();
                     let slot = base + obj as usize;
                     let Value::Map(entries) = &mut self.regs[slot] else {
                         return Err(Trap::TypeConfusion {
@@ -1417,15 +1419,12 @@ impl<'a> Vm<'a> {
                             found: self.regs[slot].type_name(),
                         });
                     };
-                    let entries = Rc::make_mut(entries);
-                    match entries.iter_mut().find(|(ek, _)| *ek == k) {
-                        Some(existing) => existing.1 = v,
-                        None => entries.push((k, v)),
-                    }
+                    Rc::make_mut(entries).set(k, v, keys);
                 }
 
                 Op::MapRemove { obj, key } => {
                     let k = self.get(base, key);
+                    let keys = self.keys();
                     let slot = base + obj as usize;
                     let Value::Map(entries) = &mut self.regs[slot] else {
                         return Err(Trap::TypeConfusion {
@@ -1441,8 +1440,8 @@ impl<'a> Vm<'a> {
                     // the variable a fresh identity, and `ptr.same` would see
                     // a change that native and Wasm (which return the map
                     // itself on a miss) do not.
-                    if let Some(i) = entries.iter().position(|(ek, _)| *ek == k) {
-                        Rc::make_mut(entries).remove(i);
+                    if let Some(i) = entries.find(&k, keys) {
+                        Rc::make_mut(entries).remove_at(i);
                     }
                 }
 
@@ -2235,6 +2234,11 @@ impl<'a> Vm<'a> {
     }
 
     // ---- register file ----------------------------------------------------
+
+    /// What a map needs to hash its keys: which structs can change.
+    fn keys(&self) -> Keys<'a> {
+        Keys { mutable_structs: &self.chunk.mutable_structs }
+    }
 
     #[inline]
     fn get(&self, base: usize, r: Reg) -> Value {
