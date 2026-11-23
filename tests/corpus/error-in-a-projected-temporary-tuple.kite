@@ -91,6 +91,41 @@ fn a_binding_put_in_and_left_behind() {
     }
 }
 
+// A binding the taken element holds all of — the same name again, or a copy
+// of it — went with that element, and is not owed a second time. One that
+// may hold more than the taken element is put back and still answers.
+fn the_same_failure_taken_once(n: int) {
+    let c = f(1)
+    let e = (c, c).0
+    let d = f(2)
+    let k = d
+    let g = (d, k).1
+    if e != nil || g != nil {
+        io.print("failed")
+    }
+    let a = f(3)
+    var b: error = nil
+    for i in 0..n {
+        b = a
+    }
+    let h = (a, b).0
+    if h != nil {
+        io.print("failed")
+    }
+}
+
+fn the_smaller_taken(n: int) {
+    let a = f(1) //~ ERROR E0302
+    var b: error = nil
+    for i in 0..n {
+        b = a
+    }
+    let h = (b, a).0
+    if h != nil {
+        io.print("failed")
+    }
+}
+
 fn main() {
     the_first_of_a_literal()
 }

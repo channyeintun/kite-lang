@@ -12281,9 +12281,29 @@ impl<'a> Checker<'a> {
         }
         match source(obj) {
             Source::Literal(elems) => {
+                // A binding whose failure the element taken holds as well —
+                // the same name, or a copy of it — has handed it on with that
+                // element: `(c, c).0` takes `c`'s failure once, and putting the
+                // other back would owe it twice. Only what the taken one holds
+                // all of counts: one that may hold more is put back.
+                fn locals(x: &hir::Expr, out: &mut Vec<u32>) {
+                    match &x.kind {
+                        ExprKind::Local(id) => out.push(id.0),
+                        ExprKind::TupleNew { elems } | ExprKind::SliceNew { elems } => {
+                            elems.iter().for_each(|y| locals(y, out))
+                        }
+                        _ => {}
+                    }
+                }
+                let mut taken = Vec::new();
+                if let Some(x) = elems.get(index) {
+                    locals(x, &mut taken);
+                }
+                let handed: std::collections::HashSet<u32> =
+                    taken.into_iter().flat_map(|t| self.copies_of(t)).collect();
                 for (j, x) in elems.iter().enumerate() {
                     if j != index {
-                        self.drop_element(x, index, name.span, before);
+                        self.drop_element(x, index, name.span, before, &handed);
                     }
                 }
             }
@@ -12321,16 +12341,24 @@ impl<'a> Checker<'a> {
 
     /// An element of a tuple literal that a projection did not take: see
     /// [`Self::drop_untaken`].
-    fn drop_element(&mut self, x: &hir::Expr, index: usize, at: Span, before: &[Taint]) {
+    fn drop_element(
+        &mut self,
+        x: &hir::Expr,
+        index: usize,
+        at: Span,
+        before: &[Taint],
+        handed: &std::collections::HashSet<u32>,
+    ) {
         if !self.may_hold_failure(x.ty) {
             return;
         }
         match &x.kind {
             ExprKind::Nil | ExprKind::Error => {}
+            ExprKind::Local(id) if handed.contains(&id.0) => {}
             ExprKind::Local(id) => self.keep_unread(id.0, before),
             ExprKind::TupleNew { elems } | ExprKind::SliceNew { elems } => {
                 for y in elems {
-                    self.drop_element(y, index, at, before);
+                    self.drop_element(y, index, at, before, handed);
                 }
             }
             _ => self.diags.push(
