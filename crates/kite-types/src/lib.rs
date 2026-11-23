@@ -1860,7 +1860,17 @@ impl<'a> Checker<'a> {
                 self.expect_ty(init.ty, a, init.span, v.ty.as_ref().map(|t| t.span()));
                 a
             }
-            None if init.ty == TyId::UNIT || init.ty == TyId::NEVER => TyId::ERROR,
+            // As for `let`: `var seed = ()` was the error type with nothing
+            // said, and the program reached code generation holding it.
+            None if init.ty == TyId::UNIT => {
+                self.diags.push(
+                    Diagnostic::error(codes::E0200, "cannot bind a value of type `()`")
+                        .with_primary(init.span, "this expression produces no value")
+                        .with_note("a function without a declared return type returns `()`"),
+                );
+                TyId::ERROR
+            }
+            None if init.ty == TyId::NEVER => TyId::ERROR,
             None => init.ty,
         };
         self.locals[local_id as usize].ty = ty;
