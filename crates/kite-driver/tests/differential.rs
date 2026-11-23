@@ -4482,6 +4482,39 @@ fn a_literal_past_either_frame_limit_compiles() {
     }
 }
 
+/// A literal of a hundred and twenty thousand strings runs under V8 as it does
+/// on the VM. Written inline it was one function of 1.9 MB, which the
+/// validator accepts and V8 cannot compile: the engine aborted the process
+/// ("a single code object needs more than half of the code space"). A chunk of
+/// constants is a function of its own now (see the Wasm backend's `pieces`),
+/// and the chunk holding a local stays where it was. The names cycle through
+/// five, so the chunks are not all one piece; the map's chunks are pieces too.
+/// The native backend is left out: it is not what this is about, and it takes
+/// ten seconds to compile the literal in a debug build.
+#[test]
+fn a_literal_of_strings_too_long_for_one_v8_function_runs() {
+    let names = ["ant", "bee", "cat", "dog", "eel"];
+    let elems: Vec<String> = (1..120_000).map(|i| format!("\"{}\"", names[i % 5])).collect();
+    let entries: Vec<String> = (0..5_000).map(|i| format!("\"k{}\": \"v{}\"", i, i)).collect();
+    let src = format!(
+        "fn main() {{\n  let first = \"local\"\n  let xs = [first, {}]\n\
+         \x20 io.print(\"\\(xs.len()) \\(xs[0]) \\(xs[1]) \\(xs[4096]) \\(xs[119999])\")\n\
+         \x20 let m = {{{}}}\n  io.print(\"\\(m.len()) \\(m.keys()[4999]) \\(m.values()[4096])\")\n}}\n",
+        elems.join(", "),
+        entries.join(", ")
+    );
+    let name = "a-literal-too-long-for-one-v8-function";
+    let vm = run_on_vm(name, &src);
+    assert_eq!(vm, "120000 local bee bee eel\n5000 k4999 v4096\n");
+    if node_available() {
+        let dir = std::env::temp_dir().join(format!("kite-v8-literal-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("create work directory");
+        let wasm = run_on_wasm(name, &src, &dir);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(wasm, vm, "wasm");
+    }
+}
+
 /// A literal of seventy thousand constants runs on the VM as it does on the
 /// other two. The VM staged a literal's every element in a register of its
 /// own, so a slice of 70,000 constants was a frame of 70,007 registers and

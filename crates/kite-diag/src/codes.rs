@@ -899,7 +899,10 @@ codes! {
          Split the function.\n\n\
          WebAssembly has a limit of its own: an engine accepts at most 50,000 \
          locals in one function, parameters included, and every local and \
-         temporary is one. A long slice or map literal is no trouble on any \
-         target: past a short window, each element is added to what has been \
-         built. The native target has neither limit.";
+         temporary is one, and at most 7,654,321 bytes of code. A long slice \
+         or map literal is no trouble on any target: past a short window, each \
+         element is added to what has been built, and on WebAssembly each \
+         chunk of 4,096 constants is built by a function of its own, so no \
+         one function grows with the literal. The native target has neither \
+         limit.";
 }

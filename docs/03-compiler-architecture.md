@@ -690,6 +690,16 @@ each one after them to what it has built, as the other backends build theirs
 a window at a time. Staged whole, a literal of seventy thousand constants
 took a register per element, and the VM refused it.
 
+V8 has a limit no validator checks: the machine code it compiles one function
+to must fit in half of its code space, and past that it aborts the process
+rather than refuse the module. A literal of 120,000 strings, an allocation
+each, was such a function at 1.9 MB of Wasm. So a literal longer than one
+`array.new_fixed` chunk (4,096 elements) has each chunk of constants built by
+a function of its own, which the literal's function calls; identical chunks
+are one function. No function holds more than one chunk of a literal, however
+long it is. A chunk that reads a local stays inline, where each element is one
+`local.get`.
+
 Not every MIR local is a Wasm local. One that lives within a single block,
 written there before anything reads it, shares a Wasm local of its type with
 others whose lives do not overlap; only a local that crosses a branch, or is

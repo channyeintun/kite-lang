@@ -1216,11 +1216,61 @@ fn constant_keys_are_collapsed_as_the_literal_is_compiled() {
             "fn main() {{\n  let k = \"s0\"\n  let m = {{{}}}\n  io.print(m.len())\n}}\n",
             entries.join(", ")
         ));
-        wasmprinter::print_bytes(&b.module.bytes).unwrap().matches("\n  (func ").count()
+        // Functions that take something: the pieces a long literal's constant
+        // chunks are built by take nothing, and how many there are depends on
+        // which chunks read a local, which is not what this is about.
+        wasmprinter::print_bytes(&b.module.bytes)
+            .unwrap()
+            .lines()
+            .filter(|l| l.starts_with("  (func ") && l.contains("(param"))
+            .count()
     };
     let distinct = functions("\"s5000\": 9");
     assert_eq!(functions("\"s0\": 9"), distinct);
     assert_eq!(functions("k: 9"), distinct + 1);
+}
+
+/// The size of every function body in `bytes`, in order.
+fn body_sizes(bytes: &[u8]) -> Vec<usize> {
+    let mut sizes = Vec::new();
+    for payload in wasmparser::Parser::new(0).parse_all(bytes) {
+        if let Ok(wasmparser::Payload::CodeSectionEntry(body)) = payload {
+            sizes.push(body.range().len());
+        }
+    }
+    sizes
+}
+
+/// No function holds more than one chunk of a long literal of constants,
+/// whatever the literal's length. Inline, a hundred and twenty thousand
+/// strings were one function V8 could not compile, and it aborted the process
+/// rather than refuse the module. Identical chunks are one piece; a chunk that
+/// reads a local stays in the literal's own function.
+#[test]
+fn a_long_literal_of_constants_is_built_by_functions_of_bounded_size() {
+    let built = |n: usize, entries: usize, distinct: bool| {
+        let elems: Vec<String> = (0..n)
+            .map(|i| if distinct { format!("\"s{}\"", i) } else { "\"same\"".to_string() })
+            .collect();
+        let entries: Vec<String> =
+            (0..entries).map(|i| format!("\"k{}\": \"v{}\"", i, i)).collect();
+        valid(&format!(
+            "fn main() {{\n  let a = \"local\"\n  let xs = [a, {}]\n  io.print(xs.len())\n\
+             \x20 let m = {{{}}}\n  io.print(m.len())\n}}\n",
+            elems.join(", "),
+            entries.join(", ")
+        ))
+    };
+    // Forty thousand strings, and a map of twenty thousand of each: well
+    // over a megabyte of code, and no function of it past one chunk's worth.
+    let long = built(40_000, 20_000, true);
+    let widest = body_sizes(&long.module.bytes).into_iter().max().unwrap_or(0);
+    assert!(long.size() > 1 << 20, "{} bytes", long.size());
+    assert!(widest < 128 << 10, "a function of {} bytes", widest);
+    // A chunk of one string, wherever it falls, is one piece.
+    let same = built(40_000, 1, false);
+    let distinct = built(40_000, 1, true);
+    assert!(same.size() * 3 < distinct.size(), "{} bytes against {}", same.size(), distinct.size());
 }
 
 /// A stack frame gets a name, which is the half of §16 the map cannot do.

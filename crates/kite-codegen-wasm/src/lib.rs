@@ -55,6 +55,7 @@ mod eq;
 mod arith;
 mod glue;
 mod maps;
+mod pieces;
 pub mod sourcemap;
 mod serve;
 mod slices;
@@ -1466,6 +1467,7 @@ pub fn compile_with(program: &mir::Program, types: &Types, debug_info: bool) -> 
     let arith_helpers = arith::ArithHelpers::collect(program, map_helpers.base + map_count);
     let arith_types = arith_helpers.add_types(&mut type_section, next_fn_type);
     next_fn_type += u32::from(!arith_types.is_empty());
+    let pieces_base = arith_helpers.base + arith_types.len() as u32;
     extra_type_index.extend(arith_types);
     // Function types for the program's own host declarations, at the end of
     // the section: an import may name any type index, and appending here
@@ -1491,7 +1493,10 @@ pub fn compile_with(program: &mir::Program, types: &Types, debug_info: bool) -> 
         next_fn_type += 1;
         type_section.ty().function(params, results);
     }
-    let _ = next_fn_type;
+    // And the signatures of a long literal's pieces, which come last in the
+    // function index space too. See `pieces`.
+    let piece_arrays = pieces::Pieces::collect(program, types, &layout);
+    let pieces = pieces::Pieces::declare(&piece_arrays, &mut type_section, next_fn_type, pieces_base);
     module.section(&type_section);
 
     // ---- imports -----------------------------------------------------------
@@ -1528,12 +1533,77 @@ pub fn compile_with(program: &mir::Program, types: &Types, debug_info: bool) -> 
     }
     module.section(&imports);
 
+    // ---- bodies ------------------------------------------------------------
+    // Compiled before the function section is written, because compiling them
+    // is what makes a long literal's pieces, and the section lists those too.
+    // A call's result type decides whether the value has to be stored, so the
+    // whole table is needed before any body is emitted.
+    let fn_returns: Vec<TyId> = program.fns.iter().map(|f| f.ret).collect();
+    let eq_builder = eq::EqBuilder {
+        types,
+        layout: &layout,
+        base: eq_base,
+        fns: &eq_fns,
+        strings: string_runtime,
+    };
+    let mut bodies: Vec<Function> = Vec::with_capacity(program.fns.len());
+    let mut too_wide = Vec::new();
+    for f in &program.fns {
+        let (body, locals) = compile_fn(
+            f,
+            types,
+            &fn_returns,
+            &layout,
+            dispatch_base,
+            &dispatchers,
+            &eq_builder,
+            program,
+            &thunk_fns,
+            thunk_base,
+            fn_base,
+            &hosts,
+            string_runtime,
+            &invoke_shapes,
+            &slice_helpers,
+            &map_helpers,
+            &arith_helpers,
+            &pieces,
+        );
+        if locals > MAX_LOCALS {
+            too_wide.push(TooLarge {
+                function: f.name.clone(),
+                span: f.span,
+                locals: true,
+                what: format!(
+                    "{} locals, more than the {} an engine accepts in one function",
+                    locals, MAX_LOCALS
+                ),
+            });
+        }
+        if body.byte_len() > MAX_BODY_BYTES {
+            too_wide.push(TooLarge {
+                function: f.name.clone(),
+                span: f.span,
+                locals: false,
+                what: format!(
+                    "{} bytes of code, more than the {} an engine accepts in one function",
+                    body.byte_len(),
+                    MAX_BODY_BYTES
+                ),
+            });
+        }
+        bodies.push(body);
+    }
+    too_wide.extend(pieces.too_large());
+
     // ---- functions ---------------------------------------------------------
+    let piece_types = pieces.type_indices();
     let mut functions = FunctionSection::new();
     for idx in runtime_type_index
         .iter()
         .chain(&fn_type_index)
         .chain(&extra_type_index)
+        .chain(&piece_types)
     {
         functions.function(*idx);
     }
@@ -1602,69 +1672,16 @@ pub fn compile_with(program: &mir::Program, types: &Types, debug_info: bool) -> 
     }
 
     // ---- code --------------------------------------------------------------
-    // A call's result type decides whether the value has to be stored, so the
-    // whole table is needed before any body is emitted.
-    let fn_returns: Vec<TyId> = program.fns.iter().map(|f| f.ret).collect();
     let mut code = CodeSection::new();
     strings::emit(&mut code, string_runtime, &layout, &hosts, string_needed);
-    let eq_builder = eq::EqBuilder {
-        types,
-        layout: &layout,
-        base: eq_base,
-        fns: &eq_fns,
-        strings: string_runtime,
-    };
     // Where each body lands inside the code section's payload, recorded as it
     // is written. The absolute offset a source map needs is this plus where
     // the payload itself ends up, which is not known until the section is
     // added to the module below.
     let mut body_offsets: Vec<usize> = Vec::with_capacity(program.fns.len());
-    let mut too_wide = Vec::new();
-    for f in &program.fns {
+    for body in &bodies {
         body_offsets.push(code.byte_len());
-        let (body, locals) = compile_fn(
-            f,
-            types,
-            &fn_returns,
-            &layout,
-            dispatch_base,
-            &dispatchers,
-            &eq_builder,
-            program,
-            &thunk_fns,
-            thunk_base,
-            fn_base,
-            &hosts,
-            string_runtime,
-            &invoke_shapes,
-            &slice_helpers,
-            &map_helpers,
-            &arith_helpers,
-        );
-        if locals > MAX_LOCALS {
-            too_wide.push(TooLarge {
-                function: f.name.clone(),
-                span: f.span,
-                locals: true,
-                what: format!(
-                    "{} locals, more than the {} an engine accepts in one function",
-                    locals, MAX_LOCALS
-                ),
-            });
-        }
-        if body.byte_len() > MAX_BODY_BYTES {
-            too_wide.push(TooLarge {
-                function: f.name.clone(),
-                span: f.span,
-                locals: false,
-                what: format!(
-                    "{} bytes of code, more than the {} an engine accepts in one function",
-                    body.byte_len(),
-                    MAX_BODY_BYTES
-                ),
-            });
-        }
-        code.function(&body);
+        code.function(body);
     }
     for d in &dispatchers {
         code.function(&compile_dispatcher(d, &layout, fn_base));
@@ -1702,6 +1719,7 @@ pub fn compile_with(program: &mir::Program, types: &Types, debug_info: bool) -> 
         },
     );
     arith_helpers.emit(&mut code);
+    pieces.emit(&mut code);
     // Where the first body lands in the module. A section is `id` (one byte),
     // then its payload length as a LEB128; the code section's payload then
     // opens with the function *count*, also a LEB128, and only then the
@@ -2248,6 +2266,7 @@ fn compile_fn(
     slice_helpers: &slices::SliceHelpers,
     map_helpers: &maps::MapHelpers,
     arith: &arith::ArithHelpers,
+    pieces: &pieces::Pieces,
 ) -> (Function, u32) {
     // Locals beyond the parameters, a block's temporaries sharing where their
     // lives allow (see `slots`), plus one synthetic program counter.
@@ -2466,6 +2485,7 @@ fn compile_fn(
             map_helpers,
             index_wide,
             arith,
+            pieces,
             range_scratch,
             invoke_shapes,
             place: &place,
@@ -2578,6 +2598,8 @@ struct Emitter<'a> {
     index_wide: Option<u32>,
     /// The functions a debug build's checked integer arithmetic calls.
     arith: &'a arith::ArithHelpers,
+    /// The functions a long literal's constant chunks are built by.
+    pieces: &'a pieces::Pieces,
     /// Two i64 registers holding the clamped bounds of `xs[a..b]`.
     range_scratch: Option<(u32, u32)>,
     /// Handler shapes given to `js.func`, in the order the trampolines and the
@@ -2782,7 +2804,8 @@ impl<'a> Emitter<'a> {
     /// after the validator has called it well-formed. So a long literal is
     /// allocated at its full length and filled a chunk at a time, each chunk
     /// a `new_fixed` copied into place: one extra copy of each element, and
-    /// no limit but memory.
+    /// no limit but memory. A chunk of constants is made by a function of its
+    /// own (see `pieces`), so that this one does not grow with the literal.
     fn fixed_array(
         &mut self,
         func: &mut Function,
@@ -2809,13 +2832,31 @@ impl<'a> Emitter<'a> {
         for (i, chunk) in elems.chunks(STR_LITERAL_CHUNK).enumerate() {
             func.instruction(&Instruction::LocalGet(hold));
             func.instruction(&Instruction::I32Const((i * STR_LITERAL_CHUNK) as i32));
-            for e in chunk {
-                self.operand(func, e);
+            // A chunk of constants is built by a function of its own, so the
+            // literal's length does not decide how large this one is. See
+            // `pieces`.
+            let constant = chunk.iter().all(|e| !matches!(e, mir::Operand::Local(_)));
+            if constant && self.pieces.fills(array_type) {
+                let mut body = Function::new(vec![]);
+                for e in chunk {
+                    self.operand(&mut body, e);
+                }
+                body.instruction(&Instruction::ArrayNewFixed {
+                    array_type_index: array_type,
+                    array_size: chunk.len() as u32,
+                });
+                body.instruction(&Instruction::End);
+                let piece = self.pieces.piece(array_type, body, self.f);
+                func.instruction(&Instruction::Call(piece));
+            } else {
+                for e in chunk {
+                    self.operand(func, e);
+                }
+                func.instruction(&Instruction::ArrayNewFixed {
+                    array_type_index: array_type,
+                    array_size: chunk.len() as u32,
+                });
             }
-            func.instruction(&Instruction::ArrayNewFixed {
-                array_type_index: array_type,
-                array_size: chunk.len() as u32,
-            });
             func.instruction(&Instruction::I32Const(0));
             func.instruction(&Instruction::I32Const(chunk.len() as i32));
             func.instruction(&Instruction::ArrayCopy {
