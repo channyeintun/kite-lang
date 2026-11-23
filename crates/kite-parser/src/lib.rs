@@ -1663,35 +1663,65 @@ impl<'a> Parser<'a> {
             return;
         }
         // Deleting the comma is the whole fix only where a line break or the
-        // closing brace already follows it.
+        // closing brace already follows it. Between two members on one line
+        // the comma and the space after it become the line break, with the
+        // indentation the first of them stands at — removing it alone left
+        // `x: int y: int`, which is a different error, and `kitec fix`
+        // stopped with one left.
         let removable = self.at(T::RBrace) || self.starts_line(self.pos);
+        let edit = if removable {
+            Edit { span: comma, replacement: String::new() }
+        } else {
+            let next = self.span().start;
+            Edit {
+                span: Span::new(self.file, comma.start, next),
+                replacement: format!("\n{}", self.member_indent(comma.start)),
+            }
+        };
+        let message = |removed_only: bool, many: bool| match (removed_only, many) {
+            (true, false) => "remove the comma",
+            (true, true) => "remove the commas",
+            (false, _) => "put each one on a line of its own",
+        };
         if let Some(first) = *commas {
             // One report per declaration, but every comma in it is fixed:
             // `kitec fix` removed one per run and said "applied 1 fix" until
             // the third. The later commas join the first one's fix. The index
             // is checked, since a pass that backtracks truncates the bag.
             if let Some(d) = self.diags.get_mut(first).filter(|d| d.code == Some(codes::E0100)) {
-                match d.fixes.first_mut() {
-                    Some(fix) => {
-                        if removable {
-                            fix.message = "remove the commas".to_string();
-                            fix.edits.push(Edit { span: comma, replacement: String::new() });
-                        }
-                    }
-                    None if removable => d.fixes.push(Fix::replace("remove the comma", comma, "")),
-                    None => {}
+                if let Some(fix) = d.fixes.first_mut() {
+                    fix.edits.push(edit);
+                    let removed_only = fix.edits.iter().all(|e| e.replacement.is_empty());
+                    fix.message = message(removed_only, true).to_string();
                 }
             }
             return;
         }
         *commas = Some(self.diags.len());
-        let mut d = Diagnostic::error(codes::E0100, format!("{} are not separated by commas", what))
-            .with_primary(comma, "remove this comma")
-            .with_note("each one goes on a line of its own, and the line break is the separator");
-        if removable {
-            d = d.with_fix(Fix::replace("remove the comma", comma, ""));
-        }
+        let label = if removable { "remove this comma" } else { "put what follows on a line of its own" };
+        let d = Diagnostic::error(codes::E0100, format!("{} are not separated by commas", what))
+            .with_primary(comma, label)
+            .with_note("each one goes on a line of its own, and the line break is the separator")
+            .with_fix(Fix { message: message(removable, false).to_string(), edits: vec![edit] });
         self.diags.push(d);
+    }
+
+    /// The indentation a member written after a `,` at `offset` goes on its
+    /// own line with: the column of the first member on that line — just
+    /// after the `{` when the declaration opens on it, so that
+    /// `struct P { x: int, y: int }` puts `y` under `x` — and otherwise the
+    /// line's own indentation, as written.
+    fn member_indent(&self, offset: u32) -> String {
+        let line_start = self.line_start(offset as usize);
+        let line = &self.src[line_start..offset as usize];
+        match line.rfind('{') {
+            Some(brace) => {
+                let after = &line[brace + 1..];
+                let pad = after.len() - after.trim_start().len();
+                " ".repeat(line[..brace + 1].chars().count() + pad)
+            }
+            None => line[..line.len() - line.trim_start().len()].to_string(),
+        }
     }
 
     /// A declaration written where only the members of something else can
