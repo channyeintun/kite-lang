@@ -2404,10 +2404,10 @@ worse than absent.
   the granularity the compiler's information exists at — a MIR function carries
   its declaration span and a MIR instruction carries nothing. Both are dropped
   by `--release`: debug information is not semantics, and it is bytes a shipped
-  page does not need — the name section is about a tenth of a small program's
-  module (61 of the 834 bytes of `examples/hello.kite`), and the map is a file
-  beside it nearly half as large again (389 bytes). An early note here said
-  they were more than half of a hello world; that was never measured.
+  page does not need — in the module of `examples/hello.kite` the name section
+  and the custom section naming the map are 61 of its 834 bytes, and the map is
+  a file of 389 bytes beside it. An early note here said they were more than
+  half of a hello world; they are not.
 
   *Reviewed later:* the map resolved nowhere. It named a source as the command
   line had — `src/main.kite`, which a browser looks for beside the map, in

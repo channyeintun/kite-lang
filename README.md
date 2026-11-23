@@ -256,7 +256,7 @@ what a call inferred — all over the same passes the compiler runs.
 |---|---|---|
 | `wasm32-gc` | WasmGC via `wasm-encoder` | Every construct the language has. `--emit wasm` refuses nothing it can express |
 | `kbc` | Register bytecode and a VM | The dev loop, the embedding target, and the differential oracle |
-| bundle | This compiler with the program appended | One file, nothing installed, starts in a few milliseconds (about 7 ms for a small program, 5 over a process that does nothing) |
+| bundle | This compiler with the program appended | One file, nothing installed, starts in a few milliseconds (6 to 7 ms for a small program, about 5 more than a process that does nothing) |
 | `native-*` | Cranelift, AOT and JIT | Machine code, with a precise collector in `kite-rt`. `--emit native` writes an object file and links it into an executable with `cc`, against a runtime `kitec` carries inside itself; `run --native` needs no linker. macOS and Linux; Windows is refused, and says why |
 
 Every program in the differential corpus is compiled to **all three** real

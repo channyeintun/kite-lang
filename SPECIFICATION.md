@@ -2784,9 +2784,9 @@ Requirements on the implementation:
   the function was declared on, not the line that trapped, because that is the
   granularity the compiler's own information exists at. Both are **dropped by
   `--release`**: debug information is not semantics, and it is bytes a shipped
-  page does not need — the name section is about a tenth of a small program's
-  module (61 of the 834 bytes of `examples/hello.kite`), and the map is a file
-  beside it nearly half as large again (389 bytes).
+  page does not need — in the module of `examples/hello.kite` the name section
+  and the custom section naming the map are 61 of its 834 bytes, and the map is
+  a file of 389 bytes beside it.
 
 ---
 
