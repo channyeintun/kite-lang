@@ -88,7 +88,7 @@ fn checks() -> [error] {
     out.push(test.is_true(near(math.exp(709.7), 1.6549840276802644e308), "exp(709.7)"))
     out.push(test.is_true(near(math.exp(-700.0), 9.85967654375977e-305), "exp(-700)"))
     out.push(test.is_true(math.exp(-740.0) > 0.0, "exp(-740) is not zero"))
-    out.push(exactly(math.exp(710.0), 1.7976931348623157e308, "exp(710) saturates"))
+    out.push(test.is_true(math.exp(710.0) > 1.7976931348623157e308, "exp(710) is infinite"))
     out.push(exactly(math.exp(-746.0), 0.0, "exp(-746) is zero"))
     out.push(exactly(math.exp(0.0), 1.0, "exp(0)"))
 

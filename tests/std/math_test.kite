@@ -77,9 +77,56 @@ fn pow_checks() -> [error] {
     return out
 }
 
+fn exp_checks() -> [error] {
+    var out: [error] = []
+    // Each the correctly rounded answer. exp(1) was a unit short of e, and
+    // powf(10, 2) was 99.99999999999997: one float's error in ln 10, times
+    // the exponent, handed to exp.
+    out.push(same(math.exp(1.0), math.e(), "exp(1) is e"))
+    out.push(same(math.exp(-1.2422637939453125), 0.28872985265215406, "exp(-1.24…)"))
+    out.push(same(math.exp(130.65435886383057), 5.526715274604418e56, "exp(130.65…)"))
+    out.push(same(math.exp(-740.0), 4.2e-322, "exp(-740), subnormal"))
+    out.push(same(math.exp(709.7), 1.6549840276802644e308, "exp(709.7)"))
+    out.push(same(math.exp(710.0), inf(), "exp(710) overflows"))
+    out.push(same(math.exp(inf()), inf(), "exp(inf)"))
+    out.push(same(math.exp(-inf()), 0.0, "exp(-inf)"))
+    out.push(same(math.exp(nan()), nan(), "exp(NaN)"))
+    out.push(same(math.ln(math.e()), 1.0, "ln(e)"))
+    out.push(same(math.ln(10.0), 2.302585092994046, "ln(10)"))
+    out.push(same(math.ln(1.4142), 0.3465640001880033, "ln near the top of the reduced range"))
+    out.push(same(math.ln(5e-324), -744.4400719213812, "ln of the smallest float"))
+    out.push(same(math.powf(10.0, 2.0), 100.0, "powf(10, 2)"))
+    out.push(same(math.powf(10.0, 15.0), 1000000000000000.0, "powf(10, 15)"))
+    out.push(same(math.powf(10.0, -2.0), 0.01, "powf(10, -2)"))
+    out.push(same(math.powf(-2.0, 3.0), -8.0, "powf(-2, 3) is pow's"))
+    out.push(same(math.powf(2.0, 0.5), 1.4142135623730951, "powf(2, 0.5)"))
+    out.push(same(math.powf(10.0, 2.5), 316.22776601683796, "powf(10, 2.5)"))
+    out.push(same(math.powf(3.0, -0.25), 0.7598356856515925, "powf(3, -0.25)"))
+    out.push(same(math.powf(1.006007009744644, 1804.771900177002), 49456.57850195142, "a large exponent"))
+    // C99's special values.
+    out.push(same(math.powf(0.0, 0.0), 1.0, "powf(0, 0)"))
+    out.push(same(math.powf(nan(), 0.0), 1.0, "powf(NaN, 0)"))
+    out.push(same(math.powf(1.0, nan()), 1.0, "powf(1, NaN)"))
+    out.push(same(math.powf(2.0, nan()), nan(), "powf(2, NaN)"))
+    out.push(same(math.powf(0.0, -0.5), inf(), "powf(0, -0.5)"))
+    out.push(same(math.powf(0.0, 0.5), 0.0, "powf(0, 0.5)"))
+    out.push(same(math.powf(-0.0, 3.0), -0.0, "powf(-0, 3)"))
+    out.push(same(math.powf(2.0, inf()), inf(), "powf(2, inf)"))
+    out.push(same(math.powf(0.5, inf()), 0.0, "powf(0.5, inf)"))
+    out.push(same(math.powf(2.0, -inf()), 0.0, "powf(2, -inf)"))
+    out.push(same(math.powf(-1.0, inf()), 1.0, "powf(-1, inf)"))
+    out.push(same(math.powf(inf(), 0.5), inf(), "powf(inf, 0.5)"))
+    out.push(same(math.powf(inf(), -0.5), 0.0, "powf(inf, -0.5)"))
+    out.push(same(math.powf(-2.0, 1e19), inf(), "powf(-2, 1e19), an even power past an int"))
+    out.push(same(math.powf(10.0, 400.5), inf(), "powf(10, 400.5) overflows"))
+    out.push(same(math.powf(-2.0, 0.5), 0.0, "a negative base to a fractional power answers zero"))
+    return out
+}
+
 fn main() {
     var results: [error] = []
     results = concat(results, pow_checks())
+    results = concat(results, exp_checks())
     var failed = 0
     for e in results {
         if e != nil {

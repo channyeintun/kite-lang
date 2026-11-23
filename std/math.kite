@@ -458,37 +458,85 @@ pub fn ln2() -> float {
 
 /// `e` raised to `x`.
 ///
+/// ```kite
+/// assert(exp(1.0) == e(), "exp(1) is the float nearest e")
+/// assert(exp(710.0) > max_float(), "past the largest float is infinite")
+/// ```
+///
 /// Reduced by `x = k·ln2 + r`, so the series only ever sees `|r| ≤ ln2/2` and
 /// the rest is a power of two. Without that a series for `exp(20)` would need
 /// hundreds of terms and lose most of its precision to cancellation.
+///
+/// Within one unit in the last place, and correctly rounded in all but a few
+/// cases in a thousand; an answer below 2⁻¹⁰²² is rounded twice. Past `ln`
+/// of the largest float the answer is an infinity, as IEEE 754 has it — this
+/// used to answer the largest float instead, which no other `exp` does and
+/// which made `exp(710)` look like an ordinary number. A NaN answers a NaN.
 pub fn exp(x: float) -> float {
-    // `ln` of the largest float. Past it the answer is past the largest
-    // float; saturating rather than trapping, which is what the casts do too.
-    if x > 709.782712893384 {
-        return 1.7976931348623157e308
+    if !(x >= x) {
+        return x
     }
-    // `ln` of half the smallest float, below which the answer rounds to zero.
-    if x < -745.1332191019412 {
+    // Past ln of the largest float, and below ln of half the smallest, there
+    // is nothing to compute. Between these and the exact thresholds the
+    // scaling at the end overflows or rounds to zero by itself.
+    if x > 709.8 {
+        return 1.0 / 0.0
+    }
+    if x < -745.2 {
         return 0.0
     }
+    return exp_split(x, 0.0)
+}
+
+/// `e` raised to `x + tail`, for a `tail` far below a unit in the last place
+/// of `x` — which is how [`powf`] hands over an exponent it knows to more bits
+/// than a float holds — and `x` within [-745.2, 709.8].
+fn exp_split(x: float, tail: float) -> float {
     let k = round(x / ln2())
     // `ln2` in two pieces, high part first. Subtracting `k · ln2` as one
     // rounded double throws away the low bits of the product before the series
     // ever sees them, and at `k = 29` that is already four units in the last
-    // place of the answer. Splitting the constant so the high part multiplies
-    // exactly keeps them. It is fdlibm's arrangement, and the reason every
-    // libm carries a two-word ln2.
-    let r = (x - k * 0.6931471803691238) - k * 1.9082149292705877e-10
-    // e^r by its Taylor series. At |r| ≤ 0.347 the terms fall off by better
-    // than a factor of three each, so eighteen of them is well past the point
-    // where adding another changes nothing.
-    var term = 1.0
-    var sum = 1.0
-    for n in 1..18 {
-        term = term * r / (n as float)
-        sum = sum + term
+    // place of the answer. The high piece has its last 21 bits zero, so `k`
+    // times it is exact for every `k` here and the subtraction is too. It is
+    // fdlibm's arrangement, and the reason every libm carries a two-word ln2.
+    let high = x - k * 0.6931471803691238
+    let (r, r_low) = two_sum(high, tail - k * 1.9082149292705877e-10)
+    // e^r = 1 + r + r²/2 · (1 + u), with u = r/3 · (1 + r/4 · (1 + …)) by
+    // Horner's rule. At |r| ≤ 0.347 the terms fall off by better than a factor
+    // of three each, so twenty of them is well past the point where another
+    // changes nothing.
+    var u = 0.0
+    var n = 20
+    for n >= 3 {
+        u = r / (n as float) * (1.0 + u)
+        n -= 1
     }
-    return scaled(sum, round_to(k))
+    // 1, r and r²/2 are big enough that rounding any of them would show, so
+    // r² is Dekker's exact product and the three are summed in two floats;
+    // the answer rounds once, at the very end, with everything smaller
+    // already in. `r_low` is a nudge to the argument, worth `r_low · e^r`.
+    let square = r * r
+    let half = square / 2.0
+    let (one, one_low) = two_sum(1.0, r)
+    let (big, big_low) = two_sum(one, half)
+    let small = (big_low + one_low) + (product_error(r, r, square) / 2.0 + half * u + r_low * big)
+    return scaled(big + small, round_to(k))
+}
+
+/// `(high + low) / d` in two floats, for a small whole `d`: what the division
+/// rounded away is `high − d · q`, found exactly by Dekker's product.
+fn divided(high: float, low: float, d: float) -> (float, float) {
+    let q = high / d
+    let t = d * q
+    return (q, (((high - t) - product_error(d, q, t)) + low) / d)
+}
+
+/// `a + b` and what rounding it lost, exactly: Knuth's sum, which needs no
+/// assumption about which of the two is larger.
+fn two_sum(a: float, b: float) -> (float, float) {
+    let s = a + b
+    let v = s - a
+    return (s, (a - (s - v)) + (b - v))
 }
 
 /// `x · 2ᵏ`, without the power itself overflowing or underflowing first.
@@ -540,55 +588,153 @@ fn two_to(k: int) -> float {
 }
 
 /// The natural logarithm. Zero and negatives have none; both answer zero,
-/// which is the same choice `sqrt` makes above.
+/// which is the same choice `sqrt` makes above. An infinity is its own
+/// logarithm, and a NaN answers a NaN.
 ///
-/// Reduced to a mantissa in `[√½, √2)` so the series argument stays under
-/// 0.172 in magnitude. The series is the one for `atanh`, which converges
-/// twice as fast here as the direct series for `ln(1 + s)`.
+/// ```kite
+/// assert(ln(e()) == 1.0, "ln(e)")
+/// assert(ln(1.0 / 0.0) > max_float(), "ln(inf) is inf")
+/// ```
+///
+/// Correctly rounded in all but a few cases in a thousand, and never a unit
+/// in the last place out: the work is done in two floats by [`ln_split`].
 pub fn ln(x: float) -> float {
     if x <= 0.0 {
         return 0.0
     }
+    if !(x < x * 2.0) {
+        return x
+    }
+    let (high, _) = ln_split(x)
+    return high
+}
+
+/// `ln x` as `high + low`, to about 2⁻⁶⁶ of a unit — what [`powf`] needs, since
+/// `exp` turns an error in its argument into the same relative error in its
+/// answer, and the argument is the logarithm times the exponent.
+///
+/// `x` is reduced to `m · 2ᵏ` with `m` in `[√½, √2)`, by halving and doubling,
+/// which are exact. Then `ln m = 2 atanh(s)` with `s = (m − 1)/(m + 1)`, under
+/// 0.172 in magnitude: `2s + 2s³/3 + 2s⁵/5 + 2s⁷ (1/7 + s²/9 + …)`. The first
+/// three terms are big enough that their rounding would show, so each is
+/// carried in two floats, `s` itself included; the rest is under 2⁻¹⁹ and a
+/// float is plenty.
+/// `k · ln2` is the two-piece constant `exp` uses, whose high piece times `k`
+/// is exact.
+fn ln_split(x: float) -> (float, float) {
     var m = x
     var k = 0
+    for m >= 4294967296.0 {
+        m = m / 4294967296.0
+        k += 32
+    }
+    for m < 0.00000000023283064365386963 {
+        m = m * 4294967296.0
+        k -= 32
+    }
     // 1.4142… is √2: the mantissa is halved or doubled until it straddles one
     // rather than merely being in `[1, 2)`, which halves the series argument.
-    for i in 0..2100 {
-        if m >= 1.4142135623730951 {
-            m = m / 2.0
-            k += 1
-        } else if m < 0.7071067811865476 {
-            m = m * 2.0
-            k -= 1
-        } else {
-            break
-        }
+    for m >= 1.4142135623730951 {
+        m = m / 2.0
+        k += 1
     }
-    let s = (m - 1.0) / (m + 1.0)
-    let squared = s * s
-    var power = s
-    var sum = s
-    for n in 1..12 {
-        power = power * squared
-        sum = sum + power / ((2 * n + 1) as float)
+    for m < 0.7071067811865476 {
+        m = m * 2.0
+        k -= 1
     }
-    return 2.0 * sum + (k as float) * ln2()
+    // `m − 1` is exact, being within a factor of two of `m`; `m + 1` is not,
+    // so it is held as a sum and its remainder folds into the low half of `s`.
+    let num = m - 1.0
+    let (den, den_low) = two_sum(m, 1.0)
+    let s = num / den
+    let p = s * den
+    let s_low = (((num - p) - product_error(s, den, p)) - s * den_low) / den
+    let s2 = s * s
+    let s2_low = product_error(s, s, s2) + 2.0 * s * s_low
+    let s3 = s * s2
+    let s3_low = product_error(s, s2, s3) + (s * s2_low + s_low * s2)
+    let s5 = s3 * s2
+    let s5_low = product_error(s3, s2, s5) + (s3 * s2_low + s3_low * s2)
+    let (third, third_low) = divided(s3, s3_low, 3.0)
+    let (fifth, fifth_low) = divided(s5, s5_low, 5.0)
+    var series = 0.0
+    var j = 11
+    for j >= 0 {
+        series = series * s2 + 1.0 / ((2 * j + 7) as float)
+        j -= 1
+    }
+    let rest = 2.0 * s5 * s2 * series
+    let (lead, lead_low) = two_sum(2.0 * s, 2.0 * third)
+    let (next, next_low) = two_sum(lead, 2.0 * fifth)
+    let low = (lead_low + next_low) + (2.0 * s_low + 2.0 * third_low + 2.0 * fifth_low + rest)
+    let turns = k as float
+    let (high, high_low) = two_sum(turns * 0.6931471803691238, next)
+    let small = high_low + (low + turns * 1.9082149292705877e-10)
+    let out = high + small
+    return (out, small - (out - high))
 }
 
 /// `base` raised to a `float` power, by `exp(exponent · ln base)`.
 ///
-/// Only defined for a non-negative base: a negative one raised to a fractional
-/// power is not a real number, and raised to a whole one is [`pow`], which is
-/// exact where this would be approximate. Naming the two separately is what
-/// keeps a caller from getting an approximation of something exact.
+/// ```kite
+/// assert(powf(10.0, 2.0) == 100.0, "a whole exponent is pow's answer, exactly")
+/// assert(powf(2.0, 0.5) == 1.4142135623730951, "powf(2, 0.5) is the square root")
+/// assert(powf(0.0, 0.0) == 1.0, "anything to the zero is one")
+/// ```
+///
+/// A whole exponent is handed to [`pow`], which is exact where this would be
+/// approximate, so `powf(10.0, 2.0)` is 100 and `powf(-2.0, 3.0)` is -8. A
+/// fractional one is within one unit in the last place — correctly rounded in
+/// all but a few cases in a thousand — because the logarithm and the product
+/// are carried in two floats: one float's error in `ln base` is multiplied by
+/// the exponent before `exp` sees it, and `powf(10.0, 15.0)` came out
+/// fourteen units short of 1e15.
+///
+/// A negative base raised to a fractional power is not a real number and
+/// answers zero, the choice `ln` and `sqrt` make for what they cannot answer.
+/// The rest is C99's `pow`: anything to the zero, and one to anything, is one,
+/// NaNs included; otherwise a NaN answers a NaN; a zero to a negative power is
+/// an infinity; and an infinite exponent gives an infinity or a zero by
+/// whether the base is above or below one in size, and one when it is one.
 pub fn powf(base: float, exponent: float) -> float {
-    if base == 0.0 {
+    if exponent == 0.0 || base == 1.0 {
+        return 1.0
+    }
+    if !(base >= base) || !(exponent >= exponent) {
+        return base + exponent
+    }
+    var b = base
+    if exponent - trunc(exponent) == 0.0 {
+        if abs(exponent) < 9223372036854775807.0 {
+            return pow(base, trunc_to(exponent))
+        }
+        // Past 2⁶³ every float is even, so the base's sign is lost.
+        b = abs(base)
+    }
+    let size = abs(b)
+    if !(abs(exponent) < 1.0 / 0.0) {
+        if size == 1.0 {
+            return 1.0
+        }
+        return if (size > 1.0) == (exponent > 0.0) { 1.0 / 0.0 } else { 0.0 }
+    }
+    if b == 0.0 || !(size < size * 2.0) {
+        return if (b == 0.0) == (exponent > 0.0) { 0.0 } else { 1.0 / 0.0 }
+    }
+    if b < 0.0 {
         return 0.0
     }
-    if base < 0.0 {
+    let (high, low) = ln_split(b)
+    let p = exponent * high
+    if p > 709.8 {
+        return 1.0 / 0.0
+    }
+    if p < -745.2 {
         return 0.0
     }
-    return exp(exponent * ln(base))
+    let lost = product_error(exponent, high, p) + exponent * low
+    let (z, z_low) = two_sum(p, lost)
+    return exp_split(z, z_low)
 }
 
 /// The cube root, keeping the sign — unlike `powf`, which cannot.
