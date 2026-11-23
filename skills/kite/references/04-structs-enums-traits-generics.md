@@ -1939,7 +1939,7 @@ prints
 {"Boxed":[3]}
 {"Named":{"label":"f","capacity":4}}
 Book{ title: "MMM", year: 1975 }
-Book.year: expected a whole number
+Book.year: missing
 ```
 
 So the JSON encoding of an enum is: unit variant → its own name as a string;

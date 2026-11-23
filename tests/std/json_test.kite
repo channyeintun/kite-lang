@@ -327,6 +327,16 @@ fn checks() -> [error] {
     out.push(test.equal_str(kind("{\"Box\":{}}"), "Box.w: missing", "an empty object is an object, with its keys missing"))
     out.push(test.equal_str(kind("{\"Box\":5}"), "Kind.Box: expected an object with the keys w, h", "nor is a number"))
     out.push(test.equal_str(kind("{\"Maybe\":{}}"), "Maybe(w: nil)", "and with every field optional, {} is each one nil"))
+    out.push(test.equal_str(kind("{\"Box\":{\"w\":1,\"h\":null}}"), "Box.h: expected a whole number", "a null where an int belongs says so"))
+
+    // ---- a struct says each mistake as a named payload does ----
+    out.push(test.equal_str(shelf("{\"id\":1,\"tags\":[\"a\"],\"counts\":{}}"), "Shelf{ id: 1, tags: [\"a\"], counts: {} }", "a whole shelf"))
+    out.push(test.equal_str(shelf("{\"tags\":[],\"counts\":{}}"), "Shelf.id: missing", "a key that is not there is missing"))
+    out.push(test.equal_str(shelf("{\"id\":null,\"tags\":[],\"counts\":{}}"), "Shelf.id: expected a whole number", "a null is the wrong type"))
+    out.push(test.equal_str(shelf("{\"id\":1,\"counts\":{}}"), "Shelf.tags: missing", "a slice that is not there is missing"))
+    out.push(test.equal_str(shelf("{\"id\":1,\"tags\":null,\"counts\":{}}"), "Shelf.tags: expected an array", "a null slice is not an empty one"))
+    out.push(test.equal_str(shelf("{\"id\":1,\"tags\":[],\"counts\":5}"), "Shelf.counts: expected an object", "nor is a number a map"))
+    out.push(test.equal_str(shelf("[1]"), "Shelf: expected an object with the keys id, tags, counts", "a struct is an object"))
 
     return out
 }
@@ -347,6 +357,22 @@ fn kind(doc: str) -> str {
         return err.message()
     }
     return k.debug()
+}
+
+@derive(Debug, Decode)
+struct Shelf {
+    id: int
+    tags: [str]
+    counts: { str: int }
+}
+
+/// What decoding `doc` as a `Shelf` says: the value, or the error.
+fn shelf(doc: str) -> str {
+    let (s, err) = Shelf.decode(parsed(doc))
+    if err != nil {
+        return err.message()
+    }
+    return s.debug()
 }
 
 @derive(Encode, Decode)

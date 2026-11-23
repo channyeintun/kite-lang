@@ -200,7 +200,7 @@ fn basket_of(body: str) -&gt; (Basket, error) {
 </code></pre>
     <p class="measure">
       A body without <code>total</code> comes back as
-      <code>Basket.total: expected a whole number</code> — at the request,
+      <code>Basket.total: missing</code> — at the request,
       naming the field. The decoder is written from the struct, so unlike a
       hand-kept validation schema there is no second copy to drift.
     </p>

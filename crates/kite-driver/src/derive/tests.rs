@@ -156,7 +156,7 @@ fn a_missing_field_is_an_error_rather_than_a_zero() {
          \x20   io.print(u.name)\n\
          }\n",
     );
-    assert_eq!(out, "User.age: expected a whole number\n");
+    assert_eq!(out, "User.age: missing\n");
 }
 
 #[test]

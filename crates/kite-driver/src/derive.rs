@@ -1259,6 +1259,27 @@ impl<'a> Writer<'a, '_> {
         let mut body: Lines = Vec::new();
         match &decl.kind {
             Shape::Struct(s) => {
+                // A struct is an object, as a named payload is, and is said
+                // so the same way: anything else used to reach the first
+                // field's reader, which then blamed a key for not being in a
+                // document that had no keys at all.
+                let names: Vec<&str> = s.fields.iter().map(|f| f.name.name.as_str()).collect();
+                let shaped = self.temp("object");
+                body.push(format!(
+                    "    let {} = match {} {{ {j}.Json.Object(_) => true, _ => false }}",
+                    shaped, doc
+                ));
+                body.push(format!("    if !{} {{", shaped));
+                body.push(if names.is_empty() {
+                    format!("        return _, errors.new(\"{}: expected an object\")", decl.bare)
+                } else {
+                    format!(
+                        "        return _, errors.new(\"{}: expected an object with the keys {}\")",
+                        decl.bare,
+                        names.join(", ")
+                    )
+                });
+                body.push("    }".to_string());
                 let mut values = Vec::new();
                 for f in &s.fields {
                     let where_ = format!("{}.{}", decl.bare, f.name.name);
@@ -1370,22 +1391,6 @@ impl<'a> Writer<'a, '_> {
                                 names.join(", ")
                             ));
                             body.push("        }".to_string());
-                            for f in fields {
-                                if let Type::Path(p) = &f.ty {
-                                    if matches!(path_text(p).as_str(), "int" | "float" | "bool" | "str") {
-                                        body.push(format!(
-                                            "        if {j}.field({}, {}) == nil {{",
-                                            held,
-                                            quote(&f.name.name)
-                                        ));
-                                        body.push(format!(
-                                            "            return _, errors.new(\"{}.{}: missing\")",
-                                            v.name.name, f.name.name
-                                        ));
-                                        body.push("        }".to_string());
-                                    }
-                                }
-                            }
                             for f in fields {
                                 let where_ = format!("{}.{}", v.name.name, f.name.name);
                                 let value = self.decode_of(
@@ -1526,6 +1531,16 @@ impl<'a> Writer<'a, '_> {
                 let held = self.temp("value");
                 out.push(format!("{}let {} = {}({})", pad, held, reader, source));
                 out.push(format!("{}if {} == nil {{", pad, held));
+                // A key that is not there is missing, in a struct as in a
+                // named payload; one that is there, `null` included, is the
+                // wrong type, and the message says which type was expected.
+                // A struct used to say "expected a whole number" of a key it
+                // never found. Only a field can be absent: an element's or a
+                // payload's position is checked against the array's length
+                // before it is read.
+                out.push(format!("{}    if {} == nil {{", pad, source));
+                out.push(format!("{}        return _, errors.new(\"{}: missing\")", pad, where_));
+                out.push(format!("{}    }}", pad));
                 if path_text(p) == "int" {
                     // A number at or past 2⁵³ is whole, so "expected a whole
                     // number" would be false of it; it is refused because a
@@ -1572,6 +1587,9 @@ impl<'a> Writer<'a, '_> {
                 out.push(format!("{}if {} == nil {{", pad, node));
                 out.push(format!("{}    return _, errors.new(\"{}: missing\")", pad, where_));
                 out.push(format!("{}}}", pad));
+                // `null`, or anything else that is not an array, is the wrong
+                // type, said as a primitive's is; it used to be read as `[]`.
+                self.expect_shape(&node, "Array", "an array", where_, &pad, out);
                 let rendered = self.render(ty);
                 out.push(format!("{}var {}: {} = []", pad, list, rendered));
                 out.push(format!("{}for {} in {j}.items({}) {{", pad, item, node));
@@ -1597,6 +1615,7 @@ impl<'a> Writer<'a, '_> {
                 out.push(format!("{}if {} == nil {{", pad, node));
                 out.push(format!("{}    return _, errors.new(\"{}: missing\")", pad, where_));
                 out.push(format!("{}}}", pad));
+                self.expect_shape(&node, "Object", "an object", where_, &pad, out);
                 let rendered = self.render(ty);
                 out.push(format!("{}var {}: {} = {{ }}", pad, object, rendered));
                 out.push(format!("{}for ({}, {}) in {j}.entries({}) {{", pad, k, v, node));
@@ -1644,6 +1663,20 @@ impl<'a> Writer<'a, '_> {
                 "0".to_string()
             }
         }
+    }
+
+    /// Refuse a present node that is not the `variant` of `json.Json` a
+    /// slice or a map is read from, saying what was expected.
+    fn expect_shape(&mut self, node: &str, variant: &str, what: &str, where_: &str, pad: &str, out: &mut Lines) {
+        let j = self.json.clone();
+        let shaped = self.temp("shaped");
+        out.push(format!(
+            "{}let {} = match {} {{ {j}.Json.{}(_) => true, _ => false }}",
+            pad, shaped, node, variant
+        ));
+        out.push(format!("{}if !{} {{", pad, shaped));
+        out.push(format!("{}    return _, errors.new(\"{}: expected {}\")", pad, where_, what));
+        out.push(format!("{}}}", pad));
     }
 
     // ---- shared -----------------------------------------------------------
