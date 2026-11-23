@@ -2865,6 +2865,25 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// `return (v, e)` in a `(T, error)` function, its `v` already checked:
+    /// checks `e` as the error and says the tuple is one value, with the
+    /// line the reader meant.
+    fn paren_pair(&mut self, span: Span, elems: &[ast::Expr], sig: &Signature) {
+        let e = self.expr(&elems[1], Some(TyId::ERR));
+        let e = self.coerce(e, Some(TyId::ERR));
+        self.expect_ty(e.ty, TyId::ERR, e.span, None);
+        self.diags.push(
+            Diagnostic::error(codes::E0203, "a fallible function returns two values")
+                .with_primary(span, "a tuple is one value, not two")
+                .with_secondary(sig.name_span, "declared `(T, error)` here")
+                .with_note(format!(
+                    "write `return {}, {}`, without the parentheses",
+                    self.text(elems[0].span()),
+                    self.text(elems[1].span()),
+                )),
+        );
+    }
+
     fn return_stmt(&mut self, r: &ast::ReturnStmt, sig: &Signature) -> Option<(hir::Stmt, Flow)> {
         if let Some(closure) = self.closure_ret_unknown {
             self.diags.push(
@@ -2929,14 +2948,17 @@ impl<'a> Checker<'a> {
             // checked as the pair's would be, so a value of the wrong type,
             // or a second element that is no error, is told too — the note
             // alone would be a fix that does not compile.
-            Some(ast::ReturnValue::Single(ast::Expr::Tuple { elems, span: tuple_span }))
+            // Parentheses around the tuple change nothing: `return ((1, nil))`
+            // is the same slip.
+            Some(ast::ReturnValue::Single(lit))
                 if sig.fallible
-                    && elems.len() == 2
+                    && pair_literal(lit).is_some()
                     && !self
                         .types
                         .fallible_value(sig.ret)
                         .is_some_and(|t| matches!(self.types.kind(t), TyKind::Tuple(_))) =>
             {
+                let elems = pair_literal(lit).unwrap_or_default();
                 let inner = self.types.fallible_value(sig.ret).unwrap_or(TyId::ERROR);
                 let want = (!self.unlearned_ret(inner)).then_some(inner);
                 let v = self.expr(&elems[0], want);
@@ -2944,19 +2966,66 @@ impl<'a> Checker<'a> {
                     let v = self.coerce(v, Some(inner));
                     self.expect_ty(v.ty, inner, v.span, Some(sig.name_span));
                 }
-                let e = self.expr(&elems[1], Some(TyId::ERR));
-                let e = self.coerce(e, Some(TyId::ERR));
-                self.expect_ty(e.ty, TyId::ERR, e.span, None);
-                self.diags.push(
-                    Diagnostic::error(codes::E0203, "a fallible function returns two values")
-                        .with_primary(*tuple_span, "a tuple is one value, not two")
-                        .with_secondary(sig.name_span, "declared `(T, error)` here")
-                        .with_note(format!(
-                            "write `return {}, {}`, without the parentheses",
-                            self.text(elems[0].span()),
-                            self.text(elems[1].span()),
-                        )),
-                );
+                self.paren_pair(lit.span(), elems, sig);
+                Some((hir::Stmt::Return { value: None, span: r.span }, Flow::Diverges))
+            }
+            // Where the value side is itself a tuple, the literal can be
+            // read two ways, and its first element says which: `(p, nil)`
+            // whose `p` is the whole `(int, int)` is the pair in parentheses,
+            // as above, and so is any first element in a function whose value
+            // tuple has no two elements. Otherwise (`(1, nil)` in a
+            // `((int, Option<int>), error)` function) it is the value tuple
+            // with no error after it, typed element by element as a tuple
+            // literal is, and the arm below's one report follows. A first
+            // element already reported leaves the second to decide: a `nil`
+            // that the value tuple's second element cannot hold is the
+            // error's.
+            Some(ast::ReturnValue::Single(lit)) if sig.fallible && pair_literal(lit).is_some() => {
+                let elems = pair_literal(lit).unwrap_or_default();
+                let inner = self.types.fallible_value(sig.ret).unwrap_or(TyId::ERROR);
+                let hint = match self.types.kind(inner) {
+                    TyKind::Tuple(ts) if ts.len() == 2 => Some((ts[0], ts[1])),
+                    _ => None,
+                };
+                let v = self.expr(&elems[0], Some(hint.map_or(inner, |h| h.0)));
+                let paren = match hint {
+                    None => true,
+                    Some((_, second)) => {
+                        v.ty == inner
+                            || (self.types.holds_error(v.ty)
+                                && matches!(unparen(&elems[1]), ast::Expr::Nil(_))
+                                && !matches!(self.types.kind(second), TyKind::Optional(_))
+                                && second != TyId::ERR)
+                    }
+                };
+                match hint {
+                    Some((first, second)) if !paren => {
+                        let v = self.coerce(v, Some(first));
+                        self.expect_ty(v.ty, first, v.span, None);
+                        let e = self.expr(&elems[1], Some(second));
+                        let e = self.coerce(e, Some(second));
+                        self.expect_ty(e.ty, second, e.span, None);
+                        // An element of the wrong type was told where it
+                        // is, and the whole tuple is not then told again.
+                        let ty = self.types.tuple_of(vec![v.ty, e.ty]);
+                        if !self.types.holds_error(ty) {
+                            self.diags.push(
+                                Diagnostic::error(codes::E0203, "a fallible function returns two values")
+                                    .with_primary(r.span, "only one value returned")
+                                    .with_secondary(sig.name_span, "declared `(T, error)` here")
+                                    .with_note(
+                                        "write `return value, nil` on the success path, or return a \
+                                         call that is itself fallible",
+                                    ),
+                            );
+                        }
+                    }
+                    _ => {
+                        let v = self.coerce(v, Some(inner));
+                        self.expect_ty(v.ty, inner, v.span, Some(sig.name_span));
+                        self.paren_pair(lit.span(), elems, sig);
+                    }
+                }
                 Some((hir::Stmt::Return { value: None, span: r.span }, Flow::Diverges))
             }
             Some(ast::ReturnValue::Single(e)) if sig.fallible => {
@@ -16982,6 +17051,23 @@ fn is_tuple_projection(e: &ast::Expr) -> bool {
         ast::Expr::Paren { inner, .. } => is_tuple_projection(inner),
         ast::Expr::Field { name, .. } => name.name.bytes().all(|b| b.is_ascii_digit()),
         _ => false,
+    }
+}
+
+/// `e` with the parentheses around it taken off.
+fn unparen(e: &ast::Expr) -> &ast::Expr {
+    match e {
+        ast::Expr::Paren { inner, .. } => unparen(inner),
+        _ => e,
+    }
+}
+
+/// The two elements of `e`, where it is a two-element tuple literal inside
+/// any number of parentheses — what `return (v, nil)` is written as.
+fn pair_literal(e: &ast::Expr) -> Option<&[ast::Expr]> {
+    match unparen(e) {
+        ast::Expr::Tuple { elems, .. } if elems.len() == 2 => Some(elems),
+        _ => None,
     }
 }
 
