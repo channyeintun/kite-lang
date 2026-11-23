@@ -710,7 +710,12 @@ pub fn render(text: str) -> str {
             continue
         }
 
-        var paragraph: [str] = []
+        // The first line is taken whatever it looks like: every block the line
+        // could start was handled above, and a `|` row with no rule under it
+        // is the one that `starts_block` still names — so asking again here
+        // would take nothing and never move on.
+        var paragraph: [str] = [line]
+        i += 1
         for i < lines.len() && !is_blank(lines[i]) && !starts_block(lines[i]) {
             paragraph.push(lines[i])
             i += 1

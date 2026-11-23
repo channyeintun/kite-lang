@@ -634,6 +634,9 @@ pub fn check_recording(
             fn_index: i,
             locals: Vec::new(),
             init: Vec::new(),
+            bare_lets: std::collections::HashSet::new(),
+            captured_decls: std::collections::HashSet::new(),
+            var_fixes: Vec::new(),
             taint: Vec::new(),
             guards: std::collections::HashMap::new(),
             narrowed: std::collections::HashMap::new(),
@@ -672,6 +675,7 @@ pub fn check_recording(
                 &sigs[i],
                 m.self_param.is_some(),
             );
+            checker.settle_var_fixes(reported);
             let copies = default_reports.remove(&(d.item_index, d.method_index)).unwrap_or_default();
             if !diags.iter().skip(reported).any(|x| x.severity == kite_diag::Severity::Error) {
                 let mut seen: std::collections::HashSet<DiagKey> = std::collections::HashSet::new();
@@ -781,6 +785,7 @@ pub fn check_recording(
                 )
             }
         };
+        checker.settle_var_fixes(reported);
         fns.push(func);
         // Functions lifted out of this one's closure literals. Their ids were
         // handed out assuming they land after every declared function, so they
@@ -1167,6 +1172,17 @@ struct Checker<'a> {
     locals: Vec<hir::Local>,
     /// Definite-assignment state, parallel to `locals`.
     init: Vec<Init>,
+    /// The names of the `let`s declared without an initialiser. `var x: T` with
+    /// none is E0110, so E0114 offers no `var` fix for one.
+    bare_lets: std::collections::HashSet<Span>,
+    /// The declarations of the locals some closure in this function captures.
+    /// A `var` cannot be captured (E0211), so E0114 offers no `var` fix for
+    /// one — and the capture may come after the write, so the fixes offered
+    /// are settled once the whole function has been read ([`Self::settle_var_fixes`]).
+    captured_decls: std::collections::HashSet<Span>,
+    /// Each `var` fix offered: the `let` keyword it replaces, and the
+    /// declaration it is for.
+    var_fixes: Vec<(Span, Span)>,
     /// Error-taint state, parallel to `locals`. See [`Taint`].
     taint: Vec<Taint>,
     /// Which value local each error local guards, so checking the error cleans
@@ -1748,6 +1764,9 @@ impl<'a> Checker<'a> {
         // this declaration afresh on every iteration.
         self.init[local_id as usize] =
             if init.is_some() { Init::Assigned } else { Init::Unassigned };
+        if init.is_none() {
+            self.bare_lets.insert(name.span);
+        }
         // **A failure bound to a name is still a failure.** `let (v, err) = f()`
         // has always marked `err`, and a bare `f()` on its own line is caught
         // too — but a function returning `error` alone, bound and never looked
@@ -2321,8 +2340,8 @@ impl<'a> Checker<'a> {
                 why
             ));
         }
-        if let Some(kw) = self.let_keyword_span(decl) {
-            d = d.with_fix(Fix::replace("make the binding mutable", kw, "var"));
+        if let Some(fix) = self.var_fix(decl) {
+            d = d.with_fix(fix);
         }
         self.diags.push(d);
     }
@@ -4695,6 +4714,7 @@ impl<'a> Checker<'a> {
         if self.declared_inside(id, region) || self.captures.contains(&id) {
             return;
         }
+        self.captured_decls.insert(self.locals[id as usize].span);
         // `var self` is the one mutable binding a capture cannot go stale on:
         // nothing can assign to `self`, only to its fields, and a struct is a
         // reference — so the copy and the original are one value.
@@ -7402,7 +7422,7 @@ impl<'a> Checker<'a> {
             // `Shape.Square(1.0)` on an enum is a variant that is not there
             // far more often than a function that is not, and it is reported
             // as the same line without its arguments is.
-            let written = self.text(p_span);
+            let written = self.quoted(p_span);
             let owner = match written.rsplit_once('.') {
                 Some((owner, _)) => owner.trim().to_string(),
                 None => type_name.clone(),
@@ -9102,13 +9122,13 @@ impl<'a> Checker<'a> {
                 Some(inner) => format!(
                     "`{}` is held in `{}`, and a {} is a copy-on-write value: changing \
                      anything inside it changes the binding; declare it `var`",
-                    self.text(inner),
+                    self.quoted(inner),
                     name,
                     noun
                 ),
             });
-        if let Some(kw) = self.let_keyword_span(decl) {
-            d = d.with_fix(Fix::replace("make the binding mutable", kw, "var"));
+        if let Some(fix) = self.var_fix(decl) {
+            d = d.with_fix(fix);
         }
         self.diags.push(d);
         None
@@ -9290,8 +9310,8 @@ impl<'a> Checker<'a> {
         )
         .with_primary(base.span(), "this binding is immutable")
         .with_secondary(decl, "declared with `let` here");
-        if let Some(kw) = self.let_keyword_span(decl) {
-            d = d.with_fix(Fix::replace("make the binding mutable", kw, "var"));
+        if let Some(fix) = self.var_fix(decl) {
+            d = d.with_fix(fix);
         }
         self.diags.push(d);
         false
@@ -9322,7 +9342,7 @@ impl<'a> Checker<'a> {
             _ => None,
         };
         let Some(id) = local else {
-            let what = self.text(inner.span()).to_string();
+            let what = self.quoted(inner.span());
             self.diags.push(
                 Diagnostic::error(
                     codes::E0301,
@@ -9387,8 +9407,8 @@ impl<'a> Checker<'a> {
                 "the enclosing method takes a plain `self`; it would have to take \
                  `var self` to pass its receiver on",
             );
-        } else if let Some(kw) = self.let_keyword_span(decl) {
-            d = d.with_fix(Fix::replace("make the binding mutable", kw, "var"));
+        } else if let Some(fix) = self.var_fix(decl) {
+            d = d.with_fix(fix);
         }
         self.diags.push(d);
     }
@@ -12564,6 +12584,12 @@ impl<'a> Checker<'a> {
         self.sources.span_text(span)
     }
 
+    /// The source of `span` as a message may quote it: on one line. See
+    /// [`one_line`].
+    fn quoted(&self, span: Span) -> String {
+        one_line(self.text(span))
+    }
+
     /// Decode a string literal's contents. Phase 1 handles escapes; string
     /// interpolation arrives with `Display` in Phase 2.
     /// `"a \(x) b"` becomes concatenation. Each hole is rendered with `ToStr`,
@@ -13189,6 +13215,46 @@ impl<'a> Checker<'a> {
              optional inputs takes a struct",
         );
         self.diags.push(d);
+    }
+
+    /// E0114's "make the binding mutable", offered only where it compiles.
+    /// `kitec fix` applies every fix it is shown, so one that swaps this error
+    /// for another is worse than none: a `let` with no initialiser would become
+    /// a `var` with none (E0110), and a `let` that a closure captures would
+    /// become a captured `var` (E0211). A write inside the closure is seen
+    /// here; a capture anywhere else in the function, before or after the
+    /// write, is taken back by [`Self::settle_var_fixes`].
+    fn var_fix(&mut self, decl: Span) -> Option<Fix> {
+        if self.bare_lets.contains(&decl) {
+            return None;
+        }
+        if let Some(region) = self.closure_span {
+            if !(decl.start >= region.start && decl.end <= region.end) {
+                return None;
+            }
+        }
+        let kw = self.let_keyword_span(decl)?;
+        self.var_fixes.push((kw, decl));
+        Some(Fix::replace("make the binding mutable", kw, "var"))
+    }
+
+    /// Take back the `var` fixes offered for a `let` that a closure in this
+    /// function captures — wherever the closure is, so a write above it is
+    /// covered too. `from` is where this function's diagnostics start.
+    fn settle_var_fixes(&mut self, from: usize) {
+        let refused: Vec<Span> = self
+            .var_fixes
+            .iter()
+            .filter(|(_, decl)| self.captured_decls.contains(decl))
+            .map(|(kw, _)| *kw)
+            .collect();
+        if refused.is_empty() {
+            return;
+        }
+        for i in from..self.diags.len() {
+            let Some(d) = self.diags.get_mut(i) else { continue };
+            d.fixes.retain(|f| !(f.edits.len() == 1 && refused.contains(&f.edits[0].span)));
+        }
     }
 
     /// The span of the `let` keyword preceding a binding, so E0114 can offer a
@@ -15386,3 +15452,49 @@ fn strip_int_suffix(text: &str) -> &str {
 
 #[cfg(test)]
 mod tests;
+
+/// Source text as a one-line message quotes it. A diagnostic's message is one
+/// line (`kite-diag`), and an expression written across two — `r .` then `e` —
+/// is the same expression, so a run of whitespace is one space and none is
+/// kept beside a `.`, which is how the formatter would write it. A comment
+/// written between the parts is dropped, since it ran to the line break that
+/// is no longer there. A string literal's own text is left as it is, apart
+/// from its line breaks.
+fn one_line(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let (mut in_string, mut escaped, mut pending_space) = (false, false, false);
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        if !in_string && c == '/' && chars.peek() == Some(&'/') {
+            for c in chars.by_ref() {
+                if c == '\n' {
+                    break;
+                }
+            }
+            pending_space = true;
+            continue;
+        }
+        if in_string {
+            let c = if c == '\n' || c == '\r' { ' ' } else { c };
+            out.push(c);
+            match c {
+                _ if escaped => escaped = false,
+                '\\' => escaped = true,
+                '"' => in_string = false,
+                _ => {}
+            }
+            continue;
+        }
+        if c.is_whitespace() {
+            pending_space = true;
+            continue;
+        }
+        if pending_space && !out.is_empty() && c != '.' && !out.ends_with('.') {
+            out.push(' ');
+        }
+        pending_space = false;
+        in_string = c == '"';
+        out.push(c);
+    }
+    out
+}

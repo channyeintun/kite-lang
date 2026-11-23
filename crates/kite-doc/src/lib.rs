@@ -515,51 +515,77 @@ fn member_doc(doc: &str) -> String {
 ///
 /// * **Raw HTML.** `<T>` in prose is read as a tag, so a generic name
 ///   vanished, and `<script>` stayed live. A `<` that could open a tag, and an
-///   `&` that could open an entity, are backslash-escaped outside code spans
-///   and fences — where they are text already, and the reader sees the
-///   backslash.
+///   `&` that could open an entity, are backslash-escaped outside code — a
+///   code span (which may run over a line break), a fence of backticks or
+///   tildes, an indented block — and outside an `<https://…>` autolink: in
+///   those they are text already, and the reader sees the backslash. Which
+///   lines are code is `kite_lexer::fence`'s, which `kitec test` shares.
 /// * **A fence that never closes.** It swallowed every entry after it. One
-///   still open at the end of the text is closed there.
+///   still open at the end of the text is closed there, by a fence as long as
+///   the one that opened it.
 /// * **Headings.** A `# Heading` in a doc sits inside an entry's own `##`, and
 ///   was a heading of the same rank or above it. They are pushed down by
 ///   `shift` levels, to at most six.
 fn prose(doc: &str, shift: usize) -> String {
+    use kite_lexer::fence::{Line, Scanner};
     let mut out: Vec<String> = Vec::new();
-    let mut in_fence = false;
+    // The lines of the paragraph being read. Escaping works on all of them at
+    // once, because a code span runs over a line break: `Option<int>` opened on
+    // one line and closed on the next is code, and escaping each line alone
+    // put backslashes inside it.
+    let mut paragraph: Vec<&str> = Vec::new();
+    let flush = |paragraph: &mut Vec<&str>, out: &mut Vec<String>| {
+        if !paragraph.is_empty() {
+            out.push(escape_markup(&paragraph.join("\n")));
+            paragraph.clear();
+        }
+    };
+    let mut scan = Scanner::new();
     for line in doc.lines() {
-        let t = line.trim();
-        if in_fence {
-            if t.len() >= 3 && t.chars().all(|c| c == '`') {
-                in_fence = false;
+        match scan.next(line) {
+            // Code is left as it was written, and so is what ends a paragraph.
+            Line::Open(_) | Line::Close => {
+                flush(&mut paragraph, &mut out);
+                out.push(line.to_string());
             }
-            out.push(line.to_string());
-            continue;
+            Line::Inside | Line::Indented => {
+                flush(&mut paragraph, &mut out);
+                out.push(line.to_string());
+            }
+            Line::Prose if line.trim().is_empty() => {
+                flush(&mut paragraph, &mut out);
+                out.push(line.to_string());
+            }
+            Line::Prose => {
+                let hashes = line.chars().take_while(|&c| c == '#').count();
+                let heading = (1..=6).contains(&hashes)
+                    && line[hashes..].chars().next().is_none_or(|c| c == ' ');
+                if heading {
+                    flush(&mut paragraph, &mut out);
+                    let shifted = format!("{}{}", "#".repeat((hashes + shift).min(6)), &line[hashes..]);
+                    out.push(escape_markup(&shifted));
+                } else {
+                    if kite_lexer::fence::starts_own_block(line) {
+                        flush(&mut paragraph, &mut out);
+                    }
+                    paragraph.push(line);
+                }
+            }
         }
-        if t.starts_with("```") {
-            in_fence = true;
-            out.push(line.to_string());
-            continue;
-        }
-        let hashes = line.chars().take_while(|&c| c == '#').count();
-        let heading = (1..=6).contains(&hashes)
-            && line[hashes..].chars().next().is_none_or(|c| c == ' ');
-        let line = if heading {
-            format!("{}{}", "#".repeat((hashes + shift).min(6)), &line[hashes..])
-        } else {
-            line.to_string()
-        };
-        out.push(escape_markup(&line));
     }
-    if in_fence {
-        out.push("```".to_string());
+    flush(&mut paragraph, &mut out);
+    // A fence still open at the end is closed there, by a fence of its own
+    // length, so the next entry is not swallowed.
+    if let Some(closing) = scan.closing_line() {
+        out.push(closing);
     }
     out.join("\n")
 }
 
-/// `line` with its `<` and `&` that Markdown would read as HTML escaped,
-/// except inside a code span.
-fn escape_markup(line: &str) -> String {
-    let chars: Vec<char> = line.chars().collect();
+/// `text` with its `<` and `&` that Markdown would read as HTML escaped,
+/// except inside a code span (which may run over line breaks) or an autolink.
+fn escape_markup(text: &str) -> String {
+    let chars: Vec<char> = text.chars().collect();
     let mut out = String::new();
     let mut i = 0;
     while i < chars.len() {
@@ -588,6 +614,14 @@ fn escape_markup(line: &str) -> String {
             continue;
         }
         let escaped = i > 0 && chars[i - 1] == '\\';
+        // `<https://example.com>` is a link, not a tag: left as it is.
+        if c == '<' && !escaped {
+            if let Some(end) = autolink_end(&chars, i) {
+                out.extend(&chars[i..end]);
+                i = end;
+                continue;
+            }
+        }
         let next = chars.get(i + 1).copied();
         let tag = c == '<' && next.is_some_and(|n| n.is_ascii_alphabetic() || "/!?".contains(n));
         let entity = c == '&' && {
@@ -604,6 +638,30 @@ fn escape_markup(line: &str) -> String {
         i += 1;
     }
     out
+}
+
+/// Where the autolink that starts at `chars[at]` (a `<`) ends, just past its
+/// `>`: a scheme of 2 to 32 letters, digits, `+`, `.` or `-` starting with a
+/// letter, a colon, and no space, `<` or `>` before the closing bracket.
+fn autolink_end(chars: &[char], at: usize) -> Option<usize> {
+    let mut i = at + 1;
+    let start = i;
+    while chars.get(i).is_some_and(|c| c.is_ascii_alphanumeric() || "+.-".contains(*c)) {
+        i += 1;
+    }
+    let scheme = i - start;
+    if !(2..=32).contains(&scheme) || !chars[start].is_ascii_alphabetic() || chars.get(i) != Some(&':')
+    {
+        return None;
+    }
+    while let Some(&c) = chars.get(i) {
+        match c {
+            '>' => return Some(i + 1),
+            '<' | ' ' | '\t' | '\n' => return None,
+            _ => i += 1,
+        }
+    }
+    None
 }
 
 /// Heading anchors, as a repository host makes them: lowercase, and a

@@ -263,6 +263,26 @@ fn assigning_to_a_let_is_rejected_with_a_var_fix() {
     assert!(out.contains("var total = 0"), "{}", out);
 }
 
+/// `kitec fix` applies every fix it is shown, so a "make the binding mutable"
+/// that gives another error is a trap. A `let x: int` with no initialiser would
+/// become a `var` with none (E0110); a `let` a closure captures would become a
+/// captured `var` (E0211). Neither gets the fix, and one that does compile does.
+#[test]
+fn the_var_fix_is_offered_only_where_it_compiles() {
+    let c = body("  let b: int\n  b = 1\n  b = 2");
+    assert!(c.has("E0114"), "{}", c.render());
+    assert!(!c.render().contains("make the binding mutable"), "{}", c.render());
+    let c = body("  let xs = [1]\n  let f = || {\n    xs.push(2)\n  }\n  f()");
+    assert!(c.has("E0114"), "{}", c.render());
+    assert!(!c.render().contains("make the binding mutable"), "{}", c.render());
+    // The write outside the closure, the capture after it: still a captured var.
+    let c = body("  let n = 1\n  n = 2\n  let f = || {\n    io.print(n)\n  }\n  f()");
+    assert!(c.has("E0114"), "{}", c.render());
+    assert!(!c.render().contains("make the binding mutable"), "{}", c.render());
+    let c = body("  let f = || {\n    let ys = [1]\n    ys.push(2)\n  }\n  f()");
+    assert!(c.render().contains("help: make the binding mutable"), "{}", c.render());
+}
+
 #[test]
 fn assigning_to_a_var_is_accepted() {
     ok_body("  var total = 0\n  total = 1\n  total += 2");
@@ -2375,4 +2395,27 @@ fn error_notes_name_fixes_that_compile_here() {
     assert_eq!(c.codes(), vec!["E0111"], "{}", c.render());
     let c = body("let c = errors.new(\"x\")\n  nowhere(c)");
     assert_eq!(c.codes(), vec!["E0111"], "{}", c.render());
+}
+
+/// A diagnostic's message is one line. E0301 and E0111 quoted the source as
+/// written, so `r .` then `e` on the next line put a line break (and the
+/// indentation after it) inside the header.
+#[test]
+fn a_quoted_expression_is_on_one_line() {
+    let c = run(
+        "struct R {\n    e: error\n}\n\nfn main() {\n    let r = R{ e: nil }\n    io.print(r .\n        e.message())\n}\n",
+    );
+    let out = c.render();
+    let header = out.lines().next().unwrap_or("");
+    assert_eq!(header, "error[E0301]: `r.e` may be nil, so it has no message", "{}", out);
+    assert!(out.contains("`let e = r.e`"), "{}", out);
+    let c = run(
+        "enum Shape {\n    Dot\n}\n\nfn main() {\n    let s = Shape \t . \t Nope(1)\n    io.print(s)\n}\n",
+    );
+    let out = c.render();
+    assert!(out.contains("`Shape` has no variant `Nope`"), "{}", out);
+    assert_eq!(one_line("a  .\n   b(\"x\n  y\")  +  c"), "a.b(\"x   y\") + c");
+    // A comment between the parts went with the line break.
+    assert_eq!(one_line("r . // why\n    e"), "r.e");
+    assert_eq!(one_line("f(\"a // b\")"), "f(\"a // b\")");
 }

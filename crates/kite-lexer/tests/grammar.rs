@@ -93,3 +93,85 @@ fn an_interpolation_nests_its_parentheses() {
     assert!(defined.contains("\"begin\": \"\\\\(\"") && defined.contains("\"end\": \"\\\\)\""));
     assert!(defined.matches("\"#interpolation-parens\"").count() >= 1);
 }
+
+/// What the grammar's `rule` makes of one line: `(text, scope)` per token, a
+/// stretch it does not scope as `-`. Run through Node, which stands in for the
+/// editor (see `grammar_tokens.cjs`); where there is no Node the check is
+/// skipped.
+fn scopes(rule: &str, line: &str) -> Option<Vec<(String, String)>> {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let out = std::process::Command::new("node")
+        .arg(root.join("tests/grammar_tokens.cjs"))
+        .arg(root.join("../../editors/vscode/syntaxes/kite.tmLanguage.json"))
+        .arg(rule)
+        .arg(line)
+        .output()
+        .ok()?;
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    Some(
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .map(|l| {
+                let (t, s) = l.split_once('\t').expect("text and scope");
+                (t.to_string(), s.to_string())
+            })
+            .collect(),
+    )
+}
+
+/// Each operator the lexer reads as one token is one scope. TextMate takes the
+/// first pattern that matches where it is standing, so `=` listed before `==`
+/// coloured `a == 1` as two assignments, and `-` before `->` took the arrow's
+/// first character.
+#[test]
+fn a_multi_character_operator_is_one_scope() {
+    for (op, scope) in [
+        ("==", "comparison"),
+        ("!=", "comparison"),
+        ("<=", "comparison"),
+        (">=", "comparison"),
+        ("->", "arrow"),
+        ("=>", "arrow"),
+        ("<<", "arithmetic"),
+        (">>", "arithmetic"),
+        ("&&", "logical"),
+        ("||", "logical"),
+        ("+=", "assignment"),
+        ("..=", "range"),
+        ("..", "range"),
+        ("=", "assignment"),
+        ("<", "comparison"),
+        ("-", "arithmetic"),
+    ] {
+        let Some(got) = scopes("operator", op) else { return };
+        assert_eq!(
+            got,
+            vec![(op.to_string(), format!("keyword.operator.{}.kite", scope))],
+            "{}",
+            op
+        );
+    }
+}
+
+/// `1e10` is a float (the lexer takes an exponent with no fraction), `t.0.1`
+/// is two tuple indexes and not the float `0.1`, and a name may be any letters.
+#[test]
+fn numbers_and_names_are_what_the_lexer_reads() {
+    let float = |text: &str| (text.to_string(), "constant.numeric.float.kite".to_string());
+    let Some(got) = scopes("number", "1e10") else { return };
+    assert_eq!(got, vec![float("1e10")]);
+    assert_eq!(scopes("number", "1E5").unwrap(), vec![float("1E5")]);
+    assert_eq!(scopes("number", "1.5e-3").unwrap(), vec![float("1.5e-3")]);
+    assert_eq!(scopes("number", "0.1").unwrap(), vec![float("0.1")]);
+    let int = |text: &str| (text.to_string(), "constant.numeric.integer.kite".to_string());
+    let gap = |text: &str| (text.to_string(), "-".to_string());
+    assert_eq!(scopes("number", "t.0.1").unwrap(), vec![gap("t."), int("0"), gap("."), int("1")]);
+    // After a range's `..` the digits are a number again, and the float is whole.
+    let got = scopes("number", "1.5..2.5").unwrap();
+    assert_eq!(got, vec![float("1.5"), gap(".."), float("2.5")]);
+    assert_eq!(scopes("number", "0xe5").unwrap()[0].1, "constant.numeric.hex.kite");
+    for (line, name) in [("fn 名前", "名前"), ("struct Ä", "Ä")] {
+        let got = scopes("declaration", line).unwrap();
+        assert!(got.iter().any(|(t, s)| t == name && s.starts_with("entity.name.")), "{:?}", got);
+    }
+}

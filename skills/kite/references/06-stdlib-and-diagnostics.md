@@ -807,8 +807,7 @@ refreshes the module beside it:
 
 ```
 $ kitec build main.kite --emit wasm --out .
-  and ./api.js with ./api.d.ts
-wrote ./app.wasm (2743 bytes) and ./app.js
+wrote ./app.wasm (2743 bytes), ./app.js, ./app.wasm.map, ./api.js and ./api.d.ts
 note: ./index.html was already there and was left alone
 ```
 
@@ -1952,6 +1951,11 @@ obeyed: `kitec test --native`, `kitec check --emit wasm` and `kitec fmt
 
 Notes worth having:
 
+- **`kitec fmt` is idempotent for every input, or it refuses.** A file that
+  does not parse still formats (the layout reads tokens), but its brackets are
+  guesses, so the formatter lays a file out again until it stops changing and
+  writes that; a file that never settles is refused with a message and left as
+  it was.
 - **`kitec run` is the bytecode VM.** It supplies the `fs` host group and
   nothing else. `--native` runs the same program as machine code under a JIT.
   It exits 1 on a trap and 0 on everything else — see *The whole command-line
