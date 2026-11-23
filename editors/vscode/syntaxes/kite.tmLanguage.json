@@ -72,9 +72,9 @@
     "number": {
       "patterns": [
         {
-          "comment": "A float needs a digit either side of the point (`1.` and `.5` are not floats in Kite), or an exponent alone (`1e10`). After a `.` the digits are a tuple index: `t.0.1` is two of them, not `0.1`.",
+          "comment": "A float needs a digit either side of the point (`1.` and `.5` are not floats in Kite), or an exponent alone (`1e10`). After a single `.` the digits are a tuple index: `t.0.1` is two of them, not `0.1`; after a range's `..` they are a number again, so `1.5..2.5` holds two floats.",
           "name": "constant.numeric.float.kite",
-          "match": "(?<!\\.)\\b[0-9][0-9_]*(\\.[0-9][0-9_]*([eE][-+]?[0-9_]+)?|[eE][-+]?[0-9_]+)\\b"
+          "match": "(?<!^\\.|[^.]\\.)\\b[0-9][0-9_]*(\\.[0-9][0-9_]*([eE][-+]?[0-9_]+)?|[eE][-+]?[0-9_]+)\\b"
         },
         {
           "name": "constant.numeric.hex.kite",

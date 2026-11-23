@@ -166,6 +166,9 @@ fn numbers_and_names_are_what_the_lexer_reads() {
     let int = |text: &str| (text.to_string(), "constant.numeric.integer.kite".to_string());
     let gap = |text: &str| (text.to_string(), "-".to_string());
     assert_eq!(scopes("number", "t.0.1").unwrap(), vec![gap("t."), int("0"), gap("."), int("1")]);
+    // After a range's `..` the digits are a number again, and the float is whole.
+    let got = scopes("number", "1.5..2.5").unwrap();
+    assert_eq!(got, vec![float("1.5"), gap(".."), float("2.5")]);
     assert_eq!(scopes("number", "0xe5").unwrap()[0].1, "constant.numeric.hex.kite");
     for (line, name) in [("fn 名前", "名前"), ("struct Ä", "Ä")] {
         let got = scopes("declaration", line).unwrap();
