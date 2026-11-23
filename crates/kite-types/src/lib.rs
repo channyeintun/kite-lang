@@ -3719,11 +3719,13 @@ impl<'a> Checker<'a> {
                 match parse_int(text) {
                     Some(v) => self.lit(ExprKind::Int(v), TyId::INT, *span),
                     None => {
-                        self.diags.push(
-                            Diagnostic::error(codes::E0004, "integer literal is out of range")
-                                .with_primary(*span, "does not fit in `int`")
-                                .with_note("`int` is 64-bit signed"),
-                        );
+                        if int_overflows(text) {
+                            self.diags.push(
+                                Diagnostic::error(codes::E0004, "integer literal is out of range")
+                                    .with_primary(*span, "does not fit in `int`")
+                                    .with_note("`int` is 64-bit signed"),
+                            );
+                        }
                         self.lit(ExprKind::Error, TyId::ERROR, *span)
                     }
                 }
@@ -14518,18 +14520,31 @@ pub(crate) fn decode_escapes_into(inner: &str, span: Span, diags: &mut DiagBag) 
 }
 
 pub(crate) fn parse_int(text: &str) -> Option<i64> {
+    read_int(text).ok()
+}
+
+/// Whether an integer literal fails to read because it is too large, rather
+/// than because it is not a number at all. The lexer has already reported
+/// a literal that is not one — `0x`, `0b102` — so the checker reports only
+/// the overflow: one bad literal, one error.
+pub(crate) fn int_overflows(text: &str) -> bool {
+    use std::num::IntErrorKind::{NegOverflow, PosOverflow};
+    read_int(text).is_err_and(|e| matches!(e.kind(), PosOverflow | NegOverflow))
+}
+
+fn read_int(text: &str) -> Result<i64, std::num::ParseIntError> {
     let text: String = text.chars().filter(|c| *c != '_').collect();
     let text = strip_int_suffix(&text);
     if let Some(h) = text.strip_prefix("0x").or_else(|| text.strip_prefix("0X")) {
-        return i64::from_str_radix(h, 16).ok();
+        return i64::from_str_radix(h, 16);
     }
     if let Some(o) = text.strip_prefix("0o").or_else(|| text.strip_prefix("0O")) {
-        return i64::from_str_radix(o, 8).ok();
+        return i64::from_str_radix(o, 8);
     }
     if let Some(b) = text.strip_prefix("0b").or_else(|| text.strip_prefix("0B")) {
-        return i64::from_str_radix(b, 2).ok();
+        return i64::from_str_radix(b, 2);
     }
-    text.parse().ok()
+    text.parse()
 }
 
 /// Whether an integer literal's digits are `2^63`: out of range alone, and

@@ -416,6 +416,18 @@ fn an_out_of_range_integer_is_reported() {
     assert!(c.has("E0004"), "{}", c.render());
 }
 
+/// A literal the lexer refused (`0x`, `0b102`, `0o8`) is not reported again
+/// as out of range: only a literal of valid digits can overflow.
+#[test]
+fn only_a_literal_of_valid_digits_is_out_of_range() {
+    for text in ["99999999999999999999", "0x1FFFFFFFFFFFFFFFFF", "0b1_0000000000000000000000000000000000000000000000000000000000000000"] {
+        assert!(int_overflows(text), "{} should overflow", text);
+    }
+    for text in ["0x", "0b102", "0o8", "0xFG", "42"] {
+        assert!(!int_overflows(text), "{} is not an overflow", text);
+    }
+}
+
 #[test]
 fn string_escapes_are_decoded() {
     let c = ok_body("  let s = \"a\\nb\\tc\\u{41}\"");

@@ -116,6 +116,33 @@ fn malformed_numbers_report_e0004() {
     assert!(d.iter().any(|x| x.code == Some(codes::E0004)));
 }
 
+/// A digit outside its radix is part of the bad literal: one token and one
+/// E0004 over the whole of it. `0b102` used to lex as `0b10` then `2`, and
+/// the parser reported a missing line break at the `2`.
+#[test]
+fn a_digit_outside_its_radix_is_one_bad_literal() {
+    for (src, bad) in [
+        ("0b102", "`2` is not a binary digit"),
+        ("0o79", "`9` is not an octal digit"),
+        ("0o8", "`8` is not an octal digit"),
+        ("0xFG", "`G` is not a hexadecimal digit"),
+        ("0x1F_zz9", "`z` is not a hexadecimal digit"),
+    ] {
+        let (toks, d) = lex(src);
+        let hits: Vec<_> = d.iter().filter(|x| x.code == Some(codes::E0004)).collect();
+        assert_eq!(hits.len(), 1, "{} should be one E0004", src);
+        assert_eq!(d.len(), 1, "{} should be one diagnostic", src);
+        assert!(hits[0].notes.iter().any(|n| n.starts_with(bad)), "{}: {:?}", src, hits[0].notes);
+        let span = hits[0].labels[0].span;
+        assert_eq!((span.start, span.end), (0, src.len() as u32), "{} is not underlined whole", src);
+        assert_eq!(toks, vec![T::Int], "{} split", src);
+    }
+    // A type suffix is still its own complaint, and a `.` still ends it.
+    let (_, d) = lex("0xFFi32");
+    assert!(d.iter().any(|x| x.message.contains("`i32` is not a Kite type")));
+    assert_eq!(bare("0xFF.max(1)"), vec![T::Int, T::Dot, T::Ident, T::LParen, T::Int, T::RParen]);
+}
+
 /// One rule for a digit separator in every radix and every part of a
 /// literal: it sits between two digits. `0xFF_`, `0x__F` and `0b_1` used to
 /// be accepted while `1_` was not.

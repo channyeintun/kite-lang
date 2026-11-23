@@ -430,6 +430,29 @@ impl<'a> Lexer<'a> {
         self.pos += 2;
         let digits_start = self.pos;
         self.eat_digits(radix);
+        // A digit or letter outside the radix is part of the literal, not
+        // the start of the next token: `0b102` stopped at the `2` and the
+        // parser saw two numbers side by side, which it reported as a
+        // missing line break pointing at the `2`. The whole run is one bad
+        // literal, reported once where it is.
+        let stray = self.char_at(self.pos).filter(|_| self.suffix_here().is_none());
+        if let Some(c) = stray.filter(|&c| is_ident_continue(Some(c))) {
+            while is_ident_continue(self.char_at(self.pos)) {
+                self.pos += self.char_at(self.pos).map_or(1, char::len_utf8);
+            }
+            let (a, name, digits) = match radix {
+                2 => ("a", "binary", "0 and 1"),
+                8 => ("an", "octal", "0 to 7"),
+                _ => ("a", "hexadecimal", "0 to 9 and A to F"),
+            };
+            self.error_here(
+                codes::E0004,
+                start,
+                "invalid number literal",
+                &format!("`{}` is not {} {} digit; {} {} literal's digits are {}", c, a, name, a, name, digits),
+            );
+            return TokenKind::Int;
+        }
         if self.pos == digits_start {
             self.error_here(
                 codes::E0004,
@@ -469,30 +492,30 @@ impl<'a> Lexer<'a> {
     /// to overflow, and 300 came out as 300.
     /// Returns whether a suffix was found (and reported).
     fn eat_suffix(&mut self) -> bool {
+        let start = self.pos;
+        let Some(s) = self.suffix_here() else { return false };
+        self.pos += s.len();
+        self.error_here(
+            codes::E0004,
+            start,
+            &format!("`{}` is not a Kite type", s),
+            "Kite has one integer, `int`, and one float, `float`; write the number on its own",
+        );
+        true
+    }
+
+    /// The type suffix (`i32`, `f64`, …) that starts at `self.pos`, if one
+    /// does and is not the start of a longer identifier.
+    fn suffix_here(&self) -> Option<&'static str> {
         const SUFFIXES: [&str; 10] = [
             "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64", "f32", "f64",
         ];
-        let start = self.pos;
         let rest = &self.src[self.pos..self.limit];
-        for s in SUFFIXES {
-            if rest.starts_with(s) {
-                let after = self.pos + s.len();
-                // Do not eat the start of a longer identifier.
-                if !is_ident_continue(self.char_at(after)) {
-                    self.pos = after;
-                    self.error_here(
-                        codes::E0004,
-                        start,
-                        &format!("`{}` is not a Kite type", s),
-                        "Kite has one integer, `int`, and one float, `float`; write the number \
-                         on its own",
-                    );
-                    return true;
-                }
-            }
-        }
-        false
+        SUFFIXES
+            .into_iter()
+            .find(|s| rest.starts_with(s) && !is_ident_continue(self.char_at(self.pos + s.len())))
     }
+
 
     /// Whether the delimiter starts at `self.pos`.
     ///

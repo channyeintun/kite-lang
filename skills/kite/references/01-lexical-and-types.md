@@ -271,6 +271,9 @@ Details the grammar does not make obvious:
   `1.0` and `0.5`.
 - A `_` separator sits between two digits, in every radix and every part of a
   literal. `1000_`, `0xFF_`, `0x_FF`, `1__0` and `1_.5` are all `E0004`.
+- A digit outside the radix is one `E0004` over the whole literal: `0b102`,
+  `0o8`, `0xFG`. (Compilers through 0.1.9 stopped the literal at that digit and
+  reported `E0100 expected a line break` at it.)
 - An integer literal above `9223372036854775807` is `E0004 integer literal is
   out of range` at compile time, and a float literal too large to be finite
   (`1e999`) is `E0004 float literal is out of range`.

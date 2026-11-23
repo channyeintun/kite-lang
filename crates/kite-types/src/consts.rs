@@ -196,10 +196,12 @@ impl<'a> Eval<'a> {
             ast::Expr::Int(span) => match parse_int(self.text(*span)) {
                 Some(v) => Some(ConstValue::Int(v)),
                 None => {
-                    self.diags.push(
-                        Diagnostic::error(codes::E0004, "invalid integer literal")
-                            .with_primary(*span, "does not fit in `int`"),
-                    );
+                    if crate::int_overflows(self.text(*span)) {
+                        self.diags.push(
+                            Diagnostic::error(codes::E0004, "invalid integer literal")
+                                .with_primary(*span, "does not fit in `int`"),
+                        );
+                    }
                     None
                 }
             },
