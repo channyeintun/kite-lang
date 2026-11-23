@@ -14009,7 +14009,13 @@ fn resolve_named_ty(
                 {
                     TyId::ERROR
                 }
-                None => resolve_ty(t, types, diags),
+                None => match resolved.missing_type_member(module, &p.segments, codes::E0204) {
+                    Some(d) => {
+                        diags.push(d);
+                        TyId::ERROR
+                    }
+                    None => resolve_ty(t, types, diags),
+                },
             }
         }
         ast::Type::Slice { elem, .. } => {

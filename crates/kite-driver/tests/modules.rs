@@ -214,6 +214,25 @@ fn a_misspelled_member_is_not_reported_as_a_missing_module() {
 /// ``cannot find `io` ``. One whose member is not near a builtin — `text.trim`
 /// with no `use std/text` — is a missing `use`, and is not told it is a typo.
 #[test]
+fn a_misspelled_type_is_not_reported_as_a_missing_module() {
+    let p = Project::new("misspelled-type");
+    p.file("m.kite", "pub struct Pt {\n  pub x: int\n}\n");
+    for (name, body) in [
+        ("s1.kite", "  let p = m.Pnt{ x: 1 }\n  io.print(p.x)\n"),
+        ("s2.kite", "  let p: m.Pnt = m.Pt{ x: 1 }\n  io.print(p.x)\n"),
+        ("s3.kite", "  let p = m.Pt{ x: 1 }\n  match p {\n    m.Ptt{ x: x } => io.print(x),\n  }\n"),
+    ] {
+        let main = p.file(name, &format!("use m\n\nfn main() {{\n{}}}\n", body));
+        let said = p.run(&main).expect_err("misspelt");
+        assert!(said.contains("cannot find `P"), "{}", said);
+        assert!(said.contains("in module `m`"), "{}", said);
+        assert!(said.contains("a similar type is in `m`: `Pt`"), "{}", said);
+        assert!(!said.contains("is that module imported"), "{}", said);
+        assert!(said.contains("1 previous error"), "{}", said);
+    }
+}
+
+#[test]
 fn a_misspelled_builtin_is_not_reported_as_a_missing_module() {
     let p = Project::new("misspelled-builtin");
     let main = p.file("main.kite", "fn main() {\n  io.prnt(\"x\")\n}\n");

@@ -828,6 +828,51 @@ impl ResolveMap {
         self.type_names.get(name).copied()
     }
 
+    /// The diagnostic for `m.Name` naming a type, where `m` is a module
+    /// `asking` imported and `Name` is no type in it: ``cannot find `Name` in
+    /// module `m` ``, at the member, with the nearest public type of `m` when
+    /// one is close. `None` when the head is not a module `asking` imported,
+    /// for the caller's own message.
+    ///
+    /// **The value case's message, for types.** A misspelt type through an
+    /// imported module asked ``is that module imported?`` of a module the
+    /// first line imports, or said `no such type in this module`, and named no
+    /// near type — the value case was fixed alone. A trait is not offered: no
+    /// position that reaches here takes one.
+    pub fn missing_type_member(
+        &self,
+        asking: &str,
+        segments: &[Ident],
+        code: kite_diag::Code,
+    ) -> Option<Diagnostic> {
+        let [head, member] = segments else {
+            return None;
+        };
+        let module = self.modules.aliases.get(&(asking.to_string(), head.name.clone()))?;
+        let prefix = format!("{}.", module);
+        let members: Vec<&str> = self
+            .types
+            .iter()
+            .filter(|t| t.is_pub && t.kind != TypeKind::Trait)
+            .filter_map(|t| t.name.strip_prefix(&prefix))
+            .collect();
+        let d = Diagnostic::error(
+            code,
+            format!("cannot find `{}` in module `{}`", member.name, head.name),
+        )
+        .with_primary(
+            member.span,
+            format!("`{}` declares no public type of this name", module.trim_start_matches('@')),
+        );
+        Some(match nearest(&member.name, &members) {
+            Some(near) => d.with_note(format!("a similar type is in `{}`: `{}`", head.name, near)),
+            None => d.with_note(format!(
+                "`{}` is imported here; only what it marks `pub` can be reached from outside it",
+                head.name
+            )),
+        })
+    }
+
     /// The struct or enum a type found by name stands for: the type itself,
     /// or the one an alias names ([`ResolveMap::alias_of`]).
     pub fn nominal(&self, type_index: u32) -> u32 {
@@ -2189,6 +2234,10 @@ impl<'a> FnResolver<'a> {
             }
         }
 
+        if let Some(d) = self.map.missing_type_member(&self.module, &path.segments, codes::E0111) {
+            self.diags.push(d);
+            return;
+        }
         let mut d = Diagnostic::error(codes::E0111, format!("cannot find `{}`", name))
             .with_primary(path.span, "no such type or variant");
         if self.map.ambiguous_variants.iter().any(|a| a == name) {
@@ -2435,6 +2484,12 @@ impl<'a> FnResolver<'a> {
             }
             None if path.segments.len() > 1 && self.failed_use(&path.segments[0].name) => {}
             None => {
+                if let Some(d) =
+                    self.map.missing_type_member(&self.module, &path.segments, codes::E0204)
+                {
+                    self.diags.push(d);
+                    return;
+                }
                 let mut d =
                     Diagnostic::error(codes::E0204, format!("unknown type `{}`", path.name()))
                         .with_primary(path.span, "no such type in this module");
