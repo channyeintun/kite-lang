@@ -31,7 +31,8 @@ fn size_of(name: &str, src: &str) -> usize {
     c.wasm.as_ref().expect("a module").bytes.len()
 }
 
-/// A program that prints. Today: 830 bytes.
+/// A program that prints. Today: 642 bytes; it was 830 until the Wasm backend
+/// stopped declaring types nothing names (see the last test).
 ///
 /// The floor, and the number the whole premise rests on — a language that
 /// needed a garbage collector inside its own binary could not be near it.
@@ -55,7 +56,8 @@ fn hello_world_stays_small() {
     assert!(size < 1024, "hello world is {} bytes, budget 1024", size);
 }
 
-/// A module a JavaScript project would import. Today: 1,057 bytes.
+/// A module a JavaScript project would import. Today: 865 bytes (1,069 before
+/// the same change).
 ///
 /// Four exported functions rather than one, and each `pub fn` is a real export
 /// with a wrapper — which is where the difference over `hello` goes.
@@ -73,7 +75,7 @@ fn a_library_of_four_functions_stays_small() {
 /// A real island: five thousand rows, filtered, sorted and diffed on every
 /// keystroke.
 ///
-/// Today 28,473 bytes, against a budget that was 24,576. What got bigger,
+/// Today 28,300 bytes, against a budget that was 24,576. What got bigger,
 /// measured rather than estimated — each number is this test run at that
 /// commit:
 ///
@@ -106,6 +108,13 @@ fn a_library_of_four_functions_stays_small() {
 ///    them in pairs, where it added each to one growing string — quadratic,
 ///    so a 100,000-character `lower` took five seconds on this target. That
 ///    brings in `join` and a push onto a slice of strings.
+/// 7. **388 bytes** (28,473 → 28,861) arrived with the other workstreams of
+///    the same round, merged after (6) and measured at the merge; they were
+///    not measured one by one.
+/// 8. **561 bytes back** (28,861 → 28,300) from declaring only what the code
+///    names: the structs and enums no local, signature or field can hold
+///    (→ 28,843), the signatures of host imports the module does not declare
+///    (→ 28,351), and the dispatchers of traits nothing implements.
 ///
 /// `examples/page` attaches its own listeners through `std/dom` and uses none
 /// of (2), so it pays for the machinery without spending it. That is the
@@ -118,8 +127,8 @@ fn a_library_of_four_functions_stays_small() {
 /// suit the budget.
 ///
 /// The number worth watching is the one below, which measures the language
-/// rather than whatever `examples/page` happens to contain, and it has not
-/// moved at all.
+/// rather than whatever `examples/page` happens to contain, and it has only
+/// gone down.
 #[test]
 fn a_dom_island_stays_under_thirty_two_kilobytes() {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -127,6 +136,27 @@ fn a_dom_island_stays_under_thirty_two_kilobytes() {
     let src = std::fs::read_to_string(&path).expect("read examples/page/main.kite");
     let size = size_of("island", &src);
     assert!(size < 32768, "the island is {} bytes, budget 32768", size);
+}
+
+/// Importing `std/dom` does not drag the rest of the library in with it.
+///
+/// The specific regression this guards. `std/js` and `std/dom` are ordinary
+/// Kite, so nothing stops one of them growing a dependency on `std/text` or
+/// `std/json` by accident — and a program that only wanted to set a class would
+/// then carry a line-breaking table. Dead-code elimination is what prevents it,
+/// and this is the assertion that it still works. Today: 3,316 bytes (3,513
+/// before the change the last test describes).
+#[test]
+fn using_the_dom_does_not_pull_in_the_whole_library() {
+    let src = "use std/dom\n\n\
+        fn main() {\n\
+        \x20 let e = dom.find(\"#a\")\n\
+        \x20 if e == nil {\n    return\n  }\n\
+        \x20 let err = dom.set_class(e, \"on\", true)\n\
+        \x20 if err != nil {\n    io.error(err.message())\n  }\n\
+        }\n";
+    let size = size_of("smalldom", src);
+    assert!(size < 4096, "a class change costs {} bytes, budget 4096", size);
 }
 
 /// Importing a module costs nothing until something in it is called: a
@@ -156,24 +186,4 @@ fn importing_a_module_costs_nothing_until_it_is_called() {
         let size = size_of(m, &src);
         assert_eq!(size, hello, "`use std/{}` costs {} bytes", m, size as isize - hello as isize);
     }
-}
-
-/// Importing `std/dom` does not drag the rest of the library in with it.
-///
-/// The specific regression this guards. `std/js` and `std/dom` are ordinary
-/// Kite, so nothing stops one of them growing a dependency on `std/text` or
-/// `std/json` by accident — and a program that only wanted to set a class would
-/// then carry a line-breaking table. Dead-code elimination is what prevents it,
-/// and this is the assertion that it still works.
-#[test]
-fn using_the_dom_does_not_pull_in_the_whole_library() {
-    let src = "use std/dom\n\n\
-        fn main() {\n\
-        \x20 let e = dom.find(\"#a\")\n\
-        \x20 if e == nil {\n    return\n  }\n\
-        \x20 let err = dom.set_class(e, \"on\", true)\n\
-        \x20 if err != nil {\n    io.error(err.message())\n  }\n\
-        }\n";
-    let size = size_of("smalldom", src);
-    assert!(size < 4096, "a class change costs {} bytes, budget 4096", size);
 }
