@@ -762,3 +762,50 @@ process.stdout.write(out + (code === 0 ? "" : "exited with " + code + "\n"));
          accept after shut: http.accept: the server is shut\n"
     );
 }
+
+/// A handler cannot set a header that frames the message: `run` answers 500 to
+/// it, and the next request on the connection is answered by its own handler.
+///
+/// A `Content-Length` shorter than the body made the rest of the body the next
+/// response on a keep-alive connection, so body data could cross into HTTP
+/// structure.
+#[test]
+fn a_handler_cannot_set_a_header_that_frames_the_message() {
+    if !node_available() {
+        eprintln!("skipping: node is not installed");
+        return;
+    }
+    let src = "use std/http\n\
+         fn page(request: http.Request) -> http.Response {\n\
+         \x20   let body = \"ok\\r\\nHTTP/1.1 200 OK\\r\\ncontent-length: 4\\r\\n\\r\\nEVIL\"\n\
+         \x20   return http.with_header(http.ok(body), \"Content-Length\", \"2\")\n\
+         }\n\
+         fn chunked(request: http.Request) -> http.Response {\n\
+         \x20   return http.with_header(http.ok(\"x\"), \"transfer-encoding\", \"gzip\")\n\
+         }\n\
+         fn other(request: http.Request) -> http.Response {\n\
+         \x20   return http.ok(\"real\")\n\
+         }\n\
+         async fn main() {\n\
+         \x20   let (server, err) = await http.open(0)\n\
+         \x20   if err != nil {\n        io.print(err.message())\n        return\n    }\n\
+         \x20   io.print(\"listening \\(http.port_of(server))\")\n\
+         \x20   let routes = [\n\
+         \x20       http.route(\"GET\", \"/page\", page),\n\
+         \x20       http.route(\"GET\", \"/chunked\", chunked),\n\
+         \x20       http.route(\"GET\", \"/other\", other),\n\
+         \x20   ]\n\
+         \x20   let (n, rerr) = await http.run(server, routes)\n\
+         \x20   if rerr != nil {\n        io.print(rerr.message())\n    }\n\
+         }\n";
+    let client = client_with(
+        r#"  const a = await fetch(`http://127.0.0.1:${port}/page`);
+  console.log("page " + a.status);
+  const c = await fetch(`http://127.0.0.1:${port}/chunked`);
+  console.log("chunked " + c.status);
+  const o = await fetch(`http://127.0.0.1:${port}/other`);
+  console.log("other " + o.status + " " + (await o.text()));"#,
+    );
+    let out = serve_under_node("framing", src, &client);
+    assert_eq!(out, "page 500\nchunked 500\nother 200 real\n", "{}", out);
+}

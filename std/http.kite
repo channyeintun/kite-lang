@@ -161,7 +161,11 @@ pub fn status(code: int, body: str) -> Response {
 /// through [`respond`], so the same rules hold: a name that is not a token, or
 /// a line break, a control character or a character past U+00FF in a value, is
 /// not sent — `respond` says why, and [`run`] answers 500 instead of putting it
-/// on the wire. A name added twice goes out twice, which is what `Set-Cookie` needs, and a
+/// on the wire. A name that frames the message — `Content-Length`,
+/// `Transfer-Encoding`, `Connection`, `Keep-Alive`, `Upgrade`, `TE`, `Trailer` — is refused
+/// the same way: the host knows the body's length in bytes and a handler does not, and a
+/// wrong one lets the body be read as the next response on the connection. A name added twice
+/// goes out twice, which is what `Set-Cookie` needs, and a
 /// `Content-Type` here replaces the default `text/plain`. This is not what
 /// [`header`] reads: that is what arrived, and a response built in Kite
 /// arrived from nowhere.
@@ -1235,6 +1239,10 @@ pub struct Header {
 /// else added one" decidable. It cannot be decided from the joined string, and
 /// the host is handed nothing else.
 ///
+/// A name that frames the message (`Content-Length`, `Transfer-Encoding`,
+/// `Connection` and their kin, see [`with_header`]) is refused too: the host
+/// writes the length, from the bytes it sends.
+///
 /// A name that is not a token, a name or value carrying a carriage return or a
 /// newline, and a value carrying a NUL byte, another control character or a
 /// character past U+00FF are refused rather than stripped:
@@ -1281,6 +1289,11 @@ fn header_lines(headers: [Header]) -> (str, error) {
         if !is_token(h.name) {
             return _, errors.new("http.respond: `\(h.name)` is not a header name")
         }
+        if frames_the_message(h.name) {
+            return _, errors.new(
+                "http.respond: `\(h.name)` frames the message, which only the host can do, from the body's length in bytes; leave it out",
+            )
+        }
         if breaks_a_line(h.value) {
             return _, errors.new("http.respond: the value of `\(h.name)` contains a line break")
         }
@@ -1295,6 +1308,22 @@ fn header_lines(headers: [Header]) -> (str, error) {
         lines.push("\(h.name): \(h.value)")
     }
     return join(lines, "\n"), nil
+}
+
+/// Whether a header name is one that says where a message ends or how the
+/// connection is used. A handler that wrote one could make the end of its own
+/// body the start of the next response (a `Content-Length` shorter than the
+/// body, or counted in characters), so the host alone writes them.
+///
+/// ```kite
+/// assert(frames_the_message("Content-Length"), "in any case")
+/// assert(!frames_the_message("content-type"), "a type is the handler's")
+/// let (_, why) = header_lines([Header{ name: "transfer-encoding", value: "gzip" }])
+/// assert(why != nil, "and a response that names one is refused")
+/// ```
+fn frames_the_message(name: str) -> bool {
+    let n = lower(name)
+    return n == "content-length" || n == "transfer-encoding" || n == "connection" || n == "keep-alive" || n == "upgrade" || n == "te" || n == "trailer" || n == "proxy-connection"
 }
 
 /// Whether every character of a value is one a header can carry: a tab, a

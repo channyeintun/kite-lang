@@ -1110,7 +1110,9 @@ Server: `open(port) -> (Server, error)` async (port 0 asks the host to choose),
 text**, because a newline in a value would otherwise become a separator; it
 refuses a name that is not a token, a line break in either, a NUL, another
 control character or a character past U+00FF in a value (percent-encode it
-first), and a status outside 100 to 599 ·
+first), a name that frames the message (`Content-Length`, `Transfer-Encoding`,
+`Connection`, `Keep-Alive`, `Upgrade`, `TE`, `Trailer`: the host writes the length), and a
+status outside 100 to 599 ·
 `run(server, [Route]) -> (int, error)` sends the headers a handler added with
 `with_header(response, name, value)`, and answers 500 (and carries on) to a
 handler whose header or status `respond` would refuse · `serve_closed` · `shut`. Once a
