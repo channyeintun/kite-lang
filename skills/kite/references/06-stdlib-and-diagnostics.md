@@ -1585,6 +1585,9 @@ called. A closure written inside a test is not a test of its own.
 Doc examples are always compiled as a debug build, `--release` or not — an
 example fails by trapping on an `assert`, which a release build drops. A
 ` ```kite ` fence may start with `use` lines; they go to the top of the file.
+Only a fence of statements runs. One that declares a function or a type is
+compiled and reported `(doc example, compiled)`: the `assert`s inside its
+`fn main` are never evaluated, so they pass whatever they say.
 
 Discovery reads the entry file's own declarations, which has one consequence
 worth knowing before you lay a project out.
