@@ -241,7 +241,15 @@ fn command() -> ExitCode {
             .file_stem()
             .and_then(|s| s.to_str())
             .unwrap_or("module");
-        let docs = kite_doc::extract(name, &src);
+        let (docs, diags) = kite_doc::extract_diagnosed(name, &src);
+        // A file that does not parse has a reference with the declaration the
+        // error is in missing from it. Said, and not printed as if whole.
+        if diags.has_errors() {
+            let mut sources = kite_span::SourceMap::new();
+            sources.add(&path, src.as_str());
+            eprint!("{}", diags.render_all(&sources));
+            return fail(&format!("cannot document `{}`, which does not parse", path));
+        }
         return answer(&kite_doc::markdown(&docs, !include_private));
     }
 

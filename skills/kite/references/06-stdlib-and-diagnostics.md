@@ -1961,7 +1961,11 @@ Notes worth having:
   `use` lines runs with none of its sources beside it. It keeps the build mode
   it was made with: `assert` fires in a bundle made without `--release`.
 - **`kitec doc`** reads signatures from the parse, so it cannot describe a
-  function that is not there.
+  function that is not there. A file that does not parse is refused with its
+  syntax errors and a non-zero exit, not documented without the declaration the
+  error is in. Doc text is Markdown: a `<` that could open an HTML tag is
+  written `\<`, a fence left open is closed at the end of its comment, and a
+  `#` heading inside a doc is pushed below the entry's own.
 - **`kitec pkg`** needs a `kite.toml`; without one it says so. It resolves path
   and git dependencies, picks **one** version per name across the whole graph,
   and writes `kite.lock` with a content hash per dependency that is *verified*

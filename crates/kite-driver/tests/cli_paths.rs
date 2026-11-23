@@ -286,6 +286,20 @@ fn an_error_in_a_doc_example_points_at_the_line_it_was_written_on() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// `kitec doc` on a file that does not parse says what is wrong and fails. It
+/// printed "Nothing is exported from this module." and exited 0, which is the
+/// reference of a file whose one declaration was the one with the error.
+#[test]
+fn kitec_doc_refuses_a_file_that_does_not_parse() {
+    let dir = scratch("doc-syntax", "t.kite", "pub fn f( {\n}\n");
+    let Some((ok, out, err)) = kitec_in(&dir, &["doc", "t.kite"]) else { return };
+    assert!(!ok, "{}{}", out, err);
+    assert!(err.contains("E0100"), "{}", err);
+    assert!(err.contains("does not parse"), "{}", err);
+    assert!(out.is_empty(), "no reference is printed: {}", out);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// Every option is listed under `OPTIONS:`, together. Two changes merged into
 /// the help at once left a sentence in the middle of the list, and `--update`,
 /// `--explain`, `--version` and `--help` below it, cut off from the rest.

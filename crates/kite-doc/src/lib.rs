@@ -55,6 +55,16 @@ pub struct Docs {
 
 /// Extract the documentation from one file.
 pub fn extract(module: &str, src: &str) -> Docs {
+    extract_diagnosed(module, src).0
+}
+
+/// [`extract`], and what the lexer and parser said about the file.
+///
+/// Documentation is read from whatever parsed, so a file with a syntax error
+/// still has a page — a page that quietly leaves out the declaration the error
+/// is in. The diagnostics are how a caller says so; `kitec doc` prints them
+/// and fails rather than present half a module as the whole.
+pub fn extract_diagnosed(module: &str, src: &str) -> (Docs, DiagBag) {
     let mut diags = DiagBag::new();
     let file = FileId(0);
     let (tokens, comments) = kite_lexer::tokenize_with_comments(file, src, &mut diags);
@@ -106,7 +116,7 @@ pub fn extract(module: &str, src: &str) -> Docs {
             }),
         }
     }
-    Docs { module: module.to_string(), overview, entries }
+    (Docs { module: module.to_string(), overview, entries }, diags)
 }
 
 /// The name a type path ends in: `Listener` for `window.Listener<T>`.
@@ -416,7 +426,7 @@ pub fn markdown(docs: &Docs, public_only: bool) -> String {
     let mut out = String::new();
     out.push_str(&format!("# {}\n\n", docs.module));
     if !docs.overview.is_empty() {
-        out.push_str(&docs.overview);
+        out.push_str(&prose(&docs.overview, 2));
         out.push_str("\n\n");
     }
 
@@ -444,7 +454,7 @@ pub fn markdown(docs: &Docs, public_only: bool) -> String {
         out.push_str(&format!("## {}\n\n", e.name));
         out.push_str(&format!("```kite\n{}\n```\n\n", e.signature));
         if !e.doc.is_empty() {
-            out.push_str(&e.doc);
+            out.push_str(&prose(&e.doc, 2));
             out.push_str("\n\n");
         }
         for list in [&e.members, &e.methods] {
@@ -454,13 +464,144 @@ pub fn markdown(docs: &Docs, public_only: bool) -> String {
             }
             for m in visible {
                 out.push_str(&format!("- `{}`", m.signature));
-                if !m.doc.is_empty() {
-                    out.push_str(&format!(" — {}", m.doc.replace('\n', " ")));
-                }
+                out.push_str(&member_doc(&prose(&m.doc, 3)));
                 out.push('\n');
             }
             out.push('\n');
         }
+    }
+    out
+}
+
+/// A member's documentation, as what follows its signature in a bullet.
+///
+/// The first line goes on the bullet and every line after it is indented under
+/// it, so a second paragraph, a code fence or a list stays what it was. It was
+/// all joined into one line, which broke a fence open and ran a list's items
+/// together. A doc that *begins* with a fence, a list or a quotation cannot
+/// follow a dash on the same line, so it goes underneath instead.
+fn member_doc(doc: &str) -> String {
+    let mut lines = doc.lines();
+    let Some(first) = lines.next() else { return String::new() };
+    let t = first.trim_start();
+    let block = t.starts_with("```")
+        || t.starts_with("- ")
+        || t.starts_with("* ")
+        || t.starts_with('>')
+        || t.starts_with('|')
+        || t.starts_with('#')
+        || t.chars().next().is_some_and(|c| c.is_ascii_digit()) && t.contains(". ");
+    let mut out = String::new();
+    let rest: Vec<&str> = if block {
+        std::iter::once(first).chain(lines).collect()
+    } else {
+        out.push_str(&format!(" — {}", first));
+        lines.collect()
+    };
+    for line in rest {
+        out.push('\n');
+        if !line.trim().is_empty() {
+            out.push_str("  ");
+            out.push_str(line);
+        }
+    }
+    out
+}
+
+/// A doc comment's text made safe to place in a Markdown page.
+///
+/// Doc text is Markdown, and three things in it go wrong in a page built from
+/// many of them:
+///
+/// * **Raw HTML.** `<T>` in prose is read as a tag, so a generic name
+///   vanished, and `<script>` stayed live. A `<` that could open a tag, and an
+///   `&` that could open an entity, are backslash-escaped outside code spans
+///   and fences — where they are text already, and the reader sees the
+///   backslash.
+/// * **A fence that never closes.** It swallowed every entry after it. One
+///   still open at the end of the text is closed there.
+/// * **Headings.** A `# Heading` in a doc sits inside an entry's own `##`, and
+///   was a heading of the same rank or above it. They are pushed down by
+///   `shift` levels, to at most six.
+fn prose(doc: &str, shift: usize) -> String {
+    let mut out: Vec<String> = Vec::new();
+    let mut in_fence = false;
+    for line in doc.lines() {
+        let t = line.trim();
+        if in_fence {
+            if t.len() >= 3 && t.chars().all(|c| c == '`') {
+                in_fence = false;
+            }
+            out.push(line.to_string());
+            continue;
+        }
+        if t.starts_with("```") {
+            in_fence = true;
+            out.push(line.to_string());
+            continue;
+        }
+        let hashes = line.chars().take_while(|&c| c == '#').count();
+        let heading = (1..=6).contains(&hashes)
+            && line[hashes..].chars().next().is_none_or(|c| c == ' ');
+        let line = if heading {
+            format!("{}{}", "#".repeat((hashes + shift).min(6)), &line[hashes..])
+        } else {
+            line.to_string()
+        };
+        out.push(escape_markup(&line));
+    }
+    if in_fence {
+        out.push("```".to_string());
+    }
+    out.join("\n")
+}
+
+/// `line` with its `<` and `&` that Markdown would read as HTML escaped,
+/// except inside a code span.
+fn escape_markup(line: &str) -> String {
+    let chars: Vec<char> = line.chars().collect();
+    let mut out = String::new();
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        if c == '`' {
+            let run = chars[i..].iter().take_while(|&&c| c == '`').count();
+            // A span closes on a run of the same length. With none, the
+            // backticks are text.
+            let mut j = i + run;
+            let mut close = None;
+            while j < chars.len() {
+                if chars[j] == '`' {
+                    let len = chars[j..].iter().take_while(|&&c| c == '`').count();
+                    if len == run {
+                        close = Some(j + len);
+                        break;
+                    }
+                    j += len;
+                } else {
+                    j += 1;
+                }
+            }
+            let end = close.unwrap_or(i + run);
+            out.extend(&chars[i..end]);
+            i = end;
+            continue;
+        }
+        let escaped = i > 0 && chars[i - 1] == '\\';
+        let next = chars.get(i + 1).copied();
+        let tag = c == '<' && next.is_some_and(|n| n.is_ascii_alphabetic() || "/!?".contains(n));
+        let entity = c == '&' && {
+            let name: String = chars[i + 1..]
+                .iter()
+                .take_while(|c| c.is_ascii_alphanumeric() || **c == '#')
+                .collect();
+            !name.is_empty() && chars.get(i + 1 + name.chars().count()) == Some(&';')
+        };
+        if (tag || entity) && !escaped {
+            out.push('\\');
+        }
+        out.push(c);
+        i += 1;
     }
     out
 }
