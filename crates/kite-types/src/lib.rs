@@ -2235,6 +2235,14 @@ impl<'a> Checker<'a> {
         };
         self.taint[local as usize] = state;
         self.reset_parts(local, state);
+        // A copy of a tuple some of whose failures were already taken owes
+        // only the rest, as taking the tuple itself apart would: `t.0` then
+        // `let w = t` and `let (x, y) = w` owes `y`, not `x` again.
+        if let ExprKind::Local(src) = value.kind {
+            if state == Taint::Unchecked && src.0 != local {
+                self.inherit_parts(local, src.0, before);
+            }
+        }
     }
 
     /// The locals a value `if` yields on its branches that are not `nil`,
@@ -12793,7 +12801,6 @@ impl<'a> Checker<'a> {
             self.drop_untaken(&obj, name, &[]);
         }
         if let Some((id, path, before)) = owed {
-            self.keep_unread(id, &before);
             // The holders from the binding down to the tuple projected; a
             // step whose element holds no failure has no part, and nothing
             // under it can be taken.
@@ -12806,7 +12813,15 @@ impl<'a> Checker<'a> {
                 }
             }
             let deepest = self.parts.get(holders.last().unwrap()).cloned();
+            // Only a projection of a tuple the parts follow puts back what
+            // reading its base marked. Where the chain ends at an element
+            // with no parts of its own — a pair, a struct, a step that holds
+            // no failure — reading the base took that element whole, as it
+            // always has: putting it back left `t.0` owed after `t.0.1` on a
+            // pair, which is refused as having no fields, and so made a
+            // second report for one mistake.
             if let (true, Some(parts)) = (holders.len() == path.len() + 1, deepest) {
+                self.keep_unread(id, &before);
                 let index = name.name.parse::<u32>().ok();
                 for &(i, part) in &parts {
                     if Some(i) == index {

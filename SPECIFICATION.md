@@ -1248,7 +1248,8 @@ The rules:
 > to the name it is bound to, and counting it with `len` is not reading it. A
 > projection `r.0` takes one element of a tuple: its failure goes where it
 > lands, and the others are still owed, so the tuple is settled once each has
-> been taken; taken apart after that, it binds only the failures not yet taken.
+> been taken; taken apart or copied after that, it owes only the failures not
+> yet taken.
 > A chain of them goes down a level at each step: `t.0.0` takes one element of
 > `t.0` and leaves `t.0.1` owed, exactly as `let u = t.0` then `u.0` does.
 > A projection of a tuple no binding holds — `(f(1), f(2)).0`, `pair().0` —

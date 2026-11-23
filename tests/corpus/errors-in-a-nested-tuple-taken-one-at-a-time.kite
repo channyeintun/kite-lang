@@ -11,6 +11,10 @@ fn f(i: int) -> error {
     return nil
 }
 
+fn load() -> (int, error) {
+    return 1, nil
+}
+
 fn sibling_left_behind() {
     let t = ((f(1), f(2)), 5) //~ ERROR E0302
     let a = t.0.0
@@ -80,7 +84,36 @@ fn taken_then_destructured() {
     io.print(n)
 }
 
+// A copy owes only what was not yet taken from the tuple it copies.
+fn taken_then_copied() {
+    let t = ((f(1), f(2)), f(3))
+    let a = t.0.0
+    let c = t.1
+    if a != nil || c != nil {
+        io.print("taken")
+    }
+    let w = t
+    let (u, z) = w
+    let (x, y) = u
+    if y != nil {
+        io.print(y.message())
+    }
+}
+
+// A chain that ends at a pair is refused once, for the pair having no
+// fields; reading the pair to project it took it, as it always has.
+fn projected_into_a_pair() {
+    let t = (load(), f(3))
+    let a = t.0.1 //~ ERROR E0200
+    let c = t.1
+    if a != nil || c != nil {
+        io.print("some")
+    }
+}
+
 fn main() {
+    taken_then_copied()
+    projected_into_a_pair()
     sibling_left_behind()
     left_on_a_return()
     left_by_a_write()
