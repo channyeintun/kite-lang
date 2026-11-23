@@ -176,6 +176,31 @@ pub fn with_header(r: Response, name: str, value: str) -> Response {
     return Response{ status: r.status, body: r.body, headers: r.headers, outgoing: more }
 }
 
+/// A response whose body is JSON, with the status given and a `Content-Type` of
+/// `application/json; charset=utf-8`. The body is sent as it is: it is up to
+/// the caller to have made it JSON, with `std/json`.
+///
+/// ```kite
+/// let r = json(201, "{\"id\":7}")
+/// assert(r.status == 201 && r.body == "{\"id\":7}", "the status and the body as given")
+/// ```
+pub fn json(code: int, body: str) -> Response {
+    return with_header(status(code, body), "content-type", "application/json; charset=utf-8")
+}
+
+/// A `303 See Other` to `location`: the client goes on to a GET of that
+/// address, whatever the request's method was, which is what an answer to a
+/// form post wants. The location is a header value, so a line break in it makes
+/// [`run`] answer 500 rather than send it.
+///
+/// ```kite
+/// let r = redirect("/done")
+/// assert(r.status == 303 && r.body == "", "see other, with nothing to read")
+/// ```
+pub fn redirect(location: str) -> Response {
+    return with_header(status(303, ""), "location", location)
+}
+
 /// Whether the status is in the 2xx range.
 pub fn succeeded(r: Response) -> bool {
     return r.status >= 200 && r.status < 300
@@ -688,22 +713,80 @@ fn path_part(target: str) -> str {
 /// assert(query_parameter(r, "sort") == nil, "one that is not there")
 /// ```
 pub fn query_parameter(r: Request, name: str) -> Option<str> {
-    let target = r.path
+    for pair in form_pairs(query_text(r.path)) {
+        if pair.name == name {
+            return pair.value
+        }
+    }
+    return nil
+}
+
+/// Every value of a query-string parameter that repeats, decoded as
+/// [`query_parameter`] decodes, in the order they were written. Empty when the
+/// request has none by that name.
+///
+/// ```kite
+/// let r = Request{ method: "GET", path: "/f?tag=a&tag=b%20c&x=1", body: "", headers: "" }
+/// let tags = query_parameters(r, "tag")
+/// assert(tags.len() == 2 && tags[0] == "a" && tags[1] == "b c", "both, in order")
+/// assert(query_parameters(r, "none").len() == 0, "none at all")
+/// ```
+pub fn query_parameters(r: Request, name: str) -> [str] {
+    var out: [str] = []
+    for pair in form_pairs(query_text(r.path)) {
+        if pair.name == name {
+            out.push(pair.value)
+        }
+    }
+    return out
+}
+
+/// A parameter of a form posted as `application/x-www-form-urlencoded`, read
+/// from the request's body the way [`query_parameter`] reads the query: names
+/// and values decoded, the first one answering when a name repeats.
+///
+/// The content type is not looked at; a body that is not a urlencoded form
+/// simply has no such parameter.
+///
+/// ```kite
+/// let r = Request{ method: "POST", path: "/", body: "user=ada+l&pw=a%26b", headers: "" }
+/// assert(or_else(form_parameter(r, "user"), "") == "ada l", "a plus is a space")
+/// assert(or_else(form_parameter(r, "pw"), "") == "a&b", "an escaped ampersand")
+/// assert(form_parameter(r, "x") == nil, "one that is not there")
+/// ```
+pub fn form_parameter(r: Request, name: str) -> Option<str> {
+    for pair in form_pairs(r.body) {
+        if pair.name == name {
+            return pair.value
+        }
+    }
+    return nil
+}
+
+/// The query of a request target, without its `?` or any fragment, or "".
+fn query_text(target: str) -> str {
     let question = target.index_of("?")
     if question < 0 {
-        return nil
+        return ""
     }
     let hash = target.index_of("#")
     if hash >= 0 && hash < question {
         // The `?` is inside the fragment, which is not a query.
-        return nil
+        return ""
     }
     var query = target.slice(question + 1, target.len())
     let end = query.index_of("#")
     if end >= 0 {
         query = query.slice(0, end)
     }
-    for piece in split(query, "&") {
+    return query
+}
+
+/// `a=1&b=2` as decoded name and value pairs, in order. A piece with no `=`
+/// has the value "", and an empty piece (`a=1&&b=2`) is nothing.
+fn form_pairs(body: str) -> [Header] {
+    var out: [Header] = []
+    for piece in split(body, "&") {
         if piece.len() > 0 {
             let eq = piece.index_of("=")
             var key = piece
@@ -712,12 +795,80 @@ pub fn query_parameter(r: Request, name: str) -> Option<str> {
                 key = piece.slice(0, eq)
                 value = piece.slice(eq + 1, piece.len())
             }
-            if form_decoded(key) == name {
-                return form_decoded(value)
+            out.push(Header{ name: form_decoded(key), value: form_decoded(value) })
+        }
+    }
+    return out
+}
+
+/// Text as one URL component: every byte of its UTF-8 that is not a letter, a
+/// digit, `-`, `.`, `_` or `~` written as `%XX`, in upper case. The same set
+/// `encodeURIComponent` keeps, less `!*'()`, which RFC 3986 reserves.
+///
+/// ```kite
+/// assert(encode_component("a b&c=d/é") == "a%20b%26c%3Dd%2F%C3%A9", "reserved characters and UTF-8")
+/// assert(encode_component("Az09-._~") == "Az09-._~", "the unreserved set stays")
+/// ```
+pub fn encode_component(s: str) -> str {
+    let digits = "0123456789ABCDEF"
+    var out: [str] = []
+    for i in 0..s.len() {
+        let c = s.code_at(i)
+        let letter = (c >= 65 && c <= 90) || (c >= 97 && c <= 122)
+        let digit = c >= 48 && c <= 57
+        if letter || digit || c == 45 || c == 46 || c == 95 || c == 126 {
+            out.push(s.slice(i, i + 1))
+        } else {
+            for b in utf8_encoded(c) {
+                out.push("%")
+                out.push(digits.slice(b / 16, b / 16 + 1))
+                out.push(digits.slice(b % 16, b % 16 + 1))
             }
         }
     }
-    return nil
+    return join(out, "")
+}
+
+/// The UTF-8 bytes of one code point.
+fn utf8_encoded(code: int) -> [int] {
+    if code < 128 {
+        return [code]
+    }
+    if code < 2048 {
+        return [192 + code / 64, 128 + code % 64]
+    }
+    if code < 65536 {
+        return [224 + code / 4096, 128 + (code / 64) % 64, 128 + code % 64]
+    }
+    return [240 + code / 262144, 128 + (code / 4096) % 64, 128 + (code / 64) % 64, 128 + code % 64]
+}
+
+/// A URL component with its `%XX` escapes decoded, read as UTF-8 (U+FFFD for a
+/// sequence that is not). A `+` stays a `+`: it is a space only in a form, so
+/// use this on a path segment and [`form_decoded`] on a query or a body. A `%`
+/// that does not begin an escape stands for itself.
+///
+/// ```kite
+/// assert(decode_component("a%20b+c%C3%A9") == "a b+cé", "an escape is decoded, a plus is not")
+/// ```
+pub fn decode_component(s: str) -> str {
+    return percent_decoded(s, false)
+}
+
+/// Pairs as a query string, without the `?`: `a=1&b=x%20y`. Names and values
+/// are encoded with [`encode_component`], so what [`query_parameter`] reads
+/// back is what went in.
+///
+/// ```kite
+/// let q = query_string([Header{ name: "q", value: "kite lang" }, Header{ name: "page", value: "2" }])
+/// assert(q == "q=kite%20lang&page=2", "joined with ampersands")
+/// ```
+pub fn query_string(pairs: [Header]) -> str {
+    var parts: [str] = []
+    for p in pairs {
+        parts.push("\(encode_component(p.name))=\(encode_component(p.value))")
+    }
+    return join(parts, "&")
 }
 
 /// `application/x-www-form-urlencoded` text decoded: `+` is a space, `%XX` a
@@ -731,6 +882,12 @@ pub fn query_parameter(r: Request, name: str) -> Option<str> {
 /// assert(form_decoded("a+b%20c%41%zz") == "a b cA%zz", "a bad escape stays, the rest is decoded")
 /// ```
 pub fn form_decoded(text: str) -> str {
+    return percent_decoded(text, true)
+}
+
+/// Escapes decoded, and `+` as a space only when asked: a form says it is one,
+/// a path segment does not.
+fn percent_decoded(text: str, plus_is_space: bool) -> str {
     var out: [str] = []
     var bytes: [int] = []
     var i = 0
@@ -749,7 +906,7 @@ pub fn form_decoded(text: str) -> str {
             out.push(utf8_decoded(bytes))
             bytes = []
         }
-        if c == 43 {
+        if c == 43 && plus_is_space {
             out.push(" ")
         } else {
             out.push(text.slice(i, i + 1))
@@ -853,6 +1010,57 @@ pub fn request_header(request: Request, name: str) -> Option<str> {
         if at > 0 {
             if equal_ignoring_case(line.slice(0, at), name) {
                 return line.slice(at + 1, line.len()).trim()
+            }
+        }
+    }
+    return nil
+}
+
+/// Every value of a request header that was sent more than once, in order,
+/// where [`request_header`] answers with the first. Names are compared ignoring
+/// case. Empty when the request carried none.
+///
+/// ```kite
+/// let r = Request{ method: "GET", path: "/", body: "", headers: "X-Tag: a\nx-tag: b\nOther: c" }
+/// let tags = request_headers(r, "x-tag")
+/// assert(tags.len() == 2 && tags[0] == "a" && tags[1] == "b", "both, in order")
+/// ```
+pub fn request_headers(request: Request, name: str) -> [str] {
+    var out: [str] = []
+    for line in split(request.headers, "\n") {
+        let at = line.index_of(":")
+        if at > 0 && equal_ignoring_case(line.slice(0, at), name) {
+            out.push(line.slice(at + 1, line.len()).trim())
+        }
+    }
+    return out
+}
+
+/// One cookie of the request's `cookie` header, or nil.
+///
+/// The header is `name=value; name=value`; the value is returned as sent, minus
+/// one pair of surrounding double quotes if it has them, and is not
+/// percent-decoded, because what a cookie holds is its sender's business. The
+/// name is compared exactly. When a name repeats the first answers, and when a
+/// request has sent several `cookie` headers they are read in order.
+///
+/// ```kite
+/// let r = Request{ method: "GET", path: "/", body: "", headers: "Cookie: sid=abc; theme=\"dark\"" }
+/// assert(or_else(cookie(r, "sid"), "") == "abc", "a plain cookie")
+/// assert(or_else(cookie(r, "theme"), "") == "dark", "a quoted one")
+/// assert(cookie(r, "other") == nil, "one that was not sent")
+/// ```
+pub fn cookie(r: Request, name: str) -> Option<str> {
+    for header in request_headers(r, "cookie") {
+        for piece in split(header, ";") {
+            let item = piece.trim()
+            let eq = item.index_of("=")
+            if eq > 0 && item.slice(0, eq) == name {
+                var value = item.slice(eq + 1, item.len())
+                if value.len() >= 2 && starts_with(value, "\"") && ends_with(value, "\"") {
+                    value = value.slice(1, value.len() - 1)
+                }
+                return value
             }
         }
     }

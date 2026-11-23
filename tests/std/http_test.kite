@@ -105,6 +105,35 @@ fn checks() -> [error] {
     out.push(test.failed(empty, "an empty name"))
     let (_, nul) = http.sending_pairs([http.Header{ name: "x-user", value: "ada\0evil" }])
     out.push(test.failed(nul, "a NUL byte in a value"))
+
+    // ---- components, query strings, forms, cookies ----
+    let wild = "a b&c=d/é😀+~"
+    out.push(test.equal_str(http.decode_component(http.encode_component(wild)), wild, "a component survives a round trip"))
+    out.push(test.equal_str(http.encode_component("😀"), "%F0%9F%98%80", "four bytes of UTF-8"))
+    out.push(test.equal_str(http.decode_component("%e4%b8%ad%zz%"), "中%zz%", "a bad escape stands for itself"))
+    out.push(test.equal_str(http.decode_component("%FF"), "\u{FFFD}", "bytes that are not UTF-8"))
+    out.push(test.equal_str(http.query_string([]), "", "no pairs, no query"))
+    let sent = http.query_string([http.Header{ name: "a b", value: "x&y=é" }, http.Header{ name: "n", value: "" }])
+    out.push(test.equal_str(sent, "a%20b=x%26y%3D%C3%A9&n=", "names and values are both encoded"))
+    let back = http.Request{ method: "GET", path: "/s?\(sent)", body: "", headers: "" }
+    out.push(test.equal_str(or_else(http.query_parameter(back, "a b"), "<nil>"), "x&y=é", "and read back as they went in"))
+    let twice = http.Request{ method: "GET", path: "/s?t=1&u=2&t=3&&t#frag", body: "", headers: "" }
+    let ts = http.query_parameters(twice, "t")
+    out.push(test.equal_int(ts.len(), 3, "a repeated parameter has every value"))
+    if ts.len() == 3 {
+        out.push(test.equal_str(join(ts, ","), "1,3,", "in order, and one with no `=` is empty"))
+    }
+    let posted = http.Request{ method: "POST", path: "/login?user=query", body: "user=form+body&x=1", headers: "" }
+    out.push(test.equal_str(or_else(http.form_parameter(posted, "user"), "<nil>"), "form body", "the body, not the query"))
+    out.push(test.is_true(http.form_parameter(posted, "y") == nil, "a form parameter that is not there"))
+    let jar = http.Request{ method: "GET", path: "/", body: "", headers: "Cookie: a=1; b=\"two words\"\ncookie: c=3; a=4" }
+    out.push(test.equal_str(or_else(http.cookie(jar, "a"), "<nil>"), "1", "the first cookie of a name"))
+    out.push(test.equal_str(or_else(http.cookie(jar, "b"), "<nil>"), "two words", "a quoted value loses its quotes"))
+    out.push(test.equal_str(or_else(http.cookie(jar, "c"), "<nil>"), "3", "one from a second header"))
+    out.push(test.is_true(http.cookie(jar, "A") == nil, "names are compared exactly"))
+    out.push(test.equal_int(http.request_headers(jar, "COOKIE").len(), 2, "both header lines, whatever the case"))
+    out.push(test.equal_int(http.json(201, "{}").status, 201, "json keeps the status"))
+    out.push(test.equal_int(http.redirect("/x").status, 303, "a redirect is a 303"))
     return out
 }
 

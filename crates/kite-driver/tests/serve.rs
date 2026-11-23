@@ -508,6 +508,12 @@ fn run_sends_the_headers_a_handler_added() {
          fn plain(request: http.Request) -> http.Response {\n\
          \x20   return http.ok(\"plain\")\n\
          }\n\
+         fn data(request: http.Request) -> http.Response {\n\
+         \x20   return http.json(201, \"{}\")\n\
+         }\n\
+         fn go(request: http.Request) -> http.Response {\n\
+         \x20   return http.redirect(\"/done\")\n\
+         }\n\
          fn zero(request: http.Request) -> http.Response {\n\
          \x20   return http.status(0, \"zero\")\n\
          }\n\
@@ -518,6 +524,8 @@ fn run_sends_the_headers_a_handler_added() {
          \x20   let routes = [\n\
          \x20       http.route(\"GET\", \"/api\", api),\n\
          \x20       http.route(\"GET\", \"/zero\", zero),\n\
+         \x20       http.route(\"GET\", \"/data\", data),\n\
+         \x20       http.route(\"GET\", \"/go\", go),\n\
          \x20       http.route(\"GET\", \"/bad\", bad),\n\
          \x20       http.route(\"GET\", \"/plain\", plain),\n\
          \x20   ]\n\
@@ -529,6 +537,10 @@ fn run_sends_the_headers_a_handler_added() {
   console.log("api " + a.status + " " + a.headers.get("content-type") + " " + a.headers.getSetCookie().join(" "));
   const b = await fetch(`http://127.0.0.1:${port}/bad`);
   console.log("bad " + b.status + " " + JSON.stringify(b.headers.get("set-cookie")));
+  const d = await fetch(`http://127.0.0.1:${port}/data`);
+  console.log("data " + d.status + " " + d.headers.get("content-type"));
+  const g = await fetch(`http://127.0.0.1:${port}/go`, { redirect: "manual" });
+  console.log("go " + g.status + " " + g.headers.get("location"));
   const z = await fetch(`http://127.0.0.1:${port}/zero`);
   console.log("zero " + z.status);
   const p = await fetch(`http://127.0.0.1:${port}/plain`);
@@ -537,7 +549,7 @@ fn run_sends_the_headers_a_handler_added() {
     let out = serve_under_node("run-headers", src, &client);
     assert_eq!(
         out,
-        "api 200 application/json a=1 b=2\nbad 500 null\nzero 500\nplain 200 text/plain; charset=utf-8 plain\n",
+        "api 200 application/json a=1 b=2\nbad 500 null\ndata 201 application/json; charset=utf-8\ngo 303 /done\nzero 500\nplain 200 text/plain; charset=utf-8 plain\n",
         "{}",
         out
     );
