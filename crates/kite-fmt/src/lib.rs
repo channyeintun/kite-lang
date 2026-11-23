@@ -137,6 +137,11 @@ pub fn format(src: &str) -> Result<String, FormatError> {
         .into_iter()
         .filter(|&at| layout.answers_for(at))
         .collect();
+    // A `>=` is written as `> =` only where the parser read it as two. In a
+    // declaration that does not parse the bracket is a guess, and `a<b>=c`
+    // there is a chained comparison: splitting it on a guess changed the
+    // tokens, which is what `faithful` is there to refuse.
+    let splits: HashSet<u32> = brackets.clone();
     for &(start, end) in &layout.unparsed {
         let from = tokens.partition_point(|t| t.span.start < start);
         let to = tokens.partition_point(|t| t.span.start < end);
@@ -152,6 +157,7 @@ pub fn format(src: &str) -> Result<String, FormatError> {
         line_started: false,
         closure_params: false,
         brackets,
+        splits,
         literal_braces,
         layout,
         prev: None,
@@ -169,7 +175,7 @@ pub fn format(src: &str) -> Result<String, FormatError> {
     if src.starts_with(kite_lexer::BYTE_ORDER_MARK) {
         f.out.insert(0, kite_lexer::BYTE_ORDER_MARK);
     }
-    if !faithful(src, &tokens, &f.out, &f.brackets) {
+    if !faithful(src, &tokens, &f.out, &f.splits) {
         return Err(FormatError::Unfaithful);
     }
     Ok(f.out)
@@ -196,7 +202,7 @@ pub fn is_formatted(src: &str) -> Result<bool, FormatError> {
 ///
 /// Any difference is a formatter bug. Refusing costs a file that stays as it
 /// was; not refusing costs a file that no longer means what its author wrote.
-fn faithful(src: &str, tokens: &[Token], out: &str, brackets: &HashSet<u32>) -> bool {
+fn faithful(src: &str, tokens: &[Token], out: &str, splits: &HashSet<u32>) -> bool {
     let squeeze = |s: &str| -> String { s.chars().filter(|c| !c.is_whitespace()).collect() };
     if squeeze(src) != squeeze(out) {
         return false;
@@ -213,7 +219,7 @@ fn faithful(src: &str, tokens: &[Token], out: &str, brackets: &HashSet<u32>) -> 
     let meaningful = |tokens: &[Token], split: bool| -> Vec<Token> {
         let mut kept: Vec<Token> = Vec::with_capacity(tokens.len());
         for t in tokens {
-            if t.kind == T::Ge && brackets.contains(&t.span.start) && split {
+            if t.kind == T::Ge && splits.contains(&t.span.start) && split {
                 let mid = t.span.start + 1;
                 kept.push(Token { kind: T::Gt, span: Span::new(t.span.file, t.span.start, mid) });
                 kept.push(Token { kind: T::Eq, span: Span::new(t.span.file, mid, t.span.end) });
@@ -264,6 +270,10 @@ struct Formatter<'a> {
     /// The byte offset of every `<` and `>` that brackets type arguments or
     /// generic parameters, rather than comparing two values.
     brackets: HashSet<u32>,
+    /// The type brackets the parser itself found, without the guesses made
+    /// inside a declaration that does not parse: a `>=` among them is written
+    /// as the `>` and `=` the parser read.
+    splits: HashSet<u32>,
     /// The byte offset of every `{` that opens a struct literal or a struct
     /// pattern, where the parser could say.
     literal_braces: HashSet<u32>,
@@ -438,7 +448,7 @@ impl Formatter<'_> {
             // (`Option<int>= nil`), and `Option<int> = nil` was a second
             // layout of the same program that `--check` also passed. It is
             // written as the two it is, and `faithful` reads it that way.
-            let split = token.kind == T::Ge && bracket;
+            let split = token.kind == T::Ge && self.splits.contains(&token.span.start);
             if split {
                 self.out.push_str("> =");
             } else {

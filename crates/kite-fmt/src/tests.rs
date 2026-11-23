@@ -39,6 +39,11 @@ fn a_type_closing_bracket_does_not_glue_to_the_assignment() {
     assert_eq!(fmt("fn main() {\n    var y: Option<Box<int>>=nil\n}\n"), "fn main() {\n    var y: Option<Box<int>> = nil\n}\n");
     // A comparison is not a type bracket.
     same("fn main() {\n    let b = a >= c\n}\n");
+    // Nor is a chained one in a declaration that does not parse, where the
+    // bracket is a guess: `a<b>=c` is `a < b >= c`, and writing `a<b> = c`
+    // made it an assignment.
+    let chained = fmt("fn main() {\n    if a<b>=c {\n        io.print(1)\n    }\n}\n");
+    assert!(chained.contains(">="), "{}", chained);
 }
 
 #[test]
