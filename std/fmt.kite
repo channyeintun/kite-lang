@@ -32,12 +32,23 @@ pub fn centre(s: str, width: int) -> str {
     return pad(pad_left(s, s.len() + spare / 2), width)
 }
 
-/// `s` cut to `width`, with an ellipsis when something was cut.
+/// `s` cut to `width`, with an ellipsis when something was cut. The answer is
+/// never wider than `width`: at one the ellipsis is all there is room for,
+/// and at zero or less there is room for nothing.
+///
+/// ```kite
+/// assert(ellipsis("abcdef", 4) == "abc…", "cut")
+/// assert(ellipsis("abc", 1) == "…", "only the ellipsis fits")
+/// assert(ellipsis("abc", 0) == "", "nothing fits")
+/// ```
 pub fn ellipsis(s: str, width: int) -> str {
     if s.len() <= width {
         return s
     }
-    if width <= 1 {
+    if width <= 0 {
+        return ""
+    }
+    if width == 1 {
         return "…"
     }
     return s.slice(0, width - 1) + "…"
