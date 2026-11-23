@@ -54,6 +54,31 @@ fn walked_and_dropped() {
     }
 }
 
+// `task.timeout` answers with an optional result, which holds the failure
+// whenever the work came in time.
+async fn an_optional_result() {
+    let r = await task.timeout(load(2), 100) //~ ERROR E0302
+    io.print("dropped")
+}
+
+async fn a_timeout_never_awaited() {
+    task.timeout(load(2), 100) //~ ERROR E0302
+}
+
+async fn an_optional_result_tested() {
+    let r = await task.timeout(load(2), 100)
+    if r == nil {
+        io.print("timed out")
+        return
+    }
+    let (n, err) = r
+    if err != nil {
+        io.print(err.message())
+        return
+    }
+    io.print(n)
+}
+
 // Every failure inspected, or passed on: nothing is dropped.
 async fn both_checked() -> (int, error) {
     let (ra, rb) = await task.both(load(1), load(2))
@@ -90,6 +115,9 @@ fn handed_on() -> int {
 async fn main() {
     await one_left_unread()
     await a_slice_only_counted()
+    await an_optional_result()
+    await a_timeout_never_awaited()
+    await an_optional_result_tested()
     a_tuple_from_a_call()
     a_slice_literal()
     walked_and_dropped()

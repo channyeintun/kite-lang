@@ -1277,6 +1277,8 @@ enum Holder {
     Task,
     /// A tuple or a slice with one or more of these in it.
     Many,
+    /// An optional one: what `task.timeout` answers with.
+    Maybe,
 }
 
 /// An error state: the taint, and which locals are copies of which.
@@ -1982,6 +1984,12 @@ impl<'a> Checker<'a> {
             if parts.iter().any(|p| self.may_hold_failure(*p)) {
                 return Some(Holder::Many);
             }
+        }
+        // `let r = await task.timeout(save(), 100)` holds `save`'s failure
+        // whenever it came in time, which is the one container §12 answers
+        // with that a tuple or a slice does not cover.
+        if let TyKind::Optional(inner) = *self.types.kind(ty) {
+            return self.may_hold_failure(inner).then_some(Holder::Maybe);
         }
         match self.types.slice_elem(ty) {
             Some(elem) if self.may_hold_failure(elem) => Some(Holder::Many),
@@ -7502,6 +7510,11 @@ impl<'a> Checker<'a> {
                 "bind the result and take it apart — `let (a, b) = …`, or `for r in …` \
                  for a slice — and check each error in it",
             ),
+            Holder::Maybe => (
+                "this call may return an error, and it is thrown away",
+                "bind it and test it — `let r = …` then `if r != nil { … }` — and \
+                 check the error it holds",
+            ),
             Holder::Task => (
                 "this call starts a task whose error nobody will see",
                 "`await` it and check what it gives, or bind the task and hand it to \
@@ -7768,6 +7781,7 @@ impl<'a> Checker<'a> {
                             Holder::Pair => "the error in this result goes out of scope uninspected",
                             Holder::Task => "this task's error is never awaited",
                             Holder::Many => "the errors this holds go out of scope uninspected",
+                            Holder::Maybe => "the error this may hold goes out of scope uninspected",
                         },
                     )
                 }
@@ -7794,6 +7808,10 @@ impl<'a> Checker<'a> {
                     "take it apart — `let (a, b) = …`, or `for r in …` for a slice — and \
                      check each error in it",
                 ),
+                Holder::Maybe => d.with_note(format!(
+                    "test `{} != nil` and check the error it holds",
+                    name
+                )),
             };
             self.diags.push(d);
         }
@@ -7825,6 +7843,10 @@ impl<'a> Checker<'a> {
             Holder::Many => d.with_note(
                 "take it apart before writing over it, and check each error in it",
             ),
+            Holder::Maybe => d.with_note(format!(
+                "test `{} != nil` before the write, and check the error it holds",
+                name
+            )),
             Holder::Error => d.with_note(format!(
                 "test `{} != nil` or `check {}` before the write; to pass it on instead, \
                  write `{} = errors.wrap({}, \"…\")`",

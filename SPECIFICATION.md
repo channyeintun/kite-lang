@@ -1020,10 +1020,11 @@ The rules:
 > is not reading it, and nor is a `match` whose every arm is `_` or a bare
 > name. Binding everything under one name is not a way out either, and nor
 > is a tuple literal: `let (n, e) = (1, f())` makes `e` Unchecked. The same
-> holds one level further out: a tuple or a slice with one of these in it
-> — what `task.both` and `task.all` answer with — is Unchecked when bound,
-> taking it apart or walking it with `for` hands each failure in it to the
-> name it is bound to, and counting it with `len` is not reading it.
+> holds one level further out: a tuple, a slice or an optional with one of
+> these in it — what `task.both`, `task.all` and `task.timeout` answer
+> with — is Unchecked when bound, taking it apart or walking it with `for`
+> hands each failure in it to the name it is bound to, and counting it with
+> `len` is not reading it.
 
 R1–R5 are about bindings, and R6 and R7 close the shapes they leave open: a
 call written as a statement makes no binding, so nothing in R1–R5 ever sees it,
