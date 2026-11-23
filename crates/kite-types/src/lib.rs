@@ -3984,6 +3984,9 @@ impl<'a> Checker<'a> {
                 let mut flat = Vec::with_capacity(entries.len() * 2);
                 let mut key_ty = hint.map(|(k, _)| k);
                 let mut val_ty = hint.map(|(_, v)| v);
+                // The keys the compiler knows, and where each was first given.
+                let mut known_keys: std::collections::HashMap<String, Span> =
+                    std::collections::HashMap::new();
                 for e in entries {
                     let k = self.expr(&e.key, key_ty);
                     let k = match key_ty {
@@ -4015,14 +4018,15 @@ impl<'a> Checker<'a> {
                         _ => None,
                     };
                     if let Some(key) = known(&k) {
-                        let earlier = flat.iter().step_by(2).find(|p: &&hir::Expr| known(p).as_ref() == Some(&key));
-                        if let Some(first) = earlier {
+                        if let Some(&first) = known_keys.get(&key) {
                             self.diags.push(
                                 Diagnostic::warning(codes::E0112, format!("the key {} is given twice", key))
                                     .with_primary(k.span, "this entry replaces the earlier one")
-                                    .with_secondary(first.span, "first given here, and never seen")
+                                    .with_secondary(first, "first given here, and never seen")
                                     .with_note("a map holds one value per key; remove one of the two"),
                             );
+                        } else {
+                            known_keys.insert(key, k.span);
                         }
                     }
                     flat.push(k);
@@ -10209,13 +10213,22 @@ impl<'a> Checker<'a> {
                 }
                 match (bound(&a), bound(&b)) {
                     (Some(x), Some(y)) => {
-                        if x > y {
+                        // `5..5` is empty as surely as `9..=4`: an
+                        // exclusive range leaves out its end.
+                        if x > y || (x == y && !*inclusive) {
+                            let op = if *inclusive { "..=" } else { ".." };
+                            let note = if x > y {
+                                "a range runs from its smaller end to its larger"
+                            } else {
+                                "`..` leaves out its end, so a range from a number to itself \
+                                 is empty; `..=` keeps the end"
+                            };
                             self.diags.push(
                                 // An arm no value can reach, which is what
                                 // E0116 is; E0210 is a match missing values.
                                 Diagnostic::warning(codes::E0116, "this range is empty")
-                                    .with_primary(*span, format!("{}{}{} matches nothing", x, if *inclusive { "..=" } else { ".." }, y))
-                                    .with_note("a range runs from its smaller end to its larger"),
+                                    .with_primary(*span, format!("{}{}{} matches nothing", x, op, y))
+                                    .with_note(note),
                             );
                         }
                         hir::Pattern::IntRange { start: x, end: y, inclusive: *inclusive }

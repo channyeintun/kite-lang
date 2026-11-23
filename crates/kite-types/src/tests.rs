@@ -1092,6 +1092,17 @@ fn a_bare_error_statement_is_one_diagnostic() {
     assert_eq!(c.codes(), vec!["E0117"], "{}", c.render());
 }
 
+/// An exclusive range from a number to itself matches nothing, exactly as a
+/// reversed one does.
+#[test]
+fn an_exclusive_range_to_itself_is_empty() {
+    let c = ok("fn f(n: int) -> str {\n  return match n {\n    5..5 => \"none\",\n\
+                \x20   5..=5 => \"five\",\n    _ => \"other\",\n  }\n}\n\
+                fn main() {\n  io.print(f(5))\n}\n");
+    assert_eq!(c.codes(), vec!["E0116"], "{}", c.render());
+    assert!(c.render().contains("5..5 matches nothing"), "{}", c.render());
+}
+
 /// A key the compiler knows, written twice in one map literal, is a warning:
 /// the later entry replaces the earlier, whose value nothing ever sees.
 #[test]

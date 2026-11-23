@@ -175,7 +175,8 @@ codes! {
          matches everything, and every arm after it is dead. A guarded arm \
          shadows nothing, because its guard may fail. A literal or a range \
          inside a range above it (`5` after `1..=9`) is dead the same way, \
-         and so is a range whose ends are the wrong way round, `9..=4`.";
+         and so is a range that matches nothing: ends the wrong way round, \
+         `9..=4`, or `5..5`, which leaves out its one value.";
 
     E0117 = "E0117", "statement has no effect",
         "A closure written as a statement is built and thrown away. Nothing \
