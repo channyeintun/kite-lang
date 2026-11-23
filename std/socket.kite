@@ -58,7 +58,13 @@ pub async fn connect(url: str) -> (Socket, error) {
         task.yield()
     }
     if socket_state(id) != 1 {
-        return _, errors.new("socket \(url): \(socket_error(id))")
+        // A socket that closes without ever having failed has no reason to
+        // give: that is the host's way of saying the server hung up first.
+        var why = socket_error(id)
+        if why == "" {
+            why = "closed before it opened"
+        }
+        return _, errors.new("socket \(url): \(why)")
     }
     return Socket{ id: id }, nil
 }

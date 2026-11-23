@@ -375,6 +375,38 @@ fn a_socket_that_cannot_connect_says_so() {
     assert_eq!(out, "refused\n", "{}", out);
 }
 
+/// A socket that is closed before it opens says why, and not nothing.
+///
+/// The state goes from connecting straight to closed, with no error event in
+/// between, and the message used to end at its own colon.
+#[test]
+fn a_socket_closed_before_it_opened_says_so() {
+    if !node_available() {
+        eprintln!("skipping: node is not on PATH");
+        return;
+    }
+    let runner = "import { readFile } from \"node:fs/promises\";\n\
+         import { run, setWriter } from \"./app.js\";\n\
+         globalThis.WebSocket = class {\n\
+         \x20 constructor() { setTimeout(() => this.onclose && this.onclose({}), 0); }\n\
+         \x20 close() {}\n\
+         };\n\
+         const out = [];\n\
+         setWriter((l) => out.push(l));\n\
+         await run(new Uint8Array(await readFile(new URL(\"./app.wasm\", import.meta.url))));\n\
+         process.stdout.write(out.map((l) => l + \"\\n\").join(\"\"));\n";
+    let out = run_runner_under_node(
+        "socket-hangup",
+        "use std/socket\n\
+         async fn main() {\n\
+         \x20 let (s, err) = await socket.connect(\"ws://x/y\")\n\
+         \x20 if err != nil {\n    io.print(err.message())\n  }\n}\n",
+        runner,
+        &[],
+    );
+    assert_eq!(out, "socket ws://x/y: closed before it opened\n", "{}", out);
+}
+
 /// A transport failure is an `error`. A status is not.
 #[test]
 fn a_transport_failure_is_an_error() {
