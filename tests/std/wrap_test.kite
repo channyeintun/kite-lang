@@ -77,6 +77,14 @@ fn overlong_checks() -> [error] {
         out.push(test.is_true(text.is_combining(code), "U+\(code) is a mark"))
         out.push(test.equal_str(shape("x\(mark)y", 1.0), "x\(mark)|y", "U+\(code) stays with its letter"))
     }
+    // An emoji sequence is cut as one: a joiner stays with what it joins, and
+    // a skin-tone modifier with its base. The cut fell inside the sequence and
+    // left a bare joiner on a line of its own.
+    let zwj = text.from_code(0x200D)
+    let family = text.from_code(0x1F468) + zwj + text.from_code(0x1F469) + zwj + text.from_code(0x1F467)
+    out.push(test.equal_str(shape("\(family)x", 1.0), "\(family)|x", "a joined emoji sequence is one cluster"))
+    let thumb = text.from_code(0x1F44D) + text.from_code(0x1F3FB)
+    out.push(test.equal_str(shape("\(thumb)\(thumb)", 1.0), "\(thumb)|\(thumb)", "a modifier stays with its base"))
     // A width nothing fits in still makes progress, one character a line.
     out.push(test.equal_str(shape("abc", 0.0), "a|b|c", "zero width takes a character a line"))
     out.push(test.equal_str(shape("ab cd", 1.0), "a|b|c|d", "and drops the spaces between"))

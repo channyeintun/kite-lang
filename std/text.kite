@@ -2746,7 +2746,8 @@ fn hangul_joins(before: LineBreak, here: LineBreak) -> bool {
 /// - **A run too wide for any line is broken between characters** rather than
 ///   left to overflow — what CSS calls `overflow-wrap: break-word`. The break
 ///   never falls before a combining mark, so an accent stays with its letter,
-///   and every line holds at least one character, so a width too narrow for
+///   nor beside a zero-width joiner or an emoji skin-tone modifier, so an emoji
+///   sequence stays whole, and every line holds at least one character, so a width too narrow for
 ///   anything still makes progress rather than looping.
 ///
 /// ```kite
@@ -2841,11 +2842,22 @@ fn split_point(body: str, start: int, end: int, width: float, measure: fn(str) -
     return best
 }
 
-/// The position after the character at `i` and any marks attached to it.
+/// The position after the character at `i` and everything that stays with it:
+/// the marks attached to it, an emoji skin-tone modifier or tag character, and
+/// a zero-width joiner together with the character it joins on — so a family
+/// emoji, which is several people stuck together with joiners, is one cluster.
 fn next_cluster(body: str, i: int, end: int) -> int {
     var k = i + 1
-    for k < end && is_combining(body.code_at(k)) {
-        k += 1
+    for k < end {
+        let c = body.code_at(k)
+        if c == 0x200D {
+            // The joiner takes what follows it, whatever that is.
+            k = if k + 1 < end { k + 2 } else { k + 1 }
+        } else if is_combining(c) || within(c, 0x1F3FB, 0x1F3FF) || within(c, 0xE0020, 0xE007F) {
+            k += 1
+        } else {
+            break
+        }
     }
     return k
 }
