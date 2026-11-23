@@ -682,3 +682,33 @@ fn a_field_passed_to_a_quiet_reader_only_glances() {
     let glancing: Vec<bool> = reads.iter().map(|l| glances[l.index()].is_some()).collect();
     assert_eq!(glancing, vec![true, true, false, false, false], "{}", b.show());
 }
+
+/// Rendering an `int` between reading a field and its last glance is quiet:
+/// `if !seen(q.m, "k\(i)")` evaluates the field, then the key, then calls.
+/// Only the four types that render themselves are let off.
+#[test]
+fn rendering_a_number_does_not_end_a_glance() {
+    let b = build(
+        "struct Q {\n    var m: { str: int }\n}\n\n\
+         struct P {\n    n: int\n}\n\n\
+         fn seen(m: { str: int }, k: str) -> bool {\n    return m[k] != nil\n}\n\n\
+         fn main() {\n    var q = Q{ m: { } }\n    let i = 3\n    let p = P{ n: 1 }\n\
+         \x20   if !seen(q.m, \"k\\(i)\") {\n        q.m[\"a\"] = 1\n    }\n\
+         \x20   _ = seen(q.m, \"\\(p.n)\")\n}\n",
+    );
+    let kept = Kept::of(&b.mir);
+    let f = b.main();
+    let reads: Vec<Local> = f
+        .blocks
+        .iter()
+        .flat_map(|b| &b.stmts)
+        .filter_map(|s| match s {
+            Inst::Assign { dst, value: Rvalue::FieldGet { .. } } => Some(*dst),
+            _ => None,
+        })
+        .collect();
+    let glances = held_reads(f, &kept);
+    assert!(glances[reads[0].index()].is_some(), "{}", b.show());
+    assert!(glances[reads[1].index()].is_some(), "{}", b.show());
+    assert!(renders_itself(TyId::INT) && !renders_itself(f.locals[0].ty), "{}", b.show());
+}

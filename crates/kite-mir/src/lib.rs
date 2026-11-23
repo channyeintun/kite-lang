@@ -581,13 +581,14 @@ fn may_write_in_place(value: &Rvalue, kept: &Kept) -> bool {
     use Rvalue as R;
     match value {
         R::Call { callee, .. } => !kept.quiet(*callee),
+        // A rendering can reach a `Display` the program wrote — of anything
+        // but the four types that render themselves.
+        R::ToStr { from, .. } => !renders_itself(*from),
         R::CallVirtual { .. }
         | R::CallClosure { .. }
         | R::CallBuiltin { .. }
         | R::CallExtern { .. }
         | R::StrOp { .. }
-        // A rendering can reach a `Display` the program wrote.
-        | R::ToStr { .. }
         | R::Await { .. }
         | R::Yield
         | R::FieldTake { .. } => true,
@@ -626,6 +627,13 @@ fn may_write_in_place(value: &Rvalue, kept: &Kept) -> bool {
         | R::Owned { .. }
         | R::Unspill { .. } => false,
     }
+}
+
+/// Whether a value of type `ty` renders without running code of the
+/// program's: `int`, `float`, `bool` and `str` render themselves (§2.4), so
+/// `"k\(i)"` reads nothing the program wrote.
+pub fn renders_itself(ty: TyId) -> bool {
+    matches!(ty, TyId::INT | TyId::FLOAT | TyId::BOOL | TyId::STR)
 }
 
 /// Blocks reachable from the entry.

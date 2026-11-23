@@ -233,10 +233,11 @@ fn stirs_at(value: &Rvalue, stirs: &[bool]) -> bool {
     match value {
         R::Call { callee, .. } => stirs.get(callee.index()).copied().unwrap_or(true),
         R::CallBuiltin { builtin, .. } => builtin_runs_code(*builtin),
+        // A rendering can reach a `Display` the program wrote.
+        R::ToStr { from, .. } => !crate::renders_itself(*from),
         R::CallVirtual { .. }
         | R::CallClosure { .. }
         | R::CallExtern { .. }
-        | R::ToStr { .. }
         | R::FieldTake { .. }
         | R::Await { .. }
         | R::Yield

@@ -614,7 +614,8 @@ fn main() {
 /// write through the field copied the whole map: at forty thousand that
 /// took 40 s on the VM. A call to a function that keeps nothing of the
 /// argument, and can write in place nothing that was there before it ran,
-/// only glances at the field now (`kite_mir::held_reads`).
+/// only glances at the field now (`kite_mir::held_reads`), and so does a
+/// read of it followed by rendering a number for the key, as `"j\(i)"` is.
 #[test]
 fn a_field_passed_to_a_reader_is_written_in_place() {
     let src = r#"fn seen(m: { str: int }, w: str) -> bool {
@@ -637,6 +638,12 @@ impl Set {
         }
         self.order.push(count(self.order))
     }
+
+    fn add_at(var self, i: int) {
+        if self.m["j\(i)"] == nil && !seen(self.m, "i\(i)") {
+            self.m["j\(i)"] = i
+        }
+    }
 }
 
 fn main() {
@@ -644,6 +651,7 @@ fn main() {
     var s = Set{ m: { }, order: [] }
     for i in 0..n {
         s.add("k\(i % (n / 2))")
+        s.add_at(i)
     }
     io.print("\(s.m.len()) \(s.order.len()) \(or_else(s.m["k7"], -1))")
 }
@@ -651,7 +659,7 @@ fn main() {
     agrees_within(
         "field-passed-to-a-reader",
         src,
-        "100000 200000 7\n",
+        "300000 200000 7\n",
         Duration::from_secs(20),
         true,
     );
