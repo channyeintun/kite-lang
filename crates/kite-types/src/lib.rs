@@ -8126,15 +8126,25 @@ impl<'a> Checker<'a> {
         let mut args = Vec::with_capacity(count);
         for (i, s) in subst.iter().enumerate() {
             match s {
-                Some(t) => args.push(*t),
-                None => {
+                Some(t) if !self.made_of_error(*t) => args.push(*t),
+                // A parameter solved only to something made of the error type
+                // is not solved: `One{ run: |n| [n] }` makes `T` a `[<error>]`
+                // out of the `n` nothing fixed, and taking that as the answer
+                // checked the closure again against it, where `n` is the error
+                // type and says nothing — so a program with no diagnostic
+                // reached code generation holding `<error>`.
+                _ => {
                     // The trial's diagnostics were discarded, so a closure
                     // field that went wrong is checked again to say what it
                     // was; only its errors are kept, and only if it has any.
                     if !poisoned.is_empty() {
+                        // Against what is really solved: told `n` is the
+                        // `[<error>]` it made, the closure says nothing again.
+                        let solved: Vec<Option<TyId>> =
+                            subst.iter().map(|s| s.filter(|t| !self.made_of_error(*t))).collect();
                         let again = self.begin_trial();
                         for &(init, declared) in &poisoned {
-                            self.field_closure_context(init, declared, &subst);
+                            self.field_closure_context(init, declared, &solved);
                             self.expr(&init.value, None);
                             self.closure_context = None;
                         }
@@ -8146,6 +8156,12 @@ impl<'a> Checker<'a> {
                             }
                             return None;
                         }
+                    }
+                    // A field that is itself an error (`seed: nope`) reports
+                    // that error in the real check, against this poison.
+                    if let Some(t) = s {
+                        args.push(*t);
+                        continue;
                     }
                     let name = self.types.struct_def(template).name.clone();
                     self.diags.push(

@@ -955,6 +955,22 @@ fn run_passes(
     if diags.has_errors() {
         return (String::new(), None, None, None, index);
     }
+    // **No error type reaches code generation.** The checker gives a value
+    // the error type only where it reported something; one that survives
+    // into a program with no diagnostic is the checker's own mistake, and
+    // lowering it was an invalid Wasm module, a segfault, or a VM trap far
+    // from the cause. So it is named here, at the expression, instead.
+    if let Some((function, span)) = kite_hir::mono::error_typed(&mut hir) {
+        diags.push(
+            Diagnostic::error(kite_diag::codes::E0901, format!("internal compiler error in `{}`", function))
+                .with_primary(span, "the checker left this without a type, and reported nothing")
+                .with_note(
+                    "this is a bug in Kite, not in this program — please report it, \
+                     with the program if it can be shared",
+                ),
+        );
+        return (String::new(), None, None, None, index);
+    }
 
     // The program's own `test_…` functions, read while the declarations are
     // still what was written: a closure lifted out of a test and the resume

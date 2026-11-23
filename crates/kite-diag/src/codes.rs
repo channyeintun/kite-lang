@@ -1663,7 +1663,8 @@ codes! {
         "This is a bug in Kite, not in the program being compiled. A stage of \
          the compiler found something an earlier stage promised it would never \
          see — a `break` with no loop to leave, an `await` the state-machine \
-         transform did not remove — and stopped rather than guess.\n\n\
+         transform did not remove, a value the checker left without a type \
+         and reported nothing about — and stopped rather than guess.\n\n\
          Guessing is what it used to do. The `break` was dropped and the \
          program ran on as if it had not been written; the `await` crashed \
          the compiler. Stopping with this names the function, which is \

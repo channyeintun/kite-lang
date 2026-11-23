@@ -966,6 +966,35 @@ impl Types {
         id == TyId::ERROR || id == TyId::NEVER
     }
 
+    /// Whether `id` is the error type or is built from it anywhere — inside
+    /// a slice, a function type, or a generic type's arguments, as
+    /// `Job<[<error>]>` is. Only a program that has been reported holds one.
+    pub fn holds_error(&self, id: TyId) -> bool {
+        match &self.kind(id) {
+            TyKind::Error => true,
+            TyKind::Slice(e) | TyKind::Optional(e) | TyKind::Fallible(e) => self.holds_error(*e),
+            TyKind::Map(k, v) => self.holds_error(*k) || self.holds_error(*v),
+            TyKind::Tuple(es) => es.iter().any(|e| self.holds_error(*e)),
+            TyKind::Fn { params, ret } => params.iter().any(|p| self.holds_error(*p)) || self.holds_error(*ret),
+            TyKind::Struct(s) => {
+                self.struct_origin.get(s).is_some_and(|(_, args)| args.iter().any(|a| self.holds_error(*a)))
+            }
+            TyKind::Enum(e) => {
+                self.enum_origin.get(e).is_some_and(|(_, args)| args.iter().any(|a| self.holds_error(*a)))
+            }
+            TyKind::Unit
+            | TyKind::Bool
+            | TyKind::Int
+            | TyKind::Float
+            | TyKind::Str
+            | TyKind::Never
+            | TyKind::Err
+            | TyKind::JsValue
+            | TyKind::Dyn(_)
+            | TyKind::Param { .. } => false,
+        }
+    }
+
     pub fn is_numeric(&self, id: TyId) -> bool {
         id == TyId::INT || id == TyId::FLOAT
     }
@@ -1599,5 +1628,30 @@ mod tests {
         let tr = t.declare_trait("Shape", true, span());
         let d = t.dyn_ty(tr);
         assert!(t.is_reference(d) && !t.has_identity(d));
+    }
+
+    /// The guard before lowering looks inside a generic type's arguments:
+    /// `Job<[<error>]>` is a struct like any other by its kind, and was what
+    /// reached code generation.
+    #[test]
+    fn the_error_type_is_found_inside_a_generic_struct() {
+        let mut t = Types::new();
+        let job = t.declare_struct("Job", true, span());
+        t.set_struct_generics(job, 1);
+        let p = t.param_ty(0, "T");
+        t.set_struct_fields(
+            job,
+            vec![FieldDef { name: "seed".into(), ty: p, mutable: false, is_pub: true, span: span() }],
+        );
+        let poison = t.slice_of(TyId::ERROR);
+        let bad = t.instantiate_struct(job, &[poison]);
+        let good = t.instantiate_struct(job, &[TyId::INT]);
+        let bad_ty = t.struct_ty(bad);
+        let good_ty = t.struct_ty(good);
+        assert!(t.holds_error(bad_ty));
+        assert!(!t.holds_error(good_ty));
+        let f = t.fn_of(vec![TyId::INT], poison);
+        assert!(t.holds_error(f));
+        assert!(!t.holds_error(TyId::NEVER));
     }
 }
