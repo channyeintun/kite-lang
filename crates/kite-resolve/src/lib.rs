@@ -555,8 +555,8 @@ pub struct LocalInfo {
     pub synthetic: bool,
 }
 
-/// A trait's default method that no `impl` block takes, with the locals its
-/// body declares. See [`ResolveMap::defaults`].
+/// A trait's default method on its own, apart from any block that takes it,
+/// with the locals its body declares. See [`ResolveMap::defaults`].
 #[derive(Debug)]
 pub struct DefaultBody {
     /// Index into [`ResolveMap::types`] for the trait.
@@ -580,11 +580,11 @@ pub struct ResolveMap {
     pub modules: Modules,
     /// Per function, in the same order as `fns`.
     pub locals: Vec<Vec<LocalInfo>>,
-    /// A trait's default methods that no `impl` block takes, because the
-    /// trait has none or each writes its own. A default is otherwise a
-    /// function only as a copy per implementing block, so one nobody takes
-    /// has no entry in `fns`, and is resolved here, once, for its body to be
-    /// checked all the same.
+    /// Every trait's default methods, each resolved once on its own. A
+    /// default is a function only as a copy per implementing block, and one
+    /// nobody takes has no entry in `fns` at all; this is the body checked
+    /// with `Self` standing for any implementation, which is the check that
+    /// reports a mistake in it.
     pub defaults: Vec<DefaultBody>,
     /// For a type alias naming a struct or an enum that takes no type
     /// arguments, `type Pt = Point`, the type it names, through any aliases
@@ -1353,21 +1353,28 @@ fn resolve_bodies(file: &SourceFile, map: &mut ResolveMap, diags: &mut DiagBag) 
         map.locals.push(locals);
     }
 
-    // A default no block takes was never resolved above, and so never
-    // checked: `let y: str = 5` in the body of a trait nobody implements
-    // compiled.
+    // Every default is also checked once on its own, with `Self` standing for
+    // any implementation (§10.1), and that check is the one that reports. A
+    // default no block takes was never resolved above, and so never checked:
+    // `let y: str = 5` in the body of a trait nobody implements compiled. One
+    // a block takes was resolved above already, and what resolving it again
+    // reports is the first copy's again.
     for trait_index in 0..map.types.len() {
         let item_index = map.types[trait_index].decl_index;
         let Item::Trait(tr) = &file.items[item_index] else { continue };
         for (mi, m) in tr.methods.iter().enumerate() {
-            if m.body.is_none() || taken.contains(&(item_index, mi)) {
+            if m.body.is_none() {
                 continue;
             }
+            let reported = diags.len();
             let module = map.modules.of(item_index).to_string();
             let mut r = FnResolver::new(map, diags, module);
             let var_self = m.self_param.as_ref().is_some_and(|s| s.is_var);
             r.resolve_fn(&m.params, m.body.as_ref(), m.self_param.is_some(), var_self);
             let locals = r.locals;
+            if taken.contains(&(item_index, mi)) {
+                diags.truncate(reported);
+            }
             map.defaults.push(DefaultBody {
                 trait_index: trait_index as u32,
                 item_index,

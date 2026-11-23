@@ -513,12 +513,14 @@ pub fn check_recording(
     let const_table = consts::evaluate(file, resolved, sources, diags);
     check_const_annotations(file, resolved, &const_table, &type_ids, &mut types, diags);
 
-    // A default method no block takes is checked once all the same, against
-    // what every implementation has in common: `Self` is a parameter of its
-    // own, after the trait's and the method's, bounded by the trait. Its
-    // signature is numbered after every function's, as its locals are in
-    // `ResolveMap::defaults`. The signature was read already, where the
-    // trait's methods were; what it would report again is dropped.
+    // Every default method is checked once on its own, against what every
+    // implementation has in common: `Self` is a parameter of its own, after
+    // the trait's and the method's, bounded by the trait (§8.2, §10.1). That
+    // check is the one that reports, so a mistake is said once however many
+    // blocks take the method, and it names `Self`. Its signature is numbered
+    // after every function's, as its locals are in `ResolveMap::defaults`.
+    // The signature was read already, where the trait's methods were; what
+    // it would report again is dropped.
     for d in &resolved.defaults {
         let ast::Item::Trait(tr) = &file.items[d.item_index] else {
             unreachable!("a default body belongs to a trait")
@@ -568,11 +570,13 @@ pub fn check_recording(
         calls: Vec::new(),
         bound_calls: Vec::new(),
     };
-    // What each default method's copies have reported, by the method. A
-    // default is checked once per block that takes it, `Self` being that
-    // block's type, and a mistake that is not about the type was reported
-    // once per `impl`.
-    let mut default_reports: std::collections::HashMap<(usize, usize), std::collections::HashSet<DiagKey>> =
+    // What each default method's copies have reported, by the method. A copy
+    // per block that takes the default is what runs, `Self` being that
+    // block's type, but the check on its own above is what reports: what a
+    // copy says is set aside, and said only if that check found nothing,
+    // which it cannot when it is the stricter of the two — kept so that a
+    // mistake no check reported can never reach a backend.
+    let mut default_reports: std::collections::HashMap<(usize, usize), Vec<Diagnostic>> =
         std::collections::HashMap::new();
     for i in 0..sigs.len() {
         let unowned = i.checked_sub(resolved.fns.len()).map(|k| &resolved.defaults[k]);
@@ -646,6 +650,16 @@ pub fn check_recording(
                 &sigs[i],
                 m.self_param.is_some(),
             );
+            let copies = default_reports.remove(&(d.item_index, d.method_index)).unwrap_or_default();
+            if !diags.iter().skip(reported).any(|x| x.severity == kite_diag::Severity::Error) {
+                let mut seen: std::collections::HashSet<DiagKey> = std::collections::HashSet::new();
+                for x in copies {
+                    let key = (x.code.map(|c| c.0), x.message.clone(), x.primary_span());
+                    if x.severity == kite_diag::Severity::Error && seen.insert(key) {
+                        diags.push(x);
+                    }
+                }
+            }
             continue;
         }
         let sig = &resolved.fns[i];
@@ -751,8 +765,12 @@ pub fn check_recording(
         // are collected here and appended once all declarations are checked.
         lifted.append(&mut checker.lifted);
         if let Some(o) = sig.owner.filter(|o| o.is_default) {
-            let seen = default_reports.entry((o.impl_index, o.method_index)).or_default();
-            keep_first_reports(diags, reported, seen);
+            let mut all = diags.take();
+            let said = all.split_off(reported);
+            for d in all {
+                diags.push(d);
+            }
+            default_reports.entry((o.impl_index, o.method_index)).or_default().extend(said);
         }
     }
     fns.append(&mut lifted);
@@ -1364,8 +1382,8 @@ impl<'a> Checker<'a> {
     // ---- functions --------------------------------------------------------
 
     /// The locals the resolver found in the body being checked: a
-    /// function's, or those of a default method no block takes, which are
-    /// numbered after every function's (`ResolveMap::defaults`).
+    /// function's, or those of a default method checked on its own, which
+    /// are numbered after every function's (`ResolveMap::defaults`).
     fn local_infos(&self) -> &'a [kite_resolve::LocalInfo] {
         match self.resolved.locals.get(self.fn_index) {
             Some(infos) => infos,
@@ -1374,7 +1392,7 @@ impl<'a> Checker<'a> {
     }
 
     /// The name of the function being checked, or of the trait whose default
-    /// method it is when no block takes that method.
+    /// method it is when that is checked on its own.
     fn body_name(&self) -> &'a str {
         match self.resolved.fns.get(self.fn_index) {
             Some(f) => &f.name,
@@ -5821,6 +5839,26 @@ impl<'a> Checker<'a> {
         hir::Expr { kind: ExprKind::StrOp { op, args: hargs }, ty: ret, span }
     }
 
+    /// The method `name` on a value of the type `ti`, as `receiver_ty`.
+    ///
+    /// In the copy of a default method a block takes, `Self` is that block's
+    /// type, but known only by the trait's methods (§8.2): `self.hi()` is the
+    /// trait's `hi`, not an inherent one of the same name, or a call through
+    /// a `dyn` ran a method the trait never declared. The check of the
+    /// default on its own reports anything else the body asks of `Self`.
+    fn method_for(&self, ti: u32, receiver_ty: TyId, name: &str) -> Option<u32> {
+        let owner = self.resolved.fns.get(self.fn_index).and_then(|f| f.owner);
+        if let Some(o) = owner.filter(|o| o.is_default && o.type_index == ti) {
+            let self_ty = self.generics.iter().find(|(n, _)| n == "Self").map(|(_, t)| *t);
+            if self_ty == Some(receiver_ty) {
+                if let Some(f) = o.trait_index.and_then(|tr| self.resolved.trait_method(ti, tr, name)) {
+                    return Some(f);
+                }
+            }
+        }
+        self.resolved.method_on(ti, name)
+    }
+
     /// `receiver.method(args)`.
     fn method_call(
         &mut self,
@@ -6042,7 +6080,8 @@ impl<'a> Checker<'a> {
         // method/field distinction to preserve here — a field of function type
         // *is* what a handler or a callback looks like, and `(r.handle)(x)`
         // would be punctuation standing in for nothing.
-        if self.resolved.method_on(ti, &name.name).is_none() {
+        let found = self.method_for(ti, receiver.ty, &name.name);
+        if found.is_none() {
             if let TyKind::Struct(sid) = *self.types.kind(receiver.ty) {
                 let field = self
                     .types
@@ -6080,7 +6119,7 @@ impl<'a> Checker<'a> {
             }
         }
 
-        let Some(fn_index) = self.resolved.method_on(ti, &name.name) else {
+        let Some(fn_index) = found else {
             let type_name = self.resolved.type_decl(ti).name.clone();
             let mut d = Diagnostic::error(
                 codes::E0205,
@@ -12386,24 +12425,6 @@ fn check_impls(
 /// A diagnostic as far as saying it twice goes: its code, its message and
 /// where it points.
 type DiagKey = (Option<&'static str>, String, Option<Span>);
-
-/// Drop what a default method's copy reported after `from` that an earlier
-/// copy of the same method reported already, and remember the rest. A
-/// mistake that depends on the implementing type — `self.x` where one `impl`
-/// is for a type without an `x` — reads differently for each, and is kept.
-fn keep_first_reports(
-    diags: &mut DiagBag,
-    from: usize,
-    seen: &mut std::collections::HashSet<DiagKey>,
-) {
-    let all = diags.take();
-    for (i, d) in all.into_iter().enumerate() {
-        let key = (d.code.map(|c| c.0), d.message.clone(), d.primary_span());
-        if i < from || seen.insert(key) {
-            diags.push(d);
-        }
-    }
-}
 
 /// An `impl` is for its type at the block's own parameters, in order:
 /// `impl<A, B> Named for Pair<A, B>`, or a type without any.

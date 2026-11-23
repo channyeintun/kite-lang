@@ -266,7 +266,11 @@ fn main() {
 ```
 
 In a trait's default method `Self` is whichever type implements the trait,
-known only by the trait's methods, so `Self{ … }` there is `E0204`.
+known only by the trait's methods, so `Self{ … }` there is `E0204`, a field
+read on `self` is `E0200` and a call to the type's inherent method is
+`E0205` — each said once, naming `Self`, however many `impl`s take the
+default. `self.hi()` in a default is always the trait's `hi`, even when the
+type has an inherent `hi` too.
 
 A method may introduce type parameters of its own, solved from its arguments:
 

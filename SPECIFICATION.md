@@ -1496,12 +1496,13 @@ does. A generic method's type parameters may be bounded no more tightly than
 the trait's are (`E0208`): a caller through the trait meets the trait's bounds
 and no others.
 
-A default method's body is checked for each implementation that takes it, with
-`Self` read as that implementation's type, and a mistake in it is reported
-once, not once per implementation. A default no implementation takes — the
-trait has none yet, or each writes its own — is checked all the same, with
-`Self` standing for any implementation: what the trait declares is known of it,
-and nothing else.
+A default method's body is checked once, with `Self` standing for any
+implementation: what the trait declares is known of it, and nothing else — not
+the implementing type's fields, nor its inherent methods. So a mistake in it is
+reported once, not once per implementation, and it is checked whether or not
+any implementation takes it. Each implementation that takes it runs it with
+`Self` as that implementation's type, and `self.m()` in it is always the
+trait's `m`.
 
 ### 10.2 Coherence
 

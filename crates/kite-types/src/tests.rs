@@ -2092,6 +2092,27 @@ fn a_default_method_reports_each_mistake_once() {
     assert_eq!(c.codes(), vec!["E0201"], "{}", c.render());
 }
 
+/// A default method taken by blocks is held to what the trait declares, as
+/// one no block takes is (§8.2): `Self` is known only by the trait's methods.
+/// Each copy used to be checked with `Self` read as its block's type, so a
+/// default could call that type's inherent methods and read its fields, and
+/// a mistake naming the type was said once per `impl`, `S` then `R`.
+#[test]
+fn a_taken_default_knows_self_only_by_the_trait() {
+    let c = run("trait T {\n  fn a(self) -> int\n  fn b(self) -> int {\n    return self.secret()\n  }\n\
+        \x20 fn c(self) -> int {\n    return self.n\n  }\n}\n\
+        struct S {\n  n: int\n}\nstruct R {\n  n: int\n}\n\
+        impl S {\n  fn secret(self) -> int {\n    return 100\n  }\n}\n\
+        impl R {\n  fn secret(self) -> int {\n    return 200\n  }\n}\n\
+        impl T for S {\n  fn a(self) -> int {\n    return 1\n  }\n}\n\
+        impl T for R {\n  fn a(self) -> int {\n    return 2\n  }\n}\n\
+        fn main() {\n  io.print(S{ n: 1 }.b() + R{ n: 2 }.c())\n}\n");
+    assert_eq!(c.codes(), vec!["E0205", "E0200"], "{}", c.render());
+    let text = c.render();
+    assert!(text.contains("`Self` has no method `secret`"), "{}", text);
+    assert!(text.contains("`Self` has no fields"), "{}", text);
+}
+
 /// A default no block takes — the trait has no `impl`, or every one writes
 /// its own — was never checked, so a mistake in it compiled. It is checked
 /// once, with `Self` standing for any implementation: what the trait
