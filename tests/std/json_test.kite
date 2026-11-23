@@ -238,9 +238,46 @@ fn checks() -> [error] {
     out.push(test.is_true(json.int_of(parsed("\"5\"")) == nil, "a small int is not read from text"))
     out.push(test.is_true(json.int_of(parsed("\"+9007199254740993\"")) == nil, "text must be spelled as an int is"))
     out.push(test.is_true(json.int_of(parsed("\"9223372036854775808\"")) == nil, "text past the range is nil"))
-    out.push(test.is_true(json.int_of(parsed("\"12abc\"")) == nil, "text that is not digits is nil"))
+    out.push(test.is_true(json.int_of(parsed("\"12abc\"")) == nil, "text that is not a number is nil"))
+
+    // ---- a derived enum decoder is as strict as the encoder is exact ----
+    out.push(test.equal_str(kind("\"Plain\""), "Plain", "a unit variant is its name"))
+    out.push(test.equal_str(kind("{\"Two\":[1,\"x\"]}"), "Two(1, \"x\")", "a payload is an object with one key"))
+    out.push(test.equal_str(kind("{\"One\":[1,2,3]}"), "Kind.One: expected an array of 1 value", "a longer payload is an error"))
+    out.push(test.equal_str(kind("{\"Two\":[1]}"), "Kind.Two: expected an array of 2 values", "a shorter payload is an error"))
+    out.push(test.equal_str(kind("{\"One\":5}"), "Kind.One: expected an array of 1 value", "a payload that is no array is an error"))
+    out.push(test.equal_str(kind("{\"One\":[1],\"Plain\":[]}"), "Kind: expected a one-key object, found 2 keys", "two keys are an error"))
+    out.push(test.equal_str(
+            kind("{\"Plain\":[]}"),
+            "Kind: Plain has no payload, so it is written as the string \"Plain\"",
+            "a unit variant as an object says what to write",
+        ))
+    out.push(test.equal_str(
+            kind("\"One\""),
+            "Kind: One has a payload, so it is written as an object with the one key \"One\"",
+            "a payload variant as a string says what to write",
+        ))
+    out.push(test.equal_str(kind("\"Zed\""), "Kind: no variant named Zed", "an unknown name"))
+    out.push(test.equal_str(kind("{\"Zed\":1}"), "Kind: no variant named Zed", "an unknown key"))
+    out.push(test.equal_str(kind("5"), "Kind: expected a variant name or a one-key object", "no variant at all"))
 
     return out
+}
+
+@derive(Debug, Decode)
+enum Kind {
+    Plain
+    One(int)
+    Two(int, str)
+}
+
+/// What decoding `doc` as a `Kind` says: the variant, or the error.
+fn kind(doc: str) -> str {
+    let (k, err) = Kind.decode(parsed(doc))
+    if err != nil {
+        return err.message()
+    }
+    return k.debug()
 }
 
 @derive(Encode, Decode)
