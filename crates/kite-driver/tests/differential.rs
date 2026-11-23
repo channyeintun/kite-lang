@@ -5103,6 +5103,63 @@ fn main() {
 "#,
         "42\n8\n-1\n",
     ),
+    // A concrete value converts to `dyn T` and is wrapped where an
+    // `Option<dyn T>` is wanted, as a `T` is where an `Option<T>` is: a
+    // binding, a return, an argument, a field and a slice element.
+    (
+        "a-value-becomes-an-optional-trait-object",
+        r#"trait T {
+  fn a(self) -> int
+}
+
+struct S {
+  n: int
+}
+
+impl T for S {
+  fn a(self) -> int {
+    return self.n
+  }
+}
+
+struct Slot {
+  held: Option<dyn T>
+}
+
+fn pick(on: bool) -> Option<dyn T> {
+  if on {
+    return S{ n: 2 }
+  }
+  return nil
+}
+
+fn take(x: Option<dyn T>) -> int {
+  if x == nil {
+    return 0
+  }
+  return x.a()
+}
+
+fn main() {
+  let s: Option<dyn T> = S{ n: 1 }
+  if s != nil {
+    io.print(s.a())
+  }
+  let p = pick(true)
+  if p != nil {
+    io.print(p.a())
+  }
+  io.print(pick(false) == nil)
+  io.print(take(S{ n: 3 }))
+  let slot = Slot{ held: S{ n: 4 } }
+  io.print(take(slot.held))
+  var xs: [Option<dyn T>] = [S{ n: 5 }, nil]
+  xs.push(S{ n: 6 })
+  io.print(take(xs[0]) + take(xs[1]) + take(xs[2]))
+}
+"#,
+        "1\n2\ntrue\n3\n4\n11\n",
+    ),
     // The built-in types meet the prelude's `Display`, `Debug` and `Hash`
     // bounds, and a call through one is what `@derive` and interpolation do
     // with a field of that type. They met none, so the specification's own

@@ -11827,6 +11827,20 @@ impl<'a> Checker<'a> {
                 kind: ExprKind::Wrap { value: Box::new(e) },
                 ty: want,
             },
+            // A value that converts to the optional's inner type stands for
+            // it too, converted then wrapped: an `S` where an
+            // `Option<dyn T>` is wanted, as where a `dyn T` is.
+            TyKind::Optional(inner) if matches!(self.types.kind(inner), TyKind::Dyn(_)) => {
+                let converted = self.coerce(e, Some(inner));
+                if converted.ty != inner {
+                    return converted;
+                }
+                hir::Expr {
+                    span: converted.span,
+                    kind: ExprKind::Wrap { value: Box::new(converted) },
+                    ty: want,
+                }
+            }
             // A concrete value becoming a trait object. Nothing about the value
             // changes; the node records that dispatch is now dynamic.
             TyKind::Dyn(tr) if self.coerces_to_dyn(e.ty, want) => {
