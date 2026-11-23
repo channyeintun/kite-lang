@@ -1892,6 +1892,10 @@ fn a_module_reached_as_part_of_two_packages_is_refused() {
         let said = p.run(&main).expect_err("one module, two packages");
         assert!(said.contains("E0404"), "{}", said);
         assert!(said.contains("it was first reached here"), "{}", said);
+        // The module is named once, in the title, as the `use`s spell it: the
+        // note did not say it again as the canonical absolute path.
+        assert!(said.contains("inner` is already loaded as part of"), "{}", said);
+        assert!(said.contains("= note: it is one module,"), "no path in the note: {}", said);
     }
     // One route alone is fine.
     let one = p.file("src/one.kite", &format!("use d/inner\n\n{}", body));
