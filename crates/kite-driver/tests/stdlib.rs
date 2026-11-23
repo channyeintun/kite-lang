@@ -148,16 +148,44 @@ fn the_standard_librarys_tests_pass_on_wasm_too() {
 }
 
 #[test]
-fn std_json_compiles_without_a_warning_as_its_own_entry() {
+fn every_std_module_compiles_without_a_warning_as_its_own_entry() {
     // `kitec test std/json.kite` compiles the module as the entry, where its
     // own code is the program's: a warning there is one the library gives
-    // itself, over a cast or a comparison it meant. (`std/math`, `std/fmt` and
-    // the prelude still do, over casts that truncate on purpose.)
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../std/json.kite");
-    let src = std::fs::read_to_string(&path).expect("std/json.kite");
-    let compiled = compile(&path, &src, Emit::Check);
-    let shown = compiled.render_diagnostics();
-    assert!(shown.trim().is_empty(), "{}", shown);
+    // itself, over a cast or a comparison it meant. `std/math`, `std/fmt` and
+    // the prelude did, over casts that truncate on purpose; a file that is a
+    // module's own source is the library's, so its advice is silenced as it is
+    // when the module is imported.
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../std");
+    let mut checked = 0;
+    for entry in std::fs::read_dir(&dir).expect("std/") {
+        let path = entry.expect("entry").path();
+        if path.extension().is_none_or(|x| x != "kite") {
+            continue;
+        }
+        let src = std::fs::read_to_string(&path).expect("read");
+        let compiled = compile(&path, &src, Emit::Check);
+        let shown = compiled.render_diagnostics();
+        assert!(shown.trim().is_empty(), "{}:\n{}", path.display(), shown);
+        // Silencing must not hide new advice: a copy one comment away from
+        // the library's text is the user's, and the only warning the
+        // library may give itself is the truncating cast it means.
+        let edited = format!("{}\n// edited\n", src);
+        let shown = compile(&path, &edited, Emit::Check).render_diagnostics();
+        for line in shown.lines().filter(|l| l.starts_with("warning") || l.starts_with("error")) {
+            assert_eq!(
+                line,
+                "warning[E0212]: this cast discards the fractional part",
+                "{}:\n{}",
+                path.display(),
+                shown
+            );
+        }
+        if path.ends_with("math.kite") {
+            assert!(shown.contains("E0212"), "an edited std/math is advised:\n{}", shown);
+        }
+        checked += 1;
+    }
+    assert!(checked >= 20, "only {} modules found", checked);
 }
 
 /// Every `kite` fence in the standard library's own doc comments compiles and
