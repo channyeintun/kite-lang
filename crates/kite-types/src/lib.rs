@@ -1580,7 +1580,7 @@ impl<'a> Checker<'a> {
                 // arm is written, since a block in value position must be a
                 // single expression. Reading divergence off the arms is what
                 // lets the function containing it be seen to return.
-                let (e, flow) = self.match_expr_with_flow(m, None);
+                let (e, flow) = self.match_expr_with_flow(m, None, true);
                 Some((hir::Stmt::Expr(e), flow))
             }
 
@@ -9106,18 +9106,20 @@ impl<'a> Checker<'a> {
     // ---- match ------------------------------------------------------------
 
     fn match_expr(&mut self, m: &ast::MatchExpr, expected: Option<TyId>) -> hir::Expr {
-        self.match_expr_with_flow(m, expected).0
+        self.match_expr_with_flow(m, expected, false).0
     }
 
     /// The same check, also reporting whether control falls out of the match.
     ///
     /// Only a statement asks: an expression that needs a value gets one or a
     /// diagnostic, and a match every arm of which leaves cannot supply one
-    /// either way.
+    /// either way. `discard` is set for that statement, whose arms' values
+    /// nothing reads.
     fn match_expr_with_flow(
         &mut self,
         m: &ast::MatchExpr,
         expected: Option<TyId>,
+        discard: bool,
     ) -> (hir::Expr, Flow) {
         let before = self.taint.clone();
         let scrutinee = self.expr(&m.scrutinee, None);
@@ -9243,7 +9245,7 @@ impl<'a> Checker<'a> {
             let want = expected.or(result_ty);
             let body = match &arm.body {
                 ast::MatchBody::Expr(e) => self.expr(e, want),
-                ast::MatchBody::Block(b) => self.match_block(b, want),
+                ast::MatchBody::Block(b) => self.match_block(b, want, discard),
             };
             // An arm producing a `T` where a `?T` is wanted is subsumption,
             // exactly as it is for a `let` or an argument — so `Text(s) => s`
@@ -9393,9 +9395,20 @@ impl<'a> Checker<'a> {
     /// So an arm wanting several statements *and* a result writes the match in
     /// statement position and returns from every arm, which
     /// [`Self::match_expr_with_flow`] recognises as diverging.
-    fn match_block(&mut self, b: &ast::Block, expected: Option<TyId>) -> hir::Expr {
+    ///
+    /// An `if` or a `match` that opens a block is read as a statement, but
+    /// when it is the whole block and every branch of it is one expression,
+    /// it is one expression too — `2 => { if a { 1 } else { 0 } }` is `1` or
+    /// `0`, not `()`. Only where the value is wanted: an arm of a `match`
+    /// statement runs its block for its effects, as it always has.
+    fn match_block(&mut self, b: &ast::Block, expected: Option<TyId>, discard: bool) -> hir::Expr {
         match b.stmts.as_slice() {
             [ast::Stmt::Expr(e)] => self.expr(e, expected),
+            [ast::Stmt::If(i)] if !discard && if_is_value(i) => {
+                let else_ = i.else_.as_deref().expect("a value `if` has an `else`");
+                self.if_expr(&i.cond, &i.then, else_, i.span, expected)
+            }
+            [ast::Stmt::Match(m)] if !discard && match_is_value(m) => self.match_expr(m, expected),
             _ => {
                 let sig = self.current_signature();
                 let (block, flow) = self.block(b, &sig);
@@ -11273,9 +11286,30 @@ impl<'a> Checker<'a> {
 
     /// A block used for its value must be a single expression. Kite has no
     /// implicit tail expression in statement blocks.
+    ///
+    /// An `if` or a `match` opening a line parses as a statement, so one that
+    /// is a branch's whole body arrives here as one — and it is a single
+    /// expression all the same. Refusing it made `if a { if b { 1 } else { 2 }
+    /// } else { 3 }` "must produce a value", where wrapping the inner `if` in
+    /// parentheses, which changes nothing, compiled.
     fn block_value(&mut self, b: &ast::Block, expected: Option<TyId>) -> hir::Expr {
         match b.stmts.as_slice() {
             [ast::Stmt::Expr(e)] => self.expr(e, expected),
+            [ast::Stmt::If(i)] => match i.else_.as_deref() {
+                Some(else_) => self.if_expr(&i.cond, &i.then, else_, i.span, expected),
+                None => {
+                    self.diags.push(
+                        Diagnostic::error(codes::E0200, "an `if` used as a value needs an `else`")
+                            .with_primary(i.span, "no value when this test is false")
+                            .with_note(
+                                "every path through a value `if` has to produce one: end the \
+                                 chain with `else { … }`",
+                            ),
+                    );
+                    self.lit(ExprKind::Error, TyId::ERROR, i.span)
+                }
+            },
+            [ast::Stmt::Match(m)] => self.match_expr(m, expected),
             _ => {
                 self.diags.push(
                     Diagnostic::error(codes::E0200, "this block must produce a value")
@@ -13674,6 +13708,33 @@ fn if_acts(i: &ast::IfStmt) -> bool {
             Some(ast::ElseBranch::Block(b)) => block_acts(b),
             Some(ast::ElseBranch::If(i)) => if_acts(i),
         }
+}
+
+/// Whether a block is one expression: a single expression statement, or a
+/// single `if` or `match` each of whose branches is one in turn.
+fn block_is_value(b: &ast::Block) -> bool {
+    match b.stmts.as_slice() {
+        [ast::Stmt::Expr(_)] => true,
+        [ast::Stmt::If(i)] => if_is_value(i),
+        [ast::Stmt::Match(m)] => match_is_value(m),
+        _ => false,
+    }
+}
+
+fn if_is_value(i: &ast::IfStmt) -> bool {
+    block_is_value(&i.then)
+        && match i.else_.as_deref() {
+            None => false,
+            Some(ast::ElseBranch::Block(b)) => block_is_value(b),
+            Some(ast::ElseBranch::If(n)) => if_is_value(n),
+        }
+}
+
+fn match_is_value(m: &ast::MatchExpr) -> bool {
+    m.arms.iter().all(|a| match &a.body {
+        ast::MatchBody::Expr(_) => true,
+        ast::MatchBody::Block(b) => block_is_value(b),
+    })
 }
 
 /// Whether a statement registers a `defer` for the function it is in.

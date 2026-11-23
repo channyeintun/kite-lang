@@ -15,7 +15,8 @@ Everything below is checked against `target/release/kitec`, not against the pros
 - **An `if` used as a value takes exactly one expression per branch.** No statements, no
   trailing-expression block. `let x = if c { let y = 1  y } else { 0 }` is `E0200`.
   A `match` arm follows the same rule: `{ 1 }` is still the value `1`, but the moment the
-  block holds a statement the arm is `()`.
+  block holds a statement the arm is `()`. An `if` or `match` is one expression, so
+  `if a { if b { 1 } else { 2 } } else { 3 }` and `2 => { if a { 1 } else { 0 } }` are values.
 - **`;` is not a token.** Newlines end statements. A statement continues only when the
   previous line *ends* in an operator, an open delimiter, or a comma. A line that *starts*
   with `||` is a zero-parameter closure, and one that starts with `-` is a negation; both
@@ -769,13 +770,15 @@ fn main() {
 
 `if` is also an expression when an `else` is present and **every branch is a single
 expression**. This is the delta from Rust: a value-`if` branch is not a block with a
-trailing expression, it is one expression.
+trailing expression, it is one expression — which may itself be an `if` or a `match`.
 
 ```kite
 fn main() {
     let n = 12
     let label = if n > 10 { "big" } else if n > 5 { "mid" } else { "small" }
     io.print(label)
+    let sign = if n > 0 { if n % 2 == 0 { "even" } else { "odd" } } else { "none" }
+    io.print(sign) // even
 }
 ```
 

@@ -5477,6 +5477,53 @@ fn main() {
 "#,
         "quick\nslow\nnone\nss\nq\n4\n",
     ),
+    // A value-`if` branch, or a `match` block arm, whose one expression is
+    // an `if` or a `match` yields it. An `if` opening a block parses as a
+    // statement, so the branch was "must produce a value" and the arm `()`.
+    (
+        "a-branch-that-is-an-if-or-a-match-is-one-expression",
+        r#"fn pick(a: bool, b: bool) -> int {
+  return if a { if b { 1 } else { 2 } } else { 3 }
+}
+
+fn inner_match(a: bool, n: int) -> int {
+  return if a {
+    match n {
+      2 => 20,
+      _ => 0,
+    }
+  } else {
+    7
+  }
+}
+
+fn arm(n: int, a: bool) -> int {
+  return match n {
+    2 => {
+      if a { 1 } else { 0 }
+    },
+    _ => 5,
+  }
+}
+
+fn main() {
+  io.print(pick(true, false))
+  io.print(pick(false, true))
+  io.print(inner_match(true, 2))
+  io.print(inner_match(false, 2))
+  io.print(arm(2, true))
+  io.print(arm(2, false))
+  io.print(arm(1, true))
+  match 3 {
+    3 => {
+      if true { io.print("statement") } else { io.print("no") }
+    },
+    _ => {},
+  }
+}
+"#,
+        "2\n3\n20\n7\n1\n0\n5\nstatement\n",
+    ),
 ];
 
 #[test]

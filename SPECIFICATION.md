@@ -832,6 +832,10 @@ present:
 let label = if x > 10 { "big" } else { "small" }
 ```
 
+A branch is one expression, and an `if` or a `match` is one too: `if a { if b {
+1 } else { 2 } } else { 3 }` is an `int`, and so is a branch holding a whole
+value `match`.
+
 ### 6.2 `for`
 
 `for` is the only loop keyword. It has three forms.
@@ -1405,7 +1409,8 @@ that is not one: `Dir` where the enum says `Directory` is a binding, which takes
 every value.
 
 An arm is an expression or a block. A block arm **runs for its effects**: it
-produces a value only when it is a single expression, because there are no tail
+produces a value only when it is a single expression — which may be an `if` or a
+`match` whose own branches are single expressions — because there are no tail
 expressions in Kite — a value arriving by falling off the end of a block is the
 hidden control flow the language is spent avoiding, and an `if` used as a value
 says "expected a single expression" for the same reason.
