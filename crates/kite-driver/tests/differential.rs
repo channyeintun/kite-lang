@@ -5884,6 +5884,75 @@ fn main() {
 "#,
         "6\n3\n12\n1\ntrue\njob\n6\n7\n",
     ),
+    // A derived `Encode` writes a tuple as an array of its elements in order,
+    // in a field, a slice, a nested tuple and a payload, and `Decode` reads
+    // back an array of exactly its length. Both used to refuse a tuple.
+    (
+        "a-tuple-derives-encode-and-decode",
+        r#"use std/json
+
+@derive(Encode, Decode, Debug)
+struct Inner {
+    n: int
+}
+
+@derive(Encode, Decode)
+struct P {
+    t: (int, str)
+    nested: [(bool, Option<float>)]
+    deep: (Inner, (int, int))
+}
+
+@derive(Encode, Decode)
+enum E {
+    Pt(at: (int, int))
+    Bare((str, int))
+}
+
+fn main() {
+    let p = P{ t: (1, "a"), nested: [(true, nil), (false, 2.5)], deep: (Inner{ n: 7 }, (8, 9)) }
+    let text = json.stringify(p.encode())
+    io.print(text)
+    let (doc, err) = json.parse(text)
+    if err == nil {
+        let (q, e2) = P.decode(doc)
+        if e2 == nil {
+            io.print("\(q.t.0) \(q.t.1) \(q.nested.len()) \(q.deep.0.n) \(q.deep.1.1)")
+        }
+    }
+    for bad in ["{\"t\":[1],\"nested\":[],\"deep\":[{\"n\":1},[1,2]]}", "{\"t\":[1,2],\"nested\":[],\"deep\":[{\"n\":1},[1,2]]}"] {
+        let (d, e3) = json.parse(bad)
+        if e3 == nil {
+            let (_, e4) = P.decode(d)
+            if e4 != nil {
+                io.print(e4.message())
+            }
+        }
+    }
+    io.print(json.stringify(E.Pt(at: (1, 2)).encode()))
+    io.print(json.stringify(E.Bare(("x", 3)).encode()))
+    let (ed, e5) = json.parse("{\"Bare\":[[\"y\",4]]}")
+    if e5 == nil {
+        let (ev, e6) = E.decode(ed)
+        if e6 == nil {
+            match ev {
+                E.Bare(b) => io.print("\(b.0)\(b.1)")
+                E.Pt(at) => io.print(at.0)
+            }
+        }
+    }
+}
+
+"#,
+        r#"{"t":[1,"a"],"nested":[[true,null],[false,2.5]],"deep":[{"n":7},[8,9]]}
+1 a 2 7 9
+P.t: expected an array of 2 values
+P.t.1: expected a string
+{"Pt":{"at":[1,2]}}
+{"Bare":[["x",3]]}
+y4
+"#,
+    ),
     // An `Option<fn(…)>` proved present is the function it holds, so it can
     // be called as written, after an `if` or an early return. The call
     // looked at the declared type and said it was not a function.

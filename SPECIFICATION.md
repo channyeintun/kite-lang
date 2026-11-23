@@ -1774,9 +1774,12 @@ and deriving `Encode` or `Debug` publishes every field's value. An opaque type
 them.
 
 The walk handles primitives, slices, maps, optionals, tuples, and other types
-that derive the same trait. Where it cannot go — a function field, a `dyn
-Trait` — it says which field stopped it and what would fix it, and the
-hand-written implementation is still there to write. `Debug` and `Hash` derive
+that derive the same trait; `Encode` writes a tuple as a JSON array of its
+elements in order, and `Decode` reads back an array of exactly its length.
+Where it cannot go — a function field, a `dyn Trait` — it says which field
+stopped it and what would fix it, and the hand-written implementation is
+still there to write. That one error is the only one: the method is still
+declared, so a call to it elsewhere is not refused again. `Debug` and `Hash` derive
 for a generic type as well: a field of a parameter's type is walked through
 the parameter's own method, and the derived `impl` bounds that parameter by
 the trait, `impl<T: Debug> Debug for Box<T>`. `Encode` and `Decode` derive only

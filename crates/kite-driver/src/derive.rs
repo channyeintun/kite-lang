@@ -398,10 +398,14 @@ pub fn expand(
                 avoid,
                 diags,
                 failed: false,
+                clash: false,
             };
-            let text = w.item(&decls[index], at);
+            let mut text = w.item(&decls[index], at);
             if w.failed {
-                continue;
+                if w.clash {
+                    continue;
+                }
+                text = w.stand_in(&decls[index]);
             }
             source.push('\n');
             source.push_str(&text);
@@ -566,6 +570,9 @@ struct Writer<'a, 'd> {
     /// emitted half-written, so one bad field is one diagnostic and not a
     /// cascade of parse errors in generated text.
     failed: bool,
+    /// Set when the failure is that the method is already written by hand,
+    /// so that no stand-in is declared beside it (see [`Writer::stand_in`]).
+    clash: bool,
 }
 
 /// Statements accumulate as lines at a known indent; an expression is a string.
@@ -638,6 +645,7 @@ impl<'a> Writer<'a, '_> {
         // derived `impl Debug`, which is the one a call reaches.
         if let Some(written) = self.by_hand.covers(&decl.qualified, self.trait_) {
             self.failed = true;
+            self.clash = true;
             let mut d = match written {
                 None => Diagnostic::error(
                     codes::E0701,
@@ -667,6 +675,44 @@ impl<'a> Writer<'a, '_> {
             Derivable::Hash => self.hash_item(decl),
             Derivable::Encode => self.encode_item(decl),
             Derivable::Decode => self.decode_item(decl),
+        }
+    }
+
+    /// What a derive that was refused declares instead: the method, with a
+    /// body that is never run — the refusal is an error, so nothing is built.
+    /// Without it each later `x.encode()` or `T.decode(doc)` was an E0205 of
+    /// its own, and one field the derive could not write was four errors.
+    fn stand_in(&mut self, decl: &Decl) -> String {
+        let j = self.json.clone();
+        let (head, target) = self.header(decl);
+        match self.trait_ {
+            Derivable::Debug => wrap_impl(
+                &target,
+                Some(&format!("{}Debug", head)),
+                "fn debug(self) -> str",
+                &["    return \"\"".to_string()],
+            ),
+            Derivable::Hash => wrap_impl(
+                &target,
+                Some(&format!("{}Hash", head)),
+                "fn hash(self) -> int",
+                &["    return 0".to_string()],
+            ),
+            Derivable::Encode => wrap_impl(
+                &target,
+                Some(&format!("{}{j}.Encode", head)),
+                &format!("fn encode(self) -> {j}.Json"),
+                &[format!("    return {j}.Json.Null")],
+            ),
+            Derivable::Decode => {
+                let doc = self.local("doc");
+                wrap_impl(
+                    &format!("{}{}", head, target),
+                    None,
+                    &format!("pub fn decode({doc}: {j}.Json) -> ({}, error)", target),
+                    &["    return _, errors.new(\"not derived\")".to_string()],
+                )
+            }
         }
     }
 
@@ -1147,12 +1193,19 @@ impl<'a> Writer<'a, '_> {
                 out.push(format!("{}}}", pad));
                 format!("{j}.Json.Object({})", object)
             }
-            Type::Tuple { .. } => self.cannot(
-                ty.span(),
-                "a tuple",
-                "a tuple has no field names, so what it should become in JSON is a choice — use \
-                 a struct, which has made that choice",
-            ),
+            // A tuple is an array of its elements in order, as a positional
+            // payload is: the order is the only name an element has.
+            Type::Tuple { elems, .. } => {
+                let held = self.temp("tuple");
+                let list = self.temp("items");
+                out.push(format!("{}let {} = {}", pad, held, expr));
+                out.push(format!("{}var {}: [{j}.Json] = []", pad, list));
+                for (i, e) in elems.iter().enumerate() {
+                    let value = self.encode_of(e, &format!("{}.{}", held, i), depth, out);
+                    out.push(format!("{}{}.push({})", pad, list, value));
+                }
+                format!("{j}.Json.Array({})", list)
+            }
             Type::Fn { .. } => {
                 self.cannot(ty.span(), "a function", "a function value is not data")
             }
@@ -1522,12 +1575,32 @@ impl<'a> Writer<'a, '_> {
                 out.push(format!("{}}}", pad));
                 object
             }
-            Type::Tuple { .. } => self.cannot(
-                ty.span(),
-                "a tuple",
-                "a tuple has no field names, so what it should become in JSON is a choice — use \
-                 a struct, which has made that choice",
-            ),
+            // An array of exactly the tuple's arity, read element by element;
+            // a longer or shorter one is refused, as a positional payload's is.
+            Type::Tuple { elems, .. } => {
+                let node = self.temp("node");
+                let n = elems.len();
+                out.push(format!("{}let {} = {}", pad, node, source));
+                out.push(format!("{}if {} == nil {{", pad, node));
+                out.push(format!("{}    return _, errors.new(\"{}: missing\")", pad, where_));
+                out.push(format!("{}}}", pad));
+                out.push(format!("{}if {j}.items({}).len() != {} {{", pad, node, n));
+                out.push(format!(
+                    "{}    return _, errors.new(\"{}: expected an array of {} value{}\")",
+                    pad,
+                    where_,
+                    n,
+                    if n == 1 { "" } else { "s" }
+                ));
+                out.push(format!("{}}}", pad));
+                let mut values = Vec::new();
+                for (i, e) in elems.iter().enumerate() {
+                    let at = format!("{}.{}", where_, i);
+                    let value = self.decode_of(e, &format!("{j}.at({}, {})", node, i), &at, depth, out);
+                    values.push(value);
+                }
+                format!("({})", values.join(", "))
+            }
             Type::Fn { .. } => {
                 self.cannot(ty.span(), "a function", "a function value is not data")
             }

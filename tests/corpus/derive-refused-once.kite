@@ -1,0 +1,27 @@
+// A derive that cannot write a field is one error. The method is still
+// declared, so each later `encode()` or `decode` was not refused again as
+// E0205: one field the derive could not write used to be several errors.
+
+use std/json
+
+@derive(Encode)
+struct Top {
+    f: fn() -> int //~ ERROR E0702
+}
+
+@derive(Decode)
+struct Bottom {
+    d: dyn Display //~ ERROR E0702
+}
+
+fn main() {
+    let t = Top{ f: || 1 }
+    io.print(json.stringify(t.encode()))
+    let (d, e) = json.parse("{}")
+    if e == nil {
+        let (v, e2) = Bottom.decode(d)
+        if e2 == nil {
+            io.print(v.d)
+        }
+    }
+}
