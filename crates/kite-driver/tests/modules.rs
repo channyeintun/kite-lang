@@ -953,6 +953,25 @@ fn the_nearest_module_of_a_spelling_wins() {
     assert_eq!(p.run(&main).expect("compiles"), "a's own\nouter\nouter\n");
 }
 
+/// A directory is a module when it holds a `.kite` file. A `config/` holding
+/// only data beside `config.kite` was taken for an empty module, and the
+/// first sign was `cannot find` at a name `config.kite` declares.
+#[test]
+fn a_directory_without_kite_files_does_not_hide_the_file_beside_it() {
+    let p = Project::new("data-dir");
+    p.file("config/app.toml", "name = \"demo\"\n");
+    p.file("config.kite", "pub fn name() -> str {\n  return \"demo\"\n}\n");
+    let main = p.file("main.kite", "use config\n\nfn main() {\n  io.print(config.name())\n}\n");
+    assert_eq!(p.run(&main).expect("compiles"), "demo\n");
+
+    // With no `config.kite`, nothing answers, and the note says why the
+    // directory did not.
+    std::fs::remove_file(p.dir.join("config.kite")).expect("remove");
+    let said = p.run(&main).expect_err("no module `config`").replace('\\', "/");
+    assert!(said.contains("cannot find module `config`"), "{}", said);
+    assert!(said.contains("is a directory with no `.kite` file directly in it"), "{}", said);
+}
+
 /// A `use` that finds nothing says every place it looked, nearest first.
 #[test]
 fn a_missing_module_names_every_place_it_was_looked_for() {

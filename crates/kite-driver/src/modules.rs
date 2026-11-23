@@ -1223,6 +1223,12 @@ impl Loader {
         let mut missing = Diagnostic::error(codes::E0400, format!("cannot find module `{}`", path))
             .with_primary(span, "no such module")
             .with_note(format!("looked for {}", places));
+        for dir in tried.iter().filter(|p| self.files.is_dir(p)) {
+            missing = missing.with_note(format!(
+                "`{}` is a directory with no `.kite` file directly in it, so it is not a module",
+                dir.display()
+            ));
+        }
         // The manifest's own error is reported in the manifest, which is not
         // the file anyone looking at this `use` has open — an editor shows a
         // file's own diagnostics beside it. Said here as well, the reason is
@@ -1278,7 +1284,13 @@ impl Loader {
         let package = package.clone();
         // A directory is the canonical form; a single file is the same thing
         // with one file in it, and is what most modules start as.
-        if self.files.is_dir(&at) {
+        //
+        // **A directory is a module when it holds a `.kite` file.** Any
+        // directory counted, so a `config/` holding only `app.toml` beside
+        // `config.kite` was taken for an empty module, the file was never
+        // read, and the first sign was `cannot find` at a name `config.kite`
+        // plainly declares.
+        if self.files.is_dir(&at) && !self.files.kite_files(&at).is_empty() {
             let prefix = within(prefix, segments);
             return Some(Found::Path { at, is_dir: true, package, prefix });
         }

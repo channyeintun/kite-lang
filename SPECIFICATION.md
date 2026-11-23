@@ -1888,8 +1888,9 @@ program that also has `use lib`, is `E0404`, because `shape.kite` is already
 part of `lib` and would otherwise be compiled twice, as two modules whose types
 are two types.
 
-`use x` takes the directory `x/` when there is one and the file `x.kite`
-otherwise. The directory is the general form; a file is the one-file case, and
+`use x` takes the directory `x/` when there is one holding a `.kite` file,
+and the file `x.kite` otherwise — a directory of data, `config/` holding only
+`app.toml`, is not a module and does not hide the `config.kite` beside it. The directory is the general form; a file is the one-file case, and
 is what most modules are and what nearly all of them start as.
 
 ```

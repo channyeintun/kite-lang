@@ -453,7 +453,9 @@ with no rewrite.
 
 ## 4. Modules
 
-**A module is a directory, or a single `.kite` file.** Every `.kite` file in a
+**A module is a directory, or a single `.kite` file.** `use x` takes `x/` when
+it holds a `.kite` file directly, and `x.kite` otherwise — a `config/` of data
+files beside `config.kite` does not hide it. Every `.kite` file in a
 module directory contributes to one namespace; the files are read in sorted
 order and there are no per-file imports of siblings — `use shape` written
 inside `lib/` is `E0404`, since `shape.kite` is already part of `lib`, and so
