@@ -1675,7 +1675,7 @@ fn a_failed_html_update_leaves_the_view_true_to_the_page() {
          exports.main();\n\
          out.push(\"on the page: \" + root.children.map((c) => c.text).join(\",\"));\n\
          process.stdout.write(out.map((l) => l + \"\\n\").join(\"\"));\n";
-    let out = run_runner_under_node("htmlfail", &src, runner, &[]);
+    let out = run_runner_under_node("htmlfail", src, runner, &[]);
     assert_eq!(
         out,
         "first failed: true\nsecond ok: true\non the page: z\n",
