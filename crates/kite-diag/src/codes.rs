@@ -902,7 +902,11 @@ codes! {
          temporary is one, and at most 7,654,321 bytes of code. A long slice \
          or map literal is no trouble on any target: past a short window, each \
          element is added to what has been built, and on WebAssembly each \
-         chunk of 4,096 constants is built by a function of its own, so no \
-         one function grows with the literal. The native target has neither \
+         run of up to 4,096 constants is built by a function of its own, so no \
+         one function grows with the literal's constants. An element that is \
+         not a constant, such as a struct literal, or a string in a \
+         `[Option<str>]`, which is wrapped first, is a statement of the function the literal is in, \
+         and V8 may fail to compile a function of a hundred thousand of \
+         those below either limit; split it. The native target has neither \
          limit.";
 }

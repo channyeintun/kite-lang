@@ -699,11 +699,15 @@ V8 has a limit no validator checks: the machine code it compiles one function
 to must fit in half of its code space, and past that it aborts the process
 rather than refuse the module. A literal of 120,000 strings, an allocation
 each, was such a function at 1.9 MB of Wasm. So a literal longer than one
-`array.new_fixed` chunk (4,096 elements) has each chunk of constants built by
-a function of its own, which the literal's function calls; identical chunks
-are one function. No function holds more than one chunk of a literal, however
-long it is. A chunk that reads a local stays inline, where each element is one
-`local.get`.
+`array.new_fixed` chunk (4,096 elements) has each run of constants in a chunk
+built by a function of its own, which the literal's function calls, and each
+element that reads a local stored in place with `array.set`; identical runs
+are one function. No function holds more than one chunk of a literal's
+constants, however long it is. This bounds the literal, not the code around
+it: an element that is not a constant — a string in a `[Option<str>]`, which
+is wrapped first, a struct literal, an interpolation — is computed by a statement of the literal's
+function before the literal is built, and a hundred thousand such statements
+are still one function that V8 may fail to compile.
 
 Not every MIR local is a Wasm local. One that lives within a single block,
 written there before anything reads it, shares a Wasm local of its type with

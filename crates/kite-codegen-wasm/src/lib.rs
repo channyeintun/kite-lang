@@ -2945,33 +2945,56 @@ impl<'a> Emitter<'a> {
         func.instruction(&Instruction::ArrayNewDefault(array_type));
         func.instruction(&Instruction::LocalSet(hold));
         for (i, chunk) in elems.chunks(STR_LITERAL_CHUNK).enumerate() {
+            // Each run of constants is built by a function of its own, and
+            // each local is stored where it goes, so the literal's length
+            // does not decide how large this function is: a local in every
+            // chunk would otherwise keep every chunk's constants here. See
+            // `pieces`.
+            if self.pieces.fills(array_type) {
+                let mut at = i * STR_LITERAL_CHUNK;
+                let local = |e: &&mir::Operand| matches!(e, mir::Operand::Local(_));
+                for run in chunk.chunk_by(|a, b| local(a) == local(b)) {
+                    if local(&run[0]) {
+                        for (j, e) in run.iter().enumerate() {
+                            func.instruction(&Instruction::LocalGet(hold));
+                            func.instruction(&Instruction::I32Const((at + j) as i32));
+                            self.operand(func, e);
+                            func.instruction(&Instruction::ArraySet(array_type));
+                        }
+                    } else {
+                        let mut body = Function::new(vec![]);
+                        for e in run {
+                            self.operand(&mut body, e);
+                        }
+                        body.instruction(&Instruction::ArrayNewFixed {
+                            array_type_index: array_type,
+                            array_size: run.len() as u32,
+                        });
+                        body.instruction(&Instruction::End);
+                        let piece = self.pieces.piece(array_type, body, self.f);
+                        func.instruction(&Instruction::LocalGet(hold));
+                        func.instruction(&Instruction::I32Const(at as i32));
+                        func.instruction(&Instruction::Call(piece));
+                        func.instruction(&Instruction::I32Const(0));
+                        func.instruction(&Instruction::I32Const(run.len() as i32));
+                        func.instruction(&Instruction::ArrayCopy {
+                            array_type_index_dst: array_type,
+                            array_type_index_src: array_type,
+                        });
+                    }
+                    at += run.len();
+                }
+                continue;
+            }
             func.instruction(&Instruction::LocalGet(hold));
             func.instruction(&Instruction::I32Const((i * STR_LITERAL_CHUNK) as i32));
-            // A chunk of constants is built by a function of its own, so the
-            // literal's length does not decide how large this one is. See
-            // `pieces`.
-            let constant = chunk.iter().all(|e| !matches!(e, mir::Operand::Local(_)));
-            if constant && self.pieces.fills(array_type) {
-                let mut body = Function::new(vec![]);
-                for e in chunk {
-                    self.operand(&mut body, e);
-                }
-                body.instruction(&Instruction::ArrayNewFixed {
-                    array_type_index: array_type,
-                    array_size: chunk.len() as u32,
-                });
-                body.instruction(&Instruction::End);
-                let piece = self.pieces.piece(array_type, body, self.f);
-                func.instruction(&Instruction::Call(piece));
-            } else {
-                for e in chunk {
-                    self.operand(func, e);
-                }
-                func.instruction(&Instruction::ArrayNewFixed {
-                    array_type_index: array_type,
-                    array_size: chunk.len() as u32,
-                });
+            for e in chunk {
+                self.operand(func, e);
             }
+            func.instruction(&Instruction::ArrayNewFixed {
+                array_type_index: array_type,
+                array_size: chunk.len() as u32,
+            });
             func.instruction(&Instruction::I32Const(0));
             func.instruction(&Instruction::I32Const(chunk.len() as i32));
             func.instruction(&Instruction::ArrayCopy {

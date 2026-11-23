@@ -9,15 +9,17 @@
 //! aborts the process. Each string is an `array.new_fixed` of its own, an
 //! allocation, which is most of what that machine code is.
 //!
-//! So a chunk whose elements are all constants is built by a function of its
-//! own, `() -> (ref $array)`, and the literal's function calls it where the
-//! chunk's elements would have been. No function then holds more than one
-//! chunk of a literal, whatever its length: the literal's own function holds a
-//! call per chunk, and each piece holds one chunk. Identical chunks — a table
-//! of a hundred thousand `"same"` — are one piece called many times, which is
-//! sound because each call builds a fresh array. A chunk that reads a local
-//! stays inline: it is cheap there, one `local.get` an element, and a function
-//! of its own would need the locals as parameters.
+//! So each run of constants in a chunk is built by a function of its own,
+//! `() -> (ref $array)`, and the literal's function calls it where the run's
+//! elements would have been; an element that reads a local is stored in place
+//! with `array.set`, one `local.get` and no allocation. No function then holds
+//! more than one chunk of a literal's constants, whatever its length and
+//! wherever its locals fall: the literal's own function holds a call per run
+//! and a store per local, and each piece holds at most one chunk. (A local in
+//! every chunk once kept every chunk's constants inline, and 120,000 strings
+//! with one local per 4,000 aborted V8 as before.) Identical runs — a table of
+//! a hundred thousand `"same"` — are one piece called many times, which is
+//! sound because each call builds a fresh array.
 //!
 //! The pieces come last in the function index space, after every other helper,
 //! and are made as bodies are emitted rather than collected beforehand; only

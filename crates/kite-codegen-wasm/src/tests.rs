@@ -1244,13 +1244,18 @@ fn body_sizes(bytes: &[u8]) -> Vec<usize> {
 /// No function holds more than one chunk of a long literal of constants,
 /// whatever the literal's length. Inline, a hundred and twenty thousand
 /// strings were one function V8 could not compile, and it aborted the process
-/// rather than refuse the module. Identical chunks are one piece; a chunk that
-/// reads a local stays in the literal's own function.
+/// rather than refuse the module. Identical runs are one piece. A local in
+/// every chunk does not keep the chunk's constants inline: each local is
+/// stored in place, and the constants around it are pieces still.
 #[test]
 fn a_long_literal_of_constants_is_built_by_functions_of_bounded_size() {
     let built = |n: usize, entries: usize, distinct: bool| {
         let elems: Vec<String> = (0..n)
-            .map(|i| if distinct { format!("\"s{}\"", i) } else { "\"same\"".to_string() })
+            .map(|i| match i {
+                _ if distinct && i % 4_000 == 3 => "a".to_string(),
+                _ if distinct => format!("\"s{}\"", i),
+                _ => "\"same\"".to_string(),
+            })
             .collect();
         let entries: Vec<String> =
             (0..entries).map(|i| format!("\"k{}\": \"v{}\"", i, i)).collect();
