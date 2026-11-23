@@ -72,9 +72,9 @@
     "number": {
       "patterns": [
         {
-          "comment": "A float needs a digit either side of the point: `1.` and `.5` are not floats in Kite.",
+          "comment": "A float needs a digit either side of the point (`1.` and `.5` are not floats in Kite), or an exponent alone (`1e10`). After a `.` the digits are a tuple index: `t.0.1` is two of them, not `0.1`.",
           "name": "constant.numeric.float.kite",
-          "match": "\\b[0-9][0-9_]*\\.[0-9][0-9_]*([eE][-+]?[0-9_]+)?\\b"
+          "match": "(?<!\\.)\\b[0-9][0-9_]*(\\.[0-9][0-9_]*([eE][-+]?[0-9_]+)?|[eE][-+]?[0-9_]+)\\b"
         },
         {
           "name": "constant.numeric.hex.kite",
@@ -122,14 +122,14 @@
       "comment": "A name in a declaring position, so `fn area` colours `area` as a definition rather than as an ordinary identifier.",
       "patterns": [
         {
-          "match": "\\b(fn)\\s+([A-Za-z_][A-Za-z0-9_]*)",
+          "match": "\\b(fn)\\s+([\\p{L}_][\\p{L}\\p{N}_]*)",
           "captures": {
             "1": { "name": "keyword.declaration.function.kite" },
             "2": { "name": "entity.name.function.kite" }
           }
         },
         {
-          "match": "\\b(struct|enum|trait|type)\\s+([A-Za-z_][A-Za-z0-9_]*)",
+          "match": "\\b(struct|enum|trait|type)\\s+([\\p{L}_][\\p{L}\\p{N}_]*)",
           "captures": {
             "1": { "name": "keyword.declaration.type.kite" },
             "2": { "name": "entity.name.type.kite" }
@@ -208,23 +208,8 @@
     },
 
     "operator": {
+      "comment": "TextMate takes the first pattern that matches at a position, so a longer operator is listed before every shorter one it starts with: `->` before `-`, `==` before `=`, `<<` before `<`, `&&` before `&`.",
       "patterns": [
-        {
-          "name": "keyword.operator.assignment.kite",
-          "match": "(\\+=|-=|\\*=|/=|%=|=)"
-        },
-        {
-          "name": "keyword.operator.comparison.kite",
-          "match": "(==|!=|<=|>=|<|>)"
-        },
-        {
-          "name": "keyword.operator.logical.kite",
-          "match": "(&&|\\|\\||!)"
-        },
-        {
-          "name": "keyword.operator.arithmetic.kite",
-          "match": "(\\+|-|\\*|/|%|&|\\||\\^|<<|>>)"
-        },
         {
           "name": "keyword.operator.arrow.kite",
           "match": "(->|=>)"
@@ -232,10 +217,41 @@
         {
           "name": "keyword.operator.range.kite",
           "match": "(\\.\\.=|\\.\\.)"
+        },
+        {
+          "name": "keyword.operator.arithmetic.kite",
+          "match": "(<<|>>)"
+        },
+        {
+          "name": "keyword.operator.comparison.kite",
+          "match": "(==|!=|<=|>=)"
+        },
+        {
+          "name": "keyword.operator.logical.kite",
+          "match": "(&&|\\|\\|)"
+        },
+        {
+          "name": "keyword.operator.assignment.kite",
+          "match": "(\\+=|-=|\\*=|/=|%=)"
+        },
+        {
+          "name": "keyword.operator.assignment.kite",
+          "match": "="
+        },
+        {
+          "name": "keyword.operator.comparison.kite",
+          "match": "(<|>)"
+        },
+        {
+          "name": "keyword.operator.logical.kite",
+          "match": "!"
+        },
+        {
+          "name": "keyword.operator.arithmetic.kite",
+          "match": "(\\+|-|\\*|/|%|&|\\||\\^)"
         }
       ]
     },
-
     "punctuation": {
       "patterns": [
         { "name": "punctuation.separator.kite", "match": "[,:]" },
