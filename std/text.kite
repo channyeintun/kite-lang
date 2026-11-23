@@ -3085,12 +3085,11 @@ fn next_cluster(body: str, i: int, end: int) -> int {
             }
         } else if is_combining(c) || within(c, 0x1F3FB, 0x1F3FF) || within(c, 0xE0020, 0xE007F) {
             k += 1
-            if conjunct > 0 {
-                if incb_linker(c) {
-                    conjunct = 2
-                } else if !is_combining(c) {
-                    conjunct = 0
-                }
+            // Every one of these is Extend to GB9c — a skin-tone modifier and
+            // a tag character too — so none ends a conjunct; a virama is the
+            // Linker that lets one go on.
+            if conjunct > 0 && incb_linker(c) {
+                conjunct = 2
             }
         } else {
             break
@@ -3117,10 +3116,11 @@ fn incb_consonant(c: int) -> bool {
 }
 
 /// Indic_Conjunct_Break=Linker (Unicode 15.1): the virama of each of those
-/// scripts. Extend is not a table of its own here: it is a mark (`is_combining`)
-/// or a joiner, as it is to GB9, which differs from InCB=Extend only by a few
-/// spacing vowel signs (U+09BE, U+0B3E, U+0D3E and the like) that no real
-/// conjunct has between its virama and its consonant.
+/// scripts. Extend is not a table of its own here: it is what GB9 attaches — a
+/// mark (`is_combining`), a skin-tone modifier, a tag character or a joiner —
+/// which differs from InCB=Extend only by a few spacing vowel signs (U+09BE,
+/// U+0B3E, U+0D3E and the like) that this module's GB9 does not attach either
+/// and that no real conjunct has between its virama and its consonant.
 fn incb_linker(c: int) -> bool {
     return c == 0x94D || c == 0x9CD || c == 0xACD || c == 0xB4D || c == 0xC4D || c == 0xD4D
 }
@@ -3190,7 +3190,9 @@ pub fn clusters(body: str) -> [str] {
 /// ideographs, kana, Hangul syllables, fullwidth forms, emoji), 0 for what
 /// takes no room (marks, joiners, control and format characters) and 1 for the rest. A
 /// cluster is as wide as its first character — a family emoji is one wide
-/// glyph, not six — and a flag is 2.
+/// glyph, not six — and a flag is 2. An Indic conjunct is the exception: it is
+/// one cluster, but a terminal gives each of its consonants a column, so क्ष
+/// is 2.
 ///
 /// The wide blocks are listed rather than read from the Unicode database,
 /// as `bidi_class`'s are: the ranges below are the East Asian Wide and
@@ -3204,6 +3206,7 @@ pub fn clusters(body: str) -> [str] {
 /// assert(cell_width("abc") == 3, "one each")
 /// assert(cell_width("中文") == 4, "two each")
 /// assert(cell_width("e\u{301}") == 1, "a mark takes no room")
+/// assert(cell_width("\u{915}\u{94D}\u{937}") == 2, "a conjunct, a column for each consonant")
 /// ```
 pub fn cell_width(body: str) -> int {
     var total = 0
@@ -3216,6 +3219,15 @@ pub fn cell_width(body: str) -> int {
             total += 2
         } else {
             total += code_width(c)
+        }
+        // A conjunct is one cluster (GB9c) but a terminal gives each of its
+        // consonants a column, as it did when each began a cluster of its own.
+        if incb_consonant(c) {
+            for j in i + 1..next {
+                if incb_consonant(body.code_at(j)) {
+                    total += 1
+                }
+            }
         }
         i = next
     }
