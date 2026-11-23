@@ -75,8 +75,20 @@ pub fn record(b: F64, index: int) -> [float] {
 ///
 /// The new buffer is a copy of the whole old one, so building N records by
 /// pushing them one at a time copies N²/2 numbers: thirty thousand records
-/// of three took seconds. Build them as rows and hand them to
-/// [`from_records`], which copies each number once.
+/// of three took seconds. It has to be: the buffer it was given still holds
+/// its numbers, and may be held elsewhere. Build the records as rows and hand
+/// them to [`from_records`], which copies each number once — or push the
+/// numbers onto a `var` buffer's `values`, which goes straight into it when
+/// nothing else holds them, `stride` numbers to a record:
+///
+/// ```kite
+/// var b = f64(2)
+/// for i in 0..1000 {
+///     b.values.push(i as float)
+///     b.values.push(0.0)
+/// }
+/// assert(count(b) == 1000 && get(b, 999, 0) == 999.0, "pushed in place")
+/// ```
 pub fn push(b: F64, values: [float]) -> F64 {
     if values.len() != b.stride {
         require(false, "buffer: pushed \(values.len()) numbers into records of \(b.stride)")
@@ -86,7 +98,8 @@ pub fn push(b: F64, values: [float]) -> F64 {
 
 /// A buffer with one number replaced — a copy of the whole buffer, as
 /// [`push`] is, so a loop that changes every record wants [`map_column`] or
-/// [`from_records`] instead.
+/// [`from_records`] instead, or `b.values[record * b.stride + field] = value`
+/// on a `var` buffer, which writes in place as a push onto `values` does.
 pub fn set(b: F64, record: int, field: int, value: float) -> F64 {
     check_record(b, record)
     check_field(b, field)
