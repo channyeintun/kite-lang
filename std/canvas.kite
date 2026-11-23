@@ -186,7 +186,8 @@ pub fn clip(x: float, y: float, w: float, h: float) {
     draw.clip(x, y, w, h)
 }
 
-/// Close the innermost [`clip`], so what is drawn next is no longer confined to its rectangle. Every `clip` needs one.
+/// Close the innermost [`clip`], so what is drawn next is no longer confined to
+/// its rectangle. Every `clip` needs one.
 pub fn unclip() {
     draw.unclip()
 }

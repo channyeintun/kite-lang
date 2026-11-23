@@ -43,7 +43,8 @@ extern fn socket_close(id: int) -> int
 
 // ---- what a program uses ------------------------------------------------------
 
-/// An open WebSocket, from [`connect`]. Messages are taken with [`receive`] or [`take`], sent with [`send`] and the socket is ended with [`close`].
+/// An open WebSocket, from [`connect`]. Messages are taken with [`receive`] or
+/// [`take`], sent with [`send`] and the socket is ended with [`close`].
 pub struct Socket {
     id: int
 }
@@ -122,7 +123,9 @@ pub fn open(s: Socket) -> bool {
     return socket_state(s.id) == 1
 }
 
-/// Close the socket. Messages that had already arrived can still be taken; [`send`] on it afterwards is an error, and [`receive`] reports the close once none are left.
+/// Close the socket. Messages that had already arrived can still be taken;
+/// [`send`] on it afterwards is an error, and [`receive`] reports the close
+/// once none are left.
 pub fn close(s: Socket) {
     socket_close(s.id)
 }

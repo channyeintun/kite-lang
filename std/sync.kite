@@ -152,7 +152,8 @@ pub struct Queue<T> {
     var head: int
 }
 
-/// An empty [`Queue`]. Its element type comes from where it is bound, as `var q: Queue<int> = queue()`.
+/// An empty [`Queue`]. Its element type comes from where it is bound, as `var
+/// q: Queue<int> = queue()`.
 pub fn queue<T>() -> Queue<T> {
     return Queue{ items: [], head: 0 }
 }

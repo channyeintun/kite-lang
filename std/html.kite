@@ -127,7 +127,8 @@ struct Live {
 
 // ---- describing ------------------------------------------------------------
 
-/// An attribute with this name and value, for [`el`]. Use [`class`], [`id`], [`data`] and the handlers for the common ones.
+/// An attribute with this name and value, for [`el`]. Use [`class`], [`id`],
+/// [`data`] and the handlers for the common ones.
 pub fn attr(name: str, value: str) -> Attr {
     return Attr{ name: name, value: value, run: nil }
 }
@@ -181,17 +182,21 @@ pub fn submit(run: fn(dom.Event)) -> Attr {
     return on("submit", run)
 }
 
-/// Run this when a key goes down while the element has focus. `dom.key` says which.
+/// Run this when a key goes down while the element has focus. `dom.key` says
+/// which.
 pub fn keydown(run: fn(dom.Event)) -> Attr {
     return on("keydown", run)
 }
 
-/// Run this when the element, or one inside it, gains focus. Unlike a plain focus event, it is also seen by the element's ancestors, which is why a container can use it.
+/// Run this when the element, or one inside it, gains focus. Unlike a plain
+/// focus event, it is also seen by the element's ancestors, which is why a
+/// container can use it.
 pub fn focus_in(run: fn(dom.Event)) -> Attr {
     return on("focusin", run)
 }
 
-/// Run this when the element, or one inside it, loses focus. The counterpart of [`focus_in`].
+/// Run this when the element, or one inside it, loses focus. The counterpart of
+/// [`focus_in`].
 pub fn focus_out(run: fn(dom.Event)) -> Attr {
     return on("focusout", run)
 }

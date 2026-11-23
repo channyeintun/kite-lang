@@ -244,7 +244,8 @@ pub fn attribute(e: Element, name: str) -> Option<str> {
 
 /// Set one attribute, replacing the value it had.
 ///
-/// The error is the host's: a name it does not accept as an attribute name, or an element it can no longer reach.
+/// The error is the host's: a name it does not accept as an attribute name, or
+/// an element it can no longer reach.
 pub fn set_attribute(e: Element, name: str, value: str) -> error {
     let (_, err) = js.call2(e.raw, "setAttribute", js.of_str(name), js.of_str(value))
     return err
@@ -270,19 +271,22 @@ pub fn value(e: Element) -> str {
     return js.str_or(e.raw, "value", "")
 }
 
-/// Write the value of an input, a textarea or a select. A property, not an attribute, for the reason [`value`] gives.
+/// Write the value of an input, a textarea or a select. A property, not an
+/// attribute, for the reason [`value`] gives.
 ///
 /// The error is the host's, when the element has no such property to write.
 pub fn set_value(e: Element, body: str) -> error {
     return js.set(e.raw, "value", js.of_str(body))
 }
 
-/// Whether a checkbox or a radio button is ticked, as it is now rather than as the markup began. False when the element has no `checked` to read.
+/// Whether a checkbox or a radio button is ticked, as it is now rather than as
+/// the markup began. False when the element has no `checked` to read.
 pub fn checked(e: Element) -> bool {
     return js.bool_or(e.raw, "checked", false)
 }
 
-/// Tick or untick a checkbox or a radio button. The error is the host's, when the element cannot be written to.
+/// Tick or untick a checkbox or a radio button. The error is the host's, when
+/// the element cannot be written to.
 pub fn set_checked(e: Element, on: bool) -> error {
     return js.set(e.raw, "checked", js.of_bool(on))
 }
@@ -310,7 +314,8 @@ pub fn set_style(e: Element, property: str, value: str) -> error {
 
 /// Add a class to an element. One it already has stays as it is.
 ///
-/// The error is the host's, when the element has no class list or the name is one the host refuses, an empty one or one with a space in it.
+/// The error is the host's, when the element has no class list or the name is
+/// one the host refuses, an empty one or one with a space in it.
 pub fn add_class(e: Element, name: str) -> error {
     let (list, err) = js.get(e.raw, "classList")
     if err != nil {
@@ -332,7 +337,8 @@ pub fn remove_class(e: Element, name: str) -> error {
     return rerr
 }
 
-/// Whether the element has this class. False when the host cannot say, so an element it cannot reach has none.
+/// Whether the element has this class. False when the host cannot say, so an
+/// element it cannot reach has none.
 pub fn has_class(e: Element, name: str) -> bool {
     let (list, err) = js.get(e.raw, "classList")
     if err != nil {
@@ -364,15 +370,18 @@ pub fn set_class(e: Element, name: str, on: bool) -> error {
 
 // ---- the tree --------------------------------------------------------------
 
-/// Put `child` last among the children of `parent`. A child that is already somewhere in the document is moved, not copied.
+/// Put `child` last among the children of `parent`. A child that is already
+/// somewhere in the document is moved, not copied.
 ///
-/// The error is the host's, when `child` cannot go there: an element inside itself, say.
+/// The error is the host's, when `child` cannot go there: an element inside
+/// itself, say.
 pub fn append(parent: Element, child: Element) -> error {
     let (_, err) = js.call1(parent.raw, "appendChild", child.raw)
     return err
 }
 
-/// Put `child` among the children of `parent`, directly before `before`. A child already in the document is moved.
+/// Put `child` among the children of `parent`, directly before `before`. A
+/// child already in the document is moved.
 ///
 /// The error is the host's, when `before` is not a child of `parent`.
 pub fn insert_before(parent: Element, child: Element, before: Element) -> error {
@@ -487,12 +496,14 @@ pub fn stop_propagation(e: Event) -> error {
 
 // ---- the page --------------------------------------------------------------
 
-/// The document's title, the text of the tab. Empty when the host has none to read.
+/// The document's title, the text of the tab. Empty when the host has none to
+/// read.
 pub fn title() -> str {
     return js.str_or(document(), "title", "")
 }
 
-/// Set the document's title. The error is the host's, when there is no document to write to.
+/// Set the document's title. The error is the host's, when there is no document
+/// to write to.
 pub fn set_title(body: str) -> error {
     return js.set(document(), "title", js.of_str(body))
 }
