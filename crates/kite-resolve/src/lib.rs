@@ -828,6 +828,39 @@ impl ResolveMap {
         self.type_names.get(name).copied()
     }
 
+    /// Every type `module` can name, as it would write it: its own and the
+    /// prelude's bare, an imported module's public ones under the spelling
+    /// the module imported it by. Traits are left out, and sorted, so a note
+    /// listing them reads the same every run.
+    pub fn nameable_types(&self, module: &str) -> Vec<String> {
+        let mut out = Vec::new();
+        for decl in self.types.iter().filter(|t| t.kind != TypeKind::Trait) {
+            let home = self.modules.of(decl.decl_index);
+            let bare = |home: &str| {
+                if home.is_empty() {
+                    decl.name.clone()
+                } else {
+                    decl.name.strip_prefix(&format!("{}.", home)).unwrap_or(&decl.name).to_string()
+                }
+            };
+            if home == module || home == PRELUDE {
+                out.push(bare(home));
+                continue;
+            }
+            if !decl.is_pub {
+                continue;
+            }
+            for ((asking, spelling), target) in &self.modules.aliases {
+                if asking == module && target == home {
+                    out.push(format!("{}.{}", spelling, bare(home)));
+                }
+            }
+        }
+        out.sort();
+        out.dedup();
+        out
+    }
+
     /// The diagnostic for `m.Name` naming a type, where `m` is a module
     /// `asking` imported and `Name` is no type in it: ``cannot find `Name` in
     /// module `m` ``, at the member, with the nearest public type of `m` when

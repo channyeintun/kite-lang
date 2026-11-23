@@ -233,6 +233,26 @@ fn a_misspelled_call_is_offered_only_a_function() {
     assert!(said.contains("a similar name is in `m`: `inner`"), "{}", said);
 }
 
+/// An unknown bare type is told about the types this module can name, as it
+/// would write them — not other modules' private ones, nor modules it never
+/// imported — and about `m.Name` when an imported module has that type.
+#[test]
+fn an_unknown_type_lists_only_what_this_module_can_name() {
+    let p = Project::new("known-types");
+    p.file("m.kite", "pub struct Shown {\n  pub n: int\n}\n\nstruct Hidden {\n  n: int\n}\n");
+    p.file("other.kite", "pub struct Elsewhere {\n  pub n: int\n}\n");
+    p.file("b.kite", "use other\n\npub fn f() -> int {\n  return other.Elsewhere{ n: 1 }.n\n}\n");
+    let main = p.file(
+        "main.kite",
+        "use m as mm\nuse b\n\nfn main() {\n  let x: Zzzzzz = 1\n  let y: Shown = mm.Shown{ n: b.f() }\n}\n",
+    );
+    let said = p.run(&main).expect_err("unknown types");
+    assert!(said.contains("known types: bool, int, float, str, mm.Shown"), "{}", said);
+    assert!(!said.contains("Hidden"), "private: {}", said);
+    assert!(!said.contains("Elsewhere"), "not imported here: {}", said);
+    assert!(said.contains("write `mm.Shown`"), "{}", said);
+}
+
 #[test]
 fn a_misspelled_type_is_not_reported_as_a_missing_module() {
     let p = Project::new("misspelled-type");

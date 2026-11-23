@@ -14009,6 +14009,10 @@ fn resolve_named_ty(
                 {
                     TyId::ERROR
                 }
+                None if p.is_simple() && p.name() != "Self" => {
+                    diags.push(unknown_type_here(p, resolved, module, generics));
+                    TyId::ERROR
+                }
                 None => match resolved.missing_type_member(module, &p.segments, codes::E0204) {
                     Some(d) => {
                         diags.push(d);
@@ -14109,6 +14113,48 @@ fn check_map_key(types: &Types, key: TyId, span: Span, diags: &mut DiagBag) -> b
     };
     diags.push(d);
     false
+}
+
+/// The `E0204` for a bare name that is no type `module` can name.
+///
+/// **What it can name, as it would write it.** The note listed every struct
+/// and enum the program had loaded — other modules' private ones, and
+/// modules this one never imported, qualified by their identities
+/// (`math.Wide`, `toml.Step`) — and for `Toml` under `use std/toml` it did not
+/// say `toml.Toml`, the one type that was meant.
+fn unknown_type_here(
+    p: &ast::TypePath,
+    resolved: &ResolveMap,
+    module: &str,
+    generics: &[(String, TyId)],
+) -> Diagnostic {
+    let name = p.name();
+    let d = Diagnostic::error(codes::E0204, format!("unknown type `{}`", name))
+        .with_primary(p.span, "not a known type");
+    let nameable = resolved.nameable_types(module);
+    let suffix = format!(".{}", name);
+    if let Some(qualified) = nameable.iter().find(|n| n.ends_with(&suffix)) {
+        return d.with_note(format!(
+            "an imported module has a type of this name: write `{}`",
+            qualified
+        ));
+    }
+    let mut candidates: Vec<String> = ["bool", "int", "float", "str"].map(String::from).to_vec();
+    candidates.extend(generics.iter().map(|(n, _)| n.clone()));
+    candidates.extend(nameable);
+    let mut best: Option<(usize, &str)> = None;
+    for cand in &candidates {
+        let dist = edit_distance(name, cand);
+        if best.is_none_or(|(bd, bc)| (dist, cand.as_str()) < (bd, bc)) {
+            best = Some((dist, cand));
+        }
+    }
+    match best {
+        Some((dist, near)) if dist <= (name.len() / 3).max(1) => {
+            d.with_note(format!("a similar type is in scope: `{}`", near))
+        }
+        _ => d.with_note(format!("known types: {}", candidates.join(", "))),
+    }
 }
 
 /// Reject naming another module's private type in a type — a parameter, a
