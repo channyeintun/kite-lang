@@ -296,8 +296,12 @@ writes `MultiString = '"""' NEWLINE …`, but the lexer does not require the
 newline: `"""one line"""` is a legal one-line block string, and text left on
 the opening line is kept verbatim. Spaces or tabs alone after the opening
 `"""` go with its line break, and a CRLF file gives the same string as an LF
-one: no line of a block string ends in `\r` unless `\r` is written. (Compilers
-through 0.1.9 kept a leading newline after `""" ` and a `\r` on every line.)
+one: no line of a block string ends in `\r` unless `\r` is written. Only the
+closing line's own indentation comes off, character for character: a line
+indented less loses what it has, and a tab where that line has spaces stays.
+(Compilers through 0.1.9 kept a leading newline after `""" ` and a `\r` on
+every line, and stripped any leading whitespace from a line that did not start
+with the closing indentation.)
 
 ```kite
 fn main() {

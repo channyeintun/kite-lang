@@ -4905,6 +4905,17 @@ fn a_race_of_no_tasks_names_the_mistake() {
 /// says the program prints.
 const EXPECTED: &[(&str, &str, &str)] = &[
     (
+        // §2.4: the closing line's indentation comes off each line, as much
+        // of it as the line starts with. A tab where the delimiter has spaces
+        // is not that indentation and stays — with a hole and without.
+        "a-dedent-takes-off-the-closing-lines-indentation-only",
+        "fn main() {\n  let n = 1\n\
+         \x20 let a = \"\"\"\n\tx\n      y\n  z\n        w\n        \"\"\"\n\
+         \x20 let b = \"\"\"\n\tx\\(n)\n      y\n        \"\"\"\n\
+         \x20 io.print(\"[\\(a)]\")\n  io.print(\"[\\(b)]\")\n}\n",
+        "[\tx\ny\nz\nw]\n[\tx1\ny]\n",
+    ),
+    (
         // A hole is an ordinary expression (§2.4), and that includes a block
         // string: the lexer ended the outer one at the inner one's `"""`.
         "a-block-string-in-a-hole-of-a-block-string",

@@ -3501,13 +3501,13 @@ impl<'a> Parser<'a> {
             let end = span.end as usize;
             loop {
                 if line_start {
+                    // The closing line's indentation, as much of it as this
+                    // line starts with — and nothing else. A line indented
+                    // less loses what it has; one indented with a tab where
+                    // the delimiter has spaces keeps its tab, which was
+                    // stripped once as though any whitespace would do.
                     let line = &self.src[from..end];
-                    let strip = if line.starts_with(indent) {
-                        indent.len()
-                    } else {
-                        line.len() - line.trim_start_matches([' ', '\t']).len()
-                    };
-                    from += strip;
+                    from += line.bytes().zip(indent.bytes()).take_while(|(a, b)| a == b).count();
                 }
                 match self.src[from..end].find('\n') {
                     Some(at) => {

@@ -14112,8 +14112,10 @@ pub(crate) fn dedent_block(body: &str) -> String {
         // indentation to take off.
         return body.to_string();
     }
+    // As much of that indentation as each line starts with comes off, and
+    // nothing else: the parser's `dedent_parts` does the same.
     text.split('\n')
-        .map(|line| line.strip_prefix(indent).unwrap_or(line.trim_start_matches([' ', '\t'])))
+        .map(|line| &line[line.bytes().zip(indent.bytes()).take_while(|(a, b)| a == b).count()..])
         .collect::<Vec<_>>()
         .join("\n")
 }

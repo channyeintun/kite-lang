@@ -831,6 +831,10 @@ fn a_block_string_with_holes_is_dedented() {
     assert_eq!(expr_sexp(src), r#"(str "hello " n "\n" "world")"#);
     let src = "\"\"\"\r\n    a \\(n)\r\n    b\"\"\"";
     assert_eq!(expr_sexp(src), r#"(str "    a " n "\n    b")"#);
+    // What comes off is the closing line's indentation, as much of it as a
+    // line starts with: a tab where the delimiter has spaces stays.
+    let src = "\"\"\"\n\ta \\(n)\n  b\n    \"\"\"";
+    assert_eq!(expr_sexp(src), r#"(str "\ta " n "\n" "b")"#);
 }
 
 // ---- depth -------------------------------------------------------------------
