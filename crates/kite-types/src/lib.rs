@@ -5028,10 +5028,16 @@ impl<'a> Checker<'a> {
             }
         }
 
-        let ty = self.types.fn_of(
-            param_ids.iter().map(|id| self.locals[*id as usize].ty).collect(),
-            ret,
-        );
+        // A closure with a parameter or result type the parser could not
+        // read is not known to be any function: `fn(<error>) -> int` was
+        // printed in whatever its use was then refused for.
+        let unread = params.iter().any(|p| matches!(p.ty, Some(ast::Type::Error(_))))
+            || matches!(ret_ty, Some(ast::Type::Error(_)));
+        let ty = if unread {
+            TyId::ERROR
+        } else {
+            self.types.fn_of(param_ids.iter().map(|id| self.locals[*id as usize].ty).collect(), ret)
+        };
         let func = self.lift(&captures, &param_ids, hir_body, ret, span);
         let capture_exprs = captures
             .iter()

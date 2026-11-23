@@ -427,6 +427,19 @@ fn a_type_that_does_not_parse_keeps_its_declaration() {
             "fn main() {\n    let g = |x: int| -> [int { return [x] }\n    io.print(g(1))\n}\n",
             2,
         ),
+        // The `>` left out took the next parameter's name for a type
+        // argument; the parameter is still there.
+        (
+            "struct Box<T> {\n    v: T\n}\n\nfn wait(work: Box<int, ms: int) -> int {\n    \
+             return ms\n}\n\nfn main() {\n    io.print(wait(Box{ v: 1 }, 2))\n}\n",
+            5,
+        ),
+        // A closure whose parameter type could not be read is no function
+        // type to print: it was `fn(<error>) -> int` in what refused it.
+        (
+            "fn main() {\n    let f = |x: [1]| 1\n    io.print(f)\n}\n",
+            2,
+        ),
     ];
     for (src, line) in cases {
         let result = compile(Path::new("t.kite"), src, Emit::Check);

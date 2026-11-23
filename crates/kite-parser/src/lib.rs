@@ -2569,6 +2569,20 @@ impl<'a> Parser<'a> {
                 && k == T::Ident
                 && self.peek_at(1) == T::Colon
                 && !open.iter().any(|&o| self.tokens[o].kind == T::LBrace);
+            // And where the type took that name as a type argument of its
+            // own — `work: Task<T, ms: int)`, whose `>` was left out — it
+            // failed at the `:` after it: the name is stepped back to, and
+            // the `,` before it was the list's.
+            if end.named
+                && k == T::Colon
+                && self.pos >= from + 2
+                && self.tokens[self.pos - 1].kind == T::Ident
+                && self.tokens[self.pos - 2].kind == T::Comma
+                && !open.iter().any(|&o| self.tokens[o].kind == T::LBrace)
+            {
+                self.pos -= 1;
+                break true;
+            }
             // A body's `{` ends its line. One that does not — `(i{ n: 1 }` —
             // is a struct literal or a map, and what was written is not a
             // return type and a body.
