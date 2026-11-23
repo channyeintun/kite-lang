@@ -135,18 +135,42 @@ pub struct Response {
     /// asked of the host by handle later: a handle the program might still
     /// ask with was a request the host could never let go.
     headers: str
+    /// The headers to send when this is a server's answer: kept as pairs, not
+    /// text, for the reason [`respond`] takes them as pairs.
+    outgoing: [Header]
 }
 
 pub fn ok(body: str) -> Response {
-    return Response{ status: 200, body: body, headers: "" }
+    return Response{ status: 200, body: body, headers: "", outgoing: [] }
 }
 
 pub fn not_found() -> Response {
-    return Response{ status: 404, body: "not found", headers: "" }
+    return Response{ status: 404, body: "not found", headers: "", outgoing: [] }
 }
 
 pub fn status(code: int, body: str) -> Response {
-    return Response{ status: code, body: body, headers: "" }
+    return Response{ status: code, body: body, headers: "", outgoing: [] }
+}
+
+/// The response with one more header line to send, after the ones it has.
+///
+/// Only [`run`] sends it, and it sends it through [`respond`], so the same
+/// rules hold: a name that is not a token, or a line break or NUL in a value,
+/// is not sent — [`run`] answers 500 instead of putting it on the wire. A
+/// name added twice goes out twice, which is what `Set-Cookie` needs, and a
+/// `Content-Type` here replaces the default `text/plain`. This is not what
+/// [`header`] reads: that is what arrived, and a response built in Kite
+/// arrived from nowhere.
+///
+/// ```kite
+/// let r = with_header(ok("{}"), "content-type", "application/json")
+/// assert(r.status == 200, "the status is untouched")
+/// assert(header(r, "content-type") == "", "and a header to send is not one that arrived")
+/// ```
+pub fn with_header(r: Response, name: str, value: str) -> Response {
+    var more = r.outgoing
+    more.push(Header{ name: name, value: value })
+    return Response{ status: r.status, body: r.body, headers: r.headers, outgoing: more }
 }
 
 /// Whether the status is in the 2xx range.
@@ -441,7 +465,7 @@ pub async fn send_with(
     // `Response` from here on.
     let code = fetch_status(id)
     let headers = fetch_headers(id)
-    return Response{ status: code, body: fetch_body(id), headers: headers }, nil
+    return Response{ status: code, body: fetch_body(id), headers: headers, outgoing: [] }, nil
 }
 
 // ---- server-sent events -----------------------------------------------------
@@ -984,26 +1008,39 @@ pub struct Header {
 /// [`sending_pairs`] holds a request's to — a colon in a name would otherwise
 /// end it early and make the rest of it a header of its own.
 pub fn respond(incoming: Incoming, response: Response, headers: [Header]) -> error {
-    var lines: [str] = []
-    for h in headers {
-        if breaks_a_line(h.name) {
-            return errors.new("http.respond: header name `\(h.name)` contains a line break")
-        }
-        if !is_token(h.name) {
-            return errors.new("http.respond: `\(h.name)` is not a header name")
-        }
-        if breaks_a_line(h.value) {
-            return errors.new("http.respond: the value of `\(h.name)` contains a line break")
-        }
-        if has_nul(h.value) {
-            return errors.new("http.respond: the value of `\(h.name)` contains a NUL byte")
-        }
-        lines.push("\(h.name): \(h.value)")
+    var all = headers
+    for h in response.outgoing {
+        all.push(h)
     }
-    if serve_respond(incoming.id, response.status, response.body, join(lines, "\n")) == 1 {
+    let (lines, refused) = header_lines(all)
+    if refused != nil {
+        return refused
+    }
+    if serve_respond(incoming.id, response.status, response.body, lines) == 1 {
         return nil
     }
     return errors.new("http.respond: that request was already answered")
+}
+
+/// The headers as the `name: value` lines the host takes, or why they cannot go.
+fn header_lines(headers: [Header]) -> (str, error) {
+    var lines: [str] = []
+    for h in headers {
+        if breaks_a_line(h.name) {
+            return _, errors.new("http.respond: header name `\(h.name)` contains a line break")
+        }
+        if !is_token(h.name) {
+            return _, errors.new("http.respond: `\(h.name)` is not a header name")
+        }
+        if breaks_a_line(h.value) {
+            return _, errors.new("http.respond: the value of `\(h.name)` contains a line break")
+        }
+        if has_nul(h.value) {
+            return _, errors.new("http.respond: the value of `\(h.name)` contains a NUL byte")
+        }
+        lines.push("\(h.name): \(h.value)")
+    }
+    return join(lines, "\n"), nil
 }
 
 /// Whether text carries a line break, in any of the three spellings a header
@@ -1030,6 +1067,10 @@ fn has_nul(text: str) -> bool {
 /// a handler was testable by calling it long before this existed, and stays
 /// that way.
 ///
+/// A handler's headers — those it added with [`with_header`] — are sent. One
+/// the host would refuse (see [`respond`]) makes the answer a 500 and the
+/// server carries on.
+///
 /// Shutting the server is how this ends well: once it is shut and every
 /// request that arrived before has been answered, the count of answered
 /// requests comes back with no error.
@@ -1047,8 +1088,16 @@ pub async fn run(server: Server, routes: [Route]) -> (int, error) {
             }
             return _, err
         }
+        var answer = serve(routes, incoming.request)
+        // A header the host would refuse is the handler's mistake, not the
+        // server's: say 500 to this one caller and go on serving, rather than
+        // let one bad route end the loop for everybody.
+        let (_, unsendable) = header_lines(answer.outgoing)
+        if unsendable != nil {
+            answer = status(500, "the handler produced a response this server will not send")
+        }
         let none: [Header] = []
-        let failed = respond(incoming, serve(routes, incoming.request), none)
+        let failed = respond(incoming, answer, none)
         if failed != nil {
             return _, failed
         }

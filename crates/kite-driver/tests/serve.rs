@@ -477,6 +477,58 @@ fn a_response_header_name_must_be_a_token_and_a_value_has_no_nul() {
     assert_eq!(out, "cookie null\nbody colon=true nul=true\n", "{}", out);
 }
 
+/// `run` sends the headers a handler put on its response, and answers 500 to a
+/// handler whose header could not be sent without ending the server.
+///
+/// `run` passed no headers at all, so a JSON API served through it was
+/// `text/plain` and nothing could redirect or set a cookie.
+#[test]
+fn run_sends_the_headers_a_handler_added() {
+    if !node_available() {
+        eprintln!("skipping: node is not installed");
+        return;
+    }
+    let src = "use std/http\n\
+         fn api(request: http.Request) -> http.Response {\n\
+         \x20   let r = http.with_header(http.ok(\"{}\"), \"Content-Type\", \"application/json\")\n\
+         \x20   let r2 = http.with_header(r, \"Set-Cookie\", \"a=1\")\n\
+         \x20   return http.with_header(r2, \"Set-Cookie\", \"b=2\")\n\
+         }\n\
+         fn bad(request: http.Request) -> http.Response {\n\
+         \x20   return http.with_header(http.ok(\"x\"), \"Set-Cookie: evil; x\", \"1\")\n\
+         }\n\
+         fn plain(request: http.Request) -> http.Response {\n\
+         \x20   return http.ok(\"plain\")\n\
+         }\n\
+         async fn main() {\n\
+         \x20   let (server, err) = await http.open(0)\n\
+         \x20   if err != nil {\n        io.print(err.message())\n        return\n    }\n\
+         \x20   io.print(\"listening \\(http.port_of(server))\")\n\
+         \x20   let routes = [\n\
+         \x20       http.route(\"GET\", \"/api\", api),\n\
+         \x20       http.route(\"GET\", \"/bad\", bad),\n\
+         \x20       http.route(\"GET\", \"/plain\", plain),\n\
+         \x20   ]\n\
+         \x20   let (n, rerr) = await http.run(server, routes)\n\
+         \x20   if rerr != nil {\n        io.print(rerr.message())\n    }\n\
+         }\n";
+    let client = client_with(
+        r#"  const a = await fetch(`http://127.0.0.1:${port}/api`);
+  console.log("api " + a.status + " " + a.headers.get("content-type") + " " + a.headers.getSetCookie().join(" "));
+  const b = await fetch(`http://127.0.0.1:${port}/bad`);
+  console.log("bad " + b.status + " " + JSON.stringify(b.headers.get("set-cookie")));
+  const p = await fetch(`http://127.0.0.1:${port}/plain`);
+  console.log("plain " + p.status + " " + p.headers.get("content-type") + " " + (await p.text()));"#,
+    );
+    let out = serve_under_node("run-headers", src, &client);
+    assert_eq!(
+        out,
+        "api 200 application/json a=1 b=2\nbad 500 null\nplain 200 text/plain; charset=utf-8 plain\n",
+        "{}",
+        out
+    );
+}
+
 /// While a server waits for requests it costs nothing, and a task's sleep
 /// still comes due.
 ///
