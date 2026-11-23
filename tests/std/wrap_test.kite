@@ -85,6 +85,13 @@ fn overlong_checks() -> [error] {
     out.push(test.equal_str(shape("\(family)x", 1.0), "\(family)|x", "a joined emoji sequence is one cluster"))
     let thumb = text.from_code(0x1F44D) + text.from_code(0x1F3FB)
     out.push(test.equal_str(shape("\(thumb)\(thumb)", 1.0), "\(thumb)|\(thumb)", "a modifier stays with its base"))
+    // The tags of a subdivision flag were letters to the line breaker, which
+    // broke before them and set them on a line of their own; and a skin tone
+    // after a letter was a break opportunity, so it was cut from it.
+    let england = text.from_code(0x1F3F4) + "\u{E0067}\u{E0062}\u{E0065}\u{E006E}\u{E0067}\u{E007F}"
+    out.push(test.equal_str(shape("ab \(england) cd", 8.0), "ab|\(england)|cd", "a tag sequence stays whole"))
+    out.push(test.is_false(text.break_opportunities(england)[1], "no break before a tag"))
+    out.push(test.equal_str(shape("a\u{1F3FB}b", 1.0), "a\u{1F3FB}|b", "a skin tone stays with any base"))
     // A width nothing fits in still makes progress, one character a line.
     out.push(test.equal_str(shape("abc", 0.0), "a|b|c", "zero width takes a character a line"))
     out.push(test.equal_str(shape("ab cd", 1.0), "a|b|c|d", "and drops the spaces between"))

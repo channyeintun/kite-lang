@@ -27,7 +27,10 @@
 //   departures, both of which the annex itself names: SA (Thai, Lao, Khmer,
 //   and Burmese syllable breaking) is treated as AL, which §5.1 prescribes in
 //   the absence of a dictionary, and CB is not implemented because nothing
-//   can be embedded in a run of Kite text to break around. The rules later
+//   can be embedded in a run of Kite text to break around. One tailoring
+//   of our own: an emoji skin tone attaches to whatever it follows, as a
+//   combining mark does, not only to an emoji base (LB30b), so a line never
+//   breaks inside what `clusters` calls one character. The rules later
 //   revisions added — LB15a–LB15d, LB20a, LB28a — are not here, and East
 //   Asian Width is read only where LB30 needs it; the section says which.
 // - `join_arabic` is the joining half of Arabic shaping: Joining_Type over
@@ -1822,6 +1825,11 @@ pub fn join_arabic(run: str) -> str {
 //   * **CB is not implemented**, because there is nothing embedded to break
 //     around: `Content` holds text or a picture, never text with a picture
 //     inside it.
+
+// And one tailoring: **a skin tone attaches to whatever it follows**, as LB9
+// attaches a mark, where UAX #14 keeps it only after an emoji base (LB30b) and
+// lets a line break before it anywhere else. The grapheme rules call it
+// Extend, and this keeps `wrap` from breaking inside one of `clusters`.
 //
 // **The revision is Unicode 15.0** (UAX #14 revision 49): rules LB2 to LB31
 // as that revision numbers them, with the tailorable ones at their defaults —
@@ -2090,6 +2098,12 @@ pub fn line_break_class(code: int) -> LineBreak {
     // piece of code. Devanagari, Thai, Arabic and Burmese all depend on this:
     // a mark that started a line would be drawn over nothing.
     if is_combining(code) {
+        return LineBreak.CM
+    }
+    // The tag characters, which spell out a subdivision flag after a black
+    // flag, are CM in the Line_Break data. Read as letters, they let `wrap`
+    // break before them and set the tags of 🏴 on a line of their own.
+    if code == 0xE0001 || within(code, 0xE0020, 0xE007F) {
         return LineBreak.CM
     }
 
@@ -2363,6 +2377,19 @@ pub fn break_opportunities(body: str) -> [bool] {
     // (LB10), which is the case a line beginning with one falls into.
     let original = classes
     for i in 0..classes.len() {
+        // A skin tone is EM, which LB30b keeps only after an emoji base; after
+        // anything else UAX #14 lets the line break before it, and a wrap cut
+        // "a" from its modifier. Here it attaches to whatever it follows, as a
+        // mark does — the grapheme rules call it Extend — so `wrap` and
+        // `clusters` keep the same things together. Where there is nothing for
+        // it to attach to it stays an EM.
+        if classes[i] == LineBreak.EM && i > 0 {
+            let before = classes[i - 1]
+            if before != LineBreak.SP && before != LineBreak.ZW && !is_mandatory(before) {
+                classes[i] = before
+                absorbed[i] = true
+            }
+        }
         if classes[i] == LineBreak.CM || classes[i] == LineBreak.ZWJ {
             if i == 0 {
                 classes[i] = LineBreak.AL
