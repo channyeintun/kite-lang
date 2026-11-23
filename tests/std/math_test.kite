@@ -118,6 +118,12 @@ fn exp_checks() -> [error] {
     out.push(same(math.powf(inf(), 0.5), inf(), "powf(inf, 0.5)"))
     out.push(same(math.powf(inf(), -0.5), 0.0, "powf(inf, -0.5)"))
     out.push(same(math.powf(-2.0, 1e19), inf(), "powf(-2, 1e19), an even power past an int"))
+    // (-1)^y past 1.3e300 was a NaN: ln 1 is 0, and 0 times so large an
+    // exponent overflowed inside the two-float product.
+    out.push(same(math.powf(-1.0, 1e301), 1.0, "powf(-1, 1e301)"))
+    out.push(same(math.powf(-1.0, -1e301), 1.0, "powf(-1, -1e301)"))
+    out.push(same(math.powf(-1.0, 1.7976931348623157e308), 1.0, "powf(-1, the largest float)"))
+    out.push(same(math.powf(-1.0, 1e19), 1.0, "powf(-1, 1e19)"))
     out.push(same(math.powf(10.0, 400.5), inf(), "powf(10, 400.5) overflows"))
     out.push(same(math.powf(-2.0, 0.5), 0.0, "a negative base to a fractional power answers zero"))
     return out

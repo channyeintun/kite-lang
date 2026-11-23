@@ -1057,6 +1057,12 @@ pub fn powf(base: float, exponent: float) -> float {
         }
         // Past 2⁶³ every float is even, so the base's sign is lost.
         b = abs(base)
+        // -1 has become 1, which the first test had already let past: its
+        // logarithm is zero, and a zero times an exponent past 1.3e300 is
+        // inf × 0 inside product_error's split — a NaN for (-1)^1e301.
+        if b == 1.0 {
+            return 1.0
+        }
     }
     let size = abs(b)
     if !(abs(exponent) < 1.0 / 0.0) {
