@@ -1221,7 +1221,9 @@ impl Loader {
             };
             let origin = found.origin(&self.files);
             if !self.seen.contains_key(&origin) {
-                if let Some(refusal) = self.already_a_member(&found, &owner, u.span) {
+                let refusal =
+                    self.already_a_member(&found, &owner, &segments, &spelling, u.span, sources);
+                if let Some(refusal) = refusal {
                     diags.push(refusal);
                     self.unresolved.insert(failed);
                     continue;
@@ -1687,9 +1689,39 @@ impl Loader {
     /// that, the line to change being the `use lib/shape` before it, which
     /// nothing pointed at — and offered `use ui` to a module inside `ui/`,
     /// which `ui` imports, so taking the advice was a cycle.
-    fn already_a_member(&self, found: &Found, owner: &str, span: Span) -> Option<Diagnostic> {
+    ///
+    /// **In the words the `use`s wrote.** The notes named modules by their
+    /// identities, which are paths below the package's root — "remove the
+    /// `use src/lib/shape`" and "reach … as `src/lib.…`" in a package whose
+    /// `main.kite` is in `src/`, neither of which is code that compiles.
+    fn already_a_member(
+        &self,
+        found: &Found,
+        owner: &str,
+        written: &[&str],
+        spelling: &str,
+        span: Span,
+        sources: &SourceMap,
+    ) -> Option<Diagnostic> {
         let Found::Path { at, is_dir, .. } = found else {
             return None;
+        };
+        // The path a `use` wrote, read back from its line: `use lib/shape as
+        // s` is `lib/shape`. Empty for a module that no `use` loaded.
+        let path_of = |span: Span| -> String {
+            let text = sources.span_text(span).trim();
+            let text = text.strip_prefix("use").unwrap_or("").trim_start();
+            text.split_whitespace().next().unwrap_or("").to_string()
+        };
+        // And how that `use` spells the module: its alias, or its last segment.
+        let written_of = |span: Span| -> (String, String) {
+            let path = path_of(span);
+            let text = sources.span_text(span);
+            let spelled = match text.split_whitespace().skip_while(|w| *w != "as").nth(1) {
+                Some(alias) => alias.to_string(),
+                None => path.rsplit('/').next().unwrap_or(&path).to_string(),
+            };
+            (path, spelled)
         };
         let files = if *is_dir { self.files.kite_files(at) } else { vec![at.clone()] };
         for file in files {
@@ -1723,26 +1755,60 @@ impl Loader {
                         directory, stem
                     ))
                 } else {
-                    d.with_note(format!(
-                        "remove this `use`: `use {0}` reaches what `{1}.kite` declares, as `{0}.…`",
-                        directory, stem
-                    ))
+                    // The directory, as this module reaches it: the path it
+                    // wrote, less the file's own segment.
+                    let reach = match written.split_last() {
+                        Some((_, rest)) if !rest.is_empty() => rest.join("/"),
+                        _ => directory.rsplit('/').next().unwrap_or(&directory).to_string(),
+                    };
+                    let spelled = reach.rsplit('/').next().unwrap_or(&reach).to_string();
+                    if first.file == span.file && !path_of(*first).is_empty() {
+                        // The `use` of the directory is in this file already.
+                        let (earlier, spelled) = written_of(*first);
+                        d.with_note(format!(
+                            "remove this `use`: the `use {0}` above reaches what `{1}.kite` \
+                             declares, as `{2}.…`",
+                            earlier, stem, spelled
+                        ))
+                    } else {
+                        d.with_note(format!(
+                            "make this `use` a `use {0}`: it reaches what `{1}.kite` declares, as \
+                             `{2}.…`",
+                            reach, stem, spelled
+                        ))
+                    }
                 }
             } else if *is_dir {
-                let directory = name(&found.identity());
-                Diagnostic::error(
+                let d = Diagnostic::error(
                     codes::E0404,
                     format!("`{}` is already the module `{}`", file.display(), name(other)),
                 )
                 .with_primary(span, "this directory holds a file already imported on its own")
-                .with_secondary(*first, format!("`{}` was imported on its own here", name(other)))
-                .with_note(format!(
-                    "import the directory only: remove the `use {}` and reach what `{}.kite` \
-                     declares as `{}.…`",
-                    name(other),
-                    stem,
-                    directory
-                ))
+                .with_secondary(*first, format!("`{}` was imported on its own here", name(other)));
+                // In this file, the `use` of the directory is already there;
+                // in another, that file's `use` of the file becomes one of
+                // the directory, the path it wrote less the file's segment.
+                let earlier = path_of(*first);
+                let directory = earlier.rsplit_once('/').map(|(dir, _)| dir.to_string());
+                match directory {
+                    Some(_) if first.file == span.file => d.with_note(format!(
+                        "import the directory only: remove the `use {}` and reach what `{}.kite` \
+                         declares as `{}.…`",
+                        earlier, stem, spelling
+                    )),
+                    Some(directory) => {
+                        let spelled = directory.rsplit('/').next().unwrap_or(&directory).to_string();
+                        d.with_note(format!(
+                            "import the directory only: make the `use {}` a `use {}`, and reach \
+                             what `{}.kite` declares as `{}.…`",
+                            earlier, directory, stem, spelled
+                        ))
+                    }
+                    None => d.with_note(format!(
+                        "import the directory only: remove the `use` of `{}.kite` on its own",
+                        stem
+                    )),
+                }
             } else {
                 continue;
             };

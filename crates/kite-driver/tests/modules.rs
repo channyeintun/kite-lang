@@ -1235,9 +1235,37 @@ fn a_file_of_a_directory_module_cannot_be_imported_on_its_own() {
             assert!(said.contains("remove the `use lib/shape`"), "{}", said);
         } else {
             assert!(said.contains("`lib` was loaded here"), "{}", said);
-            assert!(said.contains("remove this `use`: `use lib` reaches"), "{}", said);
+            assert!(said.contains("remove this `use`: the `use lib` above reaches"), "{}", said);
         }
     }
+}
+
+/// The notes are in the words the `use`s wrote, not the modules' identities:
+/// below a `kite.toml`, `lib` beside `src/main.kite` is the module `src/lib`,
+/// and "remove the `use src/lib/shape`" and "reach … as `src/lib.…`" named
+/// lines and code that are not there. The two `use`s in two files are told
+/// how to meet: the earlier `use lib/shape` becomes a `use lib`.
+#[test]
+fn a_member_imported_on_its_own_is_told_the_fix_in_the_words_written() {
+    let p = Project::new("member-alone-words");
+    p.file("kite.toml", "[package]\nname = \"app\"\nversion = \"0.1.0\"\n");
+    p.file("src/lib/shape.kite", "pub fn area() -> int {\n  return 4\n}\n");
+    p.file("src/lib/core.kite", "pub fn top() -> int {\n  return 1\n}\n");
+    p.file("src/other/o.kite", "use lib\npub fn o() -> int {\n  return lib.top()\n}\n");
+    let main = p.file(
+        "src/main.kite",
+        "use lib/shape\nuse other\nfn main() {\n  io.print(shape.area() + other.o())\n}\n",
+    );
+    let said = p.run(&main).expect_err("one file, two modules").replace('\\', "/");
+    assert!(said.contains("make the `use lib/shape` a `use lib`"), "{}", said);
+    assert!(said.contains("declares as `lib.…`"), "{}", said);
+    assert!(!said.contains("use src/"), "{}", said);
+    // And the other way round, from a module that is not the entry.
+    p.file("src/x/y.kite", "use lib/shape\npub fn y() -> int {\n  return shape.area()\n}\n");
+    let main = p.file("src/main.kite", "use lib\nuse x\nfn main() {\n  io.print(lib.top() + x.y())\n}\n");
+    let said = p.run(&main).expect_err("one file, two modules").replace('\\', "/");
+    assert!(said.contains("make this `use` a `use lib`: it reaches"), "{}", said);
+    assert!(said.contains("as `lib.…`"), "{}", said);
 }
 
 /// A diagnostic names a module by where it is, so two `util`s are told apart
