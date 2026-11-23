@@ -5463,7 +5463,7 @@ impl<'a> Checker<'a> {
         // result is still the callee's to learn — which the closure's
         // type then solves, as any other argument's does.
         if want.is_none() && matches!(a, ast::Expr::Closure { .. }) {
-            if let Some(TyKind::Fn { params, ret }) = declared.map(|d| self.types.kind(d).clone()) {
+            if let Some(TyKind::Fn { params, ret }) = declared.map(|d| self.types.kind(self.fn_place(d)).clone()) {
                 let params = params.iter().map(|p| self.apply_subst_opt(*p, subst)).collect();
                 let fallible = self.types.fallible_value(ret).is_some();
                 let ret = self.apply_subst_opt(ret, subst);
@@ -5515,7 +5515,7 @@ impl<'a> Checker<'a> {
         if self.apply_subst_opt(d, known).is_some() {
             return false;
         }
-        let TyKind::Fn { params: wanted, ret: wanted_ret } = self.types.kind(d).clone() else {
+        let TyKind::Fn { params: wanted, ret: wanted_ret } = self.types.kind(self.fn_place(d)).clone() else {
             return false;
         };
         let param_waits = params.iter().enumerate().any(|(i, p)| {
@@ -5527,6 +5527,17 @@ impl<'a> Checker<'a> {
                 if (self.types.fallible_value(wanted_ret).is_some() || block_returns_pair(b))
                     && !block_returns_value(b));
         param_waits || ret_waits
+    }
+
+    /// The function type a closure placed where `declared` is wanted is
+    /// typed as: the place is looked through `Option` (§4.5), so a closure
+    /// passed for `f: Option<fn(T) -> T>` waits for `T` and is told what of
+    /// it is known, exactly as one passed for `f: fn(T) -> T` is.
+    fn fn_place(&self, declared: TyId) -> TyId {
+        match *self.types.kind(declared) {
+            TyKind::Optional(inner) if matches!(self.types.kind(inner), TyKind::Fn { .. }) => inner,
+            _ => declared,
+        }
     }
 
     /// A function handed to another task takes its captures with it, so each
@@ -8189,7 +8200,7 @@ impl<'a> Checker<'a> {
     /// `T` a `bool`.
     fn field_closure_context(&mut self, init: &ast::FieldInit, declared: TyId, subst: &[Option<TyId>]) {
         if matches!(init.value, ast::Expr::Closure { .. }) {
-            if let TyKind::Fn { params, ret } = self.types.kind(declared).clone() {
+            if let TyKind::Fn { params, ret } = self.types.kind(self.fn_place(declared)).clone() {
                 let params = params.iter().map(|p| self.apply_subst_opt(*p, subst)).collect();
                 let fallible = self.types.fallible_value(ret).is_some();
                 let ret = self.apply_subst_opt(ret, subst);
@@ -10876,7 +10887,7 @@ impl<'a> Checker<'a> {
                             format!("conflicting types for `{}`", name),
                         )
                         .with_primary(span, format!("here `{}` would be `{}`", name, b))
-                        .with_note(format!("an earlier argument already made it `{}`", a)),
+                        .with_note(format!("another argument already made it `{}`", a)),
                     );
                 }
                 Some(_) => {}

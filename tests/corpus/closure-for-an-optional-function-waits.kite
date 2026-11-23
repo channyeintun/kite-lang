@@ -1,0 +1,19 @@
+// A closure where an `Option<fn(T) -> T>` is wanted waits for the field or
+// argument that fixes `T`, as one where an `fn(T) -> T` is wanted does
+// (§4.5). Its body is then checked against what that fixed, and a wrong one
+// is one E0200 at the closure. It was typed first, with `n` unknown, and
+// `Job<[<error>]>` passed `check` and reached code generation.
+
+struct Job<T> {
+    run: Option<fn(T) -> T>
+    seed: T
+}
+
+fn ap_opt<T>(f: Option<fn(T) -> T>, x: T) -> T {
+    return x
+}
+
+fn main() {
+    let a = Job{ run: |n| [n], seed: 1 } //~ ERROR E0200
+    let b = ap_opt(|n| [n], 41) //~ ERROR E0209
+}
