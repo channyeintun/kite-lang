@@ -1185,9 +1185,9 @@ impl<'a> Parser<'a> {
         let mut file = SourceFile::default();
         self.skip_newlines();
 
-        while self.at(T::Use) {
+        while self.at(T::Use) || self.at_pub_use() {
             let (before, reported) = (self.pos, self.diags.len());
-            if let Some(u) = self.parse_use() {
+            if let Some(u) = self.parse_maybe_pub_use() {
                 file.uses.push(u);
             }
             self.skip_newlines();
@@ -1277,6 +1277,41 @@ impl<'a> Parser<'a> {
         self.split = None;
     }
 
+    fn at_pub_use(&self) -> bool {
+        self.at(T::Pub) && self.peek_at(1) == T::Use
+    }
+
+    /// A `use`, or a `pub use` — refused once at the `pub` and then read as
+    /// the plain `use` it is, so the module's own `inner.…` still resolves.
+    ///
+    /// There is no `pub use`: a module's imports are its own (§13.1), and
+    /// what re-exporting one would mean — under which name, reaching which
+    /// of the importer's spellings — is nowhere defined. It was three
+    /// `expected a declaration` errors for the one word.
+    fn parse_maybe_pub_use(&mut self) -> Option<Use> {
+        let pub_at = self.at_pub_use().then(|| self.span());
+        if pub_at.is_some() {
+            self.bump(); // `pub`
+        }
+        let u = self.parse_use();
+        if let Some(at) = pub_at {
+            let path = u
+                .as_ref()
+                .map(|u| u.path.iter().map(|s| s.name.as_str()).collect::<Vec<_>>().join("/"))
+                .unwrap_or_else(|| "…".to_string());
+            self.diags.push(
+                Diagnostic::error(codes::E0100, "there is no `pub use`")
+                    .with_primary(at, "`pub` cannot be written on a `use`")
+                    .with_note(format!(
+                        "a module's imports are its own and are not exported; each module that \
+                         wants `{0}` writes its own `use {0}`",
+                        path
+                    )),
+            );
+        }
+        u
+    }
+
     fn parse_use(&mut self) -> Option<Use> {
         let start = self.span();
         self.bump(); // `use`
@@ -1299,6 +1334,12 @@ impl<'a> Parser<'a> {
         // amount of Kite could say instead — which is the bar an attribute has
         // to clear.
         let attribute = if self.at(T::At) { Some(self.parse_attribute()?) } else { None };
+        if attribute.is_none() && self.at_pub_use() {
+            // Below the declarations: refused as one, and the rest of the
+            // line read, so it is not reported again a word at a time.
+            self.parse_maybe_pub_use()?;
+            return Some(Item::Error(start));
+        }
         let is_pub = self.eat(T::Pub);
         let is_async = self.eat(T::Async);
 

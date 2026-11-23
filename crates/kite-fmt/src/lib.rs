@@ -468,13 +468,12 @@ impl Formatter<'_> {
         if matches!(kind, T::Comma | T::Colon | T::Dot | T::DotDot | T::DotDotEq) {
             return false;
         }
-        // `use std/task` is a path, not a division.
-        if self.current_line().trim_start().starts_with("use ")
-            && matches!(kind, T::Slash)
-        {
-            return false;
-        }
-        if prev == T::Slash && self.current_line().trim_start().starts_with("use ") {
+        // `use std/task` is a path, not a division — and so is the one in a
+        // `pub use`, which does not parse and is laid out from its tokens.
+        let line = self.current_line();
+        let line = line.trim_start();
+        let on_use = line.starts_with("use ") || line.starts_with("pub use ");
+        if on_use && (kind == T::Slash || prev == T::Slash) {
             return false;
         }
         if matches!(prev, T::Dot | T::DotDot | T::DotDotEq | T::At | T::Bang | T::LParen | T::LBracket)

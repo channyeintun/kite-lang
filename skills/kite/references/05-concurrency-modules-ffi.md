@@ -619,7 +619,10 @@ spelled.)
 
 ### Imports are always qualified
 
-There is no wildcard import and no way to bring a bare name into scope.
+There is no wildcard import and no way to bring a bare name into scope. There
+is no `pub use` either — a module's imports are not exported, and `pub use x`
+is one `E0100` at the `pub` (the `use` still imports `x` for that module).
+`pub` cannot be written on an enum variant: a variant is as visible as its enum.
 `config.load` always says where `load` came from. Types are qualified too:
 `let one: inventory.Item = inventory.item("spare", 5, 1)`.
 

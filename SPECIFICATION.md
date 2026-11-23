@@ -481,8 +481,10 @@ folding it would have had to pick one.
 - **Unmarked** — visible within the declaring module (a directory).
 - **`pub`** — visible to anything that imports the module.
 
-`pub` applies to modules, functions, types, struct fields, enum variants, traits,
-and trait methods. A `pub struct` with unmarked fields is an opaque type: callers
+`pub` applies to functions, types, struct fields, traits and trait methods. A
+variant is exactly as visible as its enum, and cannot be marked on its own. There
+is no `pub use`: a module's imports are its own (§13.1) and are not exported, so
+`pub` on a `use` is an error. A `pub struct` with unmarked fields is an opaque type: callers
 can hold it and pass it, but cannot read, construct, or destructure it — not
 with a literal, not with a `..base` update, not in a pattern.
 
