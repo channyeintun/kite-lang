@@ -235,7 +235,12 @@ codes! {
          trait implementations included, so an inherent method and a trait's of \
          the same name, or two traits', are a clash too: `x.m()` must name one \
          method, not whichever block came first. Likewise a type parameter \
-         bounded by two traits that both declare `m`.";
+         bounded by two traits that both declare `m`.\n\n\
+         A loop label is a name too: a loop inside another may not reuse the \
+         outer one's label, or `break outer` would leave the inner loop. And a \
+         map literal giving one known key twice, `{\"a\": 1, \"a\": 2}`, is a \
+         warning under this code: the later entry wins, and the earlier value \
+         is never seen.";
 
     E0113 = "E0113", "wrong number of arguments",
         "Kite has no default arguments, no variadics, and no overloading, so \
@@ -259,7 +264,10 @@ codes! {
          above it. The commonest cause is a name meant as a variant that is not \
          one — `Dir` where the enum says `Directory` — which is a binding: it \
          matches everything, and every arm after it is dead. A guarded arm \
-         shadows nothing, because its guard may fail.";
+         shadows nothing, because its guard may fail. A literal or a range \
+         inside a range above it (`5` after `1..=9`) is dead the same way, \
+         and so is a range that matches nothing: ends the wrong way round, \
+         `9..=4`, or `5..5`, which leaves out its one value.";
 
     E0117 = "E0117", "statement has no effect",
         "A closure written as a statement is built and thrown away. Nothing \
@@ -273,7 +281,18 @@ codes! {
          \x20       || (c >= 65 && c <= 90)     // a closure, discarded\n\n\
          The first line is a complete statement and the answer is wrong with \
          nothing said about it. Put the operator at the end of the line it \
-         continues.";
+         continues.\n\n\
+         The closure is one case of a wider rule: an expression statement \
+         with no call and no `await` anywhere in it computes a value and \
+         throws it away, so it is refused too. A line opening with `-` is a \
+         negation, not a subtraction carried over from the line above; one \
+         opening with `[` is a slice literal, not an index; and `done == true` \
+         compares where `done = true` was meant:\n\n\
+         \x20   let n = 10\n\
+         \x20       - 2                         // n is 10; this line does nothing\n\
+         \x20   done == true                    // write `done = true`\n\n\
+         A statement holding a call, such as `f() + 1`, does something, and \
+         is left alone.";
 
     E0118 = "E0118", "module-level binding is not a constant",
         "A `let` at the top of a module names a value the compiler works out \

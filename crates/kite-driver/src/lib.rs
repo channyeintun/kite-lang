@@ -1662,7 +1662,7 @@ mod tests {
         assert!(!text.contains("write `impl<T> Display for S<T>"), "{}", text);
         assert!(text.contains("only where `T: Display`, and `[int]` is not one"), "{}", text);
         assert!(text.contains("only where `T: prelude.Display`, and `[int]` is not one"), "{}", text);
-        assert!(text.contains("a `[int]` cannot be given an `impl`"), "{}", text);
+        assert!(text.contains("build the text: `join_ints(xs, \", \")`"), "{}", text);
     }
 
     /// `Wrapped.as(err)` at an argument its `impl Error` is bounded against

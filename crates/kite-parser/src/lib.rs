@@ -2526,6 +2526,7 @@ impl<'a> Parser<'a> {
         let brace = self.expect(T::LBrace)?;
         let mut open = self.open_brace(brace);
         let mut arms = Vec::new();
+        let mut unread = false;
         loop {
             self.skip_newlines();
             if self.at(T::RBrace) || self.at_end() || self.left_open(&open) {
@@ -2537,7 +2538,10 @@ impl<'a> Parser<'a> {
             let before = self.pos;
             match self.parse_match_arm() {
                 Some(a) => arms.push(a),
-                None => self.skip_rest(before, Resume::Line),
+                None => {
+                    unread = true;
+                    self.skip_rest(before, Resume::Line)
+                }
             }
             if self.pos == before && !self.unwinding {
                 self.bump();
@@ -2549,6 +2553,7 @@ impl<'a> Parser<'a> {
             scrutinee: Box::new(scrutinee),
             arms,
             span: start.to(end),
+            unread,
         })
     }
 
@@ -2567,6 +2572,43 @@ impl<'a> Parser<'a> {
         };
 
         self.expect(T::FatArrow)?;
+
+        // `1 => continue,` — a statement where the arm wants an expression.
+        // The block it belongs in is the whole fix, so the message says so.
+        if matches!(self.peek(), T::Continue | T::Break | T::Return) && !self.panicking {
+            let kw = self.span();
+            let word = self.peek().describe();
+            // The statement is read past, so the arm keeps its pattern and the
+            // arms after it are read: skipping to the end of the line went on
+            // through every arm below, since a line ending in `,` continues.
+            // What it was — `break outer`, `return n + 1` — is what the note
+            // puts in the block, so the fix is the line as written.
+            let is_return = self.at(T::Return);
+            self.bump();
+            let mut written = word.to_string();
+            if is_return {
+                if !matches!(self.peek(), T::Comma | T::Newline | T::RBrace | T::Eof) {
+                    let _ = self.parse_expr();
+                    written.push_str(" …");
+                }
+            } else if self.at(T::Ident) {
+                let label = self.bump();
+                written = format!("{} {}", word, self.text(label.span));
+            }
+            self.diags.push(
+                Diagnostic::error(codes::E0100, "expected an expression")
+                    .with_primary(kw, format!("found {}", word))
+                    .with_note(format!(
+                        "an arm is an expression or a block, and `{}` is a statement; put it \
+                         in a block: `=> {{ {} }}`",
+                        word, written
+                    )),
+            );
+            self.panicking = false;
+            self.eat(T::Comma);
+            let span = start.to(self.prev_span());
+            return Some(MatchArm { pattern, guard, body: MatchBody::Expr(Expr::Error(kw)), span });
+        }
 
         let body = if self.at(T::LBrace) {
             MatchBody::Block(self.parse_block()?)

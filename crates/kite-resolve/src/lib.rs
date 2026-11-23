@@ -646,6 +646,13 @@ pub struct ResolveMap {
     pub uses: HashMap<Span, Res>,
     /// Binding occurrences, keyed by the span of the introduced name.
     pub bindings: HashMap<Span, u32>,
+    /// A name in a pattern that is a unit variant of more than one enum, met
+    /// a second time in the same pattern — `(Slow, Slow)`. Which each one is
+    /// depends on the scrutinee's type, so resolution cannot call the second
+    /// a redeclaration: it shares the first one's local, and the checker
+    /// reports `E0112` at it only if both turn out to be bindings. Keyed by
+    /// the second's span; the value is the first's.
+    pub rebound: HashMap<Span, Span>,
     /// Spans that also spell a struct field: the `x` of a shorthand
     /// `Point{ x }`, in a literal or a pattern. The one identifier serves two
     /// roles, so a tool that rewrites the binding's name — rename — must not
@@ -1579,6 +1586,11 @@ struct FnResolver<'a> {
     or_bound: Vec<(String, u32)>,
     /// How many or-patterns are being resolved, one inside another.
     or_depth: usize,
+    /// Set while a pattern declares a name that is a unit variant of more
+    /// than one enum, and the locals declared that way: see
+    /// [`ResolveMap::rebound`].
+    ambiguous_pattern: bool,
+    provisional: Vec<u32>,
     /// The type `Self` names in this body: the one its `impl` block is for.
     /// None in a free function, and in a trait's default method, where
     /// `Self` is whichever type implements the trait and is known only by
@@ -1602,6 +1614,8 @@ impl<'a> FnResolver<'a> {
             alternatives: Vec::new(),
             or_bound: Vec::new(),
             or_depth: 0,
+            ambiguous_pattern: false,
+            provisional: Vec::new(),
             self_type: None,
         }
     }
@@ -1754,7 +1768,10 @@ impl<'a> FnResolver<'a> {
             .find_map(|(first, _)| first.get(&name.name).copied());
         if let Some(id) = shared {
             let (_, seen) = self.alternatives.last_mut().unwrap();
-            if seen.contains(&name.name) {
+            if seen.contains(&name.name) && self.ambiguous_pattern {
+                let first = self.locals[id as usize].span;
+                self.map.rebound.insert(name.span, first);
+            } else if seen.contains(&name.name) {
                 self.diags.push(
                     Diagnostic::error(
                         codes::E0112,
@@ -1786,6 +1803,12 @@ impl<'a> FnResolver<'a> {
         allow_shadow: bool,
     ) -> u32 {
         if let Some(&prev_id) = self.scopes.last().unwrap().get(&name.name) {
+            if self.ambiguous_pattern && self.provisional.contains(&prev_id) {
+                let first = self.locals[prev_id as usize].span;
+                self.map.rebound.insert(name.span, first);
+                self.map.bindings.insert(name.span, prev_id);
+                return prev_id;
+            }
             if allow_shadow {
                 let id = self.locals.len() as u32;
                 self.locals.push(LocalInfo {
@@ -1918,6 +1941,22 @@ impl<'a> FnResolver<'a> {
 
     fn for_stmt(&mut self, f: &ForStmt) {
         if let Some(l) = &f.label {
+            // An inner loop taking the label of one around it makes `break a`
+            // leave the inner loop, whichever the writer meant — and the
+            // outer one cannot be named from inside at all.
+            if self.labels.contains(&l.name) {
+                self.diags.push(
+                    Diagnostic::error(
+                        codes::E0112,
+                        format!("the label `{}` is already used by a loop around this one", l.name),
+                    )
+                    .with_primary(l.span, "redeclared here")
+                    .with_note(
+                        "`break` and `continue` name the innermost loop with a label, so the \
+                         outer loop could no longer be reached; give this loop a label of its own",
+                    ),
+                );
+            }
             self.labels.push(l.name.clone());
         }
         self.loop_depth += 1;
@@ -1932,10 +1971,11 @@ impl<'a> FnResolver<'a> {
             ForHeader::Loop => {}
         }
 
-        // The body shares the header's scope, so the loop variable is visible.
-        for s in &f.body.stmts {
-            self.stmt(s);
-        }
+        // The body is a scope nested in the header's, as a function's body is
+        // in its parameters': the loop variable is visible, and the body may
+        // shadow it — `let i = i * 2` — exactly as it may a parameter. Sharing
+        // the header's scope made the one a redeclaration and the other not.
+        self.block(&f.body);
 
         self.pop_scope();
         self.loop_depth -= 1;
@@ -2000,10 +2040,30 @@ impl<'a> FnResolver<'a> {
                 self.expr(end);
             }
 
-            // A bare name is a binding unless it names a unit variant.
+            // A bare name is a binding unless it names a unit variant or a
+            // module-level constant.
+            //
+            // A constant's name *is* its value everywhere else, so here it is
+            // the literal it stands for: `LIMIT => …` matches ten. Binding it
+            // afresh made the arm a catch-all that shadowed the constant, and
+            // the match answered "at the limit" for every number, silently.
+            // A local of the same name in scope is what the name means there,
+            // so a pattern under one binds as it always has.
             Pattern::Binding(name) => {
                 if let Some(&(ty, vi)) = self.map.variant_index.get(&name.name) {
                     self.map.uses.insert(name.span, Res::Variant(ty, vi));
+                } else if let Some(ci) =
+                    self.find_const(&name.name).filter(|_| self.lookup(&name.name).is_none())
+                {
+                    self.check_visible(Res::Const(ci), name.span, &name.name);
+                    self.map.uses.insert(name.span, Res::Const(ci));
+                } else if self.map.ambiguous_variants.contains(&name.name) {
+                    // `Slow`, which two enums declare: the checker decides
+                    // which, if either, from the scrutinee's type.
+                    self.ambiguous_pattern = true;
+                    let id = self.declare(name, false, false);
+                    self.ambiguous_pattern = false;
+                    self.provisional.push(id);
                 } else {
                     self.declare(name, false, false);
                 }
@@ -2118,6 +2178,15 @@ impl<'a> FnResolver<'a> {
             self.check_visible(Res::Type(ti), path.span, name);
             self.map.uses.insert(path.span, Res::Type(ti));
             return;
+        }
+        // `limits.MAX` — another module's constant, which is its value in a
+        // pattern exactly as the bare name of one of this module's is.
+        if path.segments.len() >= 2 {
+            if let Some(ci) = self.find_const(&path.text()) {
+                self.check_visible(Res::Const(ci), path.span, &path.text());
+                self.map.uses.insert(path.span, Res::Const(ci));
+                return;
+            }
         }
 
         let mut d = Diagnostic::error(codes::E0111, format!("cannot find `{}`", name))

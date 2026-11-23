@@ -180,8 +180,9 @@ the language.
 
 Statements are newline-terminated. Semicolons are never written. A statement
 continues onto the next line when the line ends in an operator, an open
-delimiter, or a comma. The same rule as Swift and Kotlin, and unambiguous here
-because a statement never begins with `(` or `[`. `>` and `>>` continue a line
+delimiter, or a comma. The same rule as Swift and Kotlin. A line that begins
+with `(` or `[` starts a statement of its own — `(g)()` is a call — so it is
+never an index into, or a call on, the line above. `>` and `>>` continue a line
 as the other operators do, and the `>` that closes `Option<int>` ends one;
 `return` is not an operator, and a line ending in it ends there.
 
@@ -199,6 +200,13 @@ The first line is already a complete statement. `&&` cannot do this, because it
 may not begin an expression and so is a syntax error; `||` can, and it is the
 one continuation a reader coming from another language writes by habit. It is
 rejected as `E0117` rather than allowed to be quietly wrong.
+
+The same holds for every expression statement that does nothing. One with no
+call and no `await` anywhere in it computes a value and throws it away, so it is
+`E0117` too: a line opening with `-` (a negation, not a subtraction carried
+over), one opening with `[` (a slice literal, not an index), and `done == true`
+written for `done = true`. A statement that holds a call, such as `f() + 1`, is
+something happening and is left alone.
 
 ---
 
@@ -410,6 +418,11 @@ main reason people reach for `var`.
 Shadowing within a nested scope is permitted. Shadowing within the *same* scope
 is an error — it is almost always a typo.
 
+A function's parameters, and a `for` loop's bindings, live in a scope of their
+own that the body is nested in. So the body may shadow either — `let x = x + 1`
+on a parameter `x`, `let i = i * 2` on a loop variable `i` — and the binding it
+makes lasts to the end of the body.
+
 ### 4.2 Module-level constants
 
 A `let` at the top of a module names a value the compiler works out while
@@ -448,6 +461,11 @@ a struct and pass it to what changes it.
 A constant shares the value name space with functions, so a module cannot
 declare both `fn limit` and `let limit`; a cycle among constants is
 [E0119](#16-diagnostics).
+
+In a `match` pattern a constant's name is its value too, so `LIMIT => …` and
+`limits.MAX_BODY => …` match that one value, exactly as the literal would — they
+are never a fresh binding that takes everything. A local of the same name in
+scope is what the name means there, and a pattern under one binds as usual.
 
 A `float` interpolated into a constant is written the way every backend writes
 one at run time, so `let LABEL = "max \(1e21)"` is `"max 1e+21"` everywhere:
@@ -736,6 +754,10 @@ m.remove("a")         // takes the entry out; a key that is not there is not an 
 
 Map indexing returns `Option<V>`, never a zero value.
 
+A map literal that gives one key twice keeps the later entry. Where the two
+keys are literals or constants, so the compiler can see they are equal, that is
+a warning ([E0112](#16-diagnostics)): the earlier value is never seen.
+
 `remove` shifts the entries after it down, so insertion order keeps meaning what
 it says and `keys()` and `values()` still line up element for element. Its
 receiver must be somewhere a change can be kept, exactly as `xs.push(v)`'s
@@ -824,6 +846,10 @@ present:
 let label = if x > 10 { "big" } else { "small" }
 ```
 
+A branch is one expression, and an `if` or a `match` is one too: `if a { if b {
+1 } else { 2 } } else { 3 }` is an `int`, and so is a branch holding a whole
+value `match`.
+
 ### 6.2 `for`
 
 `for` is the only loop keyword. It has three forms.
@@ -864,6 +890,10 @@ outer: for row in grid {
     }
 }
 ```
+
+A loop inside another may not take the label of the one around it
+([E0112](#16-diagnostics)): `break outer` would then leave the inner loop, and
+the outer one could not be named from inside at all.
 
 ### 6.3 `defer`
 
@@ -1394,10 +1424,12 @@ catch-all. A guarded arm counts towards nothing, since its guard may fail.
 An arm no value can reach — everything it matches is taken by an unguarded arm
 above it — is a warning (`E0116`). The usual cause is a name meant as a variant
 that is not one: `Dir` where the enum says `Directory` is a binding, which takes
-every value.
+every value. A literal or a range inside a range above it is one too — `5` or
+`5..=7` after `1..=9` — and so is a range that matches nothing, such as `9..=4`.
 
 An arm is an expression or a block. A block arm **runs for its effects**: it
-produces a value only when it is a single expression, because there are no tail
+produces a value only when it is a single expression (which may be an `if` or a
+`match` whose own branches are single expressions), because there are no tail
 expressions in Kite — a value arriving by falling off the end of a block is the
 hidden control flow the language is spent avoiding, and an `if` used as a value
 says "expected a single expression" for the same reason.
@@ -1424,6 +1456,12 @@ fn area(s: Shape) -> int {
 
 Every arm leaving means the `match` leaves, so this **is** a returning path and
 the function needs no `return` after it.
+
+A `match` in statement position discards its arms' values, so its arms need not
+agree in type: `0 => io.print("zero")` beside `_ => count()`, where `count`
+returns an `int`, is fine. An arm whose value is an `error` is still one dropped
+([E0302](#16-diagnostics)), as a bare call's would be. A `match` used as a value
+needs every arm to produce the same type.
 
 ### 9.3 Patterns
 

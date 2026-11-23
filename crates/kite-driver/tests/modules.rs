@@ -228,6 +228,26 @@ fn a_misspelled_builtin_is_not_reported_as_a_missing_module() {
     assert!(!said.contains("in module `text`"), "{}", said);
 }
 
+/// Another module's constant in a pattern is its value, exactly as one of the
+/// program's own is, and is held to the same visibility as anywhere else.
+#[test]
+fn an_imported_constant_in_a_pattern_is_its_value() {
+    let p = Project::new("const-pattern");
+    p.file("limits.kite", "pub let MAX = 99\nlet SECRET = 7\n");
+    let main = p.file(
+        "main.kite",
+        "use limits\n\nfn main() {\n  io.print(match 99 { limits.MAX => \"max\", _ => \"no\" })\n\
+         \x20 io.print(match 98 { limits.MAX => \"max\", _ => \"no\" })\n}\n",
+    );
+    assert_eq!(p.run(&main).expect("compiles"), "max\nno\n");
+    let main = p.file(
+        "secret.kite",
+        "use limits\n\nfn main() {\n  io.print(match 7 { limits.SECRET => \"s\", _ => \"no\" })\n}\n",
+    );
+    let err = p.run(&main).expect_err("must be private");
+    assert!(err.contains("E0401"), "{}", err);
+}
+
 #[test]
 fn an_unmarked_declaration_is_private_to_its_module() {
     let p = Project::new("private");

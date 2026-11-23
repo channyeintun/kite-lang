@@ -5404,6 +5404,202 @@ fn main() {
 "#,
         "true\ntrue\ntrue\n3|3\n2.5|2.5\ntrue|true\ns|s\nS(1)\nS(two)\n3\n1.5\nfalse\n\"a\\\"b\"\ntrue\ntrue\ntrue\n",
     ),
+    // A module-level constant named in a pattern is its value, as it is
+    // everywhere else. `LIMIT => …` bound a fresh `LIMIT` that matched every
+    // number, so `classify(5)` said "at the limit".
+    (
+        "constant-in-a-pattern-is-its-value",
+        r#"let LIMIT = 10
+let TWENTY = 20
+let NAME = "kite"
+let HALF = 0.5
+let ON = true
+
+fn classify(n: int) -> str {
+  return match n {
+    0 => "zero",
+    LIMIT => "at the limit",
+    -1 | TWENTY => "minus one or twenty",
+    _ => "other",
+  }
+}
+
+fn opt(o: Option<int>) -> str {
+  return match o {
+    nil => "none",
+    LIMIT => "ten",
+    _ => "some",
+  }
+}
+
+fn main() {
+  io.print(classify(5))
+  io.print(classify(10))
+  io.print(classify(20))
+  io.print(opt(10))
+  io.print(opt(11))
+  io.print(match "kite" { NAME => "name", _ => "no" })
+  io.print(match 0.25 { HALF => "half", _ => "no" })
+  io.print(match false { ON => "on", _ => "off" })
+  let LIMIT = 3
+  io.print(match 4 { LIMIT => "bound \(LIMIT)" })
+}
+"#,
+        "other\nat the limit\nminus one or twenty\nten\nsome\nname\nno\noff\nbound 4\n",
+    ),
+    // A unit variant two enums share is resolved against the scrutinee's
+    // type, through an optional too: `Slow` against an `Option<Pace>` was a
+    // binding that took every value, so `Pace.Quick` printed "slow". And a
+    // tuple naming it twice, `(Slow, Slow)`, was "already declared".
+    (
+        "a-shared-variant-name-resolves-by-the-scrutinee",
+        r#"enum Speed {
+  Slow
+  Fast
+}
+
+enum Pace {
+  Slow
+  Quick
+}
+
+fn name(o: Option<Pace>) -> str {
+  return match o {
+    nil => "none",
+    Slow => "slow",
+    Quick => "quick",
+  }
+}
+
+fn pair(s: Speed, p: Pace) -> str {
+  return match (s, p) {
+    (Slow, Slow) => "ss",
+    (Fast, Slow) => "fs",
+    (_, Quick) => "q",
+  }
+}
+
+fn mixed(p: (Speed, int)) -> int {
+  return match p {
+    (Slow, Slow) => Slow,
+    (Fast, _) => 0,
+  }
+}
+
+fn main() {
+  io.print(name(Pace.Quick))
+  io.print(name(Pace.Slow))
+  io.print(name(nil))
+  io.print(pair(Speed.Slow, Pace.Slow))
+  io.print(pair(Speed.Fast, Pace.Quick))
+  io.print(mixed((Speed.Slow, 4)))
+}
+"#,
+        "quick\nslow\nnone\nss\nq\n4\n",
+    ),
+    // A value-`if` branch, or a `match` block arm, whose one expression is
+    // an `if` or a `match` yields it. An `if` opening a block parses as a
+    // statement, so the branch was "must produce a value" and the arm `()`.
+    (
+        "a-branch-that-is-an-if-or-a-match-is-one-expression",
+        r#"fn pick(a: bool, b: bool) -> int {
+  return if a { if b { 1 } else { 2 } } else { 3 }
+}
+
+fn inner_match(a: bool, n: int) -> int {
+  return if a {
+    match n {
+      2 => 20,
+      _ => 0,
+    }
+  } else {
+    7
+  }
+}
+
+fn arm(n: int, a: bool) -> int {
+  return match n {
+    2 => {
+      if a { 1 } else { 0 }
+    },
+    _ => 5,
+  }
+}
+
+fn main() {
+  io.print(pick(true, false))
+  io.print(pick(false, true))
+  io.print(inner_match(true, 2))
+  io.print(inner_match(false, 2))
+  io.print(arm(2, true))
+  io.print(arm(2, false))
+  io.print(arm(1, true))
+  match 3 {
+    3 => {
+      if true { io.print("statement") } else { io.print("no") }
+    },
+    _ => {},
+  }
+}
+"#,
+        "2\n3\n20\n7\n1\n0\n5\nstatement\n",
+    ),
+    // A `match` statement discards its arms' values, so a print beside a
+    // call returning an `int` or a `str` is fine. It was "match arms have
+    // different types".
+    (
+        "a-match-statement-discards-arms-of-different-types",
+        r#"fn f() -> int {
+  io.print("f ran")
+  return 7
+}
+
+fn g() -> str {
+  io.print("g ran")
+  return "s"
+}
+
+fn main() {
+  for n in 0..4 {
+    match n {
+      0 => io.print("zero"),
+      1 => f(),
+      2 => g(),
+      _ => {
+        io.print("many")
+      },
+    }
+  }
+}
+"#,
+        "zero\nf ran\ng ran\nmany\n",
+    ),
+    // A loop body is a scope nested in its header's, as a function body is
+    // in its parameters', so it may shadow the loop variable as it may a
+    // parameter. It was E0112 for the one and fine for the other.
+    (
+        "a-loop-body-may-shadow-its-loop-variable",
+        r#"fn f(x: int) -> int {
+  let x = x + 1
+  return x
+}
+
+fn main() {
+  for i in 0..3 {
+    let i = i * 10
+    io.print(i)
+  }
+  let m = {"a": 1}
+  for (k, v) in m {
+    let v = v + 1
+    let k = "\(k)!"
+    io.print("\(k) \(v)")
+  }
+  io.print(f(1))
+}
+"#,
+        "0\n10\n20\na! 2\n2\n",
+    ),
 ];
 
 #[test]

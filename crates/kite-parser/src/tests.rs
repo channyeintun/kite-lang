@@ -1493,3 +1493,17 @@ fn literal_braces_are_the_ones_the_parser_read_as_literals() {
     let before: Vec<&str> = braces.iter().map(|&at| &src[at as usize - 1..at as usize]).collect();
     assert_eq!(before, vec!["P", "P"]);
 }
+
+/// `break outer` or a bare `return` where an arm wants an expression: the
+/// note's block is the statement as written, so the fix keeps the label and
+/// adds no value that was not there.
+#[test]
+fn a_statement_arm_is_fixed_by_the_block_it_was_written_as() {
+    let p = parse_src(
+        "fn f() {\n  outer: for i in 0..3 {\n    match i {\n      1 => break outer,\n\
+         \x20     2 => return,\n      _ => {},\n    }\n  }\n}\n",
+    );
+    assert_eq!(p.codes(), vec!["E0100", "E0100"], "{}", p.render());
+    assert!(p.render().contains("`=> { break outer }`"), "{}", p.render());
+    assert!(p.render().contains("`=> { return }`"), "{}", p.render());
+}

@@ -645,6 +645,7 @@ pub fn check_recording(
             closure_ret_unknown: None,
             reported_unchecked: std::collections::HashSet::new(),
             copies: std::collections::BTreeSet::new(),
+            arm_bound: Vec::new(),
             defers: None,
             release,
             solved: &mut *solved,
@@ -1211,6 +1212,9 @@ struct Checker<'a> {
     /// inspecting one inspects both, and one left behind while the other is
     /// still in scope has dropped nothing. Each pair is written lowest first.
     copies: std::collections::BTreeSet<(u32, u32)>,
+    /// The locals the current `match` arm's pattern has bound so far, for
+    /// [`ResolveMap::rebound`].
+    arm_bound: Vec<u32>,
 }
 
 /// Whether a local certainly holds a value at this point.
@@ -1594,7 +1598,7 @@ impl<'a> Checker<'a> {
                 // arm is written, since a block in value position must be a
                 // single expression. Reading divergence off the arms is what
                 // lets the function containing it be seen to return.
-                let (e, flow) = self.match_expr_with_flow(m, None);
+                let (e, flow) = self.match_expr_with_flow(m, None, true);
                 Some((hir::Stmt::Expr(e), flow))
             }
 
@@ -1619,9 +1623,14 @@ impl<'a> Checker<'a> {
             }
 
             ast::Stmt::Expr(e) => {
-                self.inert_closure(e);
                 let expr = self.expr(e, None);
-                self.dropped_error(&expr);
+                // Asked after the expression is checked, so one already wrong
+                // for another reason is not reported a second time; and one
+                // that does nothing is not also an error dropped.
+                let inert = !self.types.is_poisoned(expr.ty) && self.inert_statement(e);
+                if !inert {
+                    self.dropped_error(&expr);
+                }
                 let flow = if expr.ty == TyId::NEVER { Flow::Diverges } else { Flow::Falls };
                 Some((hir::Stmt::Expr(expr), flow))
             }
@@ -3993,6 +4002,9 @@ impl<'a> Checker<'a> {
                 let mut flat = Vec::with_capacity(entries.len() * 2);
                 let mut key_ty = hint.map(|(k, _)| k);
                 let mut val_ty = hint.map(|(_, v)| v);
+                // The keys the compiler knows, and where each was first given.
+                let mut known_keys: std::collections::HashMap<String, Span> =
+                    std::collections::HashMap::new();
                 for e in entries {
                     let k = self.expr(&e.key, key_ty);
                     let k = match key_ty {
@@ -4014,6 +4026,27 @@ impl<'a> Checker<'a> {
                         }
                         Some(want) => self.accept(v, want, None),
                     };
+                    // A key the compiler knows, written twice: the later
+                    // entry replaces the earlier, whose value is never seen.
+                    // Almost always a copied line whose key was not edited.
+                    let known = |e: &hir::Expr| match &e.kind {
+                        ExprKind::Int(i) => Some(i.to_string()),
+                        ExprKind::Str(s) => Some(format!("{:?}", s)),
+                        ExprKind::Bool(b) => Some(b.to_string()),
+                        _ => None,
+                    };
+                    if let Some(key) = known(&k) {
+                        if let Some(&first) = known_keys.get(&key) {
+                            self.diags.push(
+                                Diagnostic::warning(codes::E0112, format!("the key {} is given twice", key))
+                                    .with_primary(k.span, "this entry replaces the earlier one")
+                                    .with_secondary(first, "first given here, and never seen")
+                                    .with_note("a map holds one value per key; remove one of the two"),
+                            );
+                        } else {
+                            known_keys.insert(key, k.span);
+                        }
+                    }
                     flat.push(k);
                     flat.push(v);
                 }
@@ -7591,25 +7624,64 @@ impl<'a> Checker<'a> {
     /// percent-encoder in this repository's own site encoded the letters.
     ///
     /// `&&` cannot do this — it may not begin an expression, so it is a parse
-    /// error — which is why this is about `||` alone.
+    /// error.
+    ///
+    /// The closure is the loudest case of a wider one: any expression
+    /// statement with no call, no `await` and nothing else that acts in it is
+    /// computed and thrown away. A `-` opening a line is a negation, not a
+    /// subtraction carried over; a `[` opening one is a slice literal, not an
+    /// index; `done == true` is a comparison where `=` was meant. Each is a
+    /// complete statement with a wrong answer and nothing said, so each is
+    /// the same error. A call anywhere in the expression — `f() + 1`
+    /// included — is something happening, and is left alone.
     ///
     /// [§2.5]: ../../../SPECIFICATION.md#25-semicolon-insertion
-    fn inert_closure(&mut self, e: &ast::Expr) {
-        let ast::Expr::Closure { span, .. } = e else {
-            return;
-        };
-        self.diags.push(
-            Diagnostic::error(codes::E0117, "this closure is built and thrown away")
-                .with_primary(*span, "nothing calls it, so nothing in it happens")
+    ///
+    /// Whether it reported one, so the statement is not reported again for
+    /// the error its value holds: a bare `err` is one mistake, not two.
+    fn inert_statement(&mut self, e: &ast::Expr) -> bool {
+        if let ast::Expr::Closure { span, .. } = e {
+            self.diags.push(
+                Diagnostic::error(codes::E0117, "this closure is built and thrown away")
+                    .with_primary(*span, "nothing calls it, so nothing in it happens")
+                    .with_note(
+                        "an `||` opening a line is a closure with no parameters, not the \
+                         continuation of the line above",
+                    )
+                    .with_note(
+                        "a statement continues onto the next line when it *ends* in an \
+                         operator — put the `||` at the end of the line it continues",
+                    ),
+            );
+            return true;
+        }
+        if expr_acts(e) {
+            return false;
+        }
+        let mut d = Diagnostic::error(codes::E0117, "this statement has no effect")
+            .with_primary(e.span(), "computed and thrown away");
+        d = match e {
+            ast::Expr::Binary { op: ast::BinaryOp::Eq, .. } => d.with_note(
+                "`==` compares and gives back a `bool`; to assign, write `=`",
+            ),
+            ast::Expr::Unary { op: ast::UnaryOp::Neg, .. } => d.with_note(
+                "a line that begins with `-` is a statement of its own, not the \
+                 continuation of the line above; a statement continues onto the next \
+                 line when it *ends* in an operator, so put the `-` there",
+            ),
+            ast::Expr::Slice { .. } | ast::Expr::Paren { .. } | ast::Expr::Tuple { .. } => d
                 .with_note(
-                    "an `||` opening a line is a closure with no parameters, not the \
-                     continuation of the line above",
-                )
-                .with_note(
-                    "a statement continues onto the next line when it *ends* in an \
-                     operator — put the `||` at the end of the line it continues",
+                    "a line that begins with `[` or `(` is a statement of its own, not an \
+                     index or a call on the line above; keep it on that line",
                 ),
-        );
+            ast::Expr::Path(_) => d.with_note("naming a value does nothing; a call needs `()`"),
+            _ => d.with_note(
+                "nothing in it calls a function or awaits a task, so its value is the \
+                 only thing it makes — bind it with `let`, or return it",
+            ),
+        };
+        self.diags.push(d);
+        true
     }
 
     /// An error thrown away by leaving a call as a bare statement.
@@ -9087,18 +9159,20 @@ impl<'a> Checker<'a> {
     // ---- match ------------------------------------------------------------
 
     fn match_expr(&mut self, m: &ast::MatchExpr, expected: Option<TyId>) -> hir::Expr {
-        self.match_expr_with_flow(m, expected).0
+        self.match_expr_with_flow(m, expected, false).0
     }
 
     /// The same check, also reporting whether control falls out of the match.
     ///
     /// Only a statement asks: an expression that needs a value gets one or a
     /// diagnostic, and a match every arm of which leaves cannot supply one
-    /// either way.
+    /// either way. `discard` is set for that statement, whose arms' values
+    /// nothing reads.
     fn match_expr_with_flow(
         &mut self,
         m: &ast::MatchExpr,
         expected: Option<TyId>,
+        discard: bool,
     ) -> (hir::Expr, Flow) {
         let before = self.taint.clone();
         let scrutinee = self.expr(&m.scrutinee, None);
@@ -9136,11 +9210,14 @@ impl<'a> Checker<'a> {
         let mut before_wildcard = true;
 
         if m.arms.is_empty() {
-            self.diags.push(
-                Diagnostic::error(codes::E0210, "a `match` needs at least one arm")
-                    .with_primary(m.span, "no arms")
-                    .with_note("an empty match can never produce a value"),
-            );
+            // Arms the parser could not read are not no arms.
+            if !m.unread {
+                self.diags.push(
+                    Diagnostic::error(codes::E0210, "a `match` needs at least one arm")
+                        .with_primary(m.span, "no arms")
+                        .with_note("an empty match can never produce a value"),
+                );
+            }
             return (self.lit(ExprKind::Error, TyId::ERROR, m.span), Flow::Falls);
         }
 
@@ -9159,6 +9236,7 @@ impl<'a> Checker<'a> {
         let mut poisoned = false;
         let mut arms = Vec::with_capacity(m.arms.len());
         let mut result_ty: Option<TyId> = None;
+        let mut disagree = false;
         let mut arm_spans: Vec<(Span, TyId)> = Vec::new();
 
         // Arms are checked in order so a binding can be narrowed. Once an
@@ -9178,6 +9256,7 @@ impl<'a> Checker<'a> {
                 TyKind::Optional(inner) if nil_covered => inner,
                 _ => scrut_ty,
             };
+            self.arm_bound.clear();
             let pattern = self.pattern_with(&arm.pattern, scrut_ty, bind_ty);
             if let (true, hir::Pattern::Binding { local, .. }) = (held, &pattern) {
                 self.forget_copies(local.0);
@@ -9220,10 +9299,12 @@ impl<'a> Checker<'a> {
                 }
             }
 
-            let want = expected.or(result_ty);
+            // In a `match` statement the arms' values are thrown away, so one
+            // arm says nothing about what the next should be.
+            let want = if discard { expected } else { expected.or(result_ty) };
             let body = match &arm.body {
                 ast::MatchBody::Expr(e) => self.expr(e, want),
-                ast::MatchBody::Block(b) => self.match_block(b, want),
+                ast::MatchBody::Block(b) => self.match_block(b, want, discard),
             };
             // An arm producing a `T` where a `?T` is wanted is subsumption,
             // exactly as it is for a `let` or an argument — so `Text(s) => s`
@@ -9252,6 +9333,9 @@ impl<'a> Checker<'a> {
 
             if body.ty != TyId::NEVER && !self.types.is_poisoned(body.ty) {
                 match result_ty {
+                    Some(want) if discard && !self.types.satisfies(body.ty, want) => {
+                        disagree = true;
+                    }
                     None => result_ty = Some(body.ty),
                     Some(want) if !self.types.satisfies(body.ty, want) => {
                         let (a, b) = (self.types.name(want), self.types.name(body.ty));
@@ -9317,7 +9401,38 @@ impl<'a> Checker<'a> {
         // No arm produced a type, and one of them could not: the match's type
         // is unknown, not `()`, or binding it reports the one mistake again as
         // "cannot bind a value of type `()`".
-        let ty = result_ty.unwrap_or(if poisoned { TyId::ERROR } else { TyId::UNIT });
+        let mut ty = result_ty.unwrap_or(if poisoned { TyId::ERROR } else { TyId::UNIT });
+        // A `match` statement whose arms produce different types — a print
+        // beside a call returning an `int` — is fine, since nothing reads the
+        // value. Each arm that has one is made a statement of its own, so the
+        // match is `()` and the backends see arms that agree.
+        //
+        // An arm's error is dropped here, as a bare call's would be — whether
+        // or not the arms agree: `0 => fails(), _ => fails()` agrees on
+        // `error`, and throws it away just the same.
+        if discard {
+            for arm in &arms {
+                self.dropped_error(&arm.body);
+            }
+        }
+        if disagree {
+            for arm in &mut arms {
+                if arm.body.ty == TyId::UNIT || arm.body.ty == TyId::NEVER {
+                    continue;
+                }
+                let span = arm.body.span;
+                let body = std::mem::replace(
+                    &mut arm.body,
+                    hir::Expr { kind: ExprKind::Error, ty: TyId::UNIT, span },
+                );
+                arm.body = hir::Expr {
+                    kind: ExprKind::Block(hir::Block { stmts: vec![hir::Stmt::Expr(body)] }),
+                    ty: TyId::UNIT,
+                    span,
+                };
+            }
+            ty = TyId::UNIT;
+        }
         let expr = hir::Expr {
             kind: ExprKind::Match {
                 scrutinee: Box::new(scrutinee),
@@ -9327,6 +9442,25 @@ impl<'a> Checker<'a> {
             span: m.span,
         };
         (expr, flow)
+    }
+
+    /// A module-level constant named in a pattern: the literal it stands for,
+    /// checked as one — against an optional, the value inside.
+    fn const_pattern(&mut self, index: u32, span: Span, scrut: TyId) -> hir::Pattern {
+        let want = match *self.types.kind(scrut) {
+            TyKind::Optional(inner) => inner,
+            _ => scrut,
+        };
+        let lit = self.const_expr(index, span);
+        self.expect_ty(lit.ty, want, lit.span, None);
+        match lit.kind {
+            ExprKind::Int(v) => hir::Pattern::Int(v),
+            ExprKind::Float(v) => hir::Pattern::Float(v),
+            ExprKind::Str(s) => hir::Pattern::Str(s),
+            ExprKind::Bool(b) => hir::Pattern::Bool(b),
+            // Its declaration already said why it has no value.
+            _ => hir::Pattern::Wildcard,
+        }
     }
 
     /// Whether a pattern matches the whole scrutinee without testing it: `_`,
@@ -9354,9 +9488,20 @@ impl<'a> Checker<'a> {
     /// So an arm wanting several statements *and* a result writes the match in
     /// statement position and returns from every arm, which
     /// [`Self::match_expr_with_flow`] recognises as diverging.
-    fn match_block(&mut self, b: &ast::Block, expected: Option<TyId>) -> hir::Expr {
+    ///
+    /// An `if` or a `match` that opens a block is read as a statement, but
+    /// when it is the whole block and every branch of it is one expression,
+    /// it is one expression too — `2 => { if a { 1 } else { 0 } }` is `1` or
+    /// `0`, not `()`. Only where the value is wanted: an arm of a `match`
+    /// statement runs its block for its effects, as it always has.
+    fn match_block(&mut self, b: &ast::Block, expected: Option<TyId>, discard: bool) -> hir::Expr {
         match b.stmts.as_slice() {
             [ast::Stmt::Expr(e)] => self.expr(e, expected),
+            [ast::Stmt::If(i)] if !discard && if_is_value(i) => {
+                let else_ = i.else_.as_deref().expect("a value `if` has an `else`");
+                self.if_expr(&i.cond, &i.then, else_, i.span, expected)
+            }
+            [ast::Stmt::Match(m)] if !discard && match_is_value(m) => self.match_expr(m, expected),
             _ => {
                 let sig = self.current_signature();
                 let (block, flow) = self.block(b, &sig);
@@ -9973,6 +10118,22 @@ impl<'a> Checker<'a> {
 
             ast::Pattern::Binding(name) => match self.resolved.lookup_binding(name.span) {
                 Some(local) => {
+                    // `(Slow, Slow)` shares one local between the two names,
+                    // which is right when they are variants. When both are
+                    // bindings, it is a name bound twice.
+                    if let Some(&first) = self.resolved.rebound.get(&name.span) {
+                        if self.arm_bound.contains(&local) {
+                            self.diags.push(
+                                Diagnostic::error(
+                                    codes::E0112,
+                                    format!("`{}` is already declared in this scope", name.name),
+                                )
+                                .with_primary(name.span, "redeclared here")
+                                .with_secondary(first, "first declared here"),
+                            );
+                        }
+                    }
+                    self.arm_bound.push(local);
                     self.locals[local as usize].ty = bind_ty;
                     self.init[local as usize] = Init::Assigned;
                     hir::Pattern::Binding {
@@ -9987,6 +10148,7 @@ impl<'a> Checker<'a> {
                     Some(Res::Variant(ti, vi)) => {
                         self.variant_pattern(ti, vi, None, scrut, name.span)
                     }
+                    Some(Res::Const(index)) => self.const_pattern(index, name.span, scrut),
                     _ => hir::Pattern::Wildcard,
                 },
             },
@@ -10076,10 +10238,22 @@ impl<'a> Checker<'a> {
                 }
                 match (bound(&a), bound(&b)) {
                     (Some(x), Some(y)) => {
-                        if x > y {
+                        // `5..5` is empty as surely as `9..=4`: an
+                        // exclusive range leaves out its end.
+                        if x > y || (x == y && !*inclusive) {
+                            let op = if *inclusive { "..=" } else { ".." };
+                            let note = if x > y {
+                                "a range runs from its smaller end to its larger"
+                            } else {
+                                "`..` leaves out its end, so a range from a number to itself \
+                                 is empty; `..=` keeps the end"
+                            };
                             self.diags.push(
-                                Diagnostic::warning(codes::E0210, "this range is empty")
-                                    .with_primary(*span, format!("{}..{} matches nothing", x, y)),
+                                // An arm no value can reach, which is what
+                                // E0116 is; E0210 is a match missing values.
+                                Diagnostic::warning(codes::E0116, "this range is empty")
+                                    .with_primary(*span, format!("{}{}{} matches nothing", x, op, y))
+                                    .with_note(note),
                             );
                         }
                         hir::Pattern::IntRange { start: x, end: y, inclusive: *inclusive }
@@ -10109,6 +10283,24 @@ impl<'a> Checker<'a> {
                 match self.resolved.lookup_use(path.span) {
                     Some(Res::Variant(ti, vi)) => {
                         self.variant_pattern(ti, vi, Some(args), scrut, *span)
+                    }
+                    // `limits.MAX`, written without parentheses.
+                    Some(Res::Const(index)) if *span == path.span => {
+                        self.const_pattern(index, path.span, scrut)
+                    }
+                    Some(Res::Const(_)) => {
+                        self.diags.push(
+                            Diagnostic::error(
+                                codes::E0200,
+                                format!("`{}` is a constant, not a variant", path.text()),
+                            )
+                            .with_primary(*span, "a constant has no payload to match")
+                            .with_note(format!(
+                                "write `{}` alone to match its value",
+                                path.text()
+                            )),
+                        );
+                        hir::Pattern::Wildcard
                     }
                     Some(Res::Type(ti)) => match self.type_ids[ti as usize] {
                         Some(TypeTarget::Struct(_)) => {
@@ -10447,7 +10639,11 @@ impl<'a> Checker<'a> {
     /// The declaration index and variant index of a unit variant with this
     /// name on the scrutinee's enum, if there is one.
     fn unit_variant_of(&self, scrut: TyId, name: &str) -> Option<(u32, u32)> {
-        let TyKind::Enum(eid) = *self.types.kind(scrut) else { return None };
+        // Against an optional, a pattern is one for the value inside, so a
+        // name is that enum's variant there too. Asking only of the
+        // scrutinee itself made `Slow` against an `Option<Pace>` a binding
+        // whenever another enum also declared a `Slow`.
+        let TyKind::Enum(eid) = *self.types.kind(self.types.present(scrut)) else { return None };
         let vi = self
             .types
             .enum_def(eid)
@@ -10625,7 +10821,8 @@ impl<'a> Checker<'a> {
         // A refused pattern was meant to cover something, and what it was
         // meant to cover is anybody's guess, so nothing is said to be missing
         // on top of the mistake already reported.
-        if rejected.iter().any(|r| *r) {
+        // So was an arm the parser could not read.
+        if m.unread || rejected.iter().any(|r| *r) {
             return true;
         }
         let missing = exhaustive::missing_patterns(scrut, &unguarded, self.types);
@@ -10719,7 +10916,10 @@ impl<'a> Checker<'a> {
             let ast::Pattern::Binding(name) = &arm.pattern else { continue };
             // Only a name written like a variant — capitalised — is taken for
             // one that was misspelled; `other` and `x` mean what they say.
-            if checked.guard.is_some() || !name.name.starts_with(char::is_uppercase) {
+            if checked.guard.is_some()
+                || !matches!(checked.pattern, hir::Pattern::Binding { .. })
+                || !name.name.starts_with(char::is_uppercase)
+            {
                 continue;
             }
             let close = variants.iter().find(|v| {
@@ -11221,9 +11421,30 @@ impl<'a> Checker<'a> {
 
     /// A block used for its value must be a single expression. Kite has no
     /// implicit tail expression in statement blocks.
+    ///
+    /// An `if` or a `match` opening a line parses as a statement, so one that
+    /// is a branch's whole body arrives here as one — and it is a single
+    /// expression all the same. Refusing it made `if a { if b { 1 } else { 2 }
+    /// } else { 3 }` "must produce a value", where wrapping the inner `if` in
+    /// parentheses, which changes nothing, compiled.
     fn block_value(&mut self, b: &ast::Block, expected: Option<TyId>) -> hir::Expr {
         match b.stmts.as_slice() {
             [ast::Stmt::Expr(e)] => self.expr(e, expected),
+            [ast::Stmt::If(i)] => match i.else_.as_deref() {
+                Some(else_) => self.if_expr(&i.cond, &i.then, else_, i.span, expected),
+                None => {
+                    self.diags.push(
+                        Diagnostic::error(codes::E0200, "an `if` used as a value needs an `else`")
+                            .with_primary(i.span, "no value when this test is false")
+                            .with_note(
+                                "every path through a value `if` has to produce one: end the \
+                                 chain with `else { … }`",
+                            ),
+                    );
+                    self.lit(ExprKind::Error, TyId::ERROR, i.span)
+                }
+            },
+            [ast::Stmt::Match(m)] => self.match_expr(m, expected),
             _ => {
                 self.diags.push(
                     Diagnostic::error(codes::E0200, "this block must produce a value")
@@ -11452,7 +11673,15 @@ impl<'a> Checker<'a> {
         // "exactly zero?" and a tolerance would answer a different one. The
         // lint fired on every such guard in `std/math`, which is how a warning
         // teaches people to stop reading warnings.
-        let literal = |e: &hir::Expr| matches!(e.kind, ExprKind::Float(_));
+        // `-1.0` is a literal too: the language has no negative literals, so
+        // a minus sign on one is how a negative one is spelled.
+        let literal = |e: &hir::Expr| match &e.kind {
+            ExprKind::Float(_) => true,
+            ExprKind::Unary { op: hir::UnOp::NegFloat, operand } => {
+                matches!(operand.kind, ExprKind::Float(_))
+            }
+            _ => false,
+        };
         if matches!(hop, H::EqFloat | H::NeFloat) && !literal(&l) && !literal(&r) {
             self.diags.push(
                 Diagnostic::warning(codes::E0201, "comparing floats for exact equality")
@@ -11732,6 +11961,41 @@ impl<'a> Checker<'a> {
                      make the trait `Display` itself and hold a `dyn Display`",
                     self.types.with_article(ty)
                 )
+            }
+            _ => {}
+        }
+        // A built-in type cannot be given an `impl` — `impl Display for
+        // Option<int>` names no type that can be written there — so the note
+        // says what does compile for the shape at hand.
+        match self.types.kind(ty).clone() {
+            TyKind::Optional(inner) => {
+                return format!(
+                    "narrow it first — inside `if x != nil {{ … }}`, `x` is {} — or give \
+                     it a fallback: `or_else(x, …)`",
+                    self.types.with_article(inner)
+                )
+            }
+            TyKind::Slice(elem) => {
+                let join = match self.types.kind(elem) {
+                    TyKind::Int => Some("join_ints(xs, \", \")"),
+                    TyKind::Float => Some("join_floats(xs, \", \")"),
+                    TyKind::Str => Some("join(xs, \", \")"),
+                    _ => None,
+                };
+                return match join {
+                    Some(call) => format!("build the text: `{}`", call),
+                    None => "build the text: render each element in a `for` loop and \
+                             `join` the pieces"
+                        .to_string(),
+                };
+            }
+            TyKind::Tuple(elems) => {
+                let holes: Vec<String> =
+                    (0..elems.len()).map(|i| format!("\\(t.{})", i)).collect();
+                return format!(
+                    "render its elements: `\"({})\"`",
+                    holes.join(", ")
+                );
             }
             _ => {}
         }
@@ -13585,6 +13849,107 @@ fn visit_expr_stmts(e: &ast::Expr, closures: bool, f: &mut dyn FnMut(&ast::Stmt)
             }
         }
     }
+}
+
+/// Whether evaluating an expression can do anything besides produce its
+/// value: whether it calls something, awaits something, or holds a statement
+/// that might. A closure's body does not run where the closure is built, so
+/// it does not count. An expression the parser could not read counts, so that
+/// nothing is reported twice.
+fn expr_acts(e: &ast::Expr) -> bool {
+    use ast::Expr as E;
+    match e {
+        E::Call { .. } | E::Await { .. } | E::Error(_) => true,
+        E::Int(_)
+        | E::ImpliedInt { .. }
+        | E::Float(_)
+        | E::Str(_)
+        | E::Char(_)
+        | E::Bool { .. }
+        | E::Nil(_)
+        | E::Path(_)
+        | E::SelfExpr(_)
+        | E::Closure { .. } => false,
+        E::Interpolated { parts, .. } => parts.iter().any(|p| match p {
+            ast::StrPart::Hole(h) => expr_acts(h),
+            ast::StrPart::Text(_) => false,
+        }),
+        E::Unary { operand, .. } => expr_acts(operand),
+        E::Binary { lhs, rhs, .. } => expr_acts(lhs) || expr_acts(rhs),
+        E::Field { base, .. } => expr_acts(base),
+        E::Index { base, index, .. } => expr_acts(base) || expr_acts(index),
+        E::Range { start, end, .. } => expr_acts(start) || expr_acts(end),
+        E::Cast { expr, .. } | E::Paren { inner: expr, .. } => expr_acts(expr),
+        E::Tuple { elems, .. } | E::Slice { elems, .. } => elems.iter().any(expr_acts),
+        E::Map { entries, .. } => entries.iter().any(|m| expr_acts(&m.key) || expr_acts(&m.value)),
+        E::StructLit(l) => {
+            l.base.as_deref().is_some_and(expr_acts) || l.fields.iter().any(|f| expr_acts(&f.value))
+        }
+        E::If { cond, then, else_, .. } => {
+            expr_acts(cond)
+                || block_acts(then)
+                || match &**else_ {
+                    ast::ElseBranch::Block(b) => block_acts(b),
+                    ast::ElseBranch::If(i) => if_acts(i),
+                }
+        }
+        E::Match(m) => {
+            expr_acts(&m.scrutinee)
+                || m.arms.iter().any(|a| {
+                    a.guard.as_ref().is_some_and(expr_acts)
+                        || match &a.body {
+                            ast::MatchBody::Expr(e) => expr_acts(e),
+                            ast::MatchBody::Block(b) => block_acts(b),
+                        }
+                })
+        }
+    }
+}
+
+/// As [`expr_acts`], for a block: anything but an inert expression statement
+/// may act.
+fn block_acts(b: &ast::Block) -> bool {
+    b.stmts.iter().any(|s| match s {
+        ast::Stmt::Expr(e) => expr_acts(e),
+        _ => true,
+    })
+}
+
+fn if_acts(i: &ast::IfStmt) -> bool {
+    expr_acts(&i.cond)
+        || block_acts(&i.then)
+        || match i.else_.as_deref() {
+            None => false,
+            Some(ast::ElseBranch::Block(b)) => block_acts(b),
+            Some(ast::ElseBranch::If(i)) => if_acts(i),
+        }
+}
+
+/// Whether a block is one expression: a single expression statement, or a
+/// single `if` or `match` each of whose branches is one in turn.
+fn block_is_value(b: &ast::Block) -> bool {
+    match b.stmts.as_slice() {
+        [ast::Stmt::Expr(_)] => true,
+        [ast::Stmt::If(i)] => if_is_value(i),
+        [ast::Stmt::Match(m)] => match_is_value(m),
+        _ => false,
+    }
+}
+
+fn if_is_value(i: &ast::IfStmt) -> bool {
+    block_is_value(&i.then)
+        && match i.else_.as_deref() {
+            None => false,
+            Some(ast::ElseBranch::Block(b)) => block_is_value(b),
+            Some(ast::ElseBranch::If(n)) => if_is_value(n),
+        }
+}
+
+fn match_is_value(m: &ast::MatchExpr) -> bool {
+    m.arms.iter().all(|a| match &a.body {
+        ast::MatchBody::Expr(_) => true,
+        ast::MatchBody::Block(b) => block_is_value(b),
+    })
 }
 
 /// Whether a statement registers a `defer` for the function it is in.

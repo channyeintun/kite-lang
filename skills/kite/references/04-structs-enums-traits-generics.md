@@ -414,7 +414,8 @@ An unqualified pattern for a variant *with a payload* is looked up by name acros
 every enum in scope rather than against the scrutinee's type. So two enums
 declaring `Circle` make `Circle(r)` `E0111` even in a match whose scrutinee is
 unambiguous — write `Shape.Circle(r)`. (A *unit* variant does resolve against the
-scrutinee, and a shared name is fine.)
+scrutinee, and a shared name is fine — against an `Option<E>` too, and twice in
+one tuple pattern, `(Slow, Slow)`.)
 
 ```kite
 enum Shape {
@@ -548,7 +549,9 @@ is an ordinary binding, and does catch all.
 ## 4. `match`
 
 `match` is exhaustive, in expression **and** statement position. The diagnostic
-names the missing variants.
+names the missing variants. In statement position the arms' values are thrown
+away, so the arms need not agree in type (`0 => io.print("zero")` beside
+`_ => count()` is fine); an arm whose value is an `error` is still `E0302`.
 
 ```kite fails
 enum Shape {

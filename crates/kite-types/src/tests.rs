@@ -177,6 +177,11 @@ fn float_equality_against_a_literal_is_deliberate() {
     assert!(!c.has("E0201"), "{}", c.render());
     let flipped = body("  let a = 1.0\n  let e = 0.0 == a");
     assert!(!flipped.has("E0201"), "{}", flipped.render());
+    // A negative literal is a literal: there is no other way to write one.
+    let negative = body("  let a = 1.0\n  let e = a == -1.0\n  let f = -2.5 != a");
+    assert!(!negative.has("E0201"), "{}", negative.render());
+    let computed = body("  let a = 1.0\n  let e = a == -a");
+    assert!(computed.has("E0201"), "{}", computed.render());
 }
 
 #[test]
@@ -1076,6 +1081,78 @@ fn an_arm_after_a_misspelt_variant_is_unreachable() {
         .collect();
     assert_eq!(warnings.len(), 2, "{}", c.render());
     assert!(c.render().contains("did you mean `Directory`?"), "{}", c.render());
+}
+
+/// A bare error as a statement does nothing, and that is the one mistake:
+/// it is not reported a second time as an error thrown away.
+#[test]
+fn a_bare_error_statement_is_one_diagnostic() {
+    let c = run("fn fails() -> error {\n  return nil\n}\n\
+                 fn main() {\n  let err = fails()\n  err\n  _ = err\n}\n");
+    assert_eq!(c.codes(), vec!["E0117"], "{}", c.render());
+}
+
+/// An exclusive range from a number to itself matches nothing, exactly as a
+/// reversed one does.
+#[test]
+fn an_exclusive_range_to_itself_is_empty() {
+    let c = ok("fn f(n: int) -> str {\n  return match n {\n    5..5 => \"none\",\n\
+                \x20   5..=5 => \"five\",\n    _ => \"other\",\n  }\n}\n\
+                fn main() {\n  io.print(f(5))\n}\n");
+    assert_eq!(c.codes(), vec!["E0116"], "{}", c.render());
+    assert!(c.render().contains("5..5 matches nothing"), "{}", c.render());
+}
+
+/// A key the compiler knows, written twice in one map literal, is a warning:
+/// the later entry replaces the earlier, whose value nothing ever sees.
+#[test]
+fn a_map_literal_giving_one_key_twice_warns() {
+    let c = run("let KEY = \"a\"\n\
+                 fn main() {\n  let m = {\"a\": 1, \"b\": 2, KEY: 3}\n\
+                 \x20 let n = {1: \"x\", 2: \"y\"}\n  io.print(m.len() + n.len())\n}\n");
+    let twice: Vec<&kite_diag::Diagnostic> =
+        c.diags.iter().filter(|d| d.code == Some(codes::E0112)).collect();
+    assert_eq!(twice.len(), 1, "{}", c.render());
+    assert!(!c.diags.has_errors(), "must be a warning:\n{}", c.render());
+    assert!(c.render().contains("the key \"a\" is given twice"), "{}", c.render());
+}
+
+/// A built-in type with no text form cannot be given an `impl`, so E0207's
+/// note names what does compile for its shape — it used to say "write `impl
+/// Display for Option<int>`", which can never compile.
+#[test]
+fn e0207_names_a_fix_that_compiles_for_a_built_in_type() {
+    let c = body(
+        "  let xs = [1, 2]\n  let found = xs.get(0)\n\
+         \x20 io.print(\"\\(found)\")\n  io.print(\"\\(xs)\")\n  io.print(\"\\((1, 2))\")",
+    );
+    let text = c.render();
+    assert_eq!(c.codes().iter().filter(|&&x| x == "E0207").count(), 3, "{}", text);
+    assert!(!text.contains("impl Display for"), "{}", text);
+    assert!(text.contains("or_else(x, …)"), "{}", text);
+    assert!(text.contains("join_ints(xs, \", \")"), "{}", text);
+    assert!(text.contains("\"(\\(t.0), \\(t.1))\""), "{}", text);
+}
+
+/// A literal or a range inside a range above it reaches nothing, and is
+/// E0116 like any arm no value can reach; so is an empty range, which was
+/// E0210, the code for a match missing values.
+#[test]
+fn an_arm_inside_a_range_above_and_an_empty_range_are_unreachable() {
+    let c = ok("fn f(n: int) -> str {\n  return match n {\n\
+                \x20   1..=9 => \"small\",\n    5 => \"five\",\n    5..=7 => \"dead\",\n\
+                \x20   9..=4 => \"reversed\",\n    3..=12 => \"overlaps\",\n    _ => \"big\",\n  }\n}\n\
+                fn main() {\n  io.print(f(5))\n}\n");
+    let mut lines: Vec<u32> = c
+        .diags
+        .iter()
+        .filter(|d| d.code == Some(codes::E0116))
+        .filter_map(|d| d.primary_span())
+        .map(|s| c.sources.file(s.file).line_col(s.start).line)
+        .collect();
+    lines.sort();
+    assert_eq!(lines, vec![4, 5, 6], "{}", c.render());
+    assert!(!c.has("E0210"), "{}", c.render());
 }
 
 /// Matches exhaustive only through their nested patterns.

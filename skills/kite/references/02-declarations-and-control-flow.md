@@ -15,11 +15,12 @@ Everything below is checked against `target/release/kitec`, not against the pros
 - **An `if` used as a value takes exactly one expression per branch.** No statements, no
   trailing-expression block. `let x = if c { let y = 1  y } else { 0 }` is `E0200`.
   A `match` arm follows the same rule: `{ 1 }` is still the value `1`, but the moment the
-  block holds a statement the arm is `()`.
+  block holds a statement the arm is `()`. An `if` or `match` is one expression, so
+  `if a { if b { 1 } else { 2 } } else { 3 }` and `2 => { if a { 1 } else { 0 } }` are values.
 - **`;` is not a token.** Newlines end statements. A statement continues only when the
   previous line *ends* in an operator, an open delimiter, or a comma. A line that *starts*
-  with `||` is a zero-parameter closure, silently discarded — `E0117` exists to catch
-  exactly that.
+  with `||` is a zero-parameter closure, and one that starts with `-` is a negation; both
+  are statements that do nothing, which is `E0117`.
 - **`xs[a..b]` clamps; `xs[i]` traps.** A window may run off the end; an element may not.
 - **Map indexing always yields `Option<V>`** — never a zero value, and `io.print` will not
   take it.
@@ -73,7 +74,9 @@ fn split_at(n: int) -> (int, int) {
 Destructuring is a `let` feature only — `var (a, b) = …` is a parse error, because the
 grammar's `VarStmt` takes a single identifier.
 
-Shadowing is allowed in a *nested* scope and rejected in the *same* scope.
+Shadowing is allowed in a *nested* scope and rejected in the *same* scope. A function body
+is nested in its parameters' scope and a loop body in its header's, so `let x = x + 1` on a
+parameter and `let i = i * 2` on a loop variable are both fine.
 
 ```kite
 fn main() {
@@ -136,6 +139,26 @@ would always return the same answer. The types are `bool`, `int`, `float` and `s
 slice or map constant would be an allocation, so it stays an ordinary `let` inside the
 function that wants it. A `float` interpolated into a constant is written as every
 backend writes it at run time: `"\(1e21)"` is `"1e+21"`.
+
+In a `match` pattern a constant is its value as well: `LIMIT => …` (or `limits.MAX_BODY =>
+…`) matches that one value, like the literal would, and is never a binding that takes
+everything. A constant of the wrong type for the scrutinee is `E0200` at the pattern.
+
+```kite
+let LIMIT = 10
+
+fn classify(n: int) -> str {
+    return match n {
+        0 => "zero",
+        LIMIT => "at the limit",
+        _ => "other",
+    }
+}
+
+fn main() {
+    io.print(classify(5)) // other
+}
+```
 
 There is no module-level `var`: a mutable binding every function can reach is state none
 of their signatures mentions. Put it in a struct and pass it to what changes it.
@@ -749,13 +772,15 @@ fn main() {
 
 `if` is also an expression when an `else` is present and **every branch is a single
 expression**. This is the delta from Rust: a value-`if` branch is not a block with a
-trailing expression, it is one expression.
+trailing expression, it is one expression — which may itself be an `if` or a `match`.
 
 ```kite
 fn main() {
     let n = 12
     let label = if n > 10 { "big" } else if n > 5 { "mid" } else { "small" }
     io.print(label)
+    let sign = if n > 0 { if n % 2 == 0 { "even" } else { "odd" } } else { "none" }
+    io.print(sign) // even
 }
 ```
 
@@ -826,7 +851,8 @@ fn main() {
 ```
 
 The loop variable is a `let`: assigning to it is `E0114`. Labelled `break` and `continue`
-work on nested loops; the label goes before the `for` with a colon.
+work on nested loops; the label goes before the `for` with a colon. An inner loop may not
+reuse the label of a loop around it (`E0112`).
 
 ```kite
 fn main() {
@@ -953,6 +979,10 @@ fn main() {
     io.print(bucket(7))
 }
 ```
+
+An arm inside a range above it — `5` or `5..=7` after `4..=9` — can never run, and is the
+`E0116` warning, as is a range that matches nothing (`9..=4`, or `5..5`, which leaves out
+its end). A range that only overlaps a later arm leaves it alone.
 
 Patterns also cover `nil`, tuples, and struct fields with `..` for the rest:
 
@@ -1172,7 +1202,7 @@ fn main() {
 | `E0113` | wrong number of arguments, or named arguments |
 | `E0114` | assignment to an immutable binding, field, or receiver |
 | `E0115` | `break`/`continue` outside a loop |
-| `E0117` | statement has no effect (the `\|\|` continuation trap) |
+| `E0117` | statement has no effect (a leading `\|\|` or `-`, `==` for `=`) |
 | `E0200` | type mismatch |
 | `E0201` | operator applied to mismatched types; float `==` warning |
 | `E0202` | condition must be `bool` |

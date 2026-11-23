@@ -1,0 +1,24 @@
+// A module constant named in a pattern is its value, never a fresh binding
+// that matches everything.
+let LIMIT = 10
+let NAME = "kite"
+
+fn classify(n: int) -> str {
+    // `LIMIT` matches ten and nothing else, so the match is not exhaustive.
+    return match n { //~ ERROR E0210
+        0 => "zero",
+        LIMIT => "at the limit",
+    }
+}
+
+fn wrong(n: int) -> str {
+    return match n {
+        NAME => "a str is not an int", //~ ERROR E0200
+        _ => "other",
+    }
+}
+
+fn main() {
+    io.print(classify(5))
+    io.print(wrong(5))
+}

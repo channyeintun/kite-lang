@@ -1,0 +1,19 @@
+// An inner loop may not take the label of a loop around it: `break a` would
+// leave the inner one, and the outer could not be named at all. Two loops one
+// after the other may share a label.
+fn main() {
+    a: for i in 0..2 {
+        a: for j in 0..3 { //~ ERROR E0112
+            if j == 1 {
+                break a
+            }
+            io.print("\(i) \(j)")
+        }
+    }
+    b: for i in 0..2 {
+        io.print(i)
+    }
+    b: for i in 0..2 {
+        continue b
+    }
+}
