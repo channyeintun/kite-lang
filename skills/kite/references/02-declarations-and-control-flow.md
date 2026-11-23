@@ -886,6 +886,19 @@ fn main() {
 }
 ```
 
+`_` stands for an element inside a tuple binding, `for (_, v) in m`, but is not
+a binding on its own: `for _ in 0..3` is `E0100` (`expected an expression`).
+Name the variable and leave it unread — an unread loop variable is not a
+warning.
+
+```kite fails
+fn main() {
+    for _ in 0..3 { //~ E0100
+        io.print("x")
+    }
+}
+```
+
 A single binding over a map is rejected — there is no key-only iteration form.
 
 ```kite fails
@@ -1222,6 +1235,9 @@ fn main() {
     assert(1 == 1) //~ E0113
 }
 ```
+
+Neither narrows: after `require(x != nil, "…")`, `x` is still an `Option`.
+Guard with `if x == nil { return }` instead.
 
 Being builtins, they have no value form — you cannot pass `assert` around.
 

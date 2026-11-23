@@ -317,9 +317,10 @@ generated glue converts synchronously through one fixed 64 KiB scratch page in
 and bytecode targets the storage is GC-managed UTF-8, indexed so that a loop
 over a string's characters is linear on every target: an ASCII string is
 indexed by byte, natively a string's length is counted once and kept, and for
-the few long strings a program has read most recently, its length and where
-every 64th character starts are found once and kept. Kite programs observe
-the same rule everywhere: indexing and length count Unicode scalar values,
+the four long strings a program has read most recently, its length and where
+every 64th character starts are found once and kept. A loop that reads five
+or more long strings that are not ASCII in turn finds each one forgotten, and
+walks it from the front again. Kite programs observe the same rule everywhere: indexing and length count Unicode scalar values,
 never bytes or UTF-16 code units.
 
 **What a `str` can do**, and it is deliberately little:
@@ -1020,8 +1021,11 @@ for {
 ```
 
 The three headers above are the whole of iteration: over a sequence, while a
-condition holds, and forever. Labelled
-`break` and `continue` are supported for nested loops:
+condition holds, and forever. The binding of the first is a name or a tuple of
+names, in which `_` may stand for an element — `for (_, v) in m` — but `_` is
+not a name on its own: a loop that does not read its element still names it,
+`for i in 0..3`, and `for _ in 0..3` is a syntax error. Labelled `break` and
+`continue` are supported for nested loops:
 
 ```kite
 outer: for row in grid {

@@ -446,7 +446,10 @@ fn main() {
 ```
 
 A **named** payload may be filled positionally or by name. A **positional**
-payload may only be filled positionally:
+payload may only be filled positionally. A pattern works the same way, and a
+positional one goes by position, not by name: against `Rect(width: int,
+height: int)`, `Rect(h, w)` binds the width to `h`, silently. Name the fields
+in the pattern — `Rect(height: h, width: w)` — when the order is not obvious.
 
 ```kite fails
 enum Shape {
@@ -797,6 +800,10 @@ fn main() {
     io.print(both((nil, nil)))
 }
 ```
+
+The `..` is optional: a struct pattern looks only at the fields it lists, so
+`Point{ x }` matches every `Point` and binds `x`, exactly as `Point{ x, .. }`
+does.
 
 ---
 
