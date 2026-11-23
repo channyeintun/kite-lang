@@ -278,6 +278,159 @@ pub fn grouped(n: int) -> str {
     return out
 }
 
+/// An integer with an explicit sign: `+` for zero and above, as `%+d` writes
+/// it, which is what a column of differences wants.
+///
+/// ```kite
+/// assert(signed(5) == "+5", "positive")
+/// assert(signed(-5) == "-5", "negative")
+/// assert(signed(0) == "+0", "zero")
+/// ```
+pub fn signed(n: int) -> str {
+    if n < 0 {
+        return "\(n)"
+    }
+    return "+\(n)"
+}
+
+/// An integer in lowercase hexadecimal, its digits zero-padded to at least
+/// `width`. A negative number is a `-` and the digits of its size, not its
+/// two's complement: `hex(-255, 4)` is `-00ff`.
+///
+/// ```kite
+/// assert(hex(255, 0) == "ff", "hex")
+/// assert(hex(0x1a2b3c, 8) == "001a2b3c", "padded")
+/// assert(hex(-9223372036854775807 - 1, 0) == "-8000000000000000", "the smallest int")
+/// ```
+pub fn hex(n: int, width: int) -> str {
+    return in_base(n, 16, width)
+}
+
+/// An integer in binary, its digits zero-padded to at least `width`, with a
+/// `-` in front of a negative one as [`hex`] has.
+///
+/// ```kite
+/// assert(binary(5, 8) == "00000101", "binary")
+/// assert(binary(-2, 0) == "-10", "negative")
+/// ```
+pub fn binary(n: int, width: int) -> str {
+    return in_base(n, 2, width)
+}
+
+/// The digits of `n` in `base`, worked out on `n` as it is: `%` and `/`
+/// truncate, so a negative `n` gives its digits negated and the smallest
+/// `int`, which has no positive counterpart, is never negated.
+fn in_base(n: int, base: int, width: int) -> str {
+    let alphabet = "0123456789abcdef"
+    var out = ""
+    var left = n
+    for {
+        let digit = left % base
+        let d = if digit < 0 { 0 - digit } else { digit }
+        out = alphabet.slice(d, d + 1) + out
+        left = left / base
+        if left == 0 {
+            break
+        }
+    }
+    for out.len() < width {
+        out = "0" + out
+    }
+    if n < 0 {
+        return "-" + out
+    }
+    return out
+}
+
+/// A float in scientific notation with `places` digits after the point, as
+/// JavaScript's `toExponential` writes it: `scientific(1500.0, 2)` is
+/// `1.50e+3`.
+///
+/// ```kite
+/// assert(scientific(1500.0, 2) == "1.50e+3", "scientific")
+/// assert(scientific(0.000123456, 3) == "1.235e-4", "rounded")
+/// assert(scientific(9.999, 2) == "1.00e+1", "rounding carries into the exponent")
+/// assert(scientific(0.0, 1) == "0.0e+0", "zero")
+/// ```
+///
+/// Rounded as [`fixed`] rounds, from the float's exact decimal expansion and
+/// half away from zero, so the digits do not depend on how a backend prints
+/// a float. A negative number, -0.0 included, keeps its sign; an infinity is
+/// `inf` or `-inf` and a NaN `nan`, as `fixed` writes them. A negative
+/// `places` is taken as zero.
+pub fn scientific(x: float, places: int) -> str {
+    let wanted = if places < 0 { 0 } else { places }
+    let negative = x < 0.0 || (x == 0.0 && 1.0 / x < 0.0)
+    let sign = if negative { "-" } else { "" }
+    let size = absf(x)
+    if !(size < size * 2.0) && size > 0.0 {
+        return "\(sign)inf"
+    }
+    if !(size >= 0.0) {
+        return "nan"
+    }
+    if size == 0.0 {
+        let fraction = if wanted > 0 { "." + zeros(wanted) } else { "" }
+        return "\(sign)0\(fraction)e+0"
+    }
+    // `exact.digits` has no leading zero, so its first digit is the leading
+    // one, and the exponent is where the point falls from it.
+    let exact = decimal(size)
+    let digits = exact.digits
+    var exponent = digits.len() - 1 - exact.after
+    var kept = digits.slice(0, wanted + 1)
+    if digits.len() <= wanted + 1 {
+        kept = kept + zeros(wanted + 1 - digits.len())
+    } else if digits.code_at(wanted + 1) >= 0x35 {
+        kept = increment(kept)
+        // 9.99… rounds up to 10.0…, one digit longer: the same digits a
+        // place further left.
+        if kept.len() > wanted + 1 {
+            kept = kept.slice(0, wanted + 1)
+            exponent += 1
+        }
+    }
+    let mantissa = if wanted > 0 { kept.slice(0, 1) + "." + kept.slice(1, kept.len()) } else { kept }
+    let power = if exponent < 0 { "\(exponent)" } else { "+\(exponent)" }
+    return "\(sign)\(mantissa)e\(power)"
+}
+
+/// Rows of cells laid out as a table: every column padded to its widest
+/// cell, the cells of a row separated by two spaces, and the rows joined by
+/// newlines. The last cell of each row is not padded, so a line ends in
+/// spaces only when that cell is empty; a short row simply has fewer columns.
+///
+/// ```kite
+/// let t = table([["name", "qty"], ["bolt", "30"], ["washer", "5"]])
+/// assert(t == "name    qty\nbolt    30\nwasher  5", "table")
+/// ```
+///
+/// Widths are counted in characters, as [`pad`] counts them.
+pub fn table(rows: [[str]]) -> str {
+    var widths: [int] = []
+    for cells in rows {
+        for i in 0..cells.len() {
+            if i == widths.len() {
+                widths.push(0)
+            }
+            widths[i] = max(widths[i], cells[i].len())
+        }
+    }
+    var lines: [str] = []
+    for cells in rows {
+        var line = ""
+        for i in 0..cells.len() {
+            if i + 1 == cells.len() {
+                line = line + cells[i]
+            } else {
+                line = line + pad(cells[i], widths[i]) + "  "
+            }
+        }
+        lines.push(line)
+    }
+    return join(lines, "\n")
+}
+
 /// A row of columns, each padded to its width.
 pub fn row(cells: [str], widths: [int]) -> str {
     var out = ""
