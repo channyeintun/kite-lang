@@ -1,0 +1,9 @@
+// A block string that never closes reads the rest of the file as its text, so
+// a `\(…)` after it is some later line and not a hole its author wrote. What
+// that line names — here the very binding being defined — is not a second
+// error: the string is the one mistake, and it is reported once.
+
+fn main() {
+    let a = """ab //~ ERROR E0001
+    io.print("\(a)")
+}

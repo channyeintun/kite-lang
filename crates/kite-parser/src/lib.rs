@@ -3677,6 +3677,14 @@ impl<'a> Parser<'a> {
         // Skip the opening delimiter; the closing one ends the scan naturally,
         // because a `\` cannot be the last byte of a well-formed literal.
         let open = if raw.starts_with("\"\"\"") { 3 } else { 1 };
+        // A block string the lexer reported never closed read the rest of the
+        // file as its text, so a `\(…)` in it is some later line of the file,
+        // not a hole its author wrote. Reading it as one reported what that
+        // line named — `let a = """ab` with a `\(a)` after it, `cannot find
+        // `a`` — as a second error for the one mistake.
+        if open == 3 && self.unterminated.contains(&span.start) {
+            return None;
+        }
 
         let bytes = raw.as_bytes();
         let mut parts: Vec<StrPart> = Vec::new();
