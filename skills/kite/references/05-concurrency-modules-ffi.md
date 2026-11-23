@@ -163,7 +163,10 @@ async fn main() {
 
 Note the shape of the type: `async fn fetch(id: int) -> (str, error)` produces
 `Task<(str, error)>`, and `await` on it yields the pair, which is then
-destructured. The taint analysis (`E0302`) still applies across the `await` —
+destructured. That type cannot be written, though: `(str, error)` written as a
+type is a plain tuple, not a result, so `var ts: [Task<(str, error)>] = []` refuses
+`ts.push(fetch(1))` (`E0200`). Let a value give the type instead — `var ts =
+[fetch(1)]`. The taint analysis (`E0302`) still applies across the `await` —
 and before it: a task whose result holds an error is watched like the error
 itself. Called as a bare statement, or bound and never awaited, it is `E0302`,
 since its body would run and fail with nobody to hear it. Await it, return it,
@@ -212,9 +215,9 @@ and needs `use std/task`.
 | Builtin | Arity | Meaning |
 |---|---|---|
 | `task.yield()` | 0 | Suspend and let another task run. `async` only, else `E0521`. |
-| `task.park()` | 0 | Declare there is nothing to wait for but another task finishing, so a poll loop is not mistaken for progress. |
+| `task.park()` | 0 | Declare there is nothing to wait for but another task finishing, so a poll loop is not mistaken for progress. `async` only, else `E0521`. |
 | `task.wake_at(ms)` | 1 | Ask the scheduler to resume no earlier than this absolute millisecond. |
-| `task.wait_host()` | 0 | Suspend until the host hands something back. |
+| `task.wait_host()` | 0 | Suspend until the host hands something back. `async` only, else `E0521`. |
 | `task.finished(t)` | 1 | `bool` — has the task produced a value? |
 | `task.get(t)` | 1 | `T` — the task's result slot, read without suspending. |
 | `time.now()` | 0 | `int` milliseconds. Virtual under the bytecode VM and the web glue. |

@@ -1,0 +1,77 @@
+// An arm whose pattern takes anything is passed over only when its guard ran
+// and came out false, so the arms after it start from what that guard
+// proved. A guard that tests an error inspects it on both ways through, and
+// an arm runs knowing its guard held. Each accepted case here used to be
+// E0302, because every arm started from the state the match was entered in.
+
+use std/errors
+
+fn touch(n: int) -> error {
+    if n > 0 {
+        return errors.new("boom \(n)")
+    }
+    return nil
+}
+
+fn the_binding_tested_in_a_guard() {
+    let e = touch(1)
+    match e {
+        _ if e != nil => io.print("failed"),
+        _ => io.print("fine"),
+    }
+}
+
+fn a_copy_tested_in_a_guard() {
+    let e = touch(1)
+    match e {
+        x if x == nil => io.print("fine"),
+        x => io.print("failed"),
+    }
+}
+
+fn a_guard_on_another_scrutinee() {
+    let e = touch(1)
+    let n = 1
+    match n {
+        _ if e != nil => io.print("failed"),
+        _ => io.print("fine"),
+    }
+}
+
+// The arm runs only where its guard held, so the error has a message there.
+fn the_arm_knows_its_guard_held() {
+    let e = touch(1)
+    match e {
+        x if x != nil => io.print(x.message()),
+        _ => io.print("fine"),
+    }
+}
+
+// A pattern that can fail skips its guard: when `n` is not 1 nothing tested
+// `e` on the way to the `_`.
+fn a_guard_that_may_not_run() {
+    let e = touch(1) //~ ERROR E0302
+    let n = 2
+    match n {
+        1 if e != nil => io.print("failed"),
+        _ => io.print("fine"),
+    }
+}
+
+// A guard about something else proves nothing about the failure.
+fn a_guard_about_something_else(x: bool) {
+    let e = touch(1) //~ ERROR E0302
+    match e {
+        _ if x => io.print("one"),
+        _ => io.print("two"),
+    }
+}
+
+fn main() {
+    the_binding_tested_in_a_guard()
+    a_copy_tested_in_a_guard()
+    a_guard_on_another_scrutinee()
+    the_arm_knows_its_guard_held()
+    a_guard_that_may_not_run()
+    a_guard_about_something_else(true)
+}

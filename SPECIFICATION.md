@@ -352,8 +352,10 @@ match maybe {
 **Narrowing** is what makes this ergonomic rather than tedious. Testing an
 optional against `nil` narrows it to the unwrapped type on the branch where it
 cannot be absent — in the `else` of `x == nil`, and in the `then` of `x != nil`.
-The same narrowing applies in a `match` arm once an earlier arm has covered
-`nil`. A write to a `var` ends its narrowing unless the value written cannot be
+A `for` condition narrows the same way: its body runs where the condition held,
+and a loop with no `break` is left only where it failed, so `for x == nil { … }`
+leaves `x` present. The same narrowing applies in a `match` arm once an earlier
+arm has covered `nil`. A write to a `var` ends its narrowing unless the value written cannot be
 nil either; inside a loop, that holds for every write the loop's body makes,
 since the body runs again after each of them.
 
@@ -930,6 +932,13 @@ registers. A closure is a function of its own: a `defer` in its body runs when
 the closure returns. Unlike Go, `defer` cannot modify the return value — it is
 purely for release of resources, which is the only use that survives scrutiny.
 
+For the same reason a deferred call's result goes nowhere, so a call whose
+result holds a failure — an `error`, a `(T, error)`, or the `Task` of one — may
+not be deferred (`E0302`, [R6](#73-correlated-results-and-taint-analysis)):
+it runs after the function has answered, and the failure would have nobody to
+reach. Go's `defer f.Close()` drops exactly that error. Defer a function that
+handles it instead.
+
 ### 6.4 `match`
 
 See [§9](#9-enums-and-pattern-matching).
@@ -1047,7 +1056,11 @@ The rules:
 > and `v` becomes Clean. A condition proves what logic says it does: `e ==
 > nil` and `!(e != nil)` when they hold, either side of an `&&` that held
 > (the right side included, which runs only then), and either side of an
-> `||` that did not.
+> `||` that did not. A `for` condition is one: the body runs where it held,
+> and a loop with no `break` is left where it did not. A `match` guard is a
+> condition too: its arm runs where
+> it held, and when the arm's pattern is `_` or a bare name, which matches
+> anything, the arms after it are reached only where it did not.
 >
 > **R5.** On any path where `e != nil`, `e` becomes Checked and `v` remains
 > Tainted permanently. The value slot on an error path holds no value at all —
@@ -1059,7 +1072,8 @@ The rules:
 > result is either yields the `Task` of a failure on its way, and the `Task`
 > is held to the same rules as what it will give — left as a statement it is
 > `E0302`, and bound to a name it is Unchecked until it is awaited, returned
-> or passed on.
+> or passed on. A deferred call binds nothing either, and runs when nothing
+> is left to hear of its failure, so deferring one of these is `E0302` too.
 >
 > **R7.** An `error`, or a whole `(T, error)`, bound to a single name makes
 > that binding Unchecked — by `let` or by `var`, whether it came straight from
@@ -1068,8 +1082,13 @@ The rules:
 > does the same. Only `nil` leaves it Checked. A copy of another binding
 > — `let e = err`, `e = err`, a `match err { x => … }` arm — holds that
 > binding's failure: the two names share one obligation, met by inspecting
-> either. Reading it — testing it, checking it, returning it, taking it
-> apart, passing it on — inspects it, and R3 applies otherwise; copying it
+> either. A value `if` whose branches are each such a binding or `nil` adds
+> no obligation of its own — `let e = if x { c } else { nil }` holds `c`'s
+> failure or nothing, so `c` still answers for it. Reading it — testing it, checking it, returning it, taking it
+> apart, passing it on — inspects it, and R3 applies otherwise; a test
+> inspects it wherever it is written, so one in the right operand of `&&`
+> or `||` meets the obligation on every path, though it runs only on some —
+> as `if e1 != nil || e2 != nil { … }` needs it to; copying it
 > is not reading it, and nor is a `match` whose every arm is `_` or a bare
 > name. Binding everything under one name is not a way out either, and nor
 > is a tuple literal: `let (n, e) = (1, f())` makes `e` Unchecked. The same
@@ -1077,7 +1096,15 @@ The rules:
 > these in it — what `task.both`, `task.all` and `task.timeout` answer
 > with — is Unchecked when bound, taking it apart or walking it with `for`
 > hands each failure in it to the name it is bound to, and counting it with
-> `len` is not reading it.
+> `len` is not reading it. A projection `r.0` takes one element of a tuple:
+> its failure goes where it lands, and the others are still owed, so the
+> tuple is settled once each has been taken; taken apart after that, it
+> binds only the failures not yet taken. A slice cannot be followed
+> element by element, so `rs[0]` counts as reading all of it. Nor is testing an optional against `nil`, which
+> asks only whether a failure is there: where it is nil there is none, and
+> where it is present the optional, narrowed to what it holds, is still
+> Unchecked — `if r == nil { return }` is followed by a test of the error
+> or a destructuring of the pair.
 
 R1–R5 are about bindings, and R6 and R7 close the shapes they leave open: a
 call written as a statement makes no binding, so nothing in R1–R5 ever sees it,
@@ -1090,9 +1117,12 @@ The analysis follows bindings, and what is bound to them. A failure stored
 into a struct field — by a literal, `Held{ e: f() }`, or by a write — or into
 a map entry or a slice element by index is handed on to that value, exactly
 as passing it to a call is, and is not followed there; read back out into a
-binding, `let e = h.e`, it is an obligation again. A slice of failures is a
-binding like any other, so `errs.push(f())` adds `f`'s failure to what `errs`
-answers for.
+binding, `let e = h.e`, it is an obligation again. A map is not followed
+either: `let m = {1: load(1)}` hands `load`'s failure on to the map, as a struct
+literal does. A slice of failures is a binding like any other, so
+`errs.push(f())` adds `f`'s failure to what `errs` answers for — and a walk over
+one counts as reading all of it, so leaving the walk early, by `break` or
+`return`, drops the failures of the elements it did not reach.
 
 To drop one deliberately, say so:
 
@@ -1115,7 +1145,9 @@ there when the next writes over it: `var e: error = nil` then
 `for i in 0..3 { e = f(i) }` is `E0302` at the write. A body whose end changes
 nothing is checked once; one that does is checked again from the join, which
 ends because the lattice has height two and a state can only get worse. What
-follows a loop is reached from its top and from every `break`.
+follows a loop is reached from its top and from every `break` — except after a
+`for { }`, which has no header to leave from and is left only by `break`, so
+`for { if err == nil { break } … }` leaves only where `err` was tested.
 
 In practice:
 
@@ -1155,7 +1187,7 @@ error[E0302]: `err` is not checked before this `return`
   │     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `err` goes out of scope here unchecked
   │
   = note: silently dropping errors is the single most common source of production failures in languages that permit it
-  = note: to propagate, write `check` on its own line; to handle it here, test `err != nil`
+  = note: handle it here: test `err != nil`
 
 error[E0301]: `parsed` is used before its error is checked
   ┌─ titles.kite:3:25
@@ -1165,7 +1197,7 @@ error[E0301]: `parsed` is used before its error is checked
 3 │     return json.text_or(parsed, "title", "untitled")
   │                         ^^^^^^ used here while still tainted
   │
-  = note: check it first: write `check err`, or test `err != nil`
+  = note: test `err != nil` first, and read it where that is false
   = note: in Go the value on a failure path is the zero value and flows onward looking valid; in Kite there is no value on that path at all
 ```
 

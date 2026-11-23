@@ -2891,7 +2891,8 @@ fn a_timeout_fires_while_a_request_is_outstanding() {
          use std/task\n\
          async fn main() {{\n\
          \x20 let answer = await task.timeout(http.get(\"http://127.0.0.1:{port}/slow\"), 100)\n\
-         \x20 io.print(if answer == nil {{ \"timed out\" }} else {{ \"answered\" }})\n\
+         \x20 if answer == nil {{\n    io.print(\"timed out\")\n    return\n  }}\n\
+         \x20 _ = answer\n  io.print(\"answered\")\n\
          }}\n",
         port = port
     );

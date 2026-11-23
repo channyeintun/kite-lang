@@ -926,6 +926,30 @@ fn main() {
 }
 ```
 
+A deferred call's result goes nowhere, so a call that answers with an `error`, a
+`(T, error)` or the `Task` of one cannot be deferred: it runs after the function has
+returned, and its failure would reach nobody (`E0302`). Defer a function that handles
+the error itself:
+
+```kite fails
+fn close(name: str) -> error {
+    return errors.new("close failed")
+}
+
+fn close_or_log(name: str) {
+    let err = close(name)
+    if err != nil {
+        io.print(err.message())
+    }
+}
+
+fn main() {
+    defer close("a") //~ E0302
+    defer close_or_log("b")
+    io.print("working")
+}
+```
+
 ```kite
 fn note(s: str) {
     io.print(s)

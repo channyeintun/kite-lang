@@ -645,6 +645,8 @@ pub fn check_recording(
             closure_ret_unknown: None,
             reported_unchecked: std::collections::HashSet::new(),
             copies: std::collections::BTreeSet::new(),
+            parts: std::collections::HashMap::new(),
+            loop_seeds: std::collections::HashMap::new(),
             arm_bound: Vec::new(),
             defers: None,
             release,
@@ -1212,6 +1214,17 @@ struct Checker<'a> {
     /// inspecting one inspects both, and one left behind while the other is
     /// still in scope has dropped nothing. Each pair is written lowest first.
     copies: std::collections::BTreeSet<(u32, u32)>,
+    /// For a local holding a tuple of failures, one hidden local per element
+    /// that can hold one, each Unchecked until that element is taken with
+    /// `.N`: `r.0` hands on the first failure and leaves the others owed,
+    /// and the tuple is settled once every one has been taken. The hidden
+    /// locals are flow state like any other, so branches and loops join
+    /// them; they are made where the tuple is first bound, so no state that
+    /// knows the tuple lacks them.
+    parts: std::collections::HashMap<u32, Vec<(u32, u32)>>,
+    /// What came back to the start of each loop's body the last time it was
+    /// checked to its fixed point, which the next check of it starts from.
+    loop_seeds: std::collections::HashMap<Span, ErrorState>,
     /// The locals the current `match` arm's pattern has bound so far, for
     /// [`ResolveMap::rebound`].
     arm_bound: Vec<u32>,
@@ -1962,8 +1975,12 @@ impl<'a> Checker<'a> {
         // and is not reported.
         // A copy of the failure still unchecked under another name has not
         // been dropped: that name carries it.
+        // A value that could not be checked has had its mistake reported, and
+        // may well have read the old one: `e = errors.wrap(e, "…")` without
+        // `use std/errors` is one mistake, not a second E0302 as well.
         if !compound && self.may_hold_failure(local_ty) {
             if self.taint[slot] == Taint::Unchecked
+                && !matches!(value.kind, ExprKind::Error)
                 && !self.locals[slot].synthetic
                 && !self.carried_elsewhere(local_id, |_| false)
                 && self.reported_unchecked.insert(local_id)
@@ -2042,6 +2059,16 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// Whether a local is an optional that may hold a failure — what
+    /// `task.timeout` answers with — and has not been narrowed to what it
+    /// holds. Testing such a local against `nil` asks whether the failure
+    /// is there, not what it is: `if r == nil { return }` alone used to
+    /// count as reading it, and the error the finished task gave was lost.
+    fn optional_result(&self, id: u32) -> bool {
+        self.holder(self.locals[id as usize].ty) == Some(Holder::Maybe)
+            && !self.narrowed.contains_key(&id)
+    }
+
     /// Whether a value put somewhere new brings an unchecked failure with it,
     /// given the taint from before it was evaluated.
     ///
@@ -2078,18 +2105,102 @@ impl<'a> Checker<'a> {
         self.forget_copies(local);
         let state = match value.kind {
             ExprKind::Local(src) if src.0 != local && self.holds_obligation(value, before) => {
-                for i in self.copies_of(src.0) {
-                    if before.get(i as usize) == Some(&Taint::Unchecked) {
-                        self.taint[i as usize] = Taint::Unchecked;
-                    }
-                }
+                self.keep_unread(src.0, before);
                 self.note_copy(local, src.0);
                 Taint::Unchecked
             }
+            // `if x { c } else { nil }` holds `c`'s failure or nothing, so
+            // `c` answers for it and the new name adds no obligation of its
+            // own. It is not a copy — on the `nil` path, testing the new name
+            // says nothing about `c` — so `c` still has to be looked at; but
+            // one failure left unread is one report, at `c`, not two.
+            // The same for `if x { c } else { d }`: each of `c` and `d` still
+            // has its failure to answer for. With one source and no `nil`
+            // branch it is a copy on every path, as `let e = c` is.
+            ExprKind::If { .. } => match self.only_from(value) {
+                Some((srcs, maybe_nil))
+                    if srcs.iter().all(|&s| {
+                        s != local && before.get(s as usize) == Some(&Taint::Unchecked)
+                    }) =>
+                {
+                    for &s in &srcs {
+                        self.keep_unread(s, before);
+                    }
+                    if let ([src], false) = (srcs.as_slice(), maybe_nil) {
+                        self.note_copy(local, *src);
+                        Taint::Unchecked
+                    } else {
+                        Taint::Clean
+                    }
+                }
+                _ if self.holds_obligation(value, before) => Taint::Unchecked,
+                _ => Taint::Clean,
+            },
             _ if self.holds_obligation(value, before) => Taint::Unchecked,
             _ => Taint::Clean,
         };
         self.taint[local as usize] = state;
+        self.reset_parts(local, state);
+    }
+
+    /// The locals a value `if` yields on its branches that are not `nil`,
+    /// when every branch is a local or `nil`, and whether one is `nil`:
+    /// `if x { c } else { nil }` is `c` or nothing.
+    fn only_from(&self, e: &hir::Expr) -> Option<(Vec<u32>, bool)> {
+        // A condition that may have looked at a failure did so for real, and
+        // putting the branches' reads back would undo it: only conditions
+        // made of plain values are read through. Anything else is left to
+        // the general rule.
+        fn plain(c: &Checker<'_>, e: &hir::Expr) -> bool {
+            match &e.kind {
+                ExprKind::Bool(_) | ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Str(_) => true,
+                ExprKind::Local(id) => !c.may_hold_failure(c.locals[id.index()].ty),
+                ExprKind::Unary { operand, .. } => plain(c, operand),
+                ExprKind::Binary { lhs, rhs, .. } => plain(c, lhs) && plain(c, rhs),
+                _ => false,
+            }
+        }
+        fn leaves(c: &Checker<'_>, e: &hir::Expr, out: &mut Vec<Option<u32>>, nil: &mut bool) {
+            match &e.kind {
+                ExprKind::If { cond, then, else_ } => {
+                    if !plain(c, cond) {
+                        out.push(None);
+                    }
+                    leaves(c, then, out, nil);
+                    leaves(c, else_, out, nil);
+                }
+                ExprKind::Nil => *nil = true,
+                ExprKind::Local(id) => out.push(Some(id.0)),
+                _ => out.push(None),
+            }
+        }
+        let (mut found, mut nil) = (Vec::new(), false);
+        leaves(self, e, &mut found, &mut nil);
+        let mut srcs: Vec<u32> = found.into_iter().collect::<Option<Vec<u32>>>()?;
+        srcs.sort_unstable();
+        srcs.dedup();
+        (!srcs.is_empty()).then_some((srcs, nil))
+    }
+
+    /// A tuple of failures was just bound: each element that can hold one is
+    /// owed again, or settled with the whole. See [`Checker::parts`].
+    fn reset_parts(&mut self, local: u32, state: Taint) {
+        let TyKind::Tuple(elems) = self.types.kind(self.locals[local as usize].ty).clone() else {
+            return;
+        };
+        if !self.parts.contains_key(&local) {
+            let span = self.locals[local as usize].span;
+            let mut made = Vec::new();
+            for (i, ty) in elems.iter().enumerate() {
+                if self.may_hold_failure(*ty) {
+                    made.push((i as u32, self.synthetic_local("part", *ty, span)));
+                }
+            }
+            self.parts.insert(local, made);
+        }
+        for &(_, part) in &self.parts[&local] {
+            self.taint[part as usize] = state;
+        }
     }
 
     /// Inspect the failure a local holds, under every name it has.
@@ -2098,24 +2209,49 @@ impl<'a> Checker<'a> {
             if self.taint.get(i as usize) == Some(&Taint::Unchecked) {
                 self.taint[i as usize] = Taint::Clean;
             }
+            if let Some(parts) = self.parts.get(&i) {
+                for &(_, part) in parts {
+                    self.taint[part as usize] = Taint::Clean;
+                }
+            }
+        }
+    }
+
+    /// Put back what reading `id` to look at something other than its
+    /// failure marked inspected: the failure under every name, and each
+    /// element of a tuple of them still owed.
+    fn keep_unread(&mut self, id: u32, before: &[Taint]) {
+        for i in self.copies_of(id) {
+            let parts = self.parts.get(&i).map(|p| p.iter().map(|&(_, s)| s).collect::<Vec<_>>());
+            for j in std::iter::once(i).chain(parts.into_iter().flatten()) {
+                if before.get(j as usize) == Some(&Taint::Unchecked) {
+                    self.taint[j as usize] = Taint::Unchecked;
+                }
+            }
         }
     }
 
     /// A local and every local holding the same failure as it, itself first.
+    ///
+    /// The pairs are read once into a table of neighbours and the group is
+    /// walked over that. Scanning every pair for each member, and the group
+    /// for each find, made a chain of a thousand copies take seconds: the
+    /// cost was cubic in the number of copies of one error.
     fn copies_of(&self, id: u32) -> Vec<u32> {
+        if !self.copies.iter().any(|&(a, b)| a == id || b == id) {
+            return vec![id];
+        }
+        let mut next: std::collections::HashMap<u32, Vec<u32>> = std::collections::HashMap::new();
+        for &(a, b) in &self.copies {
+            next.entry(a).or_default().push(b);
+            next.entry(b).or_default().push(a);
+        }
         let mut group = vec![id];
+        let mut seen: std::collections::HashSet<u32> = std::collections::HashSet::from([id]);
         let mut i = 0;
         while i < group.len() {
-            let x = group[i];
-            for &(a, b) in &self.copies {
-                let other = if a == x {
-                    b
-                } else if b == x {
-                    a
-                } else {
-                    continue;
-                };
-                if !group.contains(&other) {
+            for &other in next.get(&group[i]).map(|v| v.as_slice()).unwrap_or(&[]) {
+                if seen.insert(other) {
                     group.push(other);
                 }
             }
@@ -2198,6 +2334,29 @@ impl<'a> Checker<'a> {
         let mut call = self.expr(expr, None);
         if matches!(call.kind, ExprKind::Error) {
             return None;
+        }
+        // A deferred call's result goes nowhere: it runs after the function
+        // has answered, so a failure it reports has nobody left to hear it.
+        // That is Go's `defer f.Close()`, the drop §7.1 sets out to remove,
+        // and it is R6 — a call whose result holds a failure, bound to
+        // nothing — in another position.
+        if let Some(holder) = self.holder(call.ty) {
+            let what = match holder {
+                Holder::Task => "this call starts a task whose error nobody will see",
+                _ => "this call's error would be thrown away when it runs",
+            };
+            self.diags.push(
+                Diagnostic::error(codes::E0302, "error is never checked")
+                    .with_primary(expr.span(), what)
+                    .with_note(
+                        "a deferred call runs after the function has returned, so its error \
+                         has nowhere to go",
+                    )
+                    .with_note(
+                        "defer a function that handles the error itself — one that tests it \
+                         and logs it, or writes `_ = …` where dropping it is meant",
+                    ),
+            );
         }
         // Set before the body was checked, by the same scan that found this
         // statement; absent only if the two disagree about what a `defer` is.
@@ -2871,7 +3030,17 @@ impl<'a> Checker<'a> {
         // checked once.
         let depth = self.loops.len() - 1;
         let entry: ErrorState = (self.taint.clone(), self.copies.clone());
-        let mut carried: Option<ErrorState> = None;
+        // **A loop checked again starts from what came back to it last
+        // time.** One nested in a loop whose body is checked again was
+        // checked to its fixed point afresh in every round of the outer one,
+        // so a nest of loops that each hand state back cost 2^depth. What
+        // came back last time came from an entry no worse than this one, and
+        // the analysis only gets worse as its input does, so it is at most
+        // the fixed point this round reaches: starting there skips the
+        // rounds that would only find it again, and finds anything new as
+        // before. Only names the resolver made are seeded; a temporary's
+        // number may belong to another by now.
+        let mut carried: Option<ErrorState> = self.loop_seeds.get(&f.span).cloned();
         let mut round = 0;
         let (result, runs, edges) = loop {
             round += 1;
@@ -2882,6 +3051,18 @@ impl<'a> Checker<'a> {
             let edges = std::mem::take(&mut self.loop_edges[depth]);
             let Some(next) = self.carry(f.span, &edges, round) else {
                 self.keep_trial(trial);
+                if let Some((mut taint, copies)) = edges.carried.clone() {
+                    for (i, t) in taint.iter_mut().enumerate() {
+                        if self.locals.get(i).is_none_or(|l| l.synthetic) {
+                            *t = Taint::Clean;
+                        }
+                    }
+                    let copies = copies
+                        .into_iter()
+                        .filter(|p| [p.0, p.1].iter().all(|&i| self.locals.get(i as usize).is_some_and(|l| !l.synthetic)))
+                        .collect();
+                    self.loop_seeds.insert(f.span, (taint, copies));
+                }
                 break (result, runs, edges);
             };
             self.end_trial(trial);
@@ -2915,8 +3096,18 @@ impl<'a> Checker<'a> {
         // body's end is not itself a way out: `for err != nil { err = g() }`
         // leaves only once `err` has been tested. Of the body's end only what
         // it declared is kept, to be reported where the function ends.
-        match (&f.header, edges.head) {
-            (ast::ForHeader::While(_), Some((mut taint, copies))) if !runs => {
+        //
+        // A `for { }` has no header at all, so it is left only by `break`:
+        // neither the state it was entered in nor its body's end is a way
+        // out, and the retry `for { if err == nil { break } … }` leaves only
+        // where `err` was tested. One with no `break` never falls out.
+        let leave = match &f.header {
+            ast::ForHeader::While(_) => edges.head.clone(),
+            ast::ForHeader::Loop => edges.exit.clone(),
+            ast::ForHeader::In { .. } => None,
+        };
+        match (&f.header, leave) {
+            (ast::ForHeader::While(_) | ast::ForHeader::Loop, Some((mut taint, copies))) if !runs => {
                 taint.resize(self.taint.len(), Taint::Clean);
                 for (i, t) in taint.iter_mut().enumerate() {
                     if self.declared_inside(i as u32, f.span) {
@@ -2933,8 +3124,8 @@ impl<'a> Checker<'a> {
                 self.copies.extend(inside);
                 self.restore_taint(taint);
             }
-            (_, head) if !runs => {
-                let (taint, copies) = head.unwrap_or(entry);
+            (_, _) if !runs => {
+                let (taint, copies) = edges.head.unwrap_or(entry);
                 self.merge_loop_taint(&taint, &copies);
                 if let Some((taint, copies)) = edges.back {
                     self.merge_loop_taint(&taint, &copies);
@@ -2949,6 +3140,17 @@ impl<'a> Checker<'a> {
         // runs of it; what it disproved was removed before it started.
         self.narrowed = entry_narrowed;
         self.error_nonnil = entry_nonnil;
+        // A `for cond` with no `break` is left only where its condition
+        // failed, so what that proves holds after it: `for e == nil { e =
+        // f() }` leaves `e` present. The narrowing a write in the body undid
+        // was dropped before the loop, and the condition runs after the last
+        // write.
+        if let ast::ForHeader::While(c) = &f.header {
+            if !breaks_out(&f.body, f.label.as_ref().map(|l| l.name.as_str())) {
+                let narrowing = self.nil_test(c);
+                self.enter_branch(narrowing, c, false);
+            }
+        }
 
         let result = result?;
         // `for { … }` with nothing that breaks out of it never falls through.
@@ -3059,8 +3261,16 @@ impl<'a> Checker<'a> {
             }
             ast::ForHeader::While(c) => {
                 self.loop_start();
+                let narrowing = self.nil_test(c);
                 let cond = self.condition(c);
+                // The loop is left where the condition failed, and the body
+                // entered where it held, exactly as for an `if`'s two sides:
+                // `for e == nil { … }` runs its body knowing `e` is nil.
+                let tested = self.flow_state();
+                self.enter_branch(narrowing, c, false);
                 self.loop_head();
+                self.set_flow_state(tested);
+                self.enter_branch(narrowing, c, true);
                 let body = self.loop_body(&f.body, sig);
                 (Some(hir::Stmt::While { cond, body, label, span: f.span }), false)
             }
@@ -3507,6 +3717,11 @@ impl<'a> Checker<'a> {
     /// *else*. The branch's state is thrown away or joined at the end, so
     /// nothing here has to be undone.
     fn enter_branch(&mut self, narrowing: Option<(u32, bool)>, cond: &ast::Expr, in_then: bool) {
+        // Where an optional result is nil there is no failure in it to look
+        // at; where it is present, the failure is still unread.
+        for id in self.nil_results(cond, in_then) {
+            self.inspect(id);
+        }
         if let Some((id, is_eq)) = narrowing {
             if is_eq != in_then {
                 if let TyKind::Optional(inner) = *self.types.kind(self.locals[id as usize].ty) {
@@ -3516,6 +3731,35 @@ impl<'a> Checker<'a> {
         }
         let facts = self.error_facts(cond, in_then);
         self.assume_error_facts(&facts);
+    }
+
+    /// The optional results — what `task.timeout` answers with — that a
+    /// condition proves nil when it comes out `truth`, by the same logic as
+    /// [`Checker::error_facts`]. A nil test of one does not read the failure
+    /// it may hold, so this is what settles it on the side where there is
+    /// none: `if r == nil && late { return }` and a guard `_ if r == nil`
+    /// as surely as a plain `if r == nil`.
+    fn nil_results(&self, cond: &ast::Expr, truth: bool) -> Vec<u32> {
+        match cond {
+            ast::Expr::Paren { inner, .. } => self.nil_results(inner, truth),
+            ast::Expr::Unary { op: ast::UnaryOp::Not, operand, .. } => {
+                self.nil_results(operand, !truth)
+            }
+            ast::Expr::Binary { op: ast::BinaryOp::And, lhs, rhs, .. } if truth => {
+                let mut ids = self.nil_results(lhs, true);
+                ids.extend(self.nil_results(rhs, true));
+                ids
+            }
+            ast::Expr::Binary { op: ast::BinaryOp::Or, lhs, rhs, .. } if !truth => {
+                let mut ids = self.nil_results(lhs, false);
+                ids.extend(self.nil_results(rhs, false));
+                ids
+            }
+            _ => match self.nil_test(cond) {
+                Some((id, is_eq)) if is_eq == truth && self.optional_result(id) => vec![id],
+                _ => Vec::new(),
+            },
+        }
     }
 
     /// Start checking something only to learn its type.
@@ -3552,6 +3796,7 @@ impl<'a> Checker<'a> {
         // built, which is being thrown away; so is a closure it lifted, whose
         // number the real check hands out again.
         self.locals.truncate(t.locals);
+        self.parts.retain(|_, ps| ps.iter().all(|&(_, s)| (s as usize) < t.locals));
         self.lifted.truncate(t.lifted);
         self.set_flow_state(t.flow);
         self.guards = t.guards;
@@ -3637,8 +3882,13 @@ impl<'a> Checker<'a> {
             (ast::Expr::Nil(_), ast::Expr::Path(p)) => p,
             _ => return None,
         };
+        // An optional result narrowed to the error it holds is tested as
+        // that error: `if r == nil { return }` then `if r != nil { … }`.
         match self.resolved.lookup_use(path.span) {
-            Some(Res::Local(id)) if self.locals[id as usize].ty == TyId::ERR => {
+            Some(Res::Local(id))
+                if self.locals[id as usize].ty == TyId::ERR
+                    || self.narrowed.get(&id) == Some(&TyId::ERR) =>
+            {
                 Some((id, is_eq))
             }
             _ => None,
@@ -3782,7 +4032,20 @@ impl<'a> Checker<'a> {
                         || matches!(rhs.as_ref(), ast::Expr::Nil(_))) =>
             {
                 let subject = if matches!(lhs.as_ref(), ast::Expr::Nil(_)) { rhs } else { lhs };
+                // A nil test of an optional result does not read the failure
+                // it may hold: that is left to whichever side finds it there.
+                let held = match subject.as_ref() {
+                    ast::Expr::Path(p) => match self.resolved.lookup_use(p.span) {
+                        Some(Res::Local(id)) if self.optional_result(id) => Some(id),
+                        _ => None,
+                    },
+                    _ => None,
+                };
+                let before = held.map(|_| self.taint.clone());
                 let value = self.expr(subject, None);
+                if let (Some(id), Some(before)) = (held, before) {
+                    self.keep_unread(id, &before);
+                }
                 if !matches!(self.types.kind(value.ty), TyKind::Optional(_))
                     && value.ty != TyId::ERR
                     && !self.types.is_poisoned(value.ty)
@@ -4510,10 +4773,11 @@ impl<'a> Checker<'a> {
                     .with_secondary(decl, "this value is only valid when the error is nil")
                     .with_primary(p.span, "used here while still tainted");
                     if let Some(e) = err_name {
-                        d = d.with_note(format!(
-                            "check it first: write `check {}`, or test `{} != nil`",
-                            e, e
-                        ));
+                        d = d.with_note(if self.may_check() {
+                            format!("check it first: write `check {}`, or test `{} != nil`", e, e)
+                        } else {
+                            format!("test `{} != nil` first, and read it where that is false", e)
+                        });
                     }
                     d = d.with_note(
                         "in Go the value on a failure path is the zero value and flows onward \
@@ -5093,8 +5357,29 @@ impl<'a> Checker<'a> {
                 self.variant_value(ti, vi, args, arg_names, p.span, span, expected)
             }
 
-            None => self.lit(ExprKind::Error, TyId::ERROR, span),
+            None => {
+                self.unresolved_call_reads(args);
+                self.lit(ExprKind::Error, TyId::ERROR, span)
+            }
         }
+    }
+
+    /// The arguments of a call whose callee could not be found, read for
+    /// what reading them means to the flow analysis and nothing else.
+    ///
+    /// The mistake is the callee, reported once where it is written; that
+    /// `errors.wrap(c, "…")` without `use std/errors` never read `c` made
+    /// it a second error, E0302 at `c`, for the same cause. Anything the
+    /// arguments would report is left for when the call can be checked.
+    fn unresolved_call_reads(&mut self, args: &[ast::Expr]) {
+        let kept = std::mem::replace(self.diags, DiagBag::new());
+        let facts = [self.facts.calls.len(), self.facts.bound_calls.len()];
+        for a in args {
+            let _ = self.expr(a, None);
+        }
+        *self.diags = kept;
+        self.facts.calls.truncate(facts[0]);
+        self.facts.bound_calls.truncate(facts[1]);
     }
 
     /// `draw.rect(x, y, w, h, colour)` and `draw.text(x, y, body, colour)`.
@@ -5264,27 +5549,7 @@ impl<'a> Checker<'a> {
                 if !args.is_empty() {
                     self.arity_error("task.yield", args.len(), 0, span, None);
                 }
-                // A closure is never async, wherever it is written — the same
-                // rule, and the same reason, as for `await` in `await_expr`.
-                if let Some(closure) = self.closure_span {
-                    self.diags.push(
-                        Diagnostic::error(codes::E0521, "`task.yield` inside a closure")
-                            .with_primary(span, "this would suspend the closure")
-                            .with_secondary(closure, "a closure cannot be `async`")
-                            .with_note(
-                                "yield in the enclosing `async fn`, before or after the \
-                                 closure runs",
-                            ),
-                    );
-                    return self.lit(ExprKind::Error, TyId::ERROR, span);
-                }
-                if !self.sigs[self.fn_index].is_async {
-                    self.diags.push(
-                        Diagnostic::error(codes::E0521, "`task.yield` outside an async function")
-                            .with_primary(span, "this suspends the enclosing function")
-                            .with_secondary(self.sigs[self.fn_index].name_span, "declared here")
-                            .with_note("write `async fn` to allow it to suspend"),
-                    );
+                if !self.may_suspend("task.yield", span) {
                     return self.lit(ExprKind::Error, TyId::ERROR, span);
                 }
                 hir::Expr { kind: ExprKind::Yield, ty: TyId::UNIT, span }
@@ -5389,9 +5654,15 @@ impl<'a> Checker<'a> {
                 }
             }
 
+            // Each says what a suspension is waiting for, so each suspends:
+            // in a plain `fn` there is nothing to suspend, and both compiled
+            // there and did nothing at all.
             BuiltinFn::TaskPark | BuiltinFn::TaskWaitHost => {
                 if !args.is_empty() {
                     self.arity_error(b.path(), args.len(), 0, span, None);
+                }
+                if !self.may_suspend(b.path(), span) {
+                    return self.lit(ExprKind::Error, TyId::ERROR, span);
                 }
                 let builtin = if b == BuiltinFn::TaskPark {
                     Builtin::TaskPark
@@ -5934,6 +6205,7 @@ impl<'a> Checker<'a> {
             }
         }
         if self.types.is_poisoned(receiver.ty) {
+            self.unresolved_call_reads(args);
             return self.lit(ExprKind::Error, TyId::ERROR, span);
         }
 
@@ -7403,10 +7675,21 @@ impl<'a> Checker<'a> {
         // `let (a, b) = await task.both(x, y)` each bind failures nobody has
         // looked at, and marking none of them let every one go unread. What
         // each element brings is what it was built from, for a tuple literal,
-        // and for a read of a binding whatever that binding held unchecked.
+        // and for a read of a binding whatever that binding held unchecked —
+        // less any element already taken with `.N`, whose failure went where
+        // that landed: `if t.0 != nil { … }` then `let (a, b) = t` owes only `b`.
+        let taken = |i: usize| match &value.kind {
+            ExprKind::Local(id) => self.parts.get(&id.0).is_some_and(|ps| {
+                ps.iter().any(|&(j, part)| {
+                    j as usize == i && before.get(part as usize) != Some(&Taint::Unchecked)
+                })
+            }),
+            _ => false,
+        };
         let held: Vec<bool> = (0..parts.len())
             .map(|i| {
                 self.may_hold_failure(parts[i])
+                    && !taken(i)
                     && match &value.kind {
                         ExprKind::TupleNew { elems } => self.holds_obligation(&elems[i], before),
                         _ => self.holds_obligation(&value, before),
@@ -7706,16 +7989,21 @@ impl<'a> Checker<'a> {
         let Some(holder) = self.holder(expr.ty) else {
             return;
         };
+        let test = "bind it and test it — `let err = …` then `if err != nil { … }`";
+        let check_or_test = if self.may_check() {
+            format!("write `check` to propagate it, or {}", test)
+        } else {
+            test.to_string()
+        };
         let (what, fix) = match holder {
-            Holder::Error => (
-                "this call returns an error, and it is thrown away",
-                "write `check` to propagate it, or bind it and test it — \
-                 `let err = …` then `if err != nil { … }`",
-            ),
+            Holder::Error => ("this call returns an error, and it is thrown away", check_or_test.as_str()),
             Holder::Pair => (
                 "this call returns a value and an error, and both are thrown away",
-                "write `check` to propagate it, or bind it and test it — \
-                 `let err = …` then `if err != nil { … }`",
+                if self.may_check() {
+                    "write `let (value, err) = …` and then `check err`, or test `err != nil`"
+                } else {
+                    "write `let (value, err) = …` and then test `err != nil`"
+                },
             ),
             Holder::Many => (
                 "this call returns errors, and they are thrown away",
@@ -8003,10 +8291,15 @@ impl<'a> Checker<'a> {
                  production failures in languages that permit it",
             );
             let d = match holder {
-                Holder::Error => d.with_note(
-                    "to propagate, write `check` on its own line; to handle it here, \
-                     test `err != nil`",
-                ),
+                Holder::Error if self.may_check() => d.with_note(format!(
+                    "to propagate, write `check {}` on its own line; to handle it here, \
+                     test `{} != nil`",
+                    name, name
+                )),
+                Holder::Error => d.with_note(format!(
+                    "handle it here: test `{} != nil`",
+                    name
+                )),
                 Holder::Pair => d.with_note(
                     "take the result apart where it is bound — `let (value, err) = …` — \
                      and then check `err`",
@@ -8026,6 +8319,35 @@ impl<'a> Checker<'a> {
                 )),
             };
             self.diags.push(d);
+        }
+    }
+
+    /// Whether `check` compiles where the checker is: in a body that answers
+    /// with an error. A note naming `check` in `main` named a fix that is
+    /// E0303.
+    fn may_check(&self) -> bool {
+        let (fallible, ret) = match &self.closure_sig {
+            Some(s) => (s.fallible, s.ret),
+            None => (self.sigs[self.fn_index].fallible, self.sigs[self.fn_index].ret),
+        };
+        fallible || ret == TyId::ERR
+    }
+
+    /// How a note spells `errors.wrap`: as written where this module imports
+    /// `std/errors`, and with the import it needs where it does not — the
+    /// bare spelling was E0111 when copied.
+    fn wrap_spelled(&self, name: &str) -> String {
+        let wrap = format!("`{} = errors.wrap({}, \"…\")`", name, name);
+        let imported = self
+            .resolved
+            .modules
+            .aliases
+            .get(&(self.module.clone(), "errors".to_string()))
+            .is_some_and(|m| m == "errors");
+        if imported {
+            wrap
+        } else {
+            format!("{} after `use std/errors`", wrap)
         }
     }
 
@@ -8059,11 +8381,18 @@ impl<'a> Checker<'a> {
                 "test `{} != nil` before the write, and check the error it holds",
                 name
             )),
-            Holder::Error => d.with_note(format!(
-                "test `{} != nil` or `check {}` before the write; to pass it on instead, \
-                 write `{} = errors.wrap({}, \"…\")`",
-                name, name, name, name
-            )),
+            Holder::Error => {
+                let test = if self.may_check() {
+                    format!("test `{} != nil` or `check {}`", name, name)
+                } else {
+                    format!("test `{} != nil`", name)
+                };
+                d.with_note(format!(
+                    "{} before the write; to pass it on instead, write {}",
+                    test,
+                    self.wrap_spelled(name)
+                ))
+            }
         };
         self.diags.push(d);
     }
@@ -9270,29 +9599,33 @@ impl<'a> Checker<'a> {
         // name. So the failure stays where it was — a binding scrutinee keeps
         // it, an arm's name holds it as a copy — and a new failure with only
         // `_` to receive it is dropped right there, as by a bare call (R6).
+        //
+        // Nor does matching an optional result against `nil`, which asks
+        // only whether the failure is there: an arm that is `nil` holds
+        // none, and the others hold it unread.
+        let maybe = self.holder(scrut_ty) == Some(Holder::Maybe);
         let tests_nothing = self.may_hold_failure(scrut_ty)
-            && m.arms.iter().all(|a| self.binds_whole(&a.pattern, scrut_ty));
+            && m.arms.iter().all(|a| {
+                self.binds_whole(&a.pattern, scrut_ty)
+                    || (maybe && matches!(a.pattern, ast::Pattern::Nil(_)))
+            });
         let held = tests_nothing && self.holds_obligation(&scrutinee, &before);
         let source = match scrutinee.kind {
             ExprKind::Local(id) if held => Some(id.0),
             _ => None,
         };
         if let Some(src) = source {
-            for i in self.copies_of(src) {
-                if before.get(i as usize) == Some(&Taint::Unchecked) {
-                    self.taint[i as usize] = Taint::Unchecked;
-                }
-            }
+            self.keep_unread(src, &before);
         }
         // A fresh failure reaching a `_` is dropped there — unless a guard
         // ahead of it looked at the name an earlier arm gave it, as in `e if
         // e != nil => …`, and so let through to the `_` only what it saw.
         // Which guards look is known once the arms are checked.
-        let mut dropped_at = (source.is_none()
-            && held
-            && m.arms.iter().any(|a| matches!(a.pattern, ast::Pattern::Wildcard(_))))
-        .then_some(scrutinee.span);
-        let mut before_wildcard = true;
+        let mut dropped_at = None;
+        // Whether a fresh failure is still unlooked-at where the next arm
+        // begins: a guard that read the name an arm gave it, and came out
+        // false, let through to later arms only what it saw.
+        let mut open = held;
 
         if m.arms.is_empty() {
             // Arms the parser could not read are not no arms.
@@ -9312,7 +9645,15 @@ impl<'a> Checker<'a> {
         // an error checked in one case clean in every other — and taking the
         // entry state for what survives, as definite assignment once did,
         // refused a `let` that every arm assigns.
+        //
+        // One thing does lead from an arm to the next: an arm whose pattern
+        // takes anything is passed over only when its guard ran and came out
+        // false, so the next arm begins where that guard left off, knowing
+        // what it proved. `_ if e != nil => …, _ => …` tests `e` on both
+        // ways through; starting the second arm from the entry state made
+        // `e` look unread there.
         let entry = self.flow_state();
+        let mut start = entry.clone();
         let mut exit: Option<FlowState> = None;
         // The arms that leave, joined, stand for the match when every arm
         // does: nothing follows it, but the end of the function still asks
@@ -9336,19 +9677,32 @@ impl<'a> Checker<'a> {
         let mut rejected = Vec::with_capacity(m.arms.len());
 
         for arm in &m.arms {
-            self.set_flow_state(entry.clone());
+            self.set_flow_state(start.clone());
             let bind_ty = match *self.types.kind(scrut_ty) {
                 TyKind::Optional(inner) if nil_covered => inner,
                 _ => scrut_ty,
             };
             self.arm_bound.clear();
             let pattern = self.pattern_with(&arm.pattern, scrut_ty, bind_ty);
+            // The arm's name holds the failure only if nothing before this arm
+            // has looked at it.
+            let unseen = match source {
+                Some(src) => self.taint.get(src as usize) == Some(&Taint::Unchecked),
+                None => open,
+            };
+            if let (true, Some(src), hir::Pattern::Nil) = (held, source, &pattern) {
+                self.inspect(src);
+            }
             if let (true, hir::Pattern::Binding { local, .. }) = (held, &pattern) {
                 self.forget_copies(local.0);
-                self.taint[local.index()] = Taint::Unchecked;
-                if let Some(src) = source {
+                self.taint[local.index()] = if unseen { Taint::Unchecked } else { Taint::Clean };
+                if let (true, Some(src)) = (unseen, source) {
                     self.note_copy(local.0, src);
                 }
+            }
+            if source.is_none() && open && matches!(arm.pattern, ast::Pattern::Wildcard(_)) {
+                // A fresh failure reaching a `_` unlooked-at is dropped there.
+                dropped_at = dropped_at.or(Some(scrutinee.span));
             }
             // Refused here or by the resolver, which reports a variant that
             // does not exist before any of this runs.
@@ -9374,13 +9728,35 @@ impl<'a> Checker<'a> {
                 }
                 c
             });
-            if matches!(arm.pattern, ast::Pattern::Wildcard(_)) {
-                before_wildcard = false;
-            } else if let (true, Some(_), hir::Pattern::Binding { local, .. }) =
-                (before_wildcard, &guard, &pattern)
-            {
-                if self.taint[local.index()] != Taint::Unchecked {
-                    dropped_at = None;
+            if let (Some(g), true) = (&arm.guard, self.binds_whole(&arm.pattern, scrut_ty)) {
+                let after = self.flow_state();
+                if let hir::Pattern::Binding { local, .. } = &pattern {
+                    if held && self.taint[local.index()] != Taint::Unchecked {
+                        open = false;
+                    }
+                }
+                let facts = self.error_facts(g, false);
+                self.assume_error_facts(&facts);
+                for id in self.nil_results(g, false) {
+                    self.inspect(id);
+                }
+                // What the arm's own pattern bound is out of scope in the
+                // next one; a failure it alone held unread is still `open`.
+                for i in 0..self.taint.len() {
+                    if self.declared_inside(i as u32, arm.span) {
+                        self.forget_copies(i as u32);
+                        self.taint[i] = Taint::Clean;
+                    }
+                }
+                start = self.flow_state();
+                self.set_flow_state(after);
+            }
+            // The arm runs where its guard held, as an `if`'s body does.
+            if let Some(g) = &arm.guard {
+                let facts = self.error_facts(g, true);
+                self.assume_error_facts(&facts);
+                for id in self.nil_results(g, true) {
+                    self.inspect(id);
                 }
             }
 
@@ -11222,7 +11598,37 @@ impl<'a> Checker<'a> {
 
     /// `p.x`
     fn field_access(&mut self, base: &ast::Expr, name: &ast::Ident, span: Span) -> hir::Expr {
+        // **`.N` takes one element of a tuple of failures**, not the whole:
+        // `let e = r.0` after `let r = await task.both(a, b)` hands on the
+        // first failure and leaves the second owed. Reading the tuple to
+        // project it is not looking at what else is in it; each element is
+        // settled as it is taken, and the tuple once every one has been.
+        let owed = match base {
+            ast::Expr::Path(p) => match self.resolved.lookup_use(p.span) {
+                Some(Res::Local(id))
+                    if self.taint.get(id as usize) == Some(&Taint::Unchecked)
+                        && self.parts.contains_key(&id) =>
+                {
+                    Some((id, self.taint.clone()))
+                }
+                _ => None,
+            },
+            _ => None,
+        };
         let obj = self.expr(base, None);
+        if let Some((id, before)) = owed {
+            self.keep_unread(id, &before);
+            let index = name.name.parse::<u32>().ok();
+            let parts = self.parts[&id].clone();
+            for &(i, part) in &parts {
+                if Some(i) == index {
+                    self.taint[part as usize] = Taint::Clean;
+                }
+            }
+            if parts.iter().all(|&(_, part)| self.taint[part as usize] != Taint::Unchecked) {
+                self.inspect(id);
+            }
+        }
 
         if self.types.is_poisoned(obj.ty) {
             return self.lit(ExprKind::Error, TyId::ERROR, span);
@@ -12392,6 +12798,37 @@ impl<'a> Checker<'a> {
             self.pair_is_not_a_tuple(found, expected, span, because);
             return;
         }
+        // The same difference one level in: `[Task<(int, error)>]` written
+        // as a type holds tuples, and `load(1)` is the task of a result.
+        if self.types.name(found) == self.types.name(expected)
+            && self.holds_pair(found) != self.holds_pair(expected)
+        {
+            let name = self.types.name(found);
+            let (headline, primary) = if self.holds_pair(found) {
+                (
+                    format!("expected `{}` of a tuple, found one of the result of a fallible call", name),
+                    "this holds a result whose error has to be checked, not a tuple",
+                )
+            } else {
+                (
+                    format!("expected `{}` of the result of a fallible call, found one of a tuple", name),
+                    "this holds a tuple, not a result",
+                )
+            };
+            let mut d = Diagnostic::error(codes::E0200, headline).with_primary(span, primary);
+            if let Some(b) = because {
+                d = d.with_secondary(b, "written as a type, the `(T, error)` here is a tuple");
+            }
+            d = d.with_note(
+                "a `(T, error)` written as a type is a plain tuple, so a type holding the result \
+                 of a fallible call cannot be written",
+            );
+            d = d.with_note(
+                "leave the type out and let a value give it, as in `var tasks = [load(1)]`",
+            );
+            self.diags.push(d);
+            return;
+        }
         let mut d = Diagnostic::error(
             codes::E0200,
             format!("expected `{}`, found `{}`", self.types.name(expected), self.types.name(found)),
@@ -12476,6 +12913,23 @@ impl<'a> Checker<'a> {
         self.diags.push(d);
     }
 
+    /// Whether a type is, or holds, the result of a fallible call.
+    fn holds_pair(&self, ty: TyId) -> bool {
+        if let Some(inner) = self.types.task_payload(ty) {
+            return self.holds_pair(inner);
+        }
+        match self.types.kind(ty) {
+            TyKind::Fallible(_) => true,
+            TyKind::Slice(e) | TyKind::Optional(e) => self.holds_pair(*e),
+            TyKind::Map(k, v) => self.holds_pair(*k) || self.holds_pair(*v),
+            TyKind::Tuple(es) => es.iter().any(|e| self.holds_pair(*e)),
+            TyKind::Fn { params, ret } => {
+                params.iter().any(|p| self.holds_pair(*p)) || self.holds_pair(*ret)
+            }
+            _ => false,
+        }
+    }
+
     /// Whether a type is, or is built from, one that failed to check.
     fn mentions_error(&self, ty: TyId) -> bool {
         match self.types.kind(ty) {
@@ -12531,6 +12985,36 @@ impl<'a> Checker<'a> {
         } else {
             None
         }
+    }
+
+    /// Whether a builtin that suspends — `task.yield`, `task.park`,
+    /// `task.wait_host` — may be written here, reporting `E0521` if not.
+    ///
+    /// A closure is never async, wherever it is written — the same rule,
+    /// and the same reason, as for `await` in `await_expr`.
+    fn may_suspend(&mut self, what: &str, span: Span) -> bool {
+        if let Some(closure) = self.closure_span {
+            self.diags.push(
+                Diagnostic::error(codes::E0521, format!("`{}` inside a closure", what))
+                    .with_primary(span, "this would suspend the closure")
+                    .with_secondary(closure, "a closure cannot be `async`")
+                    .with_note(format!(
+                        "call `{}` in the enclosing `async fn`, before or after the closure runs",
+                        what
+                    )),
+            );
+            return false;
+        }
+        if !self.sigs[self.fn_index].is_async {
+            self.diags.push(
+                Diagnostic::error(codes::E0521, format!("`{}` outside an async function", what))
+                    .with_primary(span, "this suspends the enclosing function")
+                    .with_secondary(self.sigs[self.fn_index].name_span, "declared here")
+                    .with_note("write `async fn` to allow it to suspend"),
+            );
+            return false;
+        }
+        true
     }
 
     /// A builtin named where a value is expected.

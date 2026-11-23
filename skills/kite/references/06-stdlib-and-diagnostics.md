@@ -509,9 +509,9 @@ Seven, and every combinator in `std/task` is built from them.
 | Call | Type | Notes |
 |---|---|---|
 | `task.yield()` | `-> ()` | The suspension point. `E0521` outside `async`. |
-| `task.park()` | `-> ()` | "Nothing to wait for but another task" — stops a spin looking like progress. |
+| `task.park()` | `-> ()` | "Nothing to wait for but another task" — stops a spin looking like progress. `E0521` outside `async`. |
 | `task.wake_at(ms: int)` | `-> ()` | Deadline for the virtual clock. |
-| `task.wait_host()` | `-> ()` | "What I am waiting for is the host", so the runtime can hand back the event loop. |
+| `task.wait_host()` | `-> ()` | "What I am waiting for is the host", so the runtime can hand back the event loop. `E0521` outside `async`. |
 | `task.finished(t: Task<T>)` | `-> bool` | Reads the task without suspending. |
 | `task.get(t: Task<T>)` | `-> T` | Ditto. Undefined before `finished`. |
 | `time.now()` | `-> int` | The seventh. |

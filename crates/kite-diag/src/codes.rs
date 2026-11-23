@@ -524,7 +524,10 @@ codes! {
          the block does. Copying it is not inspecting it: after `let e = err` \
          either name may be inspected, but one of them must be. The `Task` \
          of an `async fn` that answers with an error is held to the same \
-         rule: it has to be awaited, returned or passed on. Silently \
+         rule: it has to be awaited, returned or passed on. A call whose \
+         result holds a failure cannot be deferred: it runs after the \
+         function has returned, so its error has nowhere to go — defer a \
+         function that handles it instead. Silently \
          dropping errors is the single most common source of production \
          failures in languages that permit it.\n\n\
          To propagate, write `check`. To handle it where it happened, test \
@@ -767,13 +770,15 @@ codes! {
          number or a string, and keep the counter where it is.";
 
     E0521 = "E0521", "`await` outside an async function",
-        "`await` and `task.yield` suspend the function they are written in, \
-         so that function has to be declared `async`; an ordinary `fn` \
-         cannot be suspended. The situations:\n\
+        "`await`, `task.yield`, `task.park` and `task.wait_host` suspend \
+         the function they are written in, so that function has to be \
+         declared `async`; an ordinary `fn` cannot be suspended, and in one \
+         they would do nothing. The situations:\n\
          \n\
-         - `await` or `task.yield()` in a function that is not `async`. \
-         That includes `main`, which is `async fn main()` when it awaits.\n\
-         - `await` or `task.yield()` inside a closure. A closure is a \
+         - `await`, or one of those three builtins, in a function that is \
+         not `async`. That includes `main`, which is `async fn main()` \
+         when it awaits.\n\
+         - `await`, or one of those builtins, inside a closure. A closure is a \
          function of its own and is never `async`, so one inside an \
          `async fn` is refused too: `|| await work()`. Await before \
          making the closure, or have the closure return the task and \

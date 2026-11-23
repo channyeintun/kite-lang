@@ -1117,6 +1117,47 @@ fn main() {
 "#,
     ),
     (
+        // A `for cond` narrows its body where the condition held, and what
+        // follows a loop with no `break` where it failed.
+        "for-condition-narrows",
+        r#"fn f(n: int) -> error {
+    if n > 2 {
+        return errors.new("stop at \(n)")
+    }
+    return nil
+}
+
+fn next(n: int) -> Option<int> {
+    if n > 30 {
+        return nil
+    }
+    return n * 2
+}
+
+fn main() {
+    var n = 0
+    var e = f(n)
+    for e == nil {
+        n += 1
+        e = f(n)
+    }
+    io.print(e.message())
+    var o: Option<int> = 1
+    var total = 0
+    for o != nil {
+        total += o
+        o = next(o)
+    }
+    io.print(total)
+    var p: Option<str> = nil
+    for p == nil {
+        p = "found"
+    }
+    io.print(p + "!")
+}
+"#,
+    ),
+    (
         "interpolation",
         "fn main() {\n  let name = \"world\"\n  let n = 42\n  let pi = 2.5\n  let ok = true\n\
          \x20 io.print(\"hello, \\(name)!\")\n\

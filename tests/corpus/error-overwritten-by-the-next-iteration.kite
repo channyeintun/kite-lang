@@ -138,9 +138,37 @@ fn until_the_test_passes() {
     }
 }
 
+// A `for { }` has no header, so a `break` is its only way out: neither the
+// state it was entered in nor its body's end reaches what follows it.
+fn retried_until_a_break() {
+    var n = 1
+    var err = touch(n)
+    for {
+        if err == nil {
+            break
+        }
+        n += 1
+        err = touch(n)
+    }
+}
+
+// A `break` that tests nothing carries the failure out untested.
+fn left_by_an_untested_break() {
+    var n = 0
+    let err = touch(1) //~ ERROR E0302
+    for {
+        if n > 3 {
+            break
+        }
+        n += 1
+    }
+}
+
 fn main() {
     a_copy_left_by_a_break([1])
     until_the_test_passes()
+    retried_until_a_break()
+    left_by_an_untested_break()
     every_iteration()
     a_while_loop()
     after_a_continue()
