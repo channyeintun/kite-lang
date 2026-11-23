@@ -300,11 +300,16 @@ pub enum ExprKind {
     /// `Point{ x: 1.0, y: 2.0 }`. Fields are in declaration order, and all of
     /// them are present — Kite has no zero values, so a literal that omits one
     /// never reaches HIR.
-    StructNew { struct_id: StructId, fields: Vec<Expr> },
+    ///
+    /// `order` is the order they are evaluated in, as positions into
+    /// `fields`: the order they were written (§5.3). It is empty when that is
+    /// declaration order, which is the common case and costs nothing.
+    StructNew { struct_id: StructId, fields: Vec<Expr>, order: Vec<u32> },
     /// `p.x`, by field position.
     FieldGet { base: Box<Expr>, index: u32 },
-    /// `Circle(radius: 1.0)`, or a unit variant such as `Point`.
-    EnumNew { enum_id: EnumId, variant: u32, fields: Vec<Expr> },
+    /// `Circle(radius: 1.0)`, or a unit variant such as `Point`. `order` is
+    /// as for `StructNew`: named payload fields evaluate in the order written.
+    EnumNew { enum_id: EnumId, variant: u32, fields: Vec<Expr>, order: Vec<u32> },
     /// Exhaustive by construction: the checker has already proved every value
     /// is covered, so lowering needs no fallback arm.
     Match { scrutinee: Box<Expr>, arms: Vec<MatchArm> },
@@ -881,12 +886,12 @@ impl Program {
                 self.expr(then),
                 self.expr(else_)
             ),
-            ExprKind::StructNew { struct_id, fields } => {
+            ExprKind::StructNew { struct_id, fields, .. } => {
                 let a: Vec<String> = fields.iter().map(|x| self.expr(x)).collect();
                 format!("{}{{{}}}", self.types.struct_def(*struct_id).name, a.join(", "))
             }
             ExprKind::FieldGet { base, index } => format!("{}.{}", self.expr(base), index),
-            ExprKind::EnumNew { enum_id, variant, fields } => {
+            ExprKind::EnumNew { enum_id, variant, fields, .. } => {
                 let def = self.types.enum_def(*enum_id);
                 let a: Vec<String> = fields.iter().map(|x| self.expr(x)).collect();
                 format!(

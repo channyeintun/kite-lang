@@ -736,6 +736,11 @@ Kite — a struct literal that omits a field without `..` is a compile error. Th
 removes Go's most common production bug, where a forgotten field silently
 becomes `0`, `""`, or `nil`.
 
+The fields of a struct literal, and the named payload of a variant such as
+`Rect(h: f(), w: g())`, are evaluated in the order they are written, not the
+order they are declared in. `..base` is written first, so it is evaluated
+first, and once; the fields it supplies are read from that one value.
+
 ### 5.4 Slices and maps
 
 ```kite

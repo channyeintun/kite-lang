@@ -1786,6 +1786,7 @@ fn an_or_pattern_binds_through_the_alternative_that_matched() {
                 enum_id: shape,
                 variant,
                 fields: fields.into_iter().map(|v| expr(ExprKind::Int(v), TyId::INT)).collect(),
+                order: Vec::new(),
             },
             shape_ty,
         );

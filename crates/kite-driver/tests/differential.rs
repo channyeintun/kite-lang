@@ -4905,6 +4905,31 @@ fn a_race_of_no_tasks_names_the_mistake() {
 /// says the program prints.
 const EXPECTED: &[(&str, &str, &str)] = &[
     (
+        // §5.3: a struct literal's fields and a variant's named payload run in
+        // the order written, and `..base` runs first and once. They ran in
+        // declaration order, and the base ran again for every field it
+        // supplied — in a generic function, a closure and across `await` too.
+        "constructor-fields-run-in-the-order-written",
+        "struct Box<T> {\n  a: T\n  b: T\n  label: str\n}\n\
+         enum Shape {\n  Rect(w: int, h: int)\n  Dot\n}\n\
+         fn say(s: str) -> str {\n  io.print(s)\n  return s\n}\n\
+         fn n(x: int) -> int {\n  io.print(\"n \\(x)\")\n  return x\n}\n\
+         fn base<T>(v: T) -> Box<T> {\n  io.print(\"base\")\n  return Box{ a: v, b: v, label: \"base\" }\n}\n\
+         fn rebox<T>(v: T, w: T) -> Box<T> {\n  return Box{ ..base(v), b: w }\n}\n\
+         async fn later(x: int) -> int {\n  io.print(\"later \\(x)\")\n  return x\n}\n\
+         async fn main() {\n\
+         \x20 let r = rebox(1, 2)\n  io.print(\"\\(r.a) \\(r.b) \\(r.label)\")\n\
+         \x20 let f = |k: int| Box{ label: say(\"closure\"), b: n(k), a: n(k + 1) }\n\
+         \x20 let g = f(5)\n  io.print(\"\\(g.a) \\(g.b)\")\n\
+         \x20 let t = later(9)\n  let u = later(8)\n\
+         \x20 let h = Box{ b: await t, a: await u, label: \"x\" }\n  io.print(\"\\(h.a) \\(h.b)\")\n\
+         \x20 let all = Box{ ..base(\"q\"), label: say(\"l\"), b: say(\"b\"), a: say(\"a\") }\n\
+         \x20 io.print(all.label)\n\
+         \x20 let s = Rect(h: n(1), w: n(2))\n\
+         \x20 match s {\n    Rect(w, h) => io.print(\"\\(w)x\\(h)\"),\n    Dot => io.print(\"dot\"),\n  }\n}\n",
+        "base\n1 2 base\nclosure\nn 5\nn 6\n6 5\nlater 9\nlater 8\n8 9\nbase\nl\nb\na\nl\nn 1\nn 2\n2x1\n",
+    ),
+    (
         // §2.4, in a file written with CRLF line endings: a line break in the
         // source is a line break however it was written, so no line of a
         // block string ends in `\r` — with a hole, without one, in a

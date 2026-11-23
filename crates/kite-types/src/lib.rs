@@ -9103,6 +9103,9 @@ impl<'a> Checker<'a> {
         };
 
         let mut slots: Vec<Option<hir::Expr>> = (0..field_tys.len()).map(|_| None).collect();
+        // The order the payload was written in, which is the order it runs
+        // in: `V(b: f(), a: g())` calls `f` first, as a call's arguments do.
+        let mut order: Vec<u32> = Vec::with_capacity(field_tys.len());
         for (i, a) in args.iter().enumerate() {
             let index = match arg_names.get(i).and_then(|n| n.as_ref()) {
                 None => i,
@@ -9128,6 +9131,9 @@ impl<'a> Checker<'a> {
             };
             let want = field_tys[index];
             let e = self.expr(a, Some(want));
+            if slots[index].is_none() {
+                order.push(index as u32);
+            }
             slots[index] = Some(self.accept(e, want, Some(decl_span)));
         }
 
@@ -9150,7 +9156,7 @@ impl<'a> Checker<'a> {
         let _ = path_span;
 
         hir::Expr {
-            kind: ExprKind::EnumNew { enum_id: eid, variant: vi, fields },
+            kind: ExprKind::EnumNew { enum_id: eid, variant: vi, fields, order: in_written_order(order) },
             ty: enum_ty,
             span,
         }
@@ -11002,8 +11008,10 @@ impl<'a> Checker<'a> {
             }
         }
 
-        // Resolve each written field to its declared position.
+        // Resolve each written field to its declared position, and keep the
+        // order they were written in: that is the order they run in (§5.3).
         let mut given: Vec<Option<hir::Expr>> = (0..field_count).map(|_| None).collect();
+        let mut order: Vec<u32> = Vec::with_capacity(field_count);
         for init in &lit.fields {
             let found = self
                 .types
@@ -11048,8 +11056,18 @@ impl<'a> Checker<'a> {
             // mismatch — its registers are untyped — and Wasm rejected it.
             let value = self.coerce(value, Some(ty));
             self.expect_ty(value.ty, ty, value.span, Some(decl_span));
+            if given[index].is_none() {
+                order.push(index as u32);
+            }
             given[index] = Some(value);
         }
+
+        // `..base` is written first, so it runs first, and once: it is bound
+        // to a hidden local, and every gap reads its field from that. Each
+        // gap used to evaluate the base again, so `P{ ..make(), x: 1 }`
+        // called `make` once per field it did not name, in declaration order
+        // among the written ones.
+        let holder = base.as_ref().map(|b| (self.synthetic_local("base", struct_ty, b.span), b.span));
 
         // Fill the gaps from `..base`, or report them.
         let mut fields = Vec::with_capacity(field_count);
@@ -11057,19 +11075,16 @@ impl<'a> Checker<'a> {
         for (i, slot) in given.into_iter().enumerate() {
             match slot {
                 Some(e) => fields.push(e),
-                None if base.is_some() => {
+                None if holder.is_some() => {
+                    let (id, at) = holder.expect("a base");
                     let ty = self.types.struct_def(sid).fields[i].ty;
-                    // Each gap re-reads the base. Evaluating it once and
-                    // projecting is a MIR concern, not a semantic one.
-                    let base_expr = self.clone_base_read(lit, struct_ty);
+                    let read = hir::Expr { kind: ExprKind::Local(hir::LocalId(id)), ty: struct_ty, span: at };
                     fields.push(hir::Expr {
-                        kind: ExprKind::FieldGet {
-                            base: Box::new(base_expr),
-                            index: i as u32,
-                        },
+                        kind: ExprKind::FieldGet { base: Box::new(read), index: i as u32 },
                         ty,
                         span: lit.span,
                     });
+                    order.push(i as u32);
                 }
                 None => missing.push(self.types.struct_def(sid).fields[i].name.clone()),
             }
@@ -11100,18 +11115,29 @@ impl<'a> Checker<'a> {
             return self.lit(ExprKind::Error, TyId::ERROR, lit.span);
         }
 
-        hir::Expr {
-            kind: ExprKind::StructNew { struct_id: sid, fields },
+        let order = in_written_order(order);
+        let built = hir::Expr {
+            kind: ExprKind::StructNew { struct_id: sid, fields, order },
             ty: struct_ty,
             span: lit.span,
-        }
-    }
-
-    /// Re-read the `..base` expression for a gap in a functional update.
-    fn clone_base_read(&mut self, lit: &ast::StructLit, struct_ty: TyId) -> hir::Expr {
-        match &lit.base {
-            Some(b) => self.expr(b, Some(struct_ty)),
-            None => self.lit(ExprKind::Error, TyId::ERROR, lit.span),
+        };
+        // The base is bound the way a `match` binds its subject: evaluated
+        // once, put in the local, and then the literal is built.
+        match (base, holder) {
+            (Some(b), Some((id, _))) => hir::Expr {
+                kind: ExprKind::Match {
+                    scrutinee: Box::new(b),
+                    arms: vec![hir::MatchArm {
+                        pattern: hir::Pattern::Binding { local: hir::LocalId(id), unwrap: false },
+                        guard: None,
+                        body: built,
+                        span: lit.span,
+                    }],
+                },
+                ty: struct_ty,
+                span: lit.span,
+            },
+            _ => built,
         }
     }
 
@@ -13964,6 +13990,17 @@ fn expr_defers(e: &ast::Expr) -> bool {
     let mut found = false;
     visit_expr_stmts(e, false, &mut |s| found |= matches!(s, ast::Stmt::Defer { .. }));
     found
+}
+
+/// A constructor's evaluation order as `StructNew` and `EnumNew` carry it:
+/// empty when the fields were written in declaration order, so the common
+/// case is the same HIR it always was.
+fn in_written_order(order: Vec<u32>) -> Vec<u32> {
+    if order.iter().enumerate().all(|(i, &at)| i as u32 == at) {
+        Vec::new()
+    } else {
+        order
+    }
 }
 
 /// A block string's body, with the indentation the closing delimiter sets
