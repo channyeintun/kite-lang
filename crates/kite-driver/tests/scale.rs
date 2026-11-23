@@ -305,3 +305,46 @@ fn main() {
 "#;
     agrees_within("map-deep-keys", src, "199990000 20000\n", Duration::from_secs(20), false);
 }
+
+/// A slice or a map grown across suspensions is written in place, as it is
+/// outside `async`. The task's frame kept its own reference to every local it
+/// had spilled, so each one came back from a suspension looking shared and
+/// its next write copied it whole: a hundred thousand pushes, each after a
+/// `yield`, took about twenty seconds on the VM and eight on Wasm, released,
+/// and `out.push(await t)` — `task.all` — cost the same. A suspension moves
+/// the locals into the frame and back out now, owned flags and all. Maps are
+/// timed without Wasm, as the map test above is.
+#[test]
+fn a_slice_or_a_map_grown_across_suspensions_is_written_in_place() {
+    let slices = "async fn one(i: int) -> int {\n  return i\n}\n\n\
+                  pub async fn main() {\n  var out: [int] = []\n  for i in 0..100000 {\n\
+                  \x20   out.push(i)\n    task.yield()\n  }\n  var got: [int] = []\n\
+                  \x20 for i in 0..100000 {\n    got.push(await one(i))\n    got[i] = got[i] + 1\n  }\n\
+                  \x20 io.print(\"\\(out.len()) \\(out[99999]) \\(got.len()) \\(got[99999])\")\n}\n";
+    agrees_within("push-across-yield", slices, "100000 99999 100000 100000\n", Duration::from_secs(20), true);
+    // A hundred thousand: at fifty thousand the old VM took about the bound
+    // itself, which a faster machine would have passed.
+    let maps = "pub async fn main() {\n  var m: {int: int} = {}\n  for i in 0..100000 {\n\
+                \x20   m[i] = i\n    task.yield()\n  }\n  for i in 0..50000 {\n\
+                \x20   m.remove(i)\n    task.yield()\n  }\n  io.print(\"\\(m.len()) \\(or_else(m[99999], -1))\")\n}\n";
+    agrees_within("map-across-yield", maps, "50000 99999\n", Duration::from_secs(20), false);
+}
+
+/// A deep chain of awaits — a recursive `async fn`, the shape of a recursive
+/// walk — is linear on all three backends. An `await` that had to wait parked
+/// with no target, and every task finishing woke every parked task, so each
+/// link of the chain finishing re-polled all the links still waiting above it:
+/// twenty thousand deep took 84 s on the VM, 15 s natively and 7 s on Wasm,
+/// released. An `await` parks on the task it awaits now, and a sweep walks
+/// only the tasks that could run. Beside it, tasks each awaiting the one
+/// spawned before them, which the scheduler finishes in one sweep.
+#[test]
+fn a_deep_chain_of_awaits_is_linear() {
+    let down = "async fn down(n: int) -> int {\n  if n == 0 {\n    task.yield()\n    return 0\n  }\n\
+                \x20 return 1 + await down(n - 1)\n}\n\n\
+                async fn after(t: Task<int>) -> int {\n  return 1 + await t\n}\n\n\
+                pub async fn main() {\n  io.print(await down(40000))\n\
+                \x20 var t = down(0)\n  for i in 0..40000 {\n    t = after(t)\n  }\n\
+                \x20 io.print(await t)\n}\n";
+    agrees_within("await-chain", down, "40000\n40000\n", Duration::from_secs(20), true);
+}

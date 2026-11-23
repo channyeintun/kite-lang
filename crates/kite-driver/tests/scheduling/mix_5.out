@@ -1,0 +1,51 @@
+leaf 0 0 0
+p1 spawned 0
+p3 spawned 0
+w5 wait
+s6 start 0
+s8 start 0
+c11 down 6
+leaf 12 0 0
+c11 down 5
+c11 down 4
+c11 down 3
+c11 down 2
+c11 down 1
+c11 bottom
+leaf 0 1 0
+p1 spawned 1
+p3 spawned 1
+l7 locked 0
+leaf 12 1 0
+c11 up 1
+leaf 11 0 0
+leaf 31 0 0
+leaf 0 2 0
+p1 collected 10
+p3 spawned 2
+leaf 12 2 0
+c11 up 2
+leaf 32 0 0
+leaf 0 3 0
+p1 collected 21
+p3 collected 30
+p3 collected 61
+l7 unlocking
+leaf 12 3 0
+c11 up 3
+leaf 32 1 0
+leaf 0 4 0
+a2 all 21 at 0
+c11 up 4
+p3 collected 93
+c11 up 5
+c11 up 6
+z4 bottom 3
+w5 got 0 at 3
+z9 bottom 3
+z9 up 1
+z9 up 2
+a10 all 3 at 3
+s8 done 10
+s6 done 20
+total 180 at 20

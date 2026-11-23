@@ -266,6 +266,11 @@ The library combinators, all `async`, all in `std/task`:
 There is no channel type. A `Task<T>` *is* the one-shot result channel, and it
 is awaited rather than received from.
 
+A task carries which task it is, so `==` on two `Task`s is true only for the
+same task: two calls of one `async fn` are never equal, finished or not, and a
+map keyed by tasks keeps one entry per task. (Before, two tasks with equal
+results compared equal, and so did two unfinished ones.)
+
 Reaching a library combinator without the import is `E0111`, and the diagnostic
 names the module rather than the function:
 

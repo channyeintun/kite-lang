@@ -759,7 +759,11 @@ Two things the scheduler had to get right:
   progress — so one sleeping task would spin the program forever.
 - **A completion wakes everything**, because that is what a parked task was
   waiting for. Without it a `timeout` would sleep through the result it was
-  waiting for.
+  waiting for. (Since then an `await` parks on the task it awaits, and only
+  that task's finishing wakes it, at the sweep the old rule would have let it
+  see the result: the interleaving is unchanged, and a chain of awaits is
+  linear rather than quadratic. `task.park()` is still woken by every
+  completion. See [docs/02 §8](02-concurrency.md#8-implementation).)
 
 The clock is **virtual** on both backends: when every task is waiting on a
 deadline it jumps to the earliest. A program that sleeps costs no real time

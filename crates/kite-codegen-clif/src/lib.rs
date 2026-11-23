@@ -202,9 +202,10 @@ const RUNTIME: &[(&str, &[Type], Option<Type>)] = &[
     ("kite_rt_text_height", &[], Some(F64)),
     ("kite_rt_require", &[I8, I64], None),
     ("kite_rt_call_extern", &[I64, I64], Some(I64)),
-    ("kite_rt_task_spawn", &[I64], None),
+    ("kite_rt_task_spawn", &[I64], Some(I64)),
     ("kite_rt_task_wake_at", &[I64], None),
     ("kite_rt_task_park", &[], None),
+    ("kite_rt_task_park_on", &[I64], None),
     ("kite_rt_task_wait_host", &[], None),
     ("kite_rt_time_now", &[], Some(I64)),
     ("kite_rt_drive", &[], None),
@@ -1340,10 +1341,14 @@ impl<'a, 'b, M: Module> FnLower<'a, 'b, M> {
             mir::Inst::Assign { dst, value } => {
                 self.rvalue(*dst, value);
                 // A slice made here is the destination's alone; one read from
-                // anywhere else may be shared with where it came from.
+                // anywhere else may be shared with where it came from — unless
+                // it is a spilled local coming back, which brings its flag.
                 if let Some(&flag) = self.owned.get(&dst.index()) {
-                    let fresh = self.b.ins().iconst(I8, i64::from(slices::fresh(value)));
-                    self.b.def_var(flag, fresh);
+                    let now = match value {
+                        mir::Rvalue::Unspill { owned, .. } => self.operand(owned),
+                        _ => self.b.ins().iconst(I8, i64::from(slices::fresh(value))),
+                    };
+                    self.b.def_var(flag, now);
                 }
             }
             mir::Inst::SetField { base, index, value } => {
@@ -1416,6 +1421,15 @@ impl<'a, 'b, M: Module> FnLower<'a, 'b, M> {
             }
             mir::Rvalue::Use(o) => {
                 let v = self.operand(o);
+                self.def(dst, v);
+            }
+            mir::Rvalue::Owned { value } => {
+                let v = match value {
+                    mir::Operand::Local(l) if self.owned.contains_key(&l.index()) => {
+                        self.b.use_var(self.owned[&l.index()])
+                    }
+                    _ => self.b.ins().iconst(I8, 0),
+                };
                 self.def(dst, v);
             }
             mir::Rvalue::Binary { op, lhs, rhs } => self.binary(dst, *op, lhs, rhs),
@@ -1626,7 +1640,11 @@ impl<'a, 'b, M: Module> FnLower<'a, 'b, M> {
             // sit at the same offsets past the header, so one load shape
             // serves all three — the runtime's layout was chosen for exactly
             // this.
+            // The frame keeps a resumed local's reference until the next
+            // spill overwrites it, which costs nothing here: this heap has no
+            // count for a second holder to spoil. `stmt` sets the flag.
             mir::Rvalue::FieldGet { base, index }
+            | mir::Rvalue::Unspill { base, index, .. }
             | mir::Rvalue::VariantGet { base, index, .. } => {
                 let obj = self.operand(base);
                 let ty = cl_type(self.local_ty(dst), self.cx.types);
@@ -2089,8 +2107,8 @@ impl<'a, 'b, M: Module> FnLower<'a, 'b, M> {
             Builtin::JsFunc => unreachable!("js.func on a target with no host"),
             Builtin::TaskSpawn => {
                 let v = self.operand(&args[0]);
-                self.call_rt("kite_rt_task_spawn", &[v]);
-                self.def_zero(dst);
+                let r = self.call_rt("kite_rt_task_spawn", &[v]).unwrap();
+                self.def(dst, r);
             }
             Builtin::TaskWakeAt => {
                 let v = self.operand(&args[0]);
@@ -2099,6 +2117,11 @@ impl<'a, 'b, M: Module> FnLower<'a, 'b, M> {
             }
             Builtin::TaskPark => {
                 self.call_rt("kite_rt_task_park", &[]);
+                self.def_zero(dst);
+            }
+            Builtin::TaskParkOn => {
+                let v = self.operand(&args[0]);
+                self.call_rt("kite_rt_task_park_on", &[v]);
                 self.def_zero(dst);
             }
             Builtin::TaskWaitHost => {

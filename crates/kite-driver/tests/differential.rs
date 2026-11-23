@@ -2743,9 +2743,9 @@ fn appended<T>(xs: [T], v: T) -> [T] {
     return ys
 }
 
-// Every local is spilled into the task's frame at a suspension and read back
-// after it, so after `yield` the slice is one read out of the frame, which the
-// first push must copy rather than write into.
+// Every local is moved into the task's frame at a suspension and back out
+// after it, its owned flag with it — and `seen` shares the slice, so the first
+// push after `yield` must copy rather than write into it.
 async fn gather(n: int) -> [int] {
     var xs: [int] = []
     for i in 0..n {
@@ -2941,6 +2941,93 @@ fn main() {
     io.print("\(both.len()) \(both.code_at(300)) \(both.slice(299, 302))")
     let cut = mixed.slice(1, 200) + ascii.slice(0, 64)
     io.print("\(cut.len()) \(cut.code_at(198)) \(cut.code_at(199)) \(digest(cut))")
+}
+"#,
+    ),
+    // A suspension moves every local into the task's frame and back out, and
+    // a slice or map brings its owned flag with it: the frame held a second
+    // reference to every resumed slice, so each `push` after an `await` or a
+    // `yield` copied the whole of it, and accumulating across suspensions was
+    // quadratic on every backend. What shares the slice before the
+    // suspension — `kept`, `snap`, `mk` — still does after it, and the first
+    // write copies.
+    (
+        "slices-and-maps-move-across-a-suspension",
+        r#"fn show(xs: [int]) -> str {
+    return "[" + join_ints(xs, ",") + "]"
+}
+
+fn showm(m: { str: int }) -> str {
+    var out = "{"
+    for k in m.keys() {
+        out = out + k + "=\(or_else(m[k], 0));"
+    }
+    return out + "}"
+}
+
+async fn one(i: int) -> int {
+    task.yield()
+    return i
+}
+
+async fn grow(var xs: [int]) -> [int] {
+    xs.push(await one(9))
+    return xs
+}
+
+pub async fn main() {
+    var xs: [int] = [1, 2]
+    let kept = xs
+    task.yield()
+    xs.push(3)
+    task.yield()
+    let after = xs
+    xs.push(await one(4))
+    xs[0] = 10
+    io.print("\(show(kept)) \(show(after)) \(show(xs))")
+    var m: { str: int } = { "a": 1 }
+    let mk = m
+    task.yield()
+    m["b"] = 2
+    let mk2 = m
+    task.yield()
+    m.remove("a")
+    io.print("\(showm(mk)) \(showm(mk2)) \(showm(m))")
+    var ys: [int] = []
+    for i in 0..5 {
+        ys.push(await one(i))
+        if i == 2 {
+            let snap = ys
+            task.yield()
+            ys.push(100)
+            io.print("\(show(snap)) \(show(ys))")
+        }
+    }
+    let base: [int] = [7]
+    let g = await grow(base)
+    io.print("\(show(base)) \(show(g))")
+    var s = "a"
+    for i in 0..3 {
+        s = s + "b"
+        task.yield()
+    }
+    io.print(s)
+    // Enough pushes and writes across suspensions to grow many times and to
+    // fill a small nursery, each written in place.
+    var big: [str] = []
+    var counts: { int: int } = { }
+    for i in 0..3000 {
+        big.push("item \(i)")
+        counts[i % 17] = or_else(counts[i % 17], 0) + 1
+        if i % 3 == 0 {
+            task.yield()
+        } else {
+            big[i - 1] = big[i - 1] + "!"
+            let got = await one(i)
+            counts[got % 5] = or_else(counts[got % 5], 0) + 1
+        }
+    }
+    io.print("\(big.len()) \(big[0]) \(big[1]) \(big[2999]) \(counts.len()) \(or_else(counts[3], 0))")
 }
 "#,
     ),
@@ -4338,6 +4425,7 @@ fn slices_agree_natively_with_a_page_of_nursery() {
         "slices-grow-in-place-natively",
         "strings-index-by-character",
         "maps-are-indexed-and-keep-their-order",
+        "slices-and-maps-move-across-a-suspension",
     ] {
         let (_, src) = WASM_TARGET
             .iter()
@@ -4350,6 +4438,56 @@ fn slices_agree_natively_with_a_page_of_nursery() {
         collections += minor;
     }
     assert!(collections > 100, "only {} collections: the nursery did not fill", collections);
+}
+
+/// Programs whose output is the scheduler's interleaving, pinned to what it
+/// printed before an `await` parked on the task it awaits.
+///
+/// The interleaving is spawn-order sweeps, and it is observable: these print
+/// from tasks that yield, sleep, time out, race, lock, queue, await one
+/// another in chains and fans and spawn more tasks as they finish. Every
+/// completion used to wake every awaiting task, and a scheduler that wakes
+/// only the awaiters of what finished must still poll each of them exactly
+/// where the old one would have found its task finished — one way of getting
+/// that wrong reordered all three backends alike, which agreement cannot
+/// catch and these do. The `.out` files were written by the scheduler before
+/// that change. Natively they run again under a collector made to run
+/// constantly, because the scheduler holds every suspended task's closure.
+#[test]
+fn the_scheduling_order_is_unchanged() {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/scheduling");
+    let root = std::env::temp_dir().join(format!("kite-scheduling-{}", std::process::id()));
+    let mut names: Vec<String> = std::fs::read_dir(&dir)
+        .expect("tests/scheduling")
+        .filter_map(|e| {
+            let name = e.ok()?.file_name().into_string().ok()?;
+            Some(name.strip_suffix(".kite")?.to_string())
+        })
+        .collect();
+    names.sort();
+    assert!(names.len() >= 7, "only {} scheduling programs", names.len());
+    let mut wrong = Vec::new();
+    for name in &names {
+        let src = std::fs::read_to_string(dir.join(format!("{}.kite", name))).expect("read program");
+        let want = std::fs::read_to_string(dir.join(format!("{}.out", name))).expect("read output");
+        let mut got = vec![("the VM", run_on_vm(name, &src))];
+        if native_available() {
+            got.push(("natively", run_on_native(name, &src)));
+            got.push(("natively with a page of nursery", run_on_native_with(name, &src, PAGE_OF_NURSERY).0));
+        }
+        if node_available() {
+            let work = root.join(name);
+            std::fs::create_dir_all(&work).expect("create work directory");
+            got.push(("on wasm", run_on_wasm(name, &src, &work)));
+        }
+        for (backend, out) in got {
+            if out != want {
+                wrong.push(format!("{} {}:\n  want: {:?}\n  got:  {:?}", name, backend, want, out));
+            }
+        }
+    }
+    let _ = std::fs::remove_dir_all(&root);
+    assert!(wrong.is_empty(), "{}", wrong.join("\n\n"));
 }
 
 /// Literals longer than one `array.new_fixed` may be. V8 refuses more than
@@ -6435,6 +6573,33 @@ fn main() {
 }
 "#,
         "0\n10\n20\na! 2\n2\n",
+    ),
+    // A task carries its number with the scheduler, so `==` on two tasks is
+    // true only for the same one (§12.1). Two tasks with equal results, or
+    // two unfinished ones, used to compare equal, and a map keyed by tasks
+    // folded them into one entry.
+    (
+        "a-task-is-equal-only-to-itself",
+        r#"async fn one() -> int {
+  return 1
+}
+
+pub async fn main() {
+  let a = one()
+  let b = one()
+  let c = a
+  io.print("\(a == b) \(a == c)")
+  _ = await a
+  _ = await b
+  io.print("\(a == b) \(a == c) \(a == a)")
+  var m: {Task<int>: int} = {}
+  m[a] = 1
+  m[b] = 2
+  m[c] = 3
+  io.print("\(m.len()) \(or_else(m[a], 0))")
+}
+"#,
+        "false true\nfalse true true\n2 3\n",
     ),
 ];
 

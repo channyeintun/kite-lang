@@ -278,6 +278,22 @@ pub enum Rvalue {
     Await { task: Operand },
     /// `task.yield()` — suspend unconditionally. Also never reaches a backend.
     Yield,
+    /// Whether `value`, a local, is the only holder of the slice or map in it:
+    /// the owned flag a backend keeps so a write can skip the copy (see the
+    /// native backend's `slices`). `false` for anything a backend keeps no
+    /// flag for, which is always safe. Made only by the state-machine
+    /// transform, which saves the flag in the frame with the local.
+    Owned { value: Operand },
+    /// A spilled local read back out of its frame — field `index` of `base` —
+    /// with `owned`, the [`Rvalue::Owned`] saved beside it, saying whether the
+    /// local was its value's only holder when it was spilled.
+    ///
+    /// A suspension is a move: the local dies with the poll that spilled it,
+    /// so the frame's field is the one holder, and this hands it back. Nothing
+    /// reads the field again before the next spill writes it, so a backend
+    /// whose sharing is a reference count empties it here — leaving it would
+    /// make every resumed slice look shared, and its next `push` a copy.
+    Unspill { base: Operand, index: u32, owned: Operand },
     /// A call across the declared host boundary.
     CallExtern { index: u32, args: Vec<Operand> },
 }
@@ -352,7 +368,9 @@ impl Rvalue {
             | R::ErrorTag { base: o }
             | R::ErrorAs { base: o, .. }
             | R::SliceLen { base: o }
+            | R::Owned { value: o }
             | R::Await { task: o } => vec![o],
+            R::Unspill { base, owned, .. } => vec![base, owned],
             R::Binary { lhs, rhs, .. } => vec![lhs, rhs],
             R::MapGet { base, key } => vec![base, key],
             R::IndexGet { base, index } | R::SliceGet { base, index } => vec![base, index],
@@ -578,6 +596,10 @@ impl fmt::Display for Rvalue {
             }
             Rvalue::Await { task } => write!(f, "await {}", task),
             Rvalue::Yield => write!(f, "yield"),
+            Rvalue::Owned { value } => write!(f, "owned {}", value),
+            Rvalue::Unspill { base, index, owned } => {
+                write!(f, "unspill {}.{} owned {}", base, index, owned)
+            }
             Rvalue::CallExtern { index, args } => {
                 write!(f, "host#{}(", index)?;
                 write_operands(f, args)?;

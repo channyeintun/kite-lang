@@ -1,0 +1,115 @@
+use std/task
+use std/sync
+
+async fn leaf(id: int, n: int) -> int {
+    for i in 0..n {
+        io.print("leaf \(id) \(i) \(time.now())")
+        task.yield()
+    }
+    return id
+}
+
+async fn waiter(id: int, t: Task<int>) -> int {
+    io.print("w\(id) wait")
+    let v = await t
+    io.print("w\(id) got \(v) at \(time.now())")
+    return v + 1
+}
+
+async fn chain(id: int, d: int) -> int {
+    if d == 0 {
+        io.print("c\(id) bottom")
+        return 0
+    }
+    io.print("c\(id) down \(d)")
+    let v = await chain(id, d - 1)
+    io.print("c\(id) up \(d)")
+    return v + 1
+}
+
+async fn allsum(id: int, xs: [Task<int>]) -> int {
+    let vs = await task.all(xs)
+    var s = 0
+    for v in vs {
+        s += v
+    }
+    io.print("a\(id) all \(s) at \(time.now())")
+    return s
+}
+
+async fn racer(id: int, xs: [Task<int>]) -> int {
+    let v = await task.race(xs)
+    io.print("r\(id) won \(v) at \(time.now())")
+    return v
+}
+
+async fn timer(id: int, t: Task<int>, ms: int) -> int {
+    let v = await task.timeout(t, ms)
+    if v == nil {
+        io.print("t\(id) timed out at \(time.now())")
+        return -1
+    }
+    io.print("t\(id) in time \(v) at \(time.now())")
+    return v
+}
+
+async fn pair(id: int, a: Task<int>, b: Task<int>) -> int {
+    let (x, y) = await task.both(a, b)
+    io.print("b\(id) both \(x) \(y)")
+    return x + y
+}
+
+async fn locker(id: int, var m: sync.Mutex<int>, n: int) -> int {
+    let v = await sync.lock(m)
+    io.print("l\(id) locked \(v)")
+    for i in 0..n {
+        task.yield()
+    }
+    io.print("l\(id) unlocking")
+    sync.release(m, v + 1)
+    return id
+}
+
+async fn producer(id: int, var q: sync.Queue<int>, n: int) -> int {
+    for i in 0..n {
+        sync.put(q, id * 100 + i)
+        io.print("q\(id) put \(i)")
+        task.yield()
+    }
+    return id
+}
+
+async fn consumer(id: int, var q: sync.Queue<int>, n: int) -> int {
+    var s = 0
+    for i in 0..n {
+        let v = await sync.take(q)
+        io.print("k\(id) took \(v)")
+        s += v
+    }
+    return s
+}
+
+pub async fn main() {
+    var ts: [Task<int>] = []
+    var m = sync.mutex(0)
+    var q: sync.Queue<int> = sync.queue()
+    ts.push(leaf(0, 5))
+    ts.push(racer(1, [ts[0]]))
+    ts.push(allsum(2, [ts[0], ts[1]]))
+    ts.push(locker(3, m, 0))
+    io.print("main got \(await ts[3])")
+    ts.push(chain(4, 4))
+    ts.push(pair(5, ts[4], ts[2]))
+    io.print("main got \(await ts[4])")
+    ts.push(producer(6, q, 3))
+    ts.push(consumer(7, q, 3))
+    ts.push(waiter(8, ts[3]))
+    ts.push(producer(9, q, 2))
+    ts.push(consumer(10, q, 2))
+    task.yield()
+    io.print("main yielded \(time.now())")
+    ts.push(timer(11, ts[1], 0))
+    ts.push(consumer(12, q, 2))
+    ts.push(producer(13, q, 2))
+    io.print("main leaves at \(time.now())")
+}

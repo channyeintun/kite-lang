@@ -1,0 +1,40 @@
+leaf 0 0 0
+leaf 0 1 0
+l3 locked 0
+l3 unlocking
+main got 3
+leaf 0 2 0
+c4 down 4
+c4 down 3
+c4 down 2
+c4 down 1
+c4 bottom
+leaf 0 3 0
+c4 up 1
+leaf 0 4 0
+c4 up 2
+c4 up 3
+r1 won 0 at 0
+c4 up 4
+main got 4
+a2 all 0 at 0
+q6 put 0
+w8 wait
+w8 got 3 at 0
+q9 put 0
+main yielded 0
+main leaves at 0
+b5 both 4 0
+q6 put 1
+k7 took 600
+q9 put 1
+k10 took 900
+q13 put 0
+q6 put 2
+k7 took 601
+k10 took 901
+t11 in time 0 at 0
+k12 took 1300
+q13 put 1
+k7 took 602
+k12 took 1301

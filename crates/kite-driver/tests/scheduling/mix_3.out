@@ -1,0 +1,47 @@
+main leaves at 0
+leaf 0 0 0
+c3 down 2
+p4 spawned 0
+s6 start 0
+c7 down 1
+w9 wait
+c10 down 4
+c3 down 1
+c7 bottom
+c10 down 3
+c3 bottom
+c10 down 2
+c10 down 1
+c10 bottom
+leaf 0 1 0
+p4 spawned 1
+c7 up 1
+c3 up 1
+c10 up 1
+leaf 41 0 0
+leaf 0 2 0
+c3 up 2
+p4 spawned 2
+c10 up 2
+leaf 42 0 0
+leaf 0 3 0
+p4 spawned 3
+c10 up 3
+leaf 42 1 0
+leaf 43 0 0
+leaf 0 4 0
+p4 collected 40
+p4 collected 81
+c10 up 4
+leaf 43 1 0
+p4 collected 123
+leaf 43 2 0
+p4 collected 166
+w9 got 166 at 0
+a8 all 167 at 0
+s6 done 2
+z1 bottom 3
+z1 up 1
+z1 up 2
+r2 won 2 at 3
+b5 both 166 2

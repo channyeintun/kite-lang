@@ -1,0 +1,25 @@
+leaf 0 0 0
+main yielded 0
+s2 start 0
+w3 wait
+w3 got 0 at 0
+leaf 4 0 0
+c5 down 1
+c5 bottom
+main yielded 0
+main leaves at 0
+leaf 4 1 0
+c5 up 1
+leaf 4 2 0
+t7 in time 1 at 0
+a8 all 1 at 0
+r10 won 0 at 0
+leaf 4 3 0
+z1 bottom 3
+z1 up 1
+z1 up 2
+z1 up 3
+z1 up 4
+d6 twice 4 4
+b11 both 4 4
+s2 done 10

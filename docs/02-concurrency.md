@@ -348,6 +348,14 @@ own. A task is resumed when its deadline arrives or when the host answers; when
 every task is waiting on a deadline the clock jumps to the earliest, which is
 what makes a program that sleeps cost no real time under test.
 
+Each sweep polls the tasks that could run, in spawn order, and walks no
+others: an `await` that has to wait parks on the task it awaits, and is woken
+when that task finishes — at the point the older wake-everything rule would
+have let it see the result, so the interleaving is the same, but a chain of
+awaits ten thousand deep costs ten thousand polls rather than fifty million.
+The VM keeps the same bookkeeping in `kite-vm/src/sched.rs`, the native
+runtime a copy of it, and the Wasm glue the same in JavaScript.
+
 The shape a threaded runtime would take — a work-stealing deque per worker,
 one worker per core, chosen at link time by target — is what the rest of this
 document is written against. `Task<T>` and the combinators do not change when

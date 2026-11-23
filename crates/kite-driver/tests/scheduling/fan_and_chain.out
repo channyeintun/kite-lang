@@ -1,0 +1,62 @@
+main waits
+work 1 step 0 at 0
+watch 2 start
+work 3 step 0 at 0
+watch 4 start
+watch 5 start
+work 8 step 0 at 0
+y bottom
+x bottom
+work 1 step 1 at 0
+work 3 done
+watch 4 saw 3
+sof got 3
+sof spawned
+work 8 step 1 at 0
+nap 7 woke at 0
+work 100 step 0 at 0
+watch 101 start
+watch 102 start
+work 1 step 2 at 0
+work 8 step 2 at 0
+work 100 done
+watch 101 saw 100
+watch 102 saw 1000
+work 1 done
+watch 2 saw 1
+work 8 step 3 at 0
+work 8 done
+nap 7 saw 8 at 0
+y up 3
+x up 3
+x up 6
+watch 5 saw 7
+main 30 10 10000 70 5
+work 9 step 0 at 0
+r1 bottom
+t bottom
+work 9 step 1 at 0
+work 9 done
+race 9
+r1 up 3
+t up 3
+t up 6
+timeout 6
+nap 6 woke at 2
+nap 6 saw 7 at 2
+naps 7 8
+work 11 step 0 at 2
+watch 10 start
+p bottom
+work 11 step 1 at 2
+work 11 done
+watch 10 saw 11
+p up 3
+both 3 110
+work 12 step 0 at 2
+watch 13 start
+a2 bottom
+a0 bottom
+work 12 done
+watch 13 saw 1
+all 3 2 12 10
