@@ -1692,3 +1692,31 @@ fn a_syntax_error_in_an_imported_module_is_reported_once() {
     assert_eq!(said.matches("invalid character `$`").count(), 1, "{}", said);
     assert_eq!(said.matches("expected an expression").count(), 1, "{}", said);
 }
+
+/// `use dep` for a dependency whose directory holds no `.kite` file directly
+/// is `E0400`. It fell back to `dep.kite` beside the dependency's directory —
+/// a file outside the package, which the lockfile does not hash.
+#[test]
+fn a_dependency_root_never_falls_back_to_a_file_beside_it() {
+    let p = Project::new("dep-root-file");
+    p.file("dep/kite.toml", "[package]\nname = \"dep\"\nversion = \"0.1.0\"\n");
+    p.file("dep/sub/s.kite", "pub fn inside() -> str {\n  return \"inside\"\n}\n");
+    p.file("dep.kite", "pub fn outside() -> str {\n  return \"outside\"\n}\n");
+    p.file(
+        "app/kite.toml",
+        "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n\
+         [dependencies]\ndep = { path = \"../dep\" }\n",
+    );
+    let main = p.file("app/main.kite", "use dep\n\nfn main() {\n  io.print(dep.outside())\n}\n");
+    let said = p.run(&main).expect_err("the package has no root module");
+    assert!(said.contains("E0400"), "{}", said);
+    assert!(said.contains("no `.kite` file directly in it"), "{}", said);
+    assert!(!said.contains("dep.kite`"), "the file beside it is not looked for: {}", said);
+    // A module inside the package is still reached.
+    let inner = p.file("app/inner.kite", "use dep/sub\n\nfn main() {\n  io.print(sub.inside())\n}\n");
+    assert_eq!(p.run(&inner).expect("compiles"), "inside\n");
+    // And with the package's directory missing altogether, still not the file.
+    std::fs::remove_dir_all(p.dir.join("dep")).expect("remove");
+    let said = p.run(&main).expect_err("there is no package");
+    assert!(said.contains("E0400"), "{}", said);
+}

@@ -1193,7 +1193,13 @@ impl Loader {
                 let dir = at.parent().map(Path::to_path_buf);
                 return Some(Found::Provided { key, dir, package });
             }
-            if let Some(found) = self.found_at(at, &scope.prefix, segments, &package, &mut tried) {
+            // **A dependency's root module is its directory, and only that.**
+            // `use dep` naming the root fell back to `dep.kite` when the
+            // directory held no `.kite` file of its own — a file beside the
+            // package, outside it, which the lockfile never hashed.
+            let whole = segments.len() == 1;
+            let prefix = &scope.prefix;
+            if let Some(found) = self.found_at(at, prefix, segments, &package, whole, &mut tried) {
                 return Some(found);
             }
         } else {
@@ -1216,7 +1222,8 @@ impl Loader {
                     return Some(Found::Provided { key, dir, package: scope.package.clone() });
                 }
                 let package = scope.package.clone();
-                if let Some(found) = self.found_at(at, &prefix, segments, &package, &mut tried) {
+                let found = self.found_at(at, &prefix, segments, &package, false, &mut tried);
+                if let Some(found) = found {
                     return Some(found);
                 }
             }
@@ -1279,13 +1286,16 @@ impl Loader {
     }
 
     /// The module at `at` — the directory, or failing that the `.kite` file
-    /// — or `None`, with both recorded in `tried`.
+    /// — or `None`, with both recorded in `tried`. With `directory_only`,
+    /// only the directory: `at` is a package's root, and the file beside it
+    /// is not the package's.
     fn found_at(
         &self,
         at: PathBuf,
         prefix: &str,
         segments: &[&str],
         package: &Package,
+        directory_only: bool,
         tried: &mut Vec<PathBuf>,
     ) -> Option<Found> {
         let package = package.clone();
@@ -1300,6 +1310,10 @@ impl Loader {
         if self.files.is_dir(&at) && !self.files.kite_files(&at).is_empty() {
             let prefix = within(prefix, segments);
             return Some(Found::Path { at, is_dir: true, package, prefix });
+        }
+        if directory_only {
+            tried.push(at);
+            return None;
         }
         let as_file = at.with_extension("kite");
         if self.files.is_file(&as_file) {

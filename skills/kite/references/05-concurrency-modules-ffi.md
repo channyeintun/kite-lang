@@ -831,6 +831,11 @@ use markdown/render        // the `render` module inside the `markdown` package
 use markdown               // the package's own root module — its top-level .kite files
 ```
 
+A package with no `.kite` file directly in its directory has no root module:
+`use markdown` is then `E0400`, never a `markdown.kite` lying beside the
+package's directory (that file is not the package's, and the lockfile does not
+hash it).
+
 Verified end to end: with `markdown = { path = "../markdown" }` in
 `app/kite.toml`, a `render/` directory and a top-level `lib.kite` in the
 package, `kitec run app/src/main.kite` resolves both `render.to_html` and

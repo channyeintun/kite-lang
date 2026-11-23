@@ -2096,7 +2096,10 @@ modules, because every segment is honoured when the files are found. A `use`
 that finds nothing is `E0400` — never answered by some other module that
 happens to be spelled alike. A first segment naming one of the importing
 package's declared dependencies roots there instead, so `use markdown/render`
-reaches inside the package.
+reaches inside the package. `use markdown` alone is the package's root
+module, which is its own directory and only that: a directory with no `.kite`
+file directly in it has no root module, and `use markdown` is then `E0400` —
+never a `markdown.kite` beside the package, which is not part of it.
 
 What a use site writes is a **spelling**, and by default it is the last
 segment. A spelling belongs to the module that writes it, so two modules may
