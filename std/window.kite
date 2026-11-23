@@ -32,7 +32,9 @@
 //! and each encodes a decision (a byte-order mark, an auth header, a MIME
 //! type) that a standard library has no business making.
 
+use std/http
 use std/js
+use std/math
 
 // ---- the door out ------------------------------------------------------------
 
@@ -184,11 +186,11 @@ impl Timer {
 ///
 /// Rounded rather than cast: `as int` truncates toward zero, and a layout off
 /// by a fraction of a pixel on each of a thousand rows drifts by most of a
-/// screen.
+/// screen. Rounded half away from zero, and not by adding a half and casting,
+/// which sends -0.6 to 0: a scroll position past the top is negative on some
+/// platforms (overscroll), and it must not read as zero.
 fn pixels(name: str) -> int {
-    let value = js.num_or(raw(), name, 0.0)
-    let whole = value + 0.5
-    return whole as int
+    return math.round_to(js.num_or(raw(), name, 0.0))
 }
 
 /// How far down the document the window is scrolled.
@@ -264,21 +266,30 @@ pub fn go_to(url: str) -> error {
 /// Absent and empty are different answers: `?code=` is a parameter that is
 /// there and says nothing, and an OAuth redirect that lost its code is not the
 /// same event as one that never carried a code at all.
+///
+/// Read as `http.query_parameter` reads a request's query — the name is
+/// decoded before it is compared, `+` is a space, and a `%` that does not begin
+/// an escape stands for itself — because a page and the server that served it
+/// must agree on what `?a%20b=1` says. When a name repeats the first one
+/// answers.
 pub fn parameter(name: str) -> Option<str> {
     var body = query()
     if starts_with(body, "?") {
         body = body.slice(1, body.len())
     }
     for pair in split(body, "&") {
-        let at = pair.index_of("=")
-        if at < 0 {
-            if pair == name {
-                return ""
-            }
+        if pair.len() == 0 {
             continue
         }
-        if pair.slice(0, at) == name {
-            return unescaped(pair.slice(at + 1, pair.len()))
+        let at = pair.index_of("=")
+        var key = pair
+        var value = ""
+        if at >= 0 {
+            key = pair.slice(0, at)
+            value = pair.slice(at + 1, pair.len())
+        }
+        if http.form_decoded(key) == name {
+            return http.form_decoded(value)
         }
     }
     return nil
@@ -475,6 +486,25 @@ pub fn timezone_offset() -> int {
     if err != nil {
         return 0
     }
+    return offset_of(date)
+}
+
+/// How far east of UTC this device is at one instant, in minutes.
+///
+/// [`timezone_offset`] is the offset *now*, and in a zone with daylight saving
+/// that is the wrong number for any other date: a January timestamp read in
+/// July is an hour out. Give this the instant, in milliseconds since the epoch,
+/// and pass the answer to `time.civil_of` as its east argument.
+pub fn timezone_offset_at(ms: int) -> int {
+    let (date, err) = js.new1("Date", number(ms))
+    if err != nil {
+        return 0
+    }
+    return offset_of(date)
+}
+
+/// The sign-flipped `getTimezoneOffset` of a `Date`, or 0.
+fn offset_of(date: JsValue) -> int {
     let (value, oerr) = js.call0(date, "getTimezoneOffset")
     if oerr != nil {
         return 0

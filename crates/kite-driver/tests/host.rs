@@ -1547,6 +1547,49 @@ fn the_example_page_program_works() {
     );
 }
 
+/// A world for `std/window` to read: an address, a scroll position, and a time
+/// zone with daylight saving, so that "now" and "at an instant" can differ.
+const WINDOW_RUNNER: &str = "import { readFile } from \"node:fs/promises\";\n\
+     process.env.TZ = \"America/New_York\";\n\
+     import { run, setWriter } from \"./app.js\";\n\
+     globalThis.window = { scrollY: -0.6, scrollX: 2.5, innerWidth: 800.4 };\n\
+     globalThis.location = { search: \"?a%20b=1&c+d=2&e=%41%zz&f&g=h%E4%B8%AD&a%20b=late\" };\n\
+     const out = [];\n\
+     setWriter((l) => out.push(l));\n\
+     await run(new Uint8Array(await readFile(new URL(\"./app.wasm\", import.meta.url))));\n\
+     process.stdout.write(out.map((l) => l + \"\\n\").join(\"\"));\n";
+
+/// `window` reads the address as the server does, rounds a negative pixel the
+/// right way, and can ask for the time zone at an instant.
+///
+/// `parameter` compared the raw name and returned a value with any malformed
+/// escape wholly undecoded; `pixels` added a half and cast, which sends -0.6 to
+/// 0; and the zone offset was only ever the offset now, an hour out for a
+/// January instant read in July.
+#[test]
+fn window_decodes_rounds_and_dates_as_documented() {
+    if !node_available() {
+        eprintln!("skipping: node is not on PATH");
+        return;
+    }
+    let src = "use std/window\n\n\
+        fn show(name: str) -> str {\n\
+        \x20 let v = window.parameter(name)\n\
+        \x20 if v == nil {\n    return \"nil\"\n  }\n\
+        \x20 return \"[\\(v)]\"\n\
+        }\n\
+        fn main() {\n\
+        \x20 io.print(\"\\(show(\"a b\")) \\(show(\"c d\")) \\(show(\"e\")) \\(show(\"f\")) \\(show(\"g\")) \\(show(\"zz\"))\")\n\
+        \x20 io.print(\"\\(window.scroll_y()) \\(window.scroll_x()) \\(window.width())\")\n\
+        \x20 io.print(\"\\(window.timezone_offset_at(1705276800000)) \\(window.timezone_offset_at(1721001600000))\")\n\
+        }\n";
+    let out = run_runner_under_node("window", src, WINDOW_RUNNER, &[]);
+    assert_eq!(
+        out,
+        "[1] [2] [A%zz] [] [h\u{4e2d}] nil\n-1 3 800\n-300 -240\n"
+    );
+}
+
 
 // ---- the typed door --------------------------------------------------------
 

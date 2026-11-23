@@ -721,8 +721,16 @@ pub fn query_parameter(r: Request, name: str) -> Option<str> {
 }
 
 /// `application/x-www-form-urlencoded` text decoded: `+` is a space, `%XX` a
-/// byte, and a `%` not followed by two hex digits is itself.
-fn form_decoded(text: str) -> str {
+/// byte, and a `%` not followed by two hex digits is itself. The bytes are read
+/// as UTF-8, U+FFFD for a sequence that is not.
+///
+/// What [`query_parameter`] decodes with, public so that a page reading its own
+/// address (`window.parameter`) decodes exactly as the server does.
+///
+/// ```kite
+/// assert(form_decoded("a+b%20c%41%zz") == "a b cA%zz", "a bad escape stays, the rest is decoded")
+/// ```
+pub fn form_decoded(text: str) -> str {
     var out: [str] = []
     var bytes: [int] = []
     var i = 0
