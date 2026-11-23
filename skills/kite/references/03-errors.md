@@ -416,7 +416,8 @@ it is Unchecked (`rs.len()` does not count as reading it); taking it apart, or
 walking it with `for`, hands each failure to the name it lands in. `r.0` takes
 one element of a tuple and leaves the others owed — the tuple is settled once
 each has been taken, and taking it apart afterwards binds only the failures not
-yet taken. A projection of a tuple nobody holds, `(f(1), f(2)).0` or `pair().0`,
+yet taken. `t.0.0` goes a level down: it leaves `t.0.1` owed, as
+`let u = t.0` then `u.0` does. A projection of a tuple nobody holds, `(f(1), f(2)).0` or `pair().0`,
 throws the other elements away on the spot, so each failure among them is
 `E0302` there; bind the tuple and take it apart, with `_` for one you mean to
 drop. `rs[0]` on a slice, though, counts as reading the whole slice, since a

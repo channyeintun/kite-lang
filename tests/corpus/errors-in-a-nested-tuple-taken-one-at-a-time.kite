@@ -1,0 +1,90 @@
+// A chained projection owes its siblings at every level. `t.0.0` takes one
+// failure of `t.0` and leaves `t.0.1` owed, as binding the middle step,
+// `let u = t.0`, already did; reading `t.0` on the way takes nothing by
+// itself. `t.0.0` used to settle the whole of `t.0`, and `f(2)`'s failure
+// went unheard.
+
+fn f(i: int) -> error {
+    if i > 0 {
+        return errors.new("failure \(i)")
+    }
+    return nil
+}
+
+fn sibling_left_behind() {
+    let t = ((f(1), f(2)), 5) //~ ERROR E0302
+    let a = t.0.0
+    if a != nil {
+        io.print(a.message())
+    }
+    io.print(t.1)
+}
+
+fn left_on_a_return() {
+    let t = ((f(1), f(2)), 5)
+    if t.0.0 != nil {
+        return //~ ERROR E0302
+    }
+    if t.0.1 != nil {
+        return
+    }
+}
+
+fn left_by_a_write() {
+    var t = ((f(1), f(2)), 5)
+    let a = t.0.0
+    if a != nil {
+        io.print(a.message())
+    }
+    t = ((nil, nil), 1) //~ ERROR E0302
+    io.print(t.1)
+}
+
+// Taking a tuple apart binds an element that is itself a tuple with its own
+// elements owed.
+fn destructured_then_projected() {
+    let t = ((f(1), f(2)), 5)
+    let (u, n) = t //~ ERROR E0302
+    let a = u.0
+    if a != nil {
+        io.print(a.message())
+    }
+    io.print(n)
+}
+
+// Each taken, at whatever depth, settles the tuple.
+fn both_taken() {
+    let t = ((f(1), f(2)), 5)
+    let a = t.0.0
+    let b = (t.0).1
+    if a != nil {
+        io.print(a.message())
+    }
+    if b != nil {
+        io.print(b.message())
+    }
+}
+
+// What was taken is not owed again when the tuple is taken apart after.
+fn taken_then_destructured() {
+    let t = ((f(1), f(2)), 5)
+    let a = t.0.0
+    if a != nil {
+        io.print(a.message())
+    }
+    let (u, n) = t
+    let (x, y) = u
+    if y != nil {
+        io.print(y.message())
+    }
+    io.print(n)
+}
+
+fn main() {
+    sibling_left_behind()
+    left_on_a_return()
+    left_by_a_write()
+    destructured_then_projected()
+    both_taken()
+    taken_then_destructured()
+}

@@ -2267,6 +2267,10 @@ impl<'a> Checker<'a> {
 
     /// A tuple of failures was just bound: each element that can hold one is
     /// owed again, or settled with the whole. See [`Checker::parts`].
+    ///
+    /// An element that is itself a tuple of failures has parts of its own,
+    /// so `t.0.0` takes one failure of `t.0` and leaves `t.0.1` owed, as
+    /// binding the middle step, `let u = t.0`, does.
     fn reset_parts(&mut self, local: u32, state: Taint) {
         let TyKind::Tuple(elems) = self.types.kind(self.locals[local as usize].ty).clone() else {
             return;
@@ -2281,8 +2285,45 @@ impl<'a> Checker<'a> {
             }
             self.parts.insert(local, made);
         }
-        for &(_, part) in &self.parts[&local] {
+        for (_, part) in self.parts[&local].clone() {
             self.taint[part as usize] = state;
+            self.reset_parts(part, state);
+        }
+    }
+
+    /// Every part of a tuple local, its elements' parts included, at every
+    /// depth.
+    fn all_parts(&self, local: u32) -> Vec<u32> {
+        let mut out = Vec::new();
+        let mut todo = vec![local];
+        while let Some(at) = todo.pop() {
+            if let Some(parts) = self.parts.get(&at) {
+                for &(_, part) in parts {
+                    out.push(part);
+                    todo.push(part);
+                }
+            }
+        }
+        out
+    }
+
+    /// A tuple just bound from an element of another, `from`, owes only what
+    /// that element still owed (`before`): each part of `to` is settled where
+    /// the matching part of `from` was, at every depth.
+    fn inherit_parts(&mut self, to: u32, from: u32, before: &[Taint]) {
+        let (Some(dst), Some(src)) = (self.parts.get(&to).cloned(), self.parts.get(&from).cloned()) else {
+            return;
+        };
+        for (k, d) in dst {
+            let Some(&(_, s)) = src.iter().find(|&&(j, _)| j == k) else { continue };
+            if before.get(s as usize) != Some(&Taint::Unchecked) {
+                self.taint[d as usize] = Taint::Clean;
+                for sub in self.all_parts(d) {
+                    self.taint[sub as usize] = Taint::Clean;
+                }
+            } else {
+                self.inherit_parts(d, s, before);
+            }
         }
     }
 
@@ -2292,10 +2333,8 @@ impl<'a> Checker<'a> {
             if self.taint.get(i as usize) == Some(&Taint::Unchecked) {
                 self.taint[i as usize] = Taint::Clean;
             }
-            if let Some(parts) = self.parts.get(&i) {
-                for &(_, part) in parts {
-                    self.taint[part as usize] = Taint::Clean;
-                }
+            for part in self.all_parts(i) {
+                self.taint[part as usize] = Taint::Clean;
             }
         }
     }
@@ -2305,8 +2344,7 @@ impl<'a> Checker<'a> {
     /// element of a tuple of them still owed.
     fn keep_unread(&mut self, id: u32, before: &[Taint]) {
         for i in self.copies_of(id) {
-            let parts = self.parts.get(&i).map(|p| p.iter().map(|&(_, s)| s).collect::<Vec<_>>());
-            for j in std::iter::once(i).chain(parts.into_iter().flatten()) {
+            for j in std::iter::once(i).chain(self.all_parts(i)) {
                 if before.get(j as usize) == Some(&Taint::Unchecked) {
                     self.taint[j as usize] = Taint::Unchecked;
                 }
@@ -8438,6 +8476,10 @@ impl<'a> Checker<'a> {
         // The tuple is held in a local of its own, so an initialiser with side
         // effects runs once however many elements are taken from it.
         let holder = hir::LocalId(self.synthetic_local("tuple", value.ty, span));
+        let source = match value.kind {
+            ExprKind::Local(src) => Some(src.0),
+            _ => None,
+        };
         let mut stmts = vec![hir::Stmt::Let {
             local: holder,
             init: Some(value),
@@ -8449,7 +8491,23 @@ impl<'a> Checker<'a> {
             self.locals[local as usize].ty = parts[i];
             self.init[local as usize] = Init::Assigned;
             self.forget_copies(local);
-            self.taint[local as usize] = if held[i] { Taint::Unchecked } else { Taint::Clean };
+            let state = if held[i] { Taint::Unchecked } else { Taint::Clean };
+            self.taint[local as usize] = state;
+            // An element that is a tuple of failures is followed by parts
+            // as any binding of one is, and an element of it already taken
+            // with `t.0.0` is not owed again: `let (u, n) = t` then `u.0`
+            // leaves `u.1` owed, and after `t.0.0` only `u.1` is.
+            self.reset_parts(local, state);
+            if let (true, Some(src)) = (held[i], source) {
+                let from = self
+                    .parts
+                    .get(&src)
+                    .and_then(|ps| ps.iter().find(|&&(j, _)| j as usize == i))
+                    .map(|&(_, part)| part);
+                if let Some(from) = from {
+                    self.inherit_parts(local, from, before);
+                }
+            }
             stmts.push(hir::Stmt::Let {
                 local: hir::LocalId(local),
                 init: Some(hir::Expr {
@@ -12695,13 +12753,17 @@ impl<'a> Checker<'a> {
         // settled as it is taken, and the tuple once every one has been.
         // What is projected is followed through parentheses and through
         // projections of a tuple literal, so `(r, 1).0.1` takes `r.1`.
-        let owed = match projected_source(base) {
-            ast::Expr::Path(p) => match self.resolved.lookup_use(p.span) {
+        //
+        // A chain of them is followed down the binding's parts, so `t.0.0`
+        // takes one failure of `t.0` and leaves `t.0.1` owed — reading `t.0`
+        // on the way takes nothing by itself.
+        let owed = match projected_place(base) {
+            Some((at, path)) => match self.resolved.lookup_use(at) {
                 Some(Res::Local(id))
                     if self.taint.get(id as usize) == Some(&Taint::Unchecked)
                         && self.parts.contains_key(&id) =>
                 {
-                    Some((id, self.taint.clone()))
+                    Some((id, path, self.taint.clone()))
                 }
                 _ => None,
             },
@@ -12719,17 +12781,45 @@ impl<'a> Checker<'a> {
         } else if owed.is_none() {
             self.drop_untaken(&obj, name, &[]);
         }
-        if let Some((id, before)) = owed {
+        if let Some((id, path, before)) = owed {
             self.keep_unread(id, &before);
-            let index = name.name.parse::<u32>().ok();
-            let parts = self.parts[&id].clone();
-            for &(i, part) in &parts {
-                if Some(i) == index {
-                    self.taint[part as usize] = Taint::Clean;
+            // The holders from the binding down to the tuple projected; a
+            // step whose element holds no failure has no part, and nothing
+            // under it can be taken.
+            let mut holders = vec![id];
+            for &step in &path {
+                let at = *holders.last().unwrap();
+                match self.parts.get(&at).and_then(|ps| ps.iter().find(|&&(i, _)| i == step)) {
+                    Some(&(_, part)) => holders.push(part),
+                    None => break,
                 }
             }
-            if parts.iter().all(|&(_, part)| self.taint[part as usize] != Taint::Unchecked) {
-                self.inspect(id);
+            let deepest = self.parts.get(holders.last().unwrap()).cloned();
+            if let (true, Some(parts)) = (holders.len() == path.len() + 1, deepest) {
+                let index = name.name.parse::<u32>().ok();
+                for &(i, part) in &parts {
+                    if Some(i) == index {
+                        self.taint[part as usize] = Taint::Clean;
+                        for sub in self.all_parts(part) {
+                            self.taint[sub as usize] = Taint::Clean;
+                        }
+                    }
+                }
+                // Each holder is settled once every element of it has been
+                // taken, from the innermost out to the binding itself.
+                for &at in holders.iter().rev() {
+                    let settled = self.parts.get(&at).is_none_or(|ps| {
+                        ps.iter().all(|&(_, part)| self.taint[part as usize] != Taint::Unchecked)
+                    });
+                    if !settled {
+                        break;
+                    }
+                    if at == id {
+                        self.inspect(id);
+                    } else {
+                        self.taint[at as usize] = Taint::Clean;
+                    }
+                }
             }
         }
 
@@ -15984,6 +16074,23 @@ fn projected_source(e: &ast::Expr) -> &ast::Expr {
             _ => e,
         },
         _ => e,
+    }
+}
+
+/// The binding a projection's base reads, and the elements it projects on
+/// the way, outermost first: `t` is `t` and `[]`, `t.0` is `t` and `[0]`,
+/// `(t.1).0` is `t` and `[1, 0]`. `None` for a base that is not a binding
+/// projected by numbers.
+fn projected_place(e: &ast::Expr) -> Option<(Span, Vec<u32>)> {
+    match projected_source(e) {
+        ast::Expr::Path(p) => Some((p.span, Vec::new())),
+        ast::Expr::Field { base, name, .. } => {
+            let index = name.name.parse::<u32>().ok()?;
+            let (at, mut path) = projected_place(base)?;
+            path.push(index);
+            Some((at, path))
+        }
+        _ => None,
     }
 }
 
