@@ -1359,3 +1359,56 @@ fn a_manifest_that_does_not_read_is_published_under_its_own_uri() {
     assert_eq!(codes_for(&published, &main), Some(Vec::new()), "{:?}", published);
     assert_eq!(codes_for(&published, &manifest), Some(Vec::new()), "{:?}", published);
 }
+
+/// A package only a dependency declares has its modules' identities marked
+/// with an `@`, to keep them apart from the program's own. Diagnostics left
+/// the mark out; a hover over a binding of one of its types said `t: @b.T`,
+/// and an inlay hint `: @b.T`.
+#[test]
+fn hover_and_hints_leave_out_the_mark_of_a_dependencys_package() {
+    let p = Project::new("hover-marker");
+    p.file("b/kite.toml", "[package]\nname = \"b\"\nversion = \"1.0.0\"\n");
+    p.file(
+        "b/m.kite",
+        "pub struct T {\n    pub n: int\n}\n\npub fn mk() -> T {\n    return T{ n: 1 }\n}\n",
+    );
+    p.file(
+        "a/kite.toml",
+        "[package]\nname = \"a\"\nversion = \"1.0.0\"\n\n[dependencies]\nb = { path = \"../b\" }\n",
+    );
+    p.file("a/m.kite", "use b\n\npub fn make() -> b.T {\n    return b.mk()\n}\n");
+    p.file(
+        "app/kite.toml",
+        "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n[dependencies]\na = { path = \"../a\" }\n",
+    );
+    let text = "use a\n\nfn main() {\n    let t = a.make()\n    io.print(t.n)\n}\n";
+    let main = p.file("app/main.kite", text);
+    let mut s = Server::new();
+    open(&mut s, &main, text);
+    let reply = s.handle("textDocument/hover", &at(&main, 3, 8));
+    let value = reply
+        .result
+        .expect("an answer")
+        .path("contents.value")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string();
+    assert!(value.contains("t: b.T"), "{}", value);
+    assert!(!value.contains('@'), "{}", value);
+    // The hint a `let` without a type gets.
+    let range = Json::object(vec![
+        ("start", Json::object(vec![("line", Json::number(0)), ("character", Json::number(0))])),
+        ("end", Json::object(vec![("line", Json::number(6)), ("character", Json::number(0))])),
+    ]);
+    let message = Json::object(vec![(
+        "params",
+        Json::object(vec![
+            ("textDocument", Json::object(vec![("uri", Json::str(main.clone()))])),
+            ("range", range),
+        ]),
+    )]);
+    let hints = s.handle("textDocument/inlayHint", &message).result.expect("hints");
+    let hints = format!("{:?}", hints);
+    assert!(hints.contains("b.T"), "{}", hints);
+    assert!(!hints.contains("@b"), "{}", hints);
+}
