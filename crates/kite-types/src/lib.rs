@@ -9273,6 +9273,10 @@ impl<'a> Checker<'a> {
         match (self.types.kind(declared).clone(), self.types.kind(actual).clone()) {
             (TyKind::Slice(d), TyKind::Slice(a)) => self.unify(d, a, generics, subst, span),
             (TyKind::Optional(d), TyKind::Optional(a)) => self.unify(d, a, generics, subst, span),
+            // `fn() -> (T, error)` against `fn() -> (int, error)`: the
+            // fallibility form is a type of its own, so it is descended into
+            // like any other, or a `retry` helper could never be called.
+            (TyKind::Fallible(d), TyKind::Fallible(a)) => self.unify(d, a, generics, subst, span),
             // A `T` argument for an `Option<T>` parameter solves through the
             // same subsumption that lets the value be passed at all.
             (TyKind::Optional(d), _) => self.unify(d, actual, generics, subst, span),

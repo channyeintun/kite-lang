@@ -4990,6 +4990,52 @@ fn main() {
 "#,
         "5 3\n8 9\n1 true\n",
     ),
+    // A type parameter inside a fallible function type is solved by the
+    // argument. Inference stopped at `-> (T, error)`, so neither helper could
+    // be called at all.
+    (
+        "parameters-solve-through-fallible-functions",
+        r#"struct Job<T> {
+  run: fn() -> (T, error)
+}
+fn seven() -> (int, error) {
+  return 7, nil
+}
+fn label(n: int) -> (str, error) {
+  return "n\(n)", nil
+}
+fn retry<T>(g: fn() -> (T, error)) -> (T, error) {
+  let (v, err) = g()
+  check err
+  return v, nil
+}
+fn each<T, U>(xs: [T], g: fn(T) -> (U, error)) -> ([U], error) {
+  var out: [U] = []
+  for x in xs {
+    let (v, err) = g(x)
+    check err
+    out.push(v)
+  }
+  return out, nil
+}
+fn main() {
+  let (a, e1) = retry(seven)
+  if e1 == nil {
+    io.print(a)
+  }
+  let (xs, e2) = each([1, 2], label)
+  if e2 == nil {
+    io.print(xs[1])
+  }
+  let job = Job{ run: seven }
+  let (b, e3) = retry(job.run)
+  if e3 == nil {
+    io.print(b + 1)
+  }
+}
+"#,
+        "7\nn2\n8\n",
+    ),
 ];
 
 #[test]
