@@ -1812,16 +1812,10 @@ impl<'a> Checker<'a> {
         if let ast::Expr::Index { base, index, span } = &a.target {
             return self.assign_index(base, index, *span, a);
         }
+        // Anything else is not a place, and the parser said so (`E0114`) at
+        // the same span. Saying it again here was a second error for one
+        // cause.
         let ast::Expr::Path(p) = &a.target else {
-            self.diags.push(
-                Diagnostic::error(codes::E0200, "cannot assign to this expression")
-                    .with_primary(a.target.span(), "not something a value can be written to")
-                    .with_note(
-                        "a write names a binding, a field or an index — `x = …`, \
-                         `p.x = …`, `xs[i] = …`. Anything else is a value, and a value \
-                         has nowhere to put one",
-                    ),
-            );
             return None;
         };
         // A module-level constant is a name for a value, so there is nowhere
@@ -6622,12 +6616,23 @@ impl<'a> Checker<'a> {
         self.check_member_visible(module, is_pub, "field", &name, span, decl)
     }
 
-    /// When a struct is opaque here — declared in another module, with a
-    /// field that module did not mark `pub` — that module, the struct's name
-    /// and its private fields.
+    /// Whether a struct is declared `pub`.
+    fn struct_is_pub(&self, sid: kite_hir::StructId) -> bool {
+        let template = self.types.struct_template_of(sid).unwrap_or(sid);
+        self.type_ids
+            .iter()
+            .position(|t| matches!(t, Some(TypeTarget::Struct(s)) if *s == template))
+            .is_none_or(|i| self.resolved.types[i].is_pub)
+    }
+
+    /// When a struct is opaque here — declared `pub` in another module, with
+    /// a field that module did not mark `pub` — that module, the struct's
+    /// name and its private fields. A struct that is not `pub` at all is not
+    /// opaque but private, and naming it was already `E0401`: a second one
+    /// saying it cannot be built was two errors for one cause.
     fn opaque_here(&self, sid: kite_hir::StructId) -> Option<(String, String, Vec<(String, Span)>)> {
         let module = self.module_of_struct(sid)?;
-        if module == self.module {
+        if module == self.module || !self.struct_is_pub(sid) {
             return None;
         }
         let def = self.types.struct_def(sid);

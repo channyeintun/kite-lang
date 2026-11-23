@@ -1991,6 +1991,27 @@ fn a_package_cycle_is_refused_by_every_command() {
     assert_eq!(p.run(&main).expect("compiles"), "1\n");
 }
 
+/// One cause, one error. Building another module's private struct was
+/// ``private to module `m` `` and then ``cannot be built outside module `m` ``
+/// at the same span; `5 = x` was the parser's `E0114` and then the checker's
+/// `E0200`.
+#[test]
+fn a_private_struct_literal_and_a_literal_target_are_one_error_each() {
+    let p = Project::new("one-cause");
+    p.file("m.kite", "struct Hid {\n  n: int\n}\n\npub fn one() -> int {\n  return 1\n}\n");
+    let main = p.file(
+        "main.kite",
+        "use m\n\nfn main() {\n  let h = m.Hid{ n: 1 }\n  io.print(m.one())\n}\n",
+    );
+    let said = p.run(&main).expect_err("private");
+    assert!(said.contains("private to module `m`"), "{}", said);
+    assert!(said.contains("1 previous error"), "{}", said);
+    let main = p.file("assign.kite", "fn main() {\n  var x = 1\n  5 = x\n  io.print(x)\n}\n");
+    let said = p.run(&main).expect_err("not a place");
+    assert!(said.contains("E0114"), "{}", said);
+    assert!(said.contains("1 previous error"), "{}", said);
+}
+
 /// A cycle back to the entry file is one error. The closing `use main`
 /// recorded a spelling for a module that does not exist — the entry is not a
 /// module — so `main.base()` behind it said `main` declares nothing public of
