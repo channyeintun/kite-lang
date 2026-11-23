@@ -1091,7 +1091,8 @@ Routing, all synchronous and testable with no port. Matching looks at the path
 alone — a `?query` or `#fragment` after it takes no part:
 `route(method, pattern, fn(Request) -> Response)` ·
 `serve([Route], Request) -> Response` · `matches(pattern, path)` ·
-`parameter(pattern, path, name) -> Option<str>` (still percent-encoded) ·
+`parameter(pattern, path, name) -> Option<str>` (still percent-encoded; a `:name`
+segment needs at least one character, so `/users/` is not `/users/:id`) ·
 `query_parameter(request, name) -> Option<str>` (decoded as a form is: `+` is a
 space, `%XX` UTF-8 bytes) · `request_header(request, name) -> Option<str>`.
 
@@ -1100,8 +1101,10 @@ Server: `open(port) -> (Server, error)` async (port 0 asks the host to choose),
 `respond(incoming, response, [Header]) -> error` — headers as **pairs, not
 text**, because a newline in a value would otherwise become a separator; it
 refuses a name that is not a token, a line break in either, and a NUL in a
-value ·
-`run(server, [Route]) -> (int, error)` · `serve_closed` · `shut`. Once a
+value, and a status outside 100 to 599 ·
+`run(server, [Route]) -> (int, error)` sends the headers a handler added with
+`with_header(response, name, value)`, and answers 500 (and carries on) to a
+handler whose header or status `respond` would refuse · `serve_closed` · `shut`. Once a
 server is `shut` and nothing is waiting, `accept` answers with an error and
 `run` returns the count it answered.
 
@@ -1672,10 +1675,12 @@ Events and timers: `on(name, fn())` `on_passive` `after(ms, fn())`
 `every(ms, fn())`, returning `(Listener, error)` / `(Timer, error)`.
 Geometry: `scroll_x` `scroll_y` `width` `height` `scroll_to`.
 Location: `origin` `path` `query` `hash` `set_hash` `go_to`
-`parameter(name) -> Option<str>` `escaped` `unescaped`.
+`parameter(name) -> Option<str>` (decoded exactly as `http.query_parameter`
+decodes a request's) `escaped` `unescaped`.
 History: `push(url)` `rewrite(url)` `back()` `own_scroll_restoration()`.
 Storage: `kept`/`keep`/`drop_kept` (local) and `cached`/`cache`/`drop_cached`
-(session). Misc: `epoch_ms` `timezone_offset` `epoch_of(iso)` `seems_online`
+(session). Misc: `epoch_ms` `timezone_offset` (the offset *now*; `timezone_offset_at(ms)` is the
+one for an instant) `epoch_of(iso)` `seems_online`
 `print_page` `register_worker(path)` `raw()`.
 
 Absent on purpose: anything that is a recipe rather than a platform fact —
