@@ -682,8 +682,8 @@ Nor does passing it to a function that only reads it (`if !seen(q.m, w)`).
 Either call is let off as long as nothing that function runs, to any depth,
 writes through a field, prints, renders a value other than an `int`, `float`,
 `bool` or `str`, or calls a function value, a `dyn` method or the host. A
-local is simpler: handing it to a function that keeps nothing of it leaves the next write in place,
-whatever else the function does. What counts as keeping is storing,
+local is simpler: handing it to a function that keeps nothing of it leaves the
+next write in place, whatever else the function does. What counts as keeping is storing,
 returning, capturing or sending it anywhere, or passing it on to a function
 value, a `dyn` method, the host or a function that keeps it. A function that
 changes a slice or map it was given changes its own copy, so
