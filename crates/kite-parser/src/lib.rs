@@ -2523,28 +2523,32 @@ impl<'a> Parser<'a> {
         if matches!(self.peek(), T::Continue | T::Break | T::Return) && !self.panicking {
             let kw = self.span();
             let word = self.peek().describe();
-            let rest = if self.at(T::Return) { " …" } else { "" };
+            // The statement is read past, so the arm keeps its pattern and the
+            // arms after it are read: skipping to the end of the line went on
+            // through every arm below, since a line ending in `,` continues.
+            // What it was — `break outer`, `return n + 1` — is what the note
+            // puts in the block, so the fix is the line as written.
+            let is_return = self.at(T::Return);
+            self.bump();
+            let mut written = word.to_string();
+            if is_return {
+                if !matches!(self.peek(), T::Comma | T::Newline | T::RBrace | T::Eof) {
+                    let _ = self.parse_expr();
+                    written.push_str(" …");
+                }
+            } else if self.at(T::Ident) {
+                let label = self.bump();
+                written = format!("{} {}", word, self.text(label.span));
+            }
             self.diags.push(
                 Diagnostic::error(codes::E0100, "expected an expression")
                     .with_primary(kw, format!("found {}", word))
                     .with_note(format!(
                         "an arm is an expression or a block, and `{}` is a statement; put it \
-                         in a block: `=> {{ {}{} }}`",
-                        word, word, rest
+                         in a block: `=> {{ {} }}`",
+                        word, written
                     )),
             );
-            // The statement is read past, so the arm keeps its pattern and the
-            // arms after it are read: skipping to the end of the line went on
-            // through every arm below, since a line ending in `,` continues.
-            let is_return = self.at(T::Return);
-            self.bump();
-            if is_return {
-                if !matches!(self.peek(), T::Comma | T::Newline | T::RBrace | T::Eof) {
-                    let _ = self.parse_expr();
-                }
-            } else if self.at(T::Ident) {
-                self.bump();
-            }
             self.panicking = false;
             self.eat(T::Comma);
             let span = start.to(self.prev_span());
