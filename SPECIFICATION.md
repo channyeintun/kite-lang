@@ -1083,7 +1083,10 @@ The rules:
 > — `let e = err`, `e = err`, a `match err { x => … }` arm — holds that
 > binding's failure: the two names share one obligation, met by inspecting
 > either. Reading it — testing it, checking it, returning it, taking it
-> apart, passing it on — inspects it, and R3 applies otherwise; copying it
+> apart, passing it on — inspects it, and R3 applies otherwise; a test
+> inspects it wherever it is written, so one in the right operand of `&&`
+> or `||` meets the obligation on every path, though it runs only on some —
+> as `if e1 != nil || e2 != nil { … }` needs it to; copying it
 > is not reading it, and nor is a `match` whose every arm is `_` or a bare
 > name. Binding everything under one name is not a way out either, and nor
 > is a tuple literal: `let (n, e) = (1, f())` makes `e` Unchecked. The same

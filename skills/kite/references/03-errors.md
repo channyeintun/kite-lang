@@ -224,7 +224,7 @@ aliasing, no lifetimes.
 | R4 | on a path where `e == nil` is proved, `e` becomes Checked and `v` Clean — by `e == nil` or `!(e != nil)`, by either side of an `&&` that held, by either side of an `||` that failed, and past `check errors.wrap(…)`, nested or not. An error test crosses `&&` and `\|\|`, so `if err == nil && v > 0 { … }` and `if err != nil \|\| v < 0 { return }` both read `v` cleanly (an optional's narrowing does not) |
 | R5 | on a path where `e != nil`, `e` becomes Checked and `v` stays Tainted **permanently** |
 | R6 | a bare-statement call whose type is `error` or `(T, error)` is `E0302` — and so is the `Task` of one: an `async fn` answering with an error, called and never awaited — and so is a `defer` of any of them |
-| R7 | an `error` or a whole `(T, error)` bound to one name — `let` or `var`, from a call, `await`, a value `if`, a tuple literal, or assigned later with `e = f()` — is **Unchecked**; only `nil` is not. A copy of another binding (`let e = err`) shares that binding's obligation: inspect either name |
+| R7 | an `error` or a whole `(T, error)` bound to one name — `let` or `var`, from a call, `await`, a value `if`, a tuple literal, or assigned later with `e = f()` — is **Unchecked**; only `nil` is not. A copy of another binding (`let e = err`) shares that binding's obligation: inspect either name. A test inspects wherever it is written, the right operand of `&&` or `\|\|` included: `if verbose && e != nil { … }` meets `e`'s obligation even when `verbose` is false |
 
 R2 in practice:
 
