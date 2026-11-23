@@ -69,6 +69,22 @@ fn overlong_checks() -> [error] {
     // rules allowed before any ideograph was allowed before its mark too, and
     // the mark went to a line of its own.
     out.push(test.equal_str(shape("中中\(acute)", 2.0), "中|中\(acute)", "a mark is not cut from an ideograph"))
+    // The marks of the blocks that exist only for marks were not marks: the
+    // kana voiced-sound mark (decomposed Japanese), the supplement, the marks
+    // for symbols, the extended block and the variation selectors supplement.
+    for code in [0x3099, 0x1DC0, 0x20D0, 0x1AB0, 0xE0100] {
+        let mark = text.from_code(code)
+        out.push(test.is_true(text.is_combining(code), "U+\(code) is a mark"))
+        out.push(test.equal_str(shape("x\(mark)y", 1.0), "x\(mark)|y", "U+\(code) stays with its letter"))
+    }
+    // An emoji sequence is cut as one: a joiner stays with what it joins, and
+    // a skin-tone modifier with its base. The cut fell inside the sequence and
+    // left a bare joiner on a line of its own.
+    let zwj = text.from_code(0x200D)
+    let family = text.from_code(0x1F468) + zwj + text.from_code(0x1F469) + zwj + text.from_code(0x1F467)
+    out.push(test.equal_str(shape("\(family)x", 1.0), "\(family)|x", "a joined emoji sequence is one cluster"))
+    let thumb = text.from_code(0x1F44D) + text.from_code(0x1F3FB)
+    out.push(test.equal_str(shape("\(thumb)\(thumb)", 1.0), "\(thumb)|\(thumb)", "a modifier stays with its base"))
     // A width nothing fits in still makes progress, one character a line.
     out.push(test.equal_str(shape("abc", 0.0), "a|b|c", "zero width takes a character a line"))
     out.push(test.equal_str(shape("ab cd", 1.0), "a|b|c|d", "and drops the spaces between"))
