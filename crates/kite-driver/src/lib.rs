@@ -848,7 +848,8 @@ fn run_passes(
     // Resolution and checking still run after a syntax error — the parser
     // recovers, so later passes can report their own findings on the parts that
     // did parse. Code generation does not, because its input would be poisoned.
-    let module_map = kite_resolve::Modules { of_item: item_modules, aliases };
+    let unresolved = std::mem::take(&mut loader.unresolved);
+    let module_map = kite_resolve::Modules { of_item: item_modules, aliases, unresolved };
     let resolved = kite_resolve::resolve_modules(&ast, module_map, diags);
     let mut solved = kite_types::Solved::default();
     let mut hir = kite_types::check_recording(&ast, &resolved, sources, diags, release, &mut solved);

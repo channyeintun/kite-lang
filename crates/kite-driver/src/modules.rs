@@ -595,6 +595,9 @@ pub struct Loader {
     /// trusted it. A spelling is a convenience for the file that writes it and
     /// has no business being visible outside the module that does.
     pub aliases: HashMap<(String, String), String>,
+    /// Spellings, keyed as `aliases` are, whose `use` was reported and loaded
+    /// nothing — so what they qualify is not reported again.
+    pub unresolved: std::collections::HashSet<(String, String)>,
     /// Every file read through [`Files`] — each module's sources and each
     /// manifest consulted — with its contents, in the order read. It is what
     /// `kitec bundle` carries, so the program can be loaded again, the same
@@ -1009,13 +1012,16 @@ impl Loader {
                 continue;
             }
 
+            let failed = (owner.clone(), spelling.clone());
             let Some(found) = self.locate(scope, &segments, u.span, sources, diags) else {
+                self.unresolved.insert(failed);
                 continue;
             };
             let origin = found.origin(&self.files);
             if !self.seen.contains_key(&origin) {
                 if let Some(refusal) = self.already_a_member(&found, u.span) {
                     diags.push(refusal);
+                    self.unresolved.insert(failed);
                     continue;
                 }
             }
@@ -1076,6 +1082,7 @@ impl Loader {
                              manifests naming it must agree on where it is",
                         ),
                     );
+                    self.unresolved.insert(failed);
                     continue;
                 }
             }

@@ -1017,7 +1017,7 @@ fn a_dependency_inside_the_program_does_not_walk_out_into_it() {
 /// program's do.
 #[test]
 fn a_dependencys_directory_modules_reach_each_other() {
-    let p = Project::new("dep-siblings");
+    let p = Project::new("dep-directory-siblings");
     p.file("md/kite.toml", "[package]\nname = \"md\"\nversion = \"1.0.0\"\n");
     p.file("md/parse/parse.kite", "pub fn word() -> str {\n  return \"parsed\"\n}\n");
     p.file(
@@ -1253,6 +1253,11 @@ fn a_manifest_that_does_not_read_is_reported_at_its_line() {
     // And the `use` it broke says so, where an editor showing only the
     // file's own diagnostics shows it.
     assert!(said.contains("kite.toml` did not read (E0405)"), "{}", said);
+    // The cause first, and nothing after it but the `use` it broke: the
+    // manifest's error came last, under a `cannot find` at `a.hello`.
+    let (manifest, missing) = (said.find("E0405").unwrap(), said.find("E0400").unwrap());
+    assert!(manifest < missing, "the manifest is said first: {}", said);
+    assert!(!said.contains("E0111"), "`a.hello` is not a second error: {}", said);
 }
 
 /// A directory module checked on its own, as an editor renaming a name its

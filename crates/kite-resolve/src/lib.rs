@@ -16,7 +16,7 @@
 use kite_ast::*;
 use kite_diag::{codes, DiagBag, Diagnostic};
 use kite_span::Span;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// What a name refers to.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -441,9 +441,23 @@ pub struct Modules {
     /// names.
     /// Keyed by `(declaring module, alias)`; see `Loader::aliases`.
     pub aliases: HashMap<(String, String), String>,
+    /// Spellings whose `use` was refused or found nothing, keyed the same
+    /// way. That `use` has its error; a name qualified by one of these is not
+    /// a second — see [`Modules::is_unresolved`].
+    pub unresolved: HashSet<(String, String)>,
 }
 
 impl Modules {
+    /// Whether `head`, written in `asking`, is the spelling of a `use` that
+    /// already failed.
+    ///
+    /// `config.Config` after a `use config` that was `E0400` was a second
+    /// error for the same cause — ``unknown type `config.Config` ``, asking
+    /// whether the module was imported, under the line that imports it.
+    pub fn is_unresolved(&self, asking: &str, head: &str) -> bool {
+        self.unresolved.contains(&(asking.to_string(), head.to_string()))
+    }
+
     pub fn of(&self, item: usize) -> &str {
         self.of_item.get(item).map(|s| s.as_str()).unwrap_or("")
     }
@@ -1494,6 +1508,13 @@ impl<'a> FnResolver<'a> {
         self.map.const_by_name_in(&self.module, name)
     }
 
+    /// Whether `head` is how this module spelled a `use` that was already
+    /// reported, so what it qualifies is not reported again. A local of that
+    /// name is not one: it was looked up first.
+    fn failed_use(&self, head: &str) -> bool {
+        self.lookup(head).is_none() && self.map.modules.is_unresolved(&self.module, head)
+    }
+
     /// Reject reaching into another module for something it did not mark
     /// `pub`. Two levels of visibility, exactly as the specification says.
     fn check_visible(&mut self, res: Res, span: Span, name: &str) {
@@ -1932,6 +1953,9 @@ impl<'a> FnResolver<'a> {
     /// Resolve the head of a variant or struct pattern.
     fn resolve_pattern_path(&mut self, path: &TypePath) {
         let name = path.name();
+        if path.segments.len() >= 2 && self.failed_use(&path.segments[0].name) {
+            return;
+        }
 
         if path.segments.len() >= 2 {
             // `Shape.Circle`, or `ui.Align.Start` — everything but the last
@@ -2202,6 +2226,7 @@ impl<'a> FnResolver<'a> {
                 self.check_visible(Res::Type(ti), path.span, &path.text());
                 self.map.uses.insert(path.span, Res::Type(ti));
             }
+            None if path.segments.len() > 1 && self.failed_use(&path.segments[0].name) => {}
             None => {
                 let mut d =
                     Diagnostic::error(codes::E0204, format!("unknown type `{}`", path.name()))
@@ -2251,10 +2276,12 @@ impl<'a> FnResolver<'a> {
                 self.map.uses.insert(p.span, Res::Type(ti));
                 return;
             }
-            self.diags.push(
-                Diagnostic::error(codes::E0111, format!("cannot find `{}`", text))
-                    .with_primary(p.span, "not found in this scope"),
-            );
+            if !self.failed_use(&p.segments[0].name) {
+                self.diags.push(
+                    Diagnostic::error(codes::E0111, format!("cannot find `{}`", text))
+                        .with_primary(p.span, "not found in this scope"),
+                );
+            }
             return;
         }
 
@@ -2289,6 +2316,9 @@ impl<'a> FnResolver<'a> {
         }
         if let Some(ti) = self.find_type(name) {
             self.map.uses.insert(p.span, Res::Type(ti));
+            return;
+        }
+        if self.failed_use(name) {
             return;
         }
 

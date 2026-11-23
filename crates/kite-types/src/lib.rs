@@ -12963,6 +12963,13 @@ fn resolve_named_ty(
                         named_ty(other, types)
                     }
                 },
+                // A `use` that failed has its error; the types it would
+                // have brought are not each another.
+                None if p.segments.len() > 1
+                    && resolved.modules.is_unresolved(module, &p.segments[0].name) =>
+                {
+                    TyId::ERROR
+                }
                 None => resolve_ty(t, types, diags),
             }
         }
