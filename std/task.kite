@@ -94,10 +94,14 @@ pub async fn race<T>(tasks: [Task<T>]) -> T {
 
 /// Suspend for at least `ms` milliseconds.
 ///
-/// The clock is the runtime's, and it is virtual under the bytecode VM and the
-/// generated glue alike: when every task is waiting on a deadline it jumps to
-/// the earliest one. A program that sleeps therefore costs no real time under
-/// test, and the two backends agree on the order things happened in.
+/// The clock is the runtime's. It is virtual under the bytecode VM, natively,
+/// and in the generated glue's batch driver, `run`: when every task is waiting
+/// on a deadline it jumps to the earliest one. A program that sleeps therefore
+/// costs no real time under test, and the backends agree on the order things
+/// happened in. The jump gives the host no turn, so a loop that sleeps while
+/// it waits for host state to change never sees it change under `run`. Under
+/// `resident`, the driver a page keeps alive, the clock is real and a sleep is
+/// a timer.
 pub async fn sleep(ms: int) {
     let deadline = time.now() + ms
     for time.now() < deadline {
