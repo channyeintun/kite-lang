@@ -497,7 +497,10 @@ tests a result nothing holds, and the failure in it is lost — `E0302` at the
 
 The same holds however the failure got into a single binding — `var e = f()`,
 `let e = await f()`, `let e = if c { f() } else { g() }`, `let (n, e) = (1,
-f())`: the binding has to be looked at. Only `nil` starts out Checked.
+f())`: the binding has to be looked at. Only `nil` starts out Checked — and a
+value `if` whose branches are bindings and `nil`: `let e = if x { c } else
+{ nil }` holds `c`'s failure or nothing, so `c` answers for it, and once `c` is
+checked, `e` holds nothing at all.
 
 **Copying an error is not looking at it.** `let e = err` gives the failure a
 second name, and one of the two has to be inspected — either will do. A

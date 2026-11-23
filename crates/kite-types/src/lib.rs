@@ -2200,16 +2200,27 @@ impl<'a> Checker<'a> {
             // The same for `if x { c } else { d }`: each of `c` and `d` still
             // has its failure to answer for. With one source and no `nil`
             // branch it is a copy on every path, as `let e = c` is.
+            //
+            // A branch that is a binding holding no failure unread — checked
+            // already, or only ever `nil` — brings nothing, as `nil` does:
+            // `check c` then `let e = if x { c } else { nil }` holds no
+            // failure at all, and it used to make a new one nobody could
+            // owe but `e`.
             ExprKind::If { .. } => match self.only_from(value) {
                 Some((srcs, maybe_nil))
                     if srcs.iter().all(|&s| {
-                        s != local && before.get(s as usize) == Some(&Taint::Unchecked)
+                        s != local || before.get(s as usize) != Some(&Taint::Unchecked)
                     }) =>
                 {
-                    for &s in &srcs {
+                    let live: Vec<u32> = srcs
+                        .iter()
+                        .copied()
+                        .filter(|&s| before.get(s as usize) == Some(&Taint::Unchecked))
+                        .collect();
+                    for &s in &live {
                         self.keep_unread(s, before);
                     }
-                    if let ([src], false) = (srcs.as_slice(), maybe_nil) {
+                    if let ([src], [_], false) = (live.as_slice(), srcs.as_slice(), maybe_nil) {
                         self.note_copy(local, *src);
                         Taint::Unchecked
                     } else {
