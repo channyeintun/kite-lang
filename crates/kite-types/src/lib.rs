@@ -4305,6 +4305,38 @@ impl<'a> Checker<'a> {
                 if let (Some(id), Some(before)) = (held, before) {
                     self.keep_unread(id, &before);
                 }
+                // The same test of a result no binding holds leaves its
+                // failure where nothing can reach it again: the task came in
+                // time, and what it gave is gone. Only a fresh result is
+                // meant — a call or an `await` — since a field, an entry or
+                // an element read this way is still where it was stored.
+                if held.is_none()
+                    && self.holder(value.ty) == Some(Holder::Maybe)
+                    && matches!(
+                        value.kind,
+                        ExprKind::Call { .. }
+                            | ExprKind::CallVirtual { .. }
+                            | ExprKind::CallBuiltin { .. }
+                            | ExprKind::CallExtern { .. }
+                            | ExprKind::CallClosure { .. }
+                            | ExprKind::Await { .. }
+                    )
+                {
+                    let then = match *self.types.kind(value.ty) {
+                        TyKind::Optional(TyId::ERR) => "test the error in it with `if r != nil { … }`",
+                        _ => "take the pair in it apart with `let (v, err) = r`",
+                    };
+                    self.diags.push(
+                        Diagnostic::error(codes::E0302, "error is never checked")
+                            .with_primary(value.span, "this nil test never looks at the failure it holds")
+                            .with_note(format!(
+                                "a nil test asks only whether a result is there; bind it, \
+                                 `let r = …`, and after `if r == nil {{ return … }}` {}",
+                                then
+                            ))
+                            .with_note("to throw it away on purpose, write `_ = …`"),
+                    );
+                }
                 if !matches!(self.types.kind(value.ty), TyKind::Optional(_))
                     && value.ty != TyId::ERR
                     && !self.types.is_poisoned(value.ty)

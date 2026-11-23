@@ -1,0 +1,73 @@
+// A nil test of a result no binding holds asks only whether it is there, and
+// leaves the failure in it where nothing can reach it again. Bound to a name
+// the same test is `E0302` at the name, and a `match` of it against `nil` at
+// the scrutinee; written on the temporary it was accepted, and the error the
+// finished task gave was lost.
+
+use std/task
+
+async fn save() -> error {
+    return errors.new("disk full")
+}
+
+async fn load() -> (int, error) {
+    return 1, nil
+}
+
+fn cached() -> Option<error> {
+    return errors.new("stale")
+}
+
+struct Held {
+    o: Option<error>
+}
+
+async fn late_or_lost() {
+    if await task.timeout(save(), 10) == nil { //~ ERROR E0302
+        io.print("timed out")
+        return
+    }
+    io.print("saved")
+}
+
+async fn in_time_and_lost() {
+    if await task.timeout(save(), 10) != nil { //~ ERROR E0302
+        io.print("in time")
+    }
+}
+
+async fn a_pair_lost() {
+    let late = await task.timeout(load(), 10) == nil //~ ERROR E0302
+    io.print(late)
+}
+
+fn from_a_call() {
+    io.print(cached() == nil) //~ ERROR E0302
+}
+
+// A field, an entry or an element tested in place is still where it was
+// stored, so the test drops nothing.
+fn stored_values(h: Held, m: { str: error }, xs: [error]) {
+    io.print(h.o == nil)
+    io.print(m["a"] == nil)
+    io.print(xs.get(0) == nil)
+}
+
+async fn bound_and_tested() {
+    let r = await task.timeout(save(), 10)
+    if r == nil {
+        return
+    }
+    if r != nil {
+        io.print(r.message())
+    }
+}
+
+async fn main() {
+    await late_or_lost()
+    await in_time_and_lost()
+    await a_pair_lost()
+    from_a_call()
+    stored_values(Held{ o: nil }, { "a": nil }, [nil])
+    await bound_and_tested()
+}

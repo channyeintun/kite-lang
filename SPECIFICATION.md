@@ -1260,7 +1260,11 @@ The rules:
 > the error or a destructuring of the pair. Nor does finding the optional
 > present prove the error in it present, since a task that came in time with a
 > nil `error` gives a present optional: `r.message()` reads only where that
-> second test, `r != nil` on the narrowed `r`, held (`E0301` otherwise).
+> second test, `r != nil` on the narrowed `r`, held (`E0301` otherwise). A
+> nil test of a result no binding holds, `if await task.timeout(save(), 10) ==
+> nil`, leaves the failure where nothing can reach it again, and is `E0302`
+> there; a field, entry or element tested in place is still where it was
+> stored.
 
 R1–R5 are about bindings, and R6 and R7 close the shapes they leave open: a
 call written as a statement makes no binding, so nothing in R1–R5 ever sees it,
