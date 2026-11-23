@@ -2305,4 +2305,11 @@ fn error_notes_name_fixes_that_compile_here() {
         "var e = errors.new(\"x\")\n  e = errors.wrap(e, \"y\")\n  if e != nil {\n    io.print(e.message())\n  }",
     );
     assert_eq!(c.codes(), vec!["E0111"], "{}", c.render());
+    // Nor is a copy handed to a call that could not be found left unread.
+    let c = body(
+        "var e = errors.new(\"x\")\n  let c = e\n  e = errors.wrap(c, \"y\")\n  if e != nil {\n    io.print(e.message())\n  }",
+    );
+    assert_eq!(c.codes(), vec!["E0111"], "{}", c.render());
+    let c = body("let c = errors.new(\"x\")\n  nowhere(c)");
+    assert_eq!(c.codes(), vec!["E0111"], "{}", c.render());
 }

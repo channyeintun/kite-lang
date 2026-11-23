@@ -5328,8 +5328,29 @@ impl<'a> Checker<'a> {
                 self.variant_value(ti, vi, args, arg_names, p.span, span, expected)
             }
 
-            None => self.lit(ExprKind::Error, TyId::ERROR, span),
+            None => {
+                self.unresolved_call_reads(args);
+                self.lit(ExprKind::Error, TyId::ERROR, span)
+            }
         }
+    }
+
+    /// The arguments of a call whose callee could not be found, read for
+    /// what reading them means to the flow analysis and nothing else.
+    ///
+    /// The mistake is the callee, reported once where it is written; that
+    /// `errors.wrap(c, "…")` without `use std/errors` never read `c` made
+    /// it a second error, E0302 at `c`, for the same cause. Anything the
+    /// arguments would report is left for when the call can be checked.
+    fn unresolved_call_reads(&mut self, args: &[ast::Expr]) {
+        let kept = std::mem::replace(self.diags, DiagBag::new());
+        let facts = [self.facts.calls.len(), self.facts.bound_calls.len()];
+        for a in args {
+            let _ = self.expr(a, None);
+        }
+        *self.diags = kept;
+        self.facts.calls.truncate(facts[0]);
+        self.facts.bound_calls.truncate(facts[1]);
     }
 
     /// `draw.rect(x, y, w, h, colour)` and `draw.text(x, y, body, colour)`.
@@ -6155,6 +6176,7 @@ impl<'a> Checker<'a> {
             }
         }
         if self.types.is_poisoned(receiver.ty) {
+            self.unresolved_call_reads(args);
             return self.lit(ExprKind::Error, TyId::ERROR, span);
         }
 
