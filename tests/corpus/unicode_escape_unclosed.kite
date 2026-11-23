@@ -1,0 +1,8 @@
+// A unicode escape is `\u{`, hex digits, `}`. The end of the string is not
+// the closing brace, and a sign is not a hex digit.
+
+fn main() {
+    io.print("[\u{41") //~ ERROR E0003
+    io.print("\u{+41}") //~ ERROR E0003
+    io.print("\u{41}\u{1F600}")
+}

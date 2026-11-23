@@ -14456,18 +14456,31 @@ pub(crate) fn decode_escapes_into(inner: &str, span: Span, diags: &mut DiagBag) 
             Some('\\') => out.push('\\'),
             Some('"') => out.push('"'),
             Some('\'') => out.push('\''),
+            // `\u{` hex digits `}`, as the grammar has it. The loop used to
+            // stop at the end of the string as if it were the `}`, so
+            // `"\u{41"` was `A`; and `from_str_radix` takes a leading `+`,
+            // so `\u{+41}` was too. Neither is the escape, so both are E0003.
             Some('u') => {
                 let mut hex = String::new();
+                let mut closed = false;
                 if chars.next() == Some('{') {
                     for c in chars.by_ref() {
                         if c == '}' {
+                            closed = true;
                             break;
                         }
                         hex.push(c);
                     }
                 }
-                match u32::from_str_radix(&hex, 16).ok().and_then(char::from_u32) {
+                let digits = !hex.is_empty() && hex.chars().all(|c| c.is_ascii_hexdigit());
+                let value = if closed && digits { u32::from_str_radix(&hex, 16).ok() } else { None };
+                match value.and_then(char::from_u32) {
                     Some(c) => out.push(c),
+                    None if !closed => diags.push(
+                        Diagnostic::error(codes::E0003, "unclosed unicode escape")
+                            .with_primary(span, "this `\\u{` is never closed")
+                            .with_note("a unicode escape is hex digits between braces: `\\u{41}`"),
+                    ),
                     None => diags.push(
                         Diagnostic::error(codes::E0003, "invalid unicode escape")
                             .with_primary(span, format!("`\\u{{{}}}` is not a character", hex)),
