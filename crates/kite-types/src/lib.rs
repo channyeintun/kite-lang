@@ -4737,9 +4737,13 @@ impl<'a> Checker<'a> {
                 // as for a slice or a map literal: `(4, 1)` for an
                 // `Option<(Option<int>, int)>` wraps its `4` as it would for
                 // the bare tuple, and the whole is wrapped after.
+                // A wanted type that was itself reported (`(int, Nope)` is the
+                // error type whole) steers each element as the error type, so
+                // a `nil` in it is not a second report of that one cause.
                 let hint: Option<Vec<TyId>> = expected.and_then(|e| {
                     match self.types.kind(self.types.present(e)) {
                         TyKind::Tuple(ts) if ts.len() == elems.len() => Some(ts.clone()),
+                        TyKind::Error => Some(vec![TyId::ERROR; elems.len()]),
                         _ => None,
                     }
                 });
@@ -4809,6 +4813,10 @@ impl<'a> Checker<'a> {
                     TyKind::Fn { params, ret } => {
                         Some((params.iter().map(|p| Some(*p)).collect(), Some(*ret)))
                     }
+                    // Wanted as a type that was itself reported — `fn(Nope)
+                    // -> int` is the error type whole — its parameters are
+                    // the error type, not E0211 a second time for one cause.
+                    TyKind::Error => Some((vec![Some(TyId::ERROR); params.len()], Some(TyId::ERROR))),
                     _ => None,
                 }
             }),
@@ -7573,6 +7581,9 @@ impl<'a> Checker<'a> {
         subst: &mut Vec<Option<TyId>>,
         span: Span,
     ) -> Vec<Option<TyId>> {
+        if want == TyId::ERROR {
+            return self.hints_from_poison(subst);
+        }
         let want = if is_async {
             match self.types.task_payload(want) {
                 Some(value) => value,
@@ -7584,6 +7595,17 @@ impl<'a> Checker<'a> {
         let before = subst.clone();
         self.unify(ret, want, generics, subst, span);
         self.soften_seeds(ret, want, &before, subst)
+    }
+
+    /// What a call is told when the type its result is wanted as was itself
+    /// reported — `let o: Option<Nope> = id(nil)`, written around an unknown
+    /// name, resolves to the error type whole. Every parameter the
+    /// arguments leave open is taken as the error type, so a `nil` or a
+    /// closure that the annotation would have typed is not a second report
+    /// of the one cause (`cannot infer a type for nil` beside `unknown type
+    /// Nope`).
+    fn hints_from_poison(&self, subst: &[Option<TyId>]) -> Vec<Option<TyId>> {
+        subst.iter().map(|s| if s.is_none() { Some(TyId::ERROR) } else { None }).collect()
     }
 
     /// Take out of `subst` what the expected type settled only up to an
@@ -7671,6 +7693,9 @@ impl<'a> Checker<'a> {
         let Some(want) = expected else { return Vec::new() };
         if subst.iter().all(|s| s.is_some()) {
             return Vec::new();
+        }
+        if want == TyId::ERROR {
+            return self.hints_from_poison(subst);
         }
         // An `async` method's call is the task of its result, as a function's
         // is; see `seed_result`.
@@ -8375,6 +8400,10 @@ impl<'a> Checker<'a> {
                 // type and says nothing — so a program with no diagnostic
                 // reached code generation holding `<error>`.
                 _ if reported_before => return None,
+                // Wanted as a type that was itself reported — `let w:
+                // W<Nope> = W{ v: nil }`, where `W<Nope>` is the error type
+                // whole — the annotation that would have said is that error.
+                _ if expected == Some(TyId::ERROR) => return None,
                 _ => {
                     // The trial's diagnostics were discarded, so a closure
                     // field that went wrong is checked again to say what it
@@ -10487,9 +10516,24 @@ impl<'a> Checker<'a> {
         // A trial pass, as for struct literals: its diagnostics belong to the
         // real check against the specialisation, not to inference.
         let trial = self.begin_trial();
+        // As for a struct literal: a closure payload that went wrong in the
+        // trial is the cause of a parameter left open, and says so itself
+        // (`B(f: |n| [n])` is E0211 for `n`, not "cannot infer `T`"); a
+        // payload that is an error already reported (`B(f: nope)`) has its
+        // report, and E0209 beside it is not another.
+        let mut poisoned = Vec::new();
+        let mut reported_before = false;
         for (i, a) in args.iter().enumerate() {
             let Some(d) = declared.get(i).copied() else { continue };
+            let before = self.diags.error_count();
             let v = self.expr(a, None);
+            if self.made_of_error(v.ty) {
+                if matches!(a, ast::Expr::Closure { .. }) {
+                    poisoned.push(a);
+                } else if self.diags.error_count() == before {
+                    reported_before = true;
+                }
+            }
             self.unify(d, v.ty, &generics, &mut subst, v.span);
         }
         self.end_trial(trial);
@@ -10497,8 +10541,23 @@ impl<'a> Checker<'a> {
         let mut solved = Vec::with_capacity(count);
         for (i, s) in subst.iter().enumerate() {
             match s {
-                Some(t) => solved.push(*t),
-                None => {
+                Some(t) if !self.made_of_error(*t) => solved.push(*t),
+                _ if reported_before || expected == Some(TyId::ERROR) => return None,
+                _ => {
+                    if !poisoned.is_empty() {
+                        let again = self.begin_trial();
+                        for a in &poisoned {
+                            self.expr(a, None);
+                        }
+                        let found = std::mem::replace(self.diags, DiagBag::new()).take();
+                        self.end_trial(again);
+                        if found.iter().any(|d| d.severity == kite_diag::Severity::Error) {
+                            for d in found {
+                                self.diags.push(d);
+                            }
+                            return None;
+                        }
+                    }
                     // A unit variant of a generic enum says nothing about the
                     // parameter — `Maybe.None` could be any `Maybe<T>` — so the
                     // binding has to.
@@ -13185,7 +13244,14 @@ impl<'a> Checker<'a> {
                     "fields are immutable unless marked `var`; write `var {}: {}` on `{}`, or \
                      build a new value with `{}{{ ..old, {}: new }}`",
                     name.name,
-                    self.types.name(ty),
+                    // A field type written around a reported name has no
+                    // name of its own; the declaration's own words do.
+                    if self.types.holds_error(ty) {
+                        let written = self.text(decl_span);
+                        written.split_once(':').map_or(written, |(_, t)| t.trim()).to_string()
+                    } else {
+                        self.types.name(ty)
+                    },
                     sname,
                     sname,
                     name.name
