@@ -1684,6 +1684,28 @@ mod tests {
         assert!(!text.contains("write `impl<T> Error"), "{}", text);
     }
 
+    /// A value whose bounded `impl` does not reach its argument, converted to
+    /// that trait's `dyn` or to an `error`, is told which bound it misses —
+    /// not to write the `impl` it already has, which is E0112.
+    #[test]
+    fn a_conversion_outside_a_bounded_impl_names_the_bound() {
+        let c = compile(
+            "t.kite",
+            "struct Box<T> {\n  v: T\n}\n\
+             impl<T: Display> Display for Box<T> {\n  fn show(self) -> str {\n    return \"b\"\n  }\n}\n\
+             impl<T: Display> Error for Box<T> {\n  fn message(self) -> str {\n    return \"b\"\n  }\n}\n\
+             fn fail() -> error {\n  return Box{ v: [1] }\n}\n\
+             fn main() {\n  let d: dyn Display = Box{ v: [1] }\n  io.print(d)\n  io.print(fail() != nil)\n}\n",
+            Emit::Check,
+        );
+        let codes: Vec<&str> = c.diags.iter().filter_map(|d| d.code.map(|x| x.0)).collect();
+        assert_eq!(codes, vec!["E0200", "E0200"], "{}", c.render_diagnostics());
+        let text = c.render_diagnostics();
+        assert!(text.contains("`Box<[int]>` implements `Error` only where `T: Display`, and `[int]` is not one"), "{}", text);
+        assert!(text.contains("`Box<[int]>` implements `Display` only where `T: Display`, and `[int]` is not one"), "{}", text);
+        assert!(!text.contains("write `impl<T>"), "{}", text);
+    }
+
     /// A default method that asks of `Self` what its trait does not declare
     /// is not told to "add the bound: `Self: Display`", which no program
     /// can write.

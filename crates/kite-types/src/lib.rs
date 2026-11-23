@@ -12431,8 +12431,40 @@ impl<'a> Checker<'a> {
     }
 
     /// Whether a value of this type may stand where an `error` is wanted.
-    fn coerces_to_error(&self, found: TyId) -> bool {
-        found != TyId::ERR && (self.error_method(found).is_some() || self.param_is_error(found))
+    ///
+    /// Having a `message` is not enough: after `impl<T: Display> Error for
+    /// G<T>`, a `G<[int]>` has the method but is no `Error` (§10.2), and
+    /// converting it built a vtable for a body that renders a slice — the VM
+    /// trapped, native code aborted, and the Wasm module did not validate.
+    fn coerces_to_error(&mut self, found: TyId) -> bool {
+        if found == TyId::ERR {
+            return false;
+        }
+        if self.param_is_error(found) {
+            return true;
+        }
+        if self.error_method(found).is_none() {
+            return false;
+        }
+        match self.error_trait() {
+            Some(tr) => self.type_implements(found, tr),
+            None => true,
+        }
+    }
+
+    /// The note for a type whose `impl` of `tr` is there but bounded, and
+    /// whose arguments miss the bound: it names the bound rather than telling
+    /// the reader to write the `impl` again, which is E0112.
+    fn unmet_bound_note(&mut self, ty: TyId, tr: hir::TraitId) -> Option<String> {
+        let (param, arg, bound) = self.unmet_impl_bound(ty, tr)?;
+        Some(format!(
+            "`{}` implements `{}` only where `{}: {}`, and `{}` is not one",
+            self.types.name(ty),
+            last_segment(&self.types.trait_def(tr).name),
+            param,
+            last_segment(&self.types.trait_def(bound).name),
+            self.types.name(arg)
+        ))
     }
 
     /// The "carries nothing" operand, for an error slot with no value or no
@@ -12840,24 +12872,32 @@ impl<'a> Checker<'a> {
         }
         if let TyKind::Dyn(tr) = *self.types.kind(expected) {
             if self.type_index_of(found).is_some() {
-                let (tn, fname) =
-                    (self.types.trait_def(tr).name.clone(), self.types.name(found));
-                let header = self.impl_to_write(&tn, found);
-                d = d.with_note(format!(
-                    "`{}` does not implement `{}`; write `{}` to use it here",
-                    fname, tn, header
-                ));
+                let note = match self.unmet_bound_note(found, tr) {
+                    Some(bounded) => bounded,
+                    None => {
+                        let (tn, fname) =
+                            (self.types.trait_def(tr).name.clone(), self.types.name(found));
+                        let header = self.impl_to_write(&tn, found);
+                        format!("`{}` does not implement `{}`; write `{}` to use it here", fname, tn, header)
+                    }
+                };
+                d = d.with_note(note);
             }
         }
         // The same courtesy the `dyn` case gets: a nominal type in an error
         // slot is almost always a type that meant to be an error and has not
-        // said so yet.
+        // said so yet — or one whose bounded `impl Error` does not reach it.
         if expected == TyId::ERR && self.type_index_of(found).is_some() {
-            d = d.with_note(format!(
-                "a type may stand here once it implements `Error`: write \
-                 `{} {{ fn message(self) -> str {{ … }} }}`",
-                self.impl_to_write("Error", found)
-            ));
+            match self.error_trait().and_then(|tr| self.unmet_bound_note(found, tr)) {
+                Some(bounded) => d = d.with_note(bounded),
+                None => {
+                    d = d.with_note(format!(
+                        "a type may stand here once it implements `Error`: write \
+                         `{} {{ fn message(self) -> str {{ … }} }}`",
+                        self.impl_to_write("Error", found)
+                    ));
+                }
+            }
             d = d.with_note("or build one from text with `errors.new(\"…\")`");
         }
         if self.types.is_numeric(found) && self.types.is_numeric(expected) {
