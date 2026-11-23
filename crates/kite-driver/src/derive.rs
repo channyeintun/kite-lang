@@ -157,6 +157,11 @@ struct ByHand {
     /// Methods and associated functions in an inherent `impl`, with where
     /// each was written.
     methods: HashMap<String, Vec<(String, Span)>>,
+    /// For each generic type's hand-written `impl<T: B> Trait for Type<T>`,
+    /// keyed as [`ByHand::traits`] is, the trait and the bounds on each of
+    /// the type's arguments, in order: what a field of that type must meet
+    /// for the walk to reach the method.
+    bounded: HashMap<String, Vec<(String, Vec<(String, Vec<String>)>)>>,
 }
 
 impl ByHand {
@@ -297,6 +302,27 @@ pub fn expand(
                 } else {
                     text
                 };
+                let bounds: Vec<(String, Vec<String>)> = imp
+                    .self_ty
+                    .args
+                    .iter()
+                    .map(|arg| {
+                        let param = match arg {
+                            Type::Path(p) if p.is_simple() => p.segments[0].name.clone(),
+                            _ => String::new(),
+                        };
+                        let on = imp
+                            .generics
+                            .iter()
+                            .find(|g| g.name.name == param)
+                            .map(|g| g.bounds.iter().map(|b| b.text()).collect())
+                            .unwrap_or_default();
+                        (param, on)
+                    })
+                    .collect();
+                if bounds.iter().any(|(_, on)| !on.is_empty()) {
+                    by_hand.bounded.entry(target.clone()).or_default().push((trait_name.clone(), bounds));
+                }
                 by_hand.traits.entry(target).or_default().push(trait_name);
             }
             None => {
@@ -1635,11 +1661,78 @@ impl<'a> Writer<'a, '_> {
             return "\"\"".to_string();
         }
         if let Type::Path(p) = ty {
-            if !p.args.is_empty() && !self.args_meet(&base, p) {
+            if !p.args.is_empty() && (!self.args_meet(&base, p) || !self.hand_bounds_met(&base, p)) {
                 return "\"\"".to_string();
             }
         }
         format!("{}.{}()", expr, self.trait_.method())
+    }
+
+    /// Whether the arguments of a field's generic type meet the bounds of the
+    /// trait's hand-written `impl` for it, having said which one does not.
+    /// `b: Box<Plain>` beside `impl<T: Hash> Debug for Box<T>` otherwise
+    /// reached the checker as a call in generated code, and was reported at a
+    /// line of `<derive>` nobody wrote. Only the prelude traits a built-in or
+    /// derived type is known to have are judged here; any other bound is the
+    /// checker's.
+    fn hand_bounds_met(&mut self, base: &str, p: &TypePath) -> bool {
+        let qualified = declared_name(self.aliases, &self.lookup, base);
+        let path = self.trait_.path();
+        let Some(impls) = self.by_hand.bounded.get(&qualified) else { return true };
+        let Some((_, bounds)) = impls.iter().find(|(t, _)| t == path) else { return true };
+        for ((param, on), arg) in bounds.iter().zip(&p.args) {
+            for bound in on {
+                if !matches!(bound.as_str(), "Debug" | "Hash" | "Display") || !self.lacks(arg, bound) {
+                    continue;
+                }
+                let fix = match Derivable::parse(bound) {
+                    Some(d) => format!("add `@derive({})` to it", d.name()),
+                    None => format!("write `impl {} for {}`", bound, render_type(arg)),
+                };
+                self.cannot(
+                    arg.span(),
+                    &format!("a field of type `{}`", path_text(p)),
+                    &format!(
+                        "`{}` implements `{}` only where `{}: {}`, and `{}` is not one — {}",
+                        base,
+                        self.trait_.name(),
+                        param,
+                        bound,
+                        render_type(arg),
+                        fix
+                    ),
+                );
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Whether a declared struct or enum, written as `arg`, is known not to
+    /// have the prelude trait `bound`: it neither derives it nor implements
+    /// it by hand. A built-in, a parameter, an alias, a generic type or a
+    /// name the walk does not know is left to the checker.
+    fn lacks(&self, arg: &Type, bound: &str) -> bool {
+        let Type::Path(p) = arg else { return false };
+        if !p.args.is_empty() || self.through_alias(arg).is_some() {
+            return false;
+        }
+        if p.segments.len() == 1 {
+            let name = &p.segments[0].name;
+            if matches!(name.as_str(), "int" | "float" | "bool" | "str") || self.params.contains(name) {
+                return false;
+            }
+        }
+        let text = p.text();
+        let qualified = declared_name(self.aliases, &self.lookup, &text);
+        let Some(decl) = self.known.get(&qualified).map(|i| &self.decls[*i]) else {
+            // A type that derives nothing is still declared, and still has
+            // only what is written for it.
+            return self.all_types.iter().any(|(n, _)| *n == qualified)
+                && !self.by_hand.traits.get(&qualified).is_some_and(|t| t.iter().any(|t| t == bound));
+        };
+        let derives = decl.derives.iter().any(|(t, _)| t.name() == bound);
+        !derives && !self.by_hand.traits.get(&qualified).is_some_and(|t| t.iter().any(|t| t == bound))
     }
 
     /// Whether the arguments of a field's generic type meet what that type's

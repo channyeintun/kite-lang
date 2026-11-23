@@ -1991,7 +1991,10 @@ parameters is walked through that parameter's own method, and the generated
 `impl` bounds the parameter by the trait — `impl<T: Debug> Debug for Box<T>` —
 so a `Box<int>` is `Debug` and a `Box<[int]>` is not (`E0208` where it is
 used; `E0702` naming the field when a type deriving `Debug` has a
-`Box<[int]>` field). A parameter no field reaches gets no bound. `Encode` and `Decode` still
+`Box<[int]>` field). The same `E0702` names a field whose generic type
+implements the trait by hand with a bound its argument misses —
+`b: Box<Plain>` beside `impl<T: Hash> Debug for Box<T>`, where `Plain` is not
+`Hash`. A parameter no field reaches gets no bound. `Encode` and `Decode` still
 refuse a generic type (`E0702`).
 
 ```kite
