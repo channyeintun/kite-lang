@@ -1717,7 +1717,7 @@ impl<'a> Checker<'a> {
                 // that does nothing is not also an error dropped.
                 let inert = !self.types.is_poisoned(expr.ty) && self.inert_statement(e, false);
                 if !inert {
-                    self.dropped_error(&expr);
+                    self.dropped_error(&expr, is_tuple_projection(e));
                 }
                 let flow = if expr.ty == TyId::NEVER { Flow::Diverges } else { Flow::Falls };
                 Some((hir::Stmt::Expr(expr), flow))
@@ -2838,9 +2838,59 @@ impl<'a> Checker<'a> {
                 }
                 Some((self.returning(hir::Stmt::Return { value: None, span: r.span }, r.span), Flow::Diverges))
             }
+            // `return (1, nil)` is the pair written as a tuple, which a
+            // `(T, error)` function does not take. It used to be three
+            // errors for the one slip — the tuple is one value, `nil` has no
+            // type to be given, and then the function "does not return".
+            // One error, with the line the reader meant.
+            //
+            // Not when the value side is itself a tuple: `return (1, nil)`
+            // in a `((int, ?int), error)` function is that tuple with no
+            // error after it, which the arm below says. The two elements are
+            // checked as the pair's would be, so a value of the wrong type,
+            // or a second element that is no error, is told too — the note
+            // alone would be a fix that does not compile.
+            Some(ast::ReturnValue::Single(ast::Expr::Tuple { elems, span: tuple_span }))
+                if sig.fallible
+                    && elems.len() == 2
+                    && !self
+                        .types
+                        .fallible_value(sig.ret)
+                        .is_some_and(|t| matches!(self.types.kind(t), TyKind::Tuple(_))) =>
+            {
+                let inner = self.types.fallible_value(sig.ret).unwrap_or(TyId::ERROR);
+                let want = (!self.unlearned_ret(inner)).then_some(inner);
+                let v = self.expr(&elems[0], want);
+                if let Some(inner) = want {
+                    let v = self.coerce(v, Some(inner));
+                    self.expect_ty(v.ty, inner, v.span, Some(sig.name_span));
+                }
+                let e = self.expr(&elems[1], Some(TyId::ERR));
+                let e = self.coerce(e, Some(TyId::ERR));
+                self.expect_ty(e.ty, TyId::ERR, e.span, None);
+                self.diags.push(
+                    Diagnostic::error(codes::E0203, "a fallible function returns two values")
+                        .with_primary(*tuple_span, "a tuple is one value, not two")
+                        .with_secondary(sig.name_span, "declared `(T, error)` here")
+                        .with_note(format!(
+                            "write `return {}, {}`, without the parentheses",
+                            self.text(elems[0].span()),
+                            self.text(elems[1].span()),
+                        )),
+                );
+                Some((hir::Stmt::Return { value: None, span: r.span }, Flow::Diverges))
+            }
             Some(ast::ReturnValue::Single(e)) if sig.fallible => {
                 let inner = self.types.fallible_value(sig.ret).unwrap_or(TyId::ERROR);
-                let want = (!self.unlearned_ret(sig.ret)).then_some(sig.ret);
+                // A tuple literal is never the pair, so it is typed as the
+                // value it can only be meant as: `return (1, nil)` in a
+                // `((int, Option<int>), error)` function gives `nil` its type
+                // rather than a second error for having none.
+                let want = if matches!(e, ast::Expr::Tuple { .. }) {
+                    (!self.unlearned_ret(inner)).then_some(inner)
+                } else {
+                    (!self.unlearned_ret(sig.ret)).then_some(sig.ret)
+                };
                 let value = self.expr(e, want);
                 let inner = self.learn_ret(inner, self.types.fallible_value(value.ty).unwrap_or(value.ty));
                 // `return parse_user(raw)` — passing a fallible call's result
@@ -2866,7 +2916,9 @@ impl<'a> Checker<'a> {
                              that is itself fallible",
                         ),
                 );
-                None
+                // Still a way out: `return 5` is one value short, and the
+                // function is not then also said not to return.
+                Some((hir::Stmt::Return { value: None, span: r.span }, Flow::Diverges))
             }
 
             Some(ast::ReturnValue::Single(e)) => {
@@ -5734,14 +5786,34 @@ impl<'a> Checker<'a> {
                 // to be wrong about: `let f = Rect.square` then `f(2)` is one
                 // mistake, and it is on the first line.
                 if !self.types.is_poisoned(ty) {
-                    self.diags.push(
+                    let mut d =
                         Diagnostic::error(codes::E0205, format!("`{}` is not a function", p.text()))
                             .with_primary(
                                 p.span,
                                 format!("this is {}", self.types.with_article(ty)),
                             )
-                            .with_secondary(decl, "declared here"),
-                    );
+                            .with_secondary(decl, "declared here");
+                    // As a module's constant is told: a local of a function's
+                    // name hides it, and `max(1, 2)` beside `let max = 5`
+                    // most likely meant the function — the one the name
+                    // would mean without the local, which is the module's
+                    // own `max` where it declares one, not the prelude's.
+                    let written = p.text();
+                    let prelude_fn = format!("{}.{}", kite_resolve::PRELUDE, written);
+                    let hidden = (!written.contains('.'))
+                        .then(|| self.resolved.fn_by_name_in(&self.module, &written))
+                        .flatten()
+                        .map(|f| &self.resolved.fns[f as usize])
+                        .filter(|f| f.owner.is_none());
+                    if let Some(f) = hidden {
+                        let whose = if f.name == prelude_fn { "the prelude's" } else { "this module's" };
+                        d = d.with_note(format!(
+                            "this local `{0}` hides {1} function `{0}`; to call that function, \
+                             rename the local",
+                            written, whose
+                        ));
+                    }
+                    self.diags.push(d);
                 }
                 self.lit(ExprKind::Error, TyId::ERROR, span)
             }
@@ -6441,7 +6513,7 @@ impl<'a> Checker<'a> {
     ) -> hir::Expr {
         let def = self.types.trait_def(tr);
         let Some((index, method)) = def.method(&name.name) else {
-            let trait_name = def.name.clone();
+            let trait_name = written_trait(&def.name);
             let available: Vec<String> = def.methods.iter().map(|m| m.name.clone()).collect();
             let mut d = Diagnostic::error(
                 codes::E0205,
@@ -6800,7 +6872,7 @@ impl<'a> Checker<'a> {
                         let names: Vec<String> = def
                             .bounds
                             .iter()
-                            .map(|b| self.types.trait_def(*b).name.clone())
+                            .map(|b| written_trait(&self.types.trait_def(*b).name))
                             .collect();
                         d.with_note(format!(
                             "`{}` is bounded by {}, and none of those declares `{}`",
@@ -8639,7 +8711,11 @@ impl<'a> Checker<'a> {
     /// somebody made and a reader can see.
     ///
     /// [§7.3]: ../../../SPECIFICATION.md#73-correlated-results-and-taint-analysis
-    fn dropped_error(&mut self, expr: &hir::Expr) {
+    ///
+    /// `projected` is a statement that is a tuple projection, `(f(1), f(2)).0`:
+    /// the element it takes is what is thrown away, and it is no call, so it
+    /// is not called one.
+    fn dropped_error(&mut self, expr: &hir::Expr, projected: bool) {
         let Some(holder) = self.holder(expr.ty) else {
             return;
         };
@@ -8674,6 +8750,13 @@ impl<'a> Checker<'a> {
                 "`await` it and check what it gives, or bind the task and hand it to \
                  something that will, such as `task.all`",
             ),
+        };
+        let what = if projected {
+            what.replace("this call returns", "this tuple element holds")
+                .replace("this call may return", "this tuple element may hold")
+                .replace("this call starts a task", "this tuple element is a task")
+        } else {
+            what.to_string()
         };
         self.diags.push(
             Diagnostic::error(codes::E0302, "error is never checked")
@@ -10392,6 +10475,7 @@ impl<'a> Checker<'a> {
         // what its value holds was already settled where it was checked —
         // reported as having no effect, or a statement in its own right.
         let mut inert = Vec::new();
+        let mut projected = Vec::new();
 
         for arm in &m.arms {
             self.set_flow_state(start.clone());
@@ -10486,6 +10570,7 @@ impl<'a> Checker<'a> {
                 ast::MatchBody::Block(b) => (self.match_block(b, want, discard), false),
             };
             inert.push(settled);
+            projected.push(matches!(&arm.body, ast::MatchBody::Expr(e) if is_tuple_projection(e)));
             // An arm producing a `T` where a `?T` is wanted is subsumption,
             // exactly as it is for a `let` or an argument — so `Text(s) => s`
             // and `other => nil` are arms of one `Option<str>` match rather
@@ -10591,9 +10676,9 @@ impl<'a> Checker<'a> {
         // or not the arms agree: `0 => fails(), _ => fails()` agrees on
         // `error`, and throws it away just the same.
         if discard {
-            for (arm, settled) in arms.iter().zip(&inert) {
+            for ((arm, settled), projected) in arms.iter().zip(&inert).zip(&projected) {
                 if !settled {
-                    self.dropped_error(&arm.body);
+                    self.dropped_error(&arm.body, *projected);
                 }
             }
         }
@@ -11069,7 +11154,7 @@ impl<'a> Checker<'a> {
                     self.note_impl_use(*t, *bound, span);
                     continue;
                 }
-                let (tn, bn) = (self.types.name(*t), self.types.trait_def(*bound).name.clone());
+                let (tn, bn) = (self.types.name(*t), written_trait(&self.types.trait_def(*bound).name));
                 let mut d = Diagnostic::error(
                     codes::E0208,
                     format!("`{}` does not implement `{}`", tn, bn),
@@ -11098,7 +11183,7 @@ impl<'a> Checker<'a> {
                                 tn,
                                 bn,
                                 param,
-                                self.types.trait_def(unmet).name,
+                                written_trait(&self.types.trait_def(unmet).name),
                                 self.types.name(arg)
                             )),
                             None => d.with_note(format!(
@@ -11121,7 +11206,7 @@ impl<'a> Checker<'a> {
                     TyKind::Dyn(tr) => d.with_note(format!(
                         "{} has only what `{}` declares",
                         self.types.with_article(*t),
-                        self.types.trait_def(tr).name
+                        written_trait(&self.types.trait_def(tr).name)
                     )),
                     _ if self.type_index_of(*t).is_some() => {
                         d.with_note(format!("write `{}`", self.impl_to_write(&bn, *t)))
@@ -13852,7 +13937,7 @@ impl<'a> Checker<'a> {
                     Some(bounded) => bounded,
                     None => {
                         let (tn, fname) =
-                            (self.types.trait_def(tr).name.clone(), self.types.name(found));
+                            (written_trait(&self.types.trait_def(tr).name), self.types.name(found));
                         let header = self.impl_to_write(&tn, found);
                         format!("`{}` does not implement `{}`; write `{}` to use it here", fname, tn, header)
                     }
@@ -14447,7 +14532,7 @@ fn check_impls(
                         if d.bounds.contains(b) {
                             continue;
                         }
-                        let bound = types.trait_def(*b).name.clone();
+                        let bound = written_trait(&types.trait_def(*b).name);
                         diags.push(
                             Diagnostic::error(
                                 codes::E0208,
@@ -16209,6 +16294,24 @@ fn check_compared_params(
         };
         diags.push(d);
     }
+}
+
+/// Whether an expression is a tuple projection, `(f(1), f(2)).0`, through
+/// any parentheses: what a statement of it throws away is an element, not
+/// what a call returned.
+fn is_tuple_projection(e: &ast::Expr) -> bool {
+    match e {
+        ast::Expr::Paren { inner, .. } => is_tuple_projection(inner),
+        ast::Expr::Field { name, .. } => name.name.bytes().all(|b| b.is_ascii_digit()),
+        _ => false,
+    }
+}
+
+/// A trait's name as a program writes it. The prelude's traits are held as
+/// `prelude.Hash`, and a note that says so names something no program can
+/// write: the reader's own spelling is `Hash`.
+fn written_trait(name: &str) -> String {
+    name.strip_prefix("prelude.").unwrap_or(name).to_string()
 }
 
 /// The last segment of a possibly-qualified name.

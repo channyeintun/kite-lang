@@ -554,42 +554,92 @@ fn run_tests(result: &kite_driver::Compilation, path: &str, src: &str) -> ExitCo
 /// that declares a type can be compiled at all: it lands at file scope, where
 /// a declaration goes.
 ///
-/// One compilation for all of them also means one failure names them all,
-/// which is right — an example that does not compile is a broken file, not a
-/// broken example.
+/// **A fence that does not compile fails alone.** One compilation fails for
+/// every fence in it, so when it fails the blame is found by where the errors
+/// are: the first fence that holds one is reported with its own diagnostics,
+/// by the line it opened on, and the rest are compiled again without it —
+/// until they compile. Fences are taken out one at a time, the first first,
+/// because a fence that does not parse can leave errors in the ones after it,
+/// and because a fence may use what another declares: taken out with the bad
+/// one, it would be blamed for that one. When the module itself is what is
+/// broken, or no error is inside a fence (two fences that declare one name
+/// are told at the module's own line, say), no fence is singled out and every
+/// remaining one is reported, as before.
 fn run_doc_tests(
     out: &mut dyn Write,
     path: &str,
     src: &str,
     docs: &[kite_driver::doctest::DocTest],
 ) -> (usize, usize) {
-    let (augmented, names, remap) = kite_driver::doctest::augment_mapped(src, docs);
+    use kite_driver::doctest::{augment_mapped, diagnostic_line, render_diagnostics, render_diagnostics_where};
     // **Never a release build**, whatever `--release` said. An example fails
     // by trapping — an `assert` that did not hold — and a release build drops
     // `assert`, so under `--release` every example with a wrong claim in it
     // passed. `--release` still applies to the `test_…` functions, which fail
     // by returning an error rather than by asserting.
-    let compiled = kite_driver::compile_with(path, &augmented, Emit::Kbc, false);
+    let build = |docs: &[&kite_driver::doctest::DocTest]| {
+        let owned: Vec<kite_driver::doctest::DocTest> = docs
+            .iter()
+            .map(|d| kite_driver::doctest::DocTest {
+                name: d.name.clone(),
+                line: d.line,
+                code: d.code.clone(),
+                declares: d.declares,
+            })
+            .collect();
+        let (augmented, names, remap) = augment_mapped(src, &owned);
+        let compiled = kite_driver::compile_with(path, &augmented, Emit::Kbc, false);
+        (compiled, names, remap)
+    };
+    let mut docs: Vec<&kite_driver::doctest::DocTest> = docs.iter().collect();
+    let (mut compiled, mut names, mut remap) = build(&docs);
+    let mut bad = 0;
     if compiled.failed() {
-        // Every fence is named by where it opened, since one compilation
-        // fails for all of them. The diagnostics are moved back from the
-        // augmented source to the file, so each points at the line it was
-        // written on — an editor or a terminal can jump to it.
-        for d in docs {
-            let _ = writeln!(out, "FAILED   {}:{} (doc example)", path, d.line);
+        // Is it the module? Then every fence is named, once, with the
+        // module's own diagnostics.
+        let (alone, _, alone_map) = build(&[]);
+        if alone.failed() {
+            for d in &docs {
+                let _ = writeln!(out, "FAILED   {}:{} (doc example)", path, d.line);
+            }
+            let _ = write!(out, "{}", render_diagnostics(&alone, path, src, &alone_map));
+            return (docs.len(), docs.len());
         }
-        let shown = kite_driver::doctest::render_diagnostics(&compiled, path, src, &remap);
-        let _ = write!(out, "{}", shown);
-        return (docs.len(), docs.len());
     }
-
+    while compiled.failed() {
+        let errors: Vec<u32> = compiled
+            .diags
+            .iter()
+            .filter(|d| d.severity == kite_diag::Severity::Error)
+            .filter_map(|d| diagnostic_line(&compiled, path, &remap, d))
+            .collect();
+        let Some(at) = docs.iter().position(|d| errors.iter().any(|l| d.lines().contains(l))) else {
+            // No error is inside a fence: nobody is singled out.
+            for d in &docs {
+                let _ = writeln!(out, "FAILED   {}:{} (doc example)", path, d.line);
+            }
+            let _ = write!(out, "{}", render_diagnostics(&compiled, path, src, &remap));
+            return (bad + docs.len(), bad + docs.len());
+        };
+        let d = docs.remove(at);
+        bad += 1;
+        let _ = writeln!(out, "FAILED   {}:{} (doc example)", path, d.line);
+        let _ = write!(
+            out,
+            "{}",
+            render_diagnostics_where(&compiled, path, src, &remap, |x| {
+                diagnostic_line(&compiled, path, &remap, x).is_some_and(|l| d.lines().contains(&l))
+            })
+        );
+        (compiled, names, remap) = build(&docs);
+    }
     let mut failed = 0;
     // A declaring fence contributes no name: compiling was the whole test.
     for d in docs.iter().filter(|d| d.declares) {
         let _ = writeln!(out, "ok       {}:{} (doc example, compiled)", path, d.line);
     }
     let runnable: Vec<&kite_driver::doctest::DocTest> =
-        docs.iter().filter(|d| !d.declares).collect();
+        docs.iter().copied().filter(|d| !d.declares).collect();
     for (name, d) in names.iter().zip(runnable) {
         let mut captured = Vec::new();
         let label = format!("{}:{} (doc example)", path, d.line);
@@ -606,7 +656,7 @@ fn run_doc_tests(
             let _ = writeln!(out, "         | {}", line);
         }
     }
-    (failed, docs.len())
+    (failed + bad, docs.len() + bad)
 }
 
 /// `kitec fix` — apply what the compiler already knows how to do.

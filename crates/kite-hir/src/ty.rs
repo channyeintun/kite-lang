@@ -1222,7 +1222,12 @@ impl Types {
                     format!("fn({}) -> {}", ps.join(", "), self.name(*ret))
                 }
             }
-            TyKind::Dyn(t) => format!("dyn {}", self.trait_def(*t).name),
+            // The prelude's traits are held as `prelude.Debug`; a program
+            // writes `dyn Debug`.
+            TyKind::Dyn(t) => {
+                let name = &self.trait_def(*t).name;
+                format!("dyn {}", name.strip_prefix("prelude.").unwrap_or(name))
+            }
             TyKind::Param { name, .. } => (*name).to_string(),
         }
     }

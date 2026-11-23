@@ -1,0 +1,11 @@
+// `(f(1), f(2)).0` as a statement drops what its element holds. The element is
+// a projection, not a call, and the label does not call it one; the element
+// left behind in the tuple is reported at its own place.
+
+fn f(n: int) -> (int, error) {
+    return n, nil
+}
+
+fn main() {
+    (f(1), f(2)).0 //~ ERROR E0302 //~ ERROR E0302
+}

@@ -135,7 +135,9 @@ A ` ```kite ` fence is compiled and run by `kitec test`, alongside the file's
 everything the comment documents is in scope with no import to get wrong; a
 fence that declares a type or a function lands at file scope and is checked by
 compiling — it is not run, so an `assert` inside a function it declares is
-never evaluated; a fence holds declarations or statements, not both. `kitec
+never evaluated; a fence holds declarations or statements, not both, and one
+that does not compile fails alone — it is reported `FAILED` with the line it
+opened on and its own diagnostics, and the other examples still run. `kitec
 test` and `kitec doc` take one file: a file of a directory
 module tested on its own is compiled as that file alone, so its fences and
 `test_…` functions do not see what its sibling files declare — a directory
@@ -1873,7 +1875,9 @@ that large as inexact. A struct, like a named payload, is read from an object,
 and its failures are worded one way: a key that is absent is `S.f: missing`,
 and one that is there with the wrong type — `null` included, unless the field
 is optional — says what was expected, as `S.f: expected a whole number` or
-`S.f: expected an array`. Where it cannot go — a function field, a `dyn Trait`
+`S.f: expected an array`; a field of another derived type that is given a document
+of the wrong shape says so under the field's path, `S.f: Inner: expected an object
+with the keys a`. Where it cannot go — a function field, a `dyn Trait`
 — it says which field stopped it and what would fix it, and the hand-written
 implementation is still there to write. That one error is the only one: the
 method is still declared, so a call to it elsewhere is not refused again.

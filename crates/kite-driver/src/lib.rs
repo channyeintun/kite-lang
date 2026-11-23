@@ -1711,7 +1711,7 @@ mod tests {
         let text = c.render_diagnostics();
         assert!(!text.contains("write `impl<T> Display for S<T>"), "{}", text);
         assert!(text.contains("only where `T: Display`, and `[int]` is not one"), "{}", text);
-        assert!(text.contains("only where `T: prelude.Display`, and `[int]` is not one"), "{}", text);
+        assert!(!text.contains("prelude.Display"), "{}", text);
         assert!(text.contains("build the text: `join_ints(xs, \", \")`"), "{}", text);
     }
 

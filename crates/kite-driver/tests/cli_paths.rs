@@ -315,6 +315,45 @@ fn an_error_in_a_doc_example_points_at_the_line_it_was_written_on() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// One bad fence fails only itself. The fences used to be compiled as one
+/// unit, so a fence that mixes a declaration with a statement (which does not
+/// parse) marked every example in the file FAILED.
+#[test]
+fn a_bad_doc_example_fails_alone() {
+    let src = "/// One.\n///\n/// ```kite\n/// assert(one() == 1, \"one\")\n/// ```\npub fn one() -> int {\n    return 1\n}\n\n\
+/// Mixed.\n///\n/// ```kite\n/// fn helper() -> int { return 2 }\n/// assert(helper() == 2, \"two\")\n/// ```\npub fn two() -> int {\n    return 2\n}\n\n\
+/// Three.\n///\n/// ```kite\n/// assert(three() == 3, \"three\")\n/// ```\npub fn three() -> int {\n    return 3\n}\n";
+    let dir = scratch("doc-alone", "t.kite", src);
+    let Some((ok, out, err)) = kitec_in(&dir, &["test", "t.kite"]) else { return };
+    assert!(!ok, "{}{}", out, err);
+    assert!(out.contains("FAILED   ./t.kite:12 (doc example)"), "{}", out);
+    assert!(out.contains("ok       ./t.kite:3 (doc example)"), "{}", out);
+    assert!(out.contains("ok       ./t.kite:22 (doc example)"), "{}", out);
+    assert!(out.contains("2 passed, 1 failed"), "{}", out);
+    assert!(!out.contains("FAILED   t.kite:3 "), "{}", out);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A fence that uses what another fence declares is not blamed for a third
+/// fence's mistake: compiled without the bad one, it still has the helper it
+/// calls. And of two fences that declare one name, only the second fails.
+#[test]
+fn a_fence_that_uses_another_is_not_blamed_for_a_third() {
+    let src = "/// A.\n///\n/// ```kite\n/// fn helper() -> int {\n///     return 2\n/// }\n/// ```\npub fn one() -> int {\n    return 1\n}\n\n\
+/// B.\n///\n/// ```kite\n/// assert(helper() == 2, \"two\")\n/// ```\npub fn two() -> int {\n    return 2\n}\n\n\
+/// C.\n///\n/// ```kite\n/// assert(one() == \"x\", \"bad\")\n/// ```\npub fn three() -> int {\n    return 3\n}\n\n\
+/// D.\n///\n/// ```kite\n/// fn helper() -> int {\n///     return 3\n/// }\n/// ```\npub fn four() -> int {\n    return 4\n}\n";
+    let dir = scratch("doc-uses", "t.kite", src);
+    let Some((ok, out, err)) = kitec_in(&dir, &["test", "t.kite"]) else { return };
+    assert!(!ok, "{}{}", out, err);
+    assert!(out.contains("ok       ./t.kite:3 (doc example, compiled)"), "{}", out);
+    assert!(out.contains("ok       ./t.kite:14 (doc example)"), "{}", out);
+    assert!(out.contains("FAILED   ./t.kite:23 (doc example)"), "{}", out);
+    assert!(out.contains("FAILED   ./t.kite:32 (doc example)"), "{}", out);
+    assert!(out.contains("2 passed, 2 failed"), "{}", out);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// A file with no tests says so in one line and still succeeds. The line used
 /// to describe a signature, `-> (int, error)`, that a test does not need.
 #[test]
@@ -462,5 +501,122 @@ fn a_module_beside_an_entry_below_its_manifest_is_named_relatively() {
     assert!(from_above.contains("─ src/money.kite:2:"), "{}", from_above);
     let Some((_, _, from_inside)) = kitec_in(&dir.join("src"), &["check", "main.kite"]) else { return };
     assert!(from_inside.contains("─ ../src/money.kite:2:"), "{}", from_inside);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A note about a prelude trait names it as a program writes it: `Hash`, not
+/// the `prelude.Hash` it is held as.
+#[test]
+fn a_note_about_a_prelude_trait_does_not_say_prelude() {
+    let dir = scratch(
+        "prelude-trait",
+        "t.kite",
+        "struct P {\n    a: int\n}\n\nfn s1<T: Hash>(x: T) {\n}\n\nfn s2<T: Display>(x: T) {\n}\n\n\
+         fn d1(x: dyn Debug) {\n}\n\nfn d2(x: dyn Display) {\n    io.print(x.nothing())\n}\n\n\
+         fn main() {\n    s1(P{ a: 1 })\n    s2(P{ a: 1 })\n    d1(P{ a: 1 })\n}\n",
+    );
+    let Some((ok, _, err)) = kitec_in(&dir, &["check", "t.kite"]) else { return };
+    assert!(!ok, "{}", err);
+    assert!(err.contains("`P` does not implement `Hash`"), "{}", err);
+    assert!(err.contains("`dyn Display` has no method `nothing`"), "{}", err);
+    assert!(!err.contains("prelude."), "{}", err);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// After `use std/errors as errs`, the module's old name is not one this file
+/// knows, and the error says what it is called here. The member that is
+/// missing is named under the alias too.
+#[test]
+fn a_module_used_by_its_old_name_says_what_it_is_called_here() {
+    let dir = scratch(
+        "alias-old-name",
+        "t.kite",
+        "use std/errors as errs\nuse std/text as t\nuse std/json as j\n\nfn f(v: json.Json) {\n}\n\n\
+         fn main() {\n    let g = errors.wrap(errs.new(\"x\"), \"c\")\n    \
+         io.print(text.upper(\"a\"))\n    io.print(errs.nothing(g))\n}\n",
+    );
+    let Some((ok, _, err)) = kitec_in(&dir, &["check", "t.kite"]) else { return };
+    assert!(!ok, "{}", err);
+    assert!(err.contains("`errors` is imported here as `errs`"), "{}", err);
+    assert!(err.contains("`text` is imported here as `t`"), "{}", err);
+    assert!(err.contains("cannot find `nothing` in module `errs`"), "{}", err);
+    // A type through the old name, as a parameter's type or a literal's.
+    assert!(err.contains("`json` is imported here as `j`, so this file writes `j.Json`"), "{}", err);
+    assert!(!err.contains("is that module imported?"), "{}", err);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `(f(1), f(2)).0` as a statement is a projection, and its label does not
+/// call it a call.
+#[test]
+fn a_projected_tuple_element_is_not_called_a_call() {
+    let dir = scratch(
+        "projection-label",
+        "t.kite",
+        "fn f(n: int) -> (int, error) {\n    return n, nil\n}\n\nfn main() {\n    (f(1), f(2)).0\n    ((f(3), f(4)).0)\n    \
+         match 1 {\n        1 => (f(5), f(6)).0\n        _ => {}\n    }\n}\n",
+    );
+    let Some((ok, _, err)) = kitec_in(&dir, &["check", "t.kite"]) else { return };
+    assert!(!ok, "{}", err);
+    assert!(err.contains("this tuple element holds a value and an error"), "{}", err);
+    // In parentheses, and as the arm of a statement `match`, it is the same.
+    assert_eq!(err.matches("this tuple element holds").count(), 3, "{}", err);
+    assert!(!err.contains("this call returns"), "{}", err);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Calling a local that hides a prelude function says so, as a module's
+/// constant of that name does.
+#[test]
+fn a_local_that_hides_a_prelude_function_says_so() {
+    let dir = scratch(
+        "local-hides",
+        "t.kite",
+        "fn main() {\n    let max = 5\n    let size = 2\n    io.print(max(1, 2))\n    io.print(size(1))\n}\n",
+    );
+    let Some((ok, _, err)) = kitec_in(&dir, &["check", "t.kite"]) else { return };
+    assert!(!ok, "{}", err);
+    assert!(err.contains("this local `max` hides the prelude's function `max`"), "{}", err);
+    assert!(!err.contains("local `size` hides"), "{}", err);
+    let _ = std::fs::remove_dir_all(&dir);
+    // Where the module declares its own `max`, that is what the local hides.
+    let dir = scratch(
+        "local-hides-own",
+        "t.kite",
+        "fn max(a: int, b: int) -> int {\n    return a\n}\n\nfn main() {\n    let max = 5\n    io.print(max(1, 2))\n}\n",
+    );
+    let Some((ok, _, err)) = kitec_in(&dir, &["check", "t.kite"]) else { return };
+    assert!(!ok, "{}", err);
+    assert!(err.contains("this local `max` hides this module's function `max`"), "{}", err);
+    assert!(!err.contains("prelude"), "{}", err);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A program given by a relative path has its manifests and its dependencies'
+/// files named relative too, and folded: `E0405`'s title printed the
+/// manifest's absolute path, and a dependency's file was `…/app/../a/a.kite`.
+#[test]
+fn a_dependency_and_its_manifest_are_named_as_the_entry_is() {
+    let dir = scratch("dep-paths", "unused.kite", "");
+    for (rel, text) in [
+        ("a/a.kite", "pub fn hello() -> int {\n    return \"s\"\n}\n"),
+        ("a/kite.toml", "[package]\nname = \"a\"\nversion = \"0.1.0\"\n"),
+        ("app/kite.toml", "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n[dependencies]\na = { path = \"../a\" }\n"),
+        ("app/main.kite", "use a\n\nfn main() {\n    io.print(a.hello())\n}\n"),
+    ] {
+        std::fs::create_dir_all(dir.join(rel).parent().unwrap()).expect("dir");
+        std::fs::write(dir.join(rel), text).expect("write");
+    }
+    let Some((ok, _, err)) = kitec_in(&dir, &["check", "app/main.kite"]) else { return };
+    assert!(!ok, "{}", err);
+    assert!(err.contains("─ a/a.kite:2:"), "folded and relative: {}", err);
+    assert!(!err.contains(".."), "{}", err);
+    // The same package with a manifest that does not read.
+    std::fs::write(dir.join("a/kite.toml"), "[package]\nname = \"a\"\nversion = \"0.1.0\"\nedition = \"2024\"\n").expect("write");
+    let Some((ok, _, err)) = kitec_in(&dir, &["check", "app/main.kite"]) else { return };
+    assert!(!ok, "{}", err);
+    assert!(err.contains("E0405"), "{}", err);
+    assert!(err.contains("`a/kite.toml` is not a manifest"), "title is relative and folded: {}", err);
+    assert!(!err.contains(dir.to_string_lossy().as_ref()), "no absolute path: {}", err);
     let _ = std::fs::remove_dir_all(&dir);
 }
