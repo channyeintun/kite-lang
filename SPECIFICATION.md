@@ -356,10 +356,10 @@ beside them, and the index is never observable. A key that is, or holds, a
 struct with a `var` field is the exception: the field can change while the
 struct is a key, so such a struct is hashed by its type alone, and the keys
 that differ only inside one are found by comparing them in turn, as every key
-once was. On `wasm32-gc` the hash also stops three levels into a key and reads
-an enum by its variant alone, so keys that differ only deeper than that, or
-only in an enum's payload, are compared in turn in the same way
-([roadmap, Phase 4](docs/06-roadmap.md)).
+once was. On `wasm32-gc` the hash also stops three levels into a key, after
+eight tuples, structs, enums, slices or optionals inside it, and at an enum
+met again inside its own payload, so keys that differ only beyond that are
+compared in turn in the same way ([roadmap, Phase 4](docs/06-roadmap.md)).
 
 **There is no fixed-length array.** A `[N]T` was listed here for a long time
 and never existed in the compiler, and the resolution was to strike it rather

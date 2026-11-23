@@ -681,9 +681,10 @@ the slots; that changes nothing a holder can see, nor does building the index
 where a lookup first wants it, so both are done to a shared map too. The hash
 is generated per key type and agrees with the generated `==`: `-0.0` as
 `0.0`, an error by its message, a struct with a `var` field by its type alone,
-as the other two do. It reads a key three levels deep and an enum by its
-variant, which bounds its code and stack; keys that differ only below that
-share a bucket and are compared. All of it is helper functions, one per map
+as the other two do; an enum by its variant and that variant's payload. It
+reads a key three levels deep, into at most eight aggregates, and an enum
+inside its own payload by its variant alone, which bounds its code and stack;
+keys that differ only beyond that share a bucket and are compared. All of it is helper functions, one per map
 type and operation a program uses, so a program with no map is not a byte
 bigger. A small program with one `{str: int}` grew from 1,221 to 2,093 bytes
 released. 100,000 inserts, lookups and removals take a tenth of a second under

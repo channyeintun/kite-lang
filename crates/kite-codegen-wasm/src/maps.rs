@@ -1195,6 +1195,11 @@ fn reaches_str(ty: TyId, types: &Types, depth: u32) -> bool {
             !def.fields.iter().any(|f| f.mutable)
                 && def.fields.iter().any(|f| reaches_str(f.ty, types, depth + 1))
         }
+        TyKind::Enum(e) => types
+            .enum_def(*e)
+            .variants
+            .iter()
+            .any(|v| v.fields.iter().any(|f| reaches_str(f.ty, types, depth + 1))),
         _ => false,
     }
 }
@@ -1211,8 +1216,8 @@ fn reaches_str(ty: TyId, types: &Types, depth: u32) -> bool {
 ///   what two errors are compared by;
 /// - a tuple, an optional's payload, and a struct with no `var` field by
 ///   their parts in order; a slice by its length and its elements;
-/// - an enum by its variant alone, and a map by how many entries it has —
-///   coarser than `==`, never finer;
+/// - an enum by its variant and that variant's payload, as a struct;
+/// - a map by how many entries it has — coarser than `==`, never finer;
 /// - a struct with a `var` field by its type alone. The field can change
 ///   while the struct is a key, through any other handle to it, and a hash of
 ///   the fields would have been taken before the change. The keys that differ
@@ -1224,14 +1229,27 @@ fn reaches_str(ty: TyId, types: &Types, depth: u32) -> bool {
 /// still hash alike; a key whose differences are all deeper than that shares
 /// a bucket with the others like it and is found by comparing. That bounds
 /// the hash's code, which is emitted for each key type, and its stack: a key
-/// may be a recursive type as deep as the program makes it.
+/// may be a recursive type as deep as the program makes it. Width is bounded
+/// the same way: past [`HASH_PARTS`] aggregates read, in the order the walk
+/// meets them, the rest hash as a constant too — a tree-shaped enum's three
+/// levels of variants would otherwise be kilobytes of hash. And an enum met
+/// again inside its own payload is read by its variant alone, for the same
+/// reason.
 struct HashGen<'a> {
     keys: KeyEquality<'a>,
     str_hash: Option<u32>,
     first: u32,
     locals: Vec<ValType>,
     code: Vec<Instruction<'static>>,
+    /// Aggregates the walk may still read into.
+    parts: u32,
+    /// The enums whose payload is being read, outermost first.
+    open: Vec<kite_hir::EnumId>,
 }
+
+/// How many aggregates — tuples, structs, enums with a payload, slices,
+/// optionals — one key type's hash reads into. See [`HashGen`].
+const HASH_PARTS: u32 = 8;
 
 impl<'a> HashGen<'a> {
     fn new(keys: KeyEquality<'a>, str_hash: Option<u32>, params: u32) -> Self {
@@ -1241,7 +1259,18 @@ impl<'a> HashGen<'a> {
             first: params,
             locals: Vec::new(),
             code: Vec::new(),
+            parts: HASH_PARTS,
+            open: Vec::new(),
         }
+    }
+
+    /// Whether the walk may read into one more aggregate, counting it.
+    fn take_part(&mut self) -> bool {
+        if self.parts == 0 {
+            return false;
+        }
+        self.parts -= 1;
+        true
     }
 
     fn local(&mut self, t: ValType) -> u32 {
@@ -1299,6 +1328,17 @@ impl<'a> HashGen<'a> {
     fn value(&mut self, ty: TyId, depth: u32) {
         let (types, layout) = (self.keys.types, self.keys.layout);
         let vt = val_type_with(ty, types, layout);
+        let aggregate = match types.kind(ty) {
+            TyKind::Optional(_) | TyKind::Tuple(_) | TyKind::Slice(_) => true,
+            TyKind::Struct(s) => !types.struct_def(*s).fields.iter().any(|f| f.mutable),
+            TyKind::Enum(e) => {
+                !self.open.contains(e) && types.enum_def(*e).variants.iter().any(|v| !v.fields.is_empty())
+            }
+            _ => false,
+        };
+        if aggregate && depth < HASH_DEPTH && !self.take_part() {
+            return self.constant(ty, 8);
+        }
         match types.kind(ty) {
             TyKind::Str => match self.str_hash {
                 Some(h) => self.push(Instruction::Call(h)),
@@ -1377,11 +1417,60 @@ impl<'a> HashGen<'a> {
                     .collect();
                 self.fold(at, s.index() as i32, parts, depth);
             }
+            // The variant, and the payload of the one it is: `==` compares
+            // the payloads of two values of one variant, so they are read
+            // the way a struct's fields are. An enum read by its variant
+            // alone put every `Id(n)` of a map in one bucket, and a map of
+            // forty thousand of them took ten seconds where the VM took a
+            // tenth of one.
             TyKind::Enum(e) => {
-                self.push(Instruction::StructGet {
-                    struct_type_index: layout.enum_base_type(*e),
-                    field_index: layout.enum_shift(*e),
-                });
+                let (base, shift) = (layout.enum_base_type(*e), layout.enum_shift(*e));
+                let def = types.enum_def(*e);
+                let tag = |g: &mut Self| {
+                    g.push(Instruction::StructGet {
+                        struct_type_index: base,
+                        field_index: shift,
+                    });
+                };
+                if self.open.contains(e) || def.variants.iter().all(|v| v.fields.is_empty()) {
+                    return tag(self);
+                }
+                self.open.push(*e);
+                let (at, variant, acc) =
+                    (self.local(vt), self.local(ValType::I32), self.local(ValType::I32));
+                self.push(Instruction::LocalTee(at));
+                tag(self);
+                self.push(Instruction::LocalTee(variant));
+                self.push(Instruction::LocalSet(acc));
+                for (v, variant_def) in def.variants.iter().enumerate() {
+                    if variant_def.fields.is_empty() {
+                        continue;
+                    }
+                    let record = layout.variant_type(*e, v as u32);
+                    self.push(Instruction::LocalGet(variant));
+                    self.push(Instruction::I32Const(v as i32));
+                    self.push(Instruction::I32Eq);
+                    self.push(Instruction::If(BlockType::Empty));
+                    let parts = variant_def
+                        .fields
+                        .iter()
+                        .enumerate()
+                        .map(|(i, fd)| {
+                            (fd.ty, vec![
+                                Instruction::RefCastNonNull(HeapType::Concrete(record)),
+                                Instruction::StructGet {
+                                    struct_type_index: record,
+                                    field_index: i as u32 + 1 + shift,
+                                },
+                            ])
+                        })
+                        .collect();
+                    self.fold(at, v as i32, parts, depth);
+                    self.push(Instruction::LocalSet(acc));
+                    self.push(Instruction::End);
+                }
+                self.open.pop();
+                self.push(Instruction::LocalGet(acc));
             }
             TyKind::Map(..) => match layout.map_layout(ty) {
                 Some(ml) => self.push(Instruction::StructGet {

@@ -376,6 +376,41 @@ fn main() {
     agrees_within("map-deep-keys", src, "199990000 20000\n", Duration::from_secs(20), true);
 }
 
+/// An enum key is hashed by its payload as well as its variant, on Wasm as
+/// on the other two. Wasm's hash read the variant alone, so every `Id(n)`
+/// shared one bucket and was found by comparing: 40,000 of them took ten
+/// seconds under Node where the VM took a tenth of one, and these 100,000
+/// would take about a minute.
+#[test]
+fn enum_keys_are_hashed_by_their_payload() {
+    let src = r#"enum Key {
+    Id(int)
+    Pair(a: int, b: str)
+    None
+}
+
+fn main() {
+    var m: {Key: int} = {}
+    for i in 0..100000 {
+        m[Id(i)] = i
+        if i % 4 == 0 {
+            m[Pair(a: i, b: "p")] = 1
+        }
+    }
+    m[None] = 2
+    var s = 0
+    for i in 0..100000 {
+        s += or_else(m[Id(i)], 0)
+    }
+    for i in 0..50000 {
+        m.remove(Id(i))
+    }
+    io.print("\(s) \(m.len()) \(or_else(m[Pair(a: 8, b: "p")], 0)) \(or_else(m[None], 0))")
+}
+"#;
+    agrees_within("map-enum-keys", src, "4999950000 75001 1 2\n", Duration::from_secs(20), true);
+}
+
 /// A slice or a map grown across suspensions is written in place, as it is
 /// outside `async`. The task's frame kept its own reference to every local it
 /// had spilled, so each one came back from a suspension looking shared and

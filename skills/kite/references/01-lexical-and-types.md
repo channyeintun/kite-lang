@@ -595,9 +595,10 @@ A map is hashed on every backend, so a read, a write and a `remove` cost the
 same at any size — unless the key is, or holds, a struct with a `var` field:
 those are hashed by their type alone, since the field can change while the
 struct is a key, so such keys are compared one by one. A `--emit wasm` build
-also hashes a key only three levels deep and an enum key by its variant, so
-keys that differ only below that, or only in an enum's payload, are compared
-one by one there too.
+also hashes a key only three levels deep, into at most eight tuples, structs,
+enums, slices or optionals, and an enum inside its own payload (a tree) by its
+variant alone, so keys that differ only beyond that are compared one by one
+there too.
 
 ```kite
 fn main() {
