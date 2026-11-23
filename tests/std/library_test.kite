@@ -169,6 +169,12 @@ fn checks() -> [error] {
     out.push(test.equal_str(fmt.pad("ab", 4), "ab  ", "pad"))
     out.push(test.equal_str(fmt.pad_left("ab", 4), "  ab", "pad_left"))
     out.push(test.equal_str(fmt.centre("ab", 6), "  ab  ", "centre"))
+    // Padding is one `repeat` now, not a space a pass: a width of a hundred
+    // thousand took seconds. Narrower than the text, it leaves it alone.
+    out.push(test.equal_int(fmt.pad("x", 100000).len() + fmt.pad_left("x", 100000).len(), 200000, "a wide pad"))
+    out.push(test.is_true(fmt.pad("abc", 1) == "abc" && fmt.pad_left("abc", -5) == "abc", "a pad narrower than the text"))
+    out.push(test.equal_str(fmt.centre("abc", 6), " abc  ", "centre gives the odd space to the right"))
+    out.push(test.equal_str(fmt.hex(255, 6) + " " + fmt.fixed(0.5, 3), "0000ff 0.500", "zero padding"))
     out.push(test.equal_str(fmt.ellipsis("abcdef", 4), "abc…", "ellipsis"))
     out.push(test.equal_str(fmt.ellipsis("abc", 4), "abc", "ellipsis leaves short text alone"))
     // Never wider than asked: a width of zero or less was answered "…".

@@ -7,20 +7,15 @@
 
 /// `s` at least `width` characters wide, padded on the right.
 pub fn pad(s: str, width: int) -> str {
-    var out = s
-    for out.len() < width {
-        out = out + " "
-    }
-    return out
+    // The spaces in one `repeat`, which doubles as it goes. Adding them one
+    // at a time copied the string once per space, so the cost grew with the
+    // square of the width.
+    return s + repeat(" ", width - s.len())
 }
 
 /// `s` at least `width` characters wide, padded on the left.
 pub fn pad_left(s: str, width: int) -> str {
-    var out = s
-    for out.len() < width {
-        out = " " + out
-    }
-    return out
+    return repeat(" ", width - s.len()) + s
 }
 
 /// `s` centred in `width`, with any odd space going to the right.
@@ -191,11 +186,7 @@ fn increment(digits: str) -> str {
 }
 
 fn zeros(count: int) -> str {
-    var out = ""
-    for i in 0..count {
-        out = out + "0"
-    }
-    return out
+    return repeat("0", count)
 }
 
 /// The exact decimal digits of a whole float at or above 2⁵³.
@@ -339,9 +330,7 @@ fn in_base(n: int, base: int, width: int) -> str {
             break
         }
     }
-    for out.len() < width {
-        out = "0" + out
-    }
+    out = zeros(width - out.len()) + out
     if n < 0 {
         return "-" + out
     }
@@ -448,9 +437,6 @@ pub fn row(cells: [str], widths: [int]) -> str {
 }
 
 fn pad_zeros(n: int, places: int) -> str {
-    var out = "\(n)"
-    for out.len() < places {
-        out = "0" + out
-    }
-    return out
+    let written = "\(n)"
+    return zeros(places - written.len()) + written
 }
