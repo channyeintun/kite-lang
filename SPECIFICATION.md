@@ -320,8 +320,9 @@ indexed by byte, natively a string's length is counted once and kept, and for
 the four long strings a program has read most recently, its length and where
 every 64th character starts are found once and kept. A loop that reads five
 or more long strings that are not ASCII in turn finds each one forgotten, and
-walks it from the front again. Kite programs observe the same rule everywhere: indexing and length count Unicode scalar values,
-never bytes or UTF-16 code units.
+walks it from the front again. Kite programs observe the same rule
+everywhere: indexing and length count Unicode scalar values, never bytes or
+UTF-16 code units.
 
 **What a `str` can do**, and it is deliberately little:
 
