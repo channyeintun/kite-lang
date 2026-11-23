@@ -2285,10 +2285,6 @@ const SELF_OUTSIDE_AN_IMPL: &str = "`Self` names a type inside an `impl` block, 
      for; in a trait's default method it is whichever type implements the trait, which is \
      known only by the trait's methods, so reach it through one of those";
 
-/// An `impl` header naming something that is not a struct or an enum: an
-/// alias of one, such as `type Id = int`, or a trait. Either was accepted and
-/// its block never reached, since nothing has the alias or the trait itself
-/// as its type.
 /// The `E0401` for an `impl` header in `module` naming `named` as written at
 /// `header`, when that is another module's declaration not marked `pub`.
 fn private_in_header(map: &ResolveMap, module: &str, named: u32, header: &TypePath) -> Option<Diagnostic> {
@@ -2309,6 +2305,10 @@ fn private_in_header(map: &ResolveMap, module: &str, named: u32, header: &TypePa
     )
 }
 
+/// An `impl` header naming something that is not a struct or an enum: an
+/// alias of one, such as `type Id = int`, or a trait. Either was accepted and
+/// its block never reached, since nothing has the alias or the trait itself
+/// as its type.
 fn not_for_an_alias(file: &SourceFile, map: &ResolveMap, named: u32, header: &TypePath) -> Diagnostic {
     let decl = &map.types[named as usize];
     let d = Diagnostic::error(
