@@ -256,7 +256,7 @@ what a call inferred — all over the same passes the compiler runs.
 |---|---|---|
 | `wasm32-gc` | WasmGC via `wasm-encoder` | Every construct the language has. `--emit wasm` refuses nothing it can express |
 | `kbc` | Register bytecode and a VM | The dev loop, the embedding target, and the differential oracle |
-| bundle | This compiler with the program appended | One file, nothing installed, starts in about a millisecond |
+| bundle | This compiler with the program appended | One file, nothing installed, starts in a few milliseconds (6 to 7 ms for a small program, about 5 more than a process that does nothing) |
 | `native-*` | Cranelift, AOT and JIT | Machine code, with a precise collector in `kite-rt`. `--emit native` writes an object file and links it into an executable with `cc`, against a runtime `kitec` carries inside itself; `run --native` needs no linker. macOS and Linux; Windows is refused, and says why |
 
 Every program in the differential corpus is compiled to **all three** real
@@ -352,7 +352,7 @@ Recorded here rather than left to be discovered:
   AUR account are decisions about identity and hosting, not code.
 - **No Argon2.** It is not in WebCrypto, so it waits on a runtime that has it.
 
-More than 1,300 tests: unit tests per crate, an annotated compile-fail
+More than 1,370 tests: unit tests per crate, an annotated compile-fail
 corpus, a differential corpus that runs every program on **three** backends and
 compares, the standard library's own suite on all three, the host boundary and a real
 socket under Node, the DOM layer and the typed door driven under Node — with

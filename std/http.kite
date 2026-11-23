@@ -118,6 +118,8 @@ extern fn sse_close(id: int) -> int
 
 // ---- requests and responses -------------------------------------------------
 
+/// What a server's handler is asked: the `method`, the `path` (query string
+/// included), the `body`, and the `headers` as `name: value` lines.
 pub struct Request {
     pub method: str
     pub path: str
@@ -127,6 +129,10 @@ pub struct Request {
     pub headers: str
 }
 
+/// An answer: a `status`, a `body` and headers. Build one with [`ok`],
+/// [`not_found`], [`status`] or [`redirect`]; a client receives one from
+/// [`get`] and the others, and the headers it arrived with are read with
+/// [`header`].
 pub struct Response {
     pub status: int
     pub body: str
@@ -140,17 +146,28 @@ pub struct Response {
     outgoing: [Header]
 }
 
+/// A 200 response with this body and no headers.
+///
+/// ```kite
+/// assert(ok("hi").status == 200, "ok is 200")
+/// assert(ok("hi").body == "hi", "and carries the body")
+/// ```
 pub fn ok(body: str) -> Response {
     return Response{ status: 200, body: body, headers: "", outgoing: [] }
 }
 
+/// A 404 response whose body is `not found`.
+///
+/// ```kite
+/// assert(not_found().status == 404, "not found is 404")
+/// ```
 pub fn not_found() -> Response {
     return Response{ status: 404, body: "not found", headers: "", outgoing: [] }
 }
 
 /// A response with any status code. Nothing is checked here, so that a
 /// handler can be tested whatever it builds; [`respond`] refuses a code outside
-/// 200 to 599 (a 1xx is never the last word) and a body on a 204 or a 304,
+/// 200 to 599 (a 1xx is never the last word) and a body on a 204, a 205 or a 304,
 /// and [`run`] answers 500 in its place.
 pub fn status(code: int, body: str) -> Response {
     return Response{ status: code, body: body, headers: "", outgoing: [] }
@@ -428,22 +445,50 @@ fn redirect_word(r: Redirect) -> str {
 
 // ---- the client -------------------------------------------------------------
 
+/// A GET request to `url` and no body, waiting for the answer.
+///
+/// Any status the server answers with, a 404 or a 500 as much as a 200, comes
+/// back as the [`Response`]; the error is for a request that got no answer at
+/// all, and says `http GET <url>:` and the host's reason.
 pub async fn get(url: str) -> (Response, error) {
     return await send("GET", url, "", "")
 }
 
+/// A POST request to `url`, with `body` and a `content-type: application/json`
+/// header, waiting for the answer.
+///
+/// Any status the server answers with, a 404 or a 500 as much as a 200, comes
+/// back as the [`Response`]; the error is for a request that got no answer at
+/// all, and says `http POST <url>:` and the host's reason.
 pub async fn post(url: str, body: str) -> (Response, error) {
     return await send("POST", url, body, "content-type: application/json")
 }
 
+/// A PUT request to `url`, with `body` and a `content-type: application/json`
+/// header, waiting for the answer.
+///
+/// Any status the server answers with, a 404 or a 500 as much as a 200, comes
+/// back as the [`Response`]; the error is for a request that got no answer at
+/// all, and says `http PUT <url>:` and the host's reason.
 pub async fn put(url: str, body: str) -> (Response, error) {
     return await send("PUT", url, body, "content-type: application/json")
 }
 
+/// A DELETE request to `url` and no body, waiting for the answer.
+///
+/// Any status the server answers with, a 404 or a 500 as much as a 200, comes
+/// back as the [`Response`]; the error is for a request that got no answer at
+/// all, and says `http DELETE <url>:` and the host's reason.
 pub async fn delete(url: str) -> (Response, error) {
     return await send("DELETE", url, "", "")
 }
 
+/// A PATCH request to `url`, with `body` and a `content-type: application/json`
+/// header, waiting for the answer.
+///
+/// Any status the server answers with, a 404 or a 500 as much as a 200, comes
+/// back as the [`Response`]; the error is for a request that got no answer at
+/// all, and says `http PATCH <url>:` and the host's reason.
 pub async fn patch(url: str, body: str) -> (Response, error) {
     return await send("PATCH", url, body, "content-type: application/json")
 }
@@ -454,6 +499,11 @@ pub async fn head(url: str) -> (Response, error) {
     return await send("HEAD", url, "", "")
 }
 
+/// An OPTIONS request to `url` and no body, waiting for the answer.
+///
+/// Any status the server answers with, a 404 or a 500 as much as a 200, comes
+/// back as the [`Response`]; the error is for a request that got no answer at
+/// all, and says `http OPTIONS <url>:` and the host's reason.
 pub async fn options(url: str) -> (Response, error) {
     return await send("OPTIONS", url, "", "")
 }
@@ -530,10 +580,13 @@ pub async fn send_with(
 // program: an event arrives when a task asks for one, which is the same shape
 // as awaiting a request and needs no second notion of control flow.
 
+/// An open stream of server-sent events, from [`events`] or [`events_named`].
+/// Take events off it with [`receive`] and end it with [`close`].
 pub struct Events {
     id: int
 }
 
+/// One server-sent event: its `name`, its `id` and its `data`.
 pub struct Event {
     /// The `event:` field, or "message" when the event had none.
     pub name: str
@@ -629,6 +682,8 @@ pub fn close(stream: Events) {
 // needs no framework — so there is no middleware stack, no dependency
 // injection and no ORM here, deliberately.
 
+/// A method, a path pattern and the function that answers requests that fit
+/// them; [`route`] builds one, and [`serve`] and [`run`] take a slice of them.
 pub struct Route {
     pub method: str
     /// A path, with `:name` standing for one segment.
@@ -636,6 +691,9 @@ pub struct Route {
     pub handle: fn(Request) -> Response
 }
 
+/// A [`Route`]: `handle` answers a `method` request whose path fits `pattern`,
+/// where `:name` in the pattern stands for one segment. Routes are tried in the
+/// order they are given, and the first that fits answers.
 pub fn route(method: str, pattern: str, handle: fn(Request) -> Response) -> Route {
     return Route{ method: method, pattern: pattern, handle: handle }
 }
@@ -1314,7 +1372,7 @@ fn sendable_status(code: int) -> bool {
 }
 
 /// Why a response cannot be sent for its status and body, or nil: a status that
-/// is not a final one, or a body on a 204 or a 304, which by definition have
+/// is not a final one, or a body on a 204, a 205 or a 304, which by definition have
 /// none (the host would drop it, and the program should hear that it was not
 /// sent).
 ///
@@ -1323,12 +1381,13 @@ fn sendable_status(code: int) -> bool {
 /// assert(status_refused(status(100, "")) != nil, "an interim one is not final")
 /// assert(status_refused(status(204, "")) == nil, "no content, and none given")
 /// assert(status_refused(status(304, "stale")) != nil, "a body where there is none")
+/// assert(status_refused(status(205, "reset")) != nil, "a reset carries none either")
 /// ```
 fn status_refused(response: Response) -> error {
     if !sendable_status(response.status) {
         return errors.new("http.respond: `\(response.status)` is not a status HTTP sends (200 to 599)")
     }
-    if (response.status == 204 || response.status == 304) && response.body.len() > 0 {
+    if (response.status == 204 || response.status == 205 || response.status == 304) && response.body.len() > 0 {
         return errors.new("http.respond: a \(response.status) has no body, and this one has \(response.body.len()) characters")
     }
     return nil
@@ -1421,8 +1480,8 @@ fn has_nul(text: str) -> bool {
 /// that way.
 ///
 /// A handler's headers — those it added with [`with_header`] — are sent. One
-/// the host would refuse, or a status outside 200 to 599 or a body on a 204 or
-/// 304 (see [`respond`]),
+/// the host would refuse, or a status outside 200 to 599 or a body on a 204,
+/// 205 or 304 (see [`respond`]),
 /// makes the answer a 500 and the server carries on.
 ///
 /// Shutting the server is how this ends well: once it is shut and every

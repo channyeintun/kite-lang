@@ -186,6 +186,8 @@ pub fn clip(x: float, y: float, w: float, h: float) {
     draw.clip(x, y, w, h)
 }
 
+/// Close the innermost [`clip`], so what is drawn next is no longer confined to
+/// its rectangle. Every `clip` needs one.
 pub fn unclip() {
     draw.unclip()
 }
@@ -199,6 +201,7 @@ pub fn alpha(a: float) {
     draw.alpha(a)
 }
 
+/// Draw at full opacity again: what [`alpha`] set is put back to 1.0.
 pub fn opaque() {
     draw.alpha(1.0)
 }

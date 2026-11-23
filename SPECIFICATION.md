@@ -1289,10 +1289,12 @@ a map entry or a slice element by index is handed on to that value, exactly
 as passing it to a call is, and is not followed there; read back out into a
 binding, `let e = h.e`, it is an obligation again. A map is not followed
 either: `let m = {1: load(1)}` hands `load`'s failure on to the map, as a struct
-literal does. A slice of failures is a binding like any other, so
-`errs.push(f())` adds `f`'s failure to what `errs` answers for — and a walk over
-one counts as reading all of it, so leaving the walk early, by `break` or
-`return`, drops the failures of the elements it did not reach.
+literal does. Nor is a closure: one that captures a failure, `let g = || e`,
+takes it with it, whether or not it is ever called. A slice of failures is a
+binding like any other, so `errs.push(f())` adds `f`'s failure to what `errs`
+answers for — and a walk over one counts as reading all of it, so leaving the
+walk early, by `break` or `return`, drops the failures of the elements it did
+not reach.
 
 To drop one deliberately, say so:
 
@@ -2783,8 +2785,10 @@ Requirements on the implementation:
   **The granularity is one entry per function** — a frame resolves to the line
   the function was declared on, not the line that trapped, because that is the
   granularity the compiler's own information exists at. Both are **dropped by
-  `--release`**: they are more than half of a hello world, and debug
-  information is not semantics.
+  `--release`**: debug information is not semantics, and it is bytes a shipped
+  page does not need — in the module of `examples/hello.kite` the name section
+  and the custom section naming the map are 61 of its 834 bytes, and the map is
+  a file of 389 bytes beside it.
 
 ---
 

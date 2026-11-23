@@ -691,6 +691,9 @@ pub fn field(value: Option<Json>, key: str) -> Option<Json> {
     }
 }
 
+/// Element `index` of an array, or nil when `value` is nil, is not an array, or
+/// has no element there. It never fails, so a chain of [`field`] and `at` ends
+/// in one test.
 pub fn at(value: Option<Json>, index: int) -> Option<Json> {
     if value == nil {
         return nil
@@ -701,6 +704,8 @@ pub fn at(value: Option<Json>, index: int) -> Option<Json> {
     }
 }
 
+/// The text of a string value, or nil when `value` is nil or is anything else.
+/// A number is not turned into text here.
 pub fn text(value: Option<Json>) -> Option<str> {
     if value == nil {
         return nil
@@ -711,6 +716,8 @@ pub fn text(value: Option<Json>) -> Option<str> {
     }
 }
 
+/// The number in a number value, or nil when `value` is nil or is anything
+/// else. Every JSON number is a `float` here; [`int_of`] asks for a whole one.
 pub fn number_of(value: Option<Json>) -> Option<float> {
     if value == nil {
         return nil
@@ -819,6 +826,8 @@ fn whole_number(n: float) -> Option<int> {
     return whole
 }
 
+/// The `bool` in a boolean value, or nil when `value` is nil or is anything
+/// else. `"true"` the string is not `true`.
 pub fn bool_of(value: Option<Json>) -> Option<bool> {
     if value == nil {
         return nil
@@ -895,6 +904,8 @@ pub fn text_or(value: Option<Json>, key: str, fallback: str) -> str {
     return s
 }
 
+/// A field's whole number, or `fallback` when the field is absent, is not a
+/// number, or is not a whole one that an `int` holds (see [`int_of`]).
 pub fn int_or(value: Option<Json>, key: str, fallback: int) -> int {
     let n = int_of(field(value, key))
     if n == nil {
@@ -903,6 +914,8 @@ pub fn int_or(value: Option<Json>, key: str, fallback: int) -> int {
     return n
 }
 
+/// A field's boolean, or `fallback` when the field is absent or is not a
+/// boolean.
 pub fn bool_or(value: Option<Json>, key: str, fallback: bool) -> bool {
     let b = bool_of(field(value, key))
     if b == nil {

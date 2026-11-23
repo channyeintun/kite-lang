@@ -239,18 +239,37 @@ pub fn length(target: JsValue) -> (int, error) {
 // aggregate and does not cross the boundary — and even where it could, every
 // property write would allocate an array to carry nothing.
 
+/// Call the method `name` of `target`, and give back what it returned.
+///
+/// The error is the host's: a `name` that is not a function, or a call that
+/// threw, in which case the message is the exception's.
 pub fn call0(target: JsValue, name: str) -> (JsValue, error) {
     return checked(js_call0(target, name))
 }
 
+/// Call the method `name` of `target` with one argument, and give back what it
+/// returned.
+///
+/// The error is the host's: a `name` that is not a function, or a call that
+/// threw, in which case the message is the exception's.
 pub fn call1(target: JsValue, name: str, a: JsValue) -> (JsValue, error) {
     return checked(js_call1(target, name, a))
 }
 
+/// Call the method `name` of `target` with two arguments, and give back what it
+/// returned.
+///
+/// The error is the host's: a `name` that is not a function, or a call that
+/// threw, in which case the message is the exception's.
 pub fn call2(target: JsValue, name: str, a: JsValue, b: JsValue) -> (JsValue, error) {
     return checked(js_call2(target, name, a, b))
 }
 
+/// Call the method `name` of `target` with three arguments, and give back what
+/// it returned.
+///
+/// The error is the host's: a `name` that is not a function, or a call that
+/// threw, in which case the message is the exception's.
 pub fn call3(
     target: JsValue,
     name: str,
@@ -261,6 +280,11 @@ pub fn call3(
     return checked(js_call3(target, name, a, b, c))
 }
 
+/// Call the method `name` of `target` with four arguments, and give back what
+/// it returned.
+///
+/// The error is the host's: a `name` that is not a function, or a call that
+/// threw, in which case the message is the exception's.
 pub fn call4(
     target: JsValue,
     name: str,
@@ -277,14 +301,29 @@ pub fn new0(constructor: str) -> (JsValue, error) {
     return checked(js_new0(constructor))
 }
 
+/// `new Thing(…)` with one argument, by the constructor's name on the global
+/// object.
+///
+/// The error is the host's: a name that is not a constructor, or a constructor
+/// that threw.
 pub fn new1(constructor: str, a: JsValue) -> (JsValue, error) {
     return checked(js_new1(constructor, a))
 }
 
+/// `new Thing(…)` with two arguments, by the constructor's name on the global
+/// object.
+///
+/// The error is the host's: a name that is not a constructor, or a constructor
+/// that threw.
 pub fn new2(constructor: str, a: JsValue, b: JsValue) -> (JsValue, error) {
     return checked(js_new2(constructor, a, b))
 }
 
+/// `new Thing(…)` with three arguments, by the constructor's name on the global
+/// object.
+///
+/// The error is the host's: a name that is not a constructor, or a constructor
+/// that threw.
 pub fn new3(constructor: str, a: JsValue, b: JsValue, c: JsValue) -> (JsValue, error) {
     return checked(js_new3(constructor, a, b, c))
 }
@@ -328,14 +367,18 @@ pub fn instance_of(v: JsValue, constructor: str) -> (bool, error) {
 
 // ---- converting ------------------------------------------------------------
 
+/// `value` as a JavaScript string.
 pub fn of_str(value: str) -> JsValue {
     return js_of_str(value)
 }
 
+/// `value` as a JavaScript number. A NaN and the infinities cross as
+/// themselves.
 pub fn of_num(value: float) -> JsValue {
     return js_of_num(value)
 }
 
+/// `value` as a JavaScript boolean.
 pub fn of_bool(value: bool) -> JsValue {
     return js_of_bool(value)
 }
@@ -367,6 +410,9 @@ pub fn as_str(v: JsValue) -> (str, error) {
     return js_as_str(v), nil
 }
 
+/// The value as a `float`, and an error naming what it was when it is not a
+/// number. A whole number is one too: JavaScript has a single number type.
+/// [`as_int`] is the one that insists on a whole number.
 pub fn as_num(v: JsValue) -> (float, error) {
     let kind = js_kind_of(v)
     if kind != "number" {
@@ -375,6 +421,8 @@ pub fn as_num(v: JsValue) -> (float, error) {
     return js_as_num(v), nil
 }
 
+/// The value as a `bool`, and an error naming what it was when it is not a
+/// boolean. Nothing else is read as truthy or falsy.
 pub fn as_bool(v: JsValue) -> (bool, error) {
     let kind = js_kind_of(v)
     if kind != "boolean" {

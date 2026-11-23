@@ -11,14 +11,27 @@ pub fn seconds(n: int) -> int {
     return n * 1000
 }
 
+/// `n` minutes, in milliseconds. Traps on overflow, as every `int`
+/// multiplication does.
+///
+/// ```kite
+/// assert(minutes(2) == 120000, "two minutes")
+/// ```
 pub fn minutes(n: int) -> int {
     return n * 60000
 }
 
+/// `n` hours, in milliseconds. Traps on overflow.
+///
+/// ```kite
+/// assert(hours(1) == 3600000, "an hour")
+/// ```
 pub fn hours(n: int) -> int {
     return n * 3600000
 }
 
+/// `n` milliseconds, which is `n`. It is here so that a duration reads the same
+/// in every unit: `millis(250)` beside `seconds(2)`.
 pub fn millis(n: int) -> int {
     return n
 }

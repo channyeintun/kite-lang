@@ -538,8 +538,12 @@ every build:
 
 ```
 $ kitec build examples/page/main.kite --emit wasm --release --out dist
-wrote dist/app.wasm (… bytes), dist/app.js, dist/app.wasm.map, dist/index.html, dist/api.js and dist/api.d.ts
+wrote dist/app.wasm (27440 bytes), dist/app.js and dist/index.html
 ```
+
+A `--release` build writes no `app.wasm.map` — the name section and the map
+are the debug build's — and `api.js` and `api.d.ts` only for a program that has
+a `pub fn` to describe, which `examples/page` has none of.
 
 **There is no per-symbol breakdown**, and this section used to show one — a
 mock-up naming `ui.layout.flex` and `json.decode<Task>`, neither of which

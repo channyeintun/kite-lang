@@ -136,92 +136,206 @@ fn block_after(text: &str, lead: &str) -> Option<String> {
     (!out.trim().is_empty()).then_some(out)
 }
 
-/// An example that is a whole program is checked: it fails with the code it
-/// illustrates, and its fix compiles. E0204's fix called a `len` Kite does not
-/// have, which a reader copying it would have found out the hard way.
-#[test]
-fn a_whole_program_example_and_its_fix_are_what_they_say() {
-    let dir = std::env::temp_dir().join(format!("kitec-explain-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).expect("temp dir");
-    // The codes whose example must produce that code and no other: the ones
-    // written as a whole explanation of one situation each.
-    let exactly = [
-        "E0001", "E0002", "E0003", "E0005", "E0101", "E0110", "E0113", "E0115", "E0119", "E0200",
-        "E0201", "E0202", "E0203", "E0210", "E0303", "E0700", "E0006", "E0114", "E0116", "E0205",
-        "E0206", "E0207", "E0208", "E0209", "E0212", "E0302", "E0405", "E0600", "E0701", "E0702",
-    ];
-    let mut codes = vec!["E0100", "E0111", "E0204", "E0520", "E0521"];
-    codes.extend(exactly);
-    for code in codes {
-        let said = stdout(&kitec(&["--explain", code]));
-        let example = block_after(&said, "Example").expect("an example");
-        let mut checked = 0;
-        // An example that is a `kite.toml` is the manifest of a package whose
-        // program does nothing: what is checked is whether the manifest reads.
-        let manifest = example.trim_start().starts_with("[package]");
-        let package = |name: &str, toml: &str| {
-            let pkg = dir.join(name);
-            std::fs::create_dir_all(&pkg).expect("package dir");
-            std::fs::write(pkg.join("kite.toml"), toml).expect("write");
-            std::fs::write(pkg.join("main.kite"), "fn main() {\n    io.print(1)\n}\n")
-                .expect("write");
-            kitec(&["check", pkg.join("main.kite").to_str().unwrap()])
-        };
-        if example.contains("fn main") || manifest {
-            let out = if manifest {
-                package(code, &example)
-            } else {
-                let file = dir.join(format!("{}.kite", code));
-                std::fs::write(&file, &example).expect("write");
-                kitec(&["check", file.to_str().unwrap()])
-            };
-            // A warning is the code's own, too: E0116 and E0600 do not stop a build.
-            let said = stderr(&out);
-            assert!(
-                said.contains(&format!("error[{}]", code))
-                    || said.contains(&format!("warning[{}]", code)),
-                "{}:\n{}",
-                code,
-                said
-            );
-            if exactly.contains(&code) {
-                let others: Vec<String> = stderr(&out)
-                    .lines()
-                    .filter_map(|l| l.strip_prefix("error[").and_then(|l| l.get(..5)).map(str::to_string))
-                    .filter(|c| c != code)
-                    .collect();
-                assert!(others.is_empty(), "{} example also gives {:?}:\n{}", code, others, stderr(&out));
-            }
-            checked += 1;
+/// The files an example shows: a line `// name.kite` starts the file of that
+/// name, and the first is the one checked. An example with no such line is one
+/// file.
+fn files_of(block: &str) -> Vec<(String, String)> {
+    let marker = |l: &str| -> Option<String> {
+        let name = l.strip_prefix("// ")?;
+        let ok = name.ends_with(".kite")
+            && name.chars().all(|c| c.is_ascii_alphanumeric() || "_/.-".contains(c));
+        ok.then(|| name.to_string())
+    };
+    let mut files: Vec<(String, String)> = Vec::new();
+    for line in block.lines() {
+        if let Some(name) = marker(line) {
+            files.push((name, String::new()));
+        } else if let Some((_, body)) = files.last_mut() {
+            body.push_str(line);
+            body.push('\n');
         }
-        if let Some(fix) = block_after(&said, "The fix is") {
-            if manifest {
-                let out = package(&format!("{}_fix", code), &fix);
-                assert!(out.status.success(), "{} fix:\n{}\n{}", code, fix, stderr(&out));
-                assert!(!stderr(&out).contains(&format!("[{}]", code)), "{} fix:\n{}", code, stderr(&out));
-                continue;
-            }
-            // A fix that shows only `main` keeps the example's declarations.
-            let only_main =
-                ["fn main", "async fn main"].iter().any(|m| fix.trim_start().starts_with(m));
-            let fix = match example.find("fn main") {
-                Some(at) if only_main => {
-                    format!("{}{}", example[..at].trim_end_matches("async "), fix.trim_start())
-                }
-                _ if fix.contains("fn main") => fix,
-                _ => format!("{}\nfn main() {{}}\n", fix),
-            };
-            let file = dir.join(format!("{}_fix.kite", code));
-            std::fs::write(&file, &fix).expect("write");
-            let out = kitec(&["check", file.to_str().unwrap()]);
-            assert!(out.status.success(), "{} fix:\n{}\n{}", code, fix, stderr(&out));
-            // A warning's fix compiles with the warning still there: what is
-            // checked is that the code is gone.
-            assert!(!stderr(&out).contains(&format!("[{}]", code)), "{} fix:\n{}\n{}", code, fix, stderr(&out));
-            checked += 1;
-        }
-        assert!(checked > 0, "{}: nothing checked", code);
     }
+    if files.is_empty() {
+        files.push(("main.kite".to_string(), block.to_string()));
+    }
+    files
+}
+
+fn write_all(dir: &std::path::Path, files: &[(String, String)]) {
+    for (name, body) in files {
+        let path = dir.join(name);
+        std::fs::create_dir_all(path.parent().unwrap()).expect("dir");
+        std::fs::write(path, body.trim_start_matches('\n')).expect("write");
+    }
+}
+
+/// The codes no program can raise, or raises only at a size no text can show.
+/// Each is named with why; its text says so, and shows the layout of the
+/// report instead of a program.
+const NO_EXAMPLE: [(&str, &str); 2] = [
+    ("E0900", "the compiler's own invalid output: no source provokes it"),
+    ("E0901", "the compiler's own internal error: no source provokes it"),
+];
+
+/// The programs of the two codes raised only by size, generated here: what
+/// the text shows has `…` where the thousands of lines are.
+fn generated(code: &str, fixed: bool) -> Option<String> {
+    match code {
+        // Three hundred deep; the fix names the middle, as the text says,
+        // so that each half is a hundred and fifty.
+        "E0102" if fixed => Some(format!(
+            "fn main() {{\n    let inner = {o}1{c}\n    let x = {o}inner{c}\n    io.print(x)\n}}\n",
+            o = "(".repeat(150),
+            c = ")".repeat(150)
+        )),
+        "E0102" => Some(format!(
+            "fn main() {{\n    let x = {}1{}\n    io.print(x)\n}}\n",
+            "(".repeat(300),
+            ")".repeat(300)
+        )),
+        // Seventy thousand `let`s in one function; the fix is the text's two
+        // halves.
+        "E0902" => {
+            let lets = |text: &mut String, from: usize, to: usize| {
+                for i in from..to {
+                    text.push_str(&format!("    let a{} = {}\n", i, i));
+                }
+            };
+            let mut text = String::new();
+            if fixed {
+                text.push_str("fn first() {\n");
+                lets(&mut text, 0, 35000);
+                text.push_str("    io.print(a1)\n}\n\nfn second() {\n");
+                lets(&mut text, 35000, 70000);
+                text.push_str("    io.print(a35000)\n}\n\nfn main() {\n    first()\n    second()\n}\n");
+            } else {
+                text.push_str("fn main() {\n");
+                lets(&mut text, 0, 70000);
+                text.push_str("    io.print(a1)\n}\n");
+            }
+            Some(text)
+        }
+        _ => None,
+    }
+}
+
+/// Every diagnostic code's `--explain` text has an example that raises that
+/// code and a fix that compiles, and the two are run from the texts
+/// themselves, so they cannot drift from the compiler. E0204's fix called a
+/// `len` Kite does not have; E0521's fix left out the `work` it called; E0117's
+/// blocks were fragments; sixteen codes had prose only.
+#[test]
+fn every_code_has_an_example_that_raises_it_and_a_fix_that_compiles() {
+    let dir = std::env::temp_dir().join(format!("kitec-explain-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let listed = stderr(&kitec(&["--explain", "E9999"]));
+    let list = listed.lines().find_map(|l| l.strip_prefix("note: known codes: ")).expect("a list");
+    // Codes whose example is allowed to raise another code beside its own,
+    // because the situation it shows cannot be built without it.
+    let also: [&str; 0] = [];
+    let mut walked = 0;
+    for code in list.split(", ") {
+        let said = stdout(&kitec(&["--explain", code]));
+        if let Some((_, why)) = NO_EXAMPLE.iter().find(|(c, _)| *c == code) {
+            assert!(said.contains("not an error a program can provoke"), "{}: {}", code, why);
+            walked += 1;
+            continue;
+        }
+        assert!(said.contains("Example"), "{} has no example:\n{}", code, said);
+        assert!(said.contains("The fix"), "{} has no fix:\n{}", code, said);
+        let at = dir.join(code);
+        let fixed_at = dir.join(format!("{}_fix", code));
+        let example_block = block_after(&said, "Example").unwrap_or_else(|| panic!("{}: no block", code));
+        let fix_block = block_after(&said, "The fix").unwrap_or_else(|| panic!("{}: no fix block", code));
+        let manifest = example_block.trim_start().starts_with("[package]");
+        let (entry, fixed_entry);
+        // The line an example marks `// E0xxx` is the line the report points
+        // at; a mark on a line of its own is about the line below it.
+        let mut marked: Option<(String, usize)> = None;
+        if manifest {
+            // A manifest is the example: what is checked is whether it reads,
+            // in a package whose program does nothing.
+            for (path, toml) in [(&at, &example_block), (&fixed_at, &fix_block)] {
+                std::fs::create_dir_all(path).expect("package dir");
+                std::fs::write(path.join("kite.toml"), toml).expect("write");
+                std::fs::write(path.join("main.kite"), "fn main() {\n    io.print(1)\n}\n")
+                    .expect("write");
+            }
+            entry = at.join("main.kite");
+            fixed_entry = fixed_at.join("main.kite");
+        } else if let Some(program) = generated(code, false) {
+            std::fs::create_dir_all(&at).expect("dir");
+            std::fs::create_dir_all(&fixed_at).expect("dir");
+            std::fs::write(at.join("main.kite"), program).expect("write");
+            std::fs::write(fixed_at.join("main.kite"), generated(code, true).unwrap()).expect("write");
+            entry = at.join("main.kite");
+            fixed_entry = fixed_at.join("main.kite");
+        } else {
+            let files = files_of(&example_block);
+            write_all(&at, &files);
+            let mark = format!("// {}", code);
+            marked = files.iter().find_map(|(name, body)| {
+                let body = body.trim_start_matches('\n');
+                let lines: Vec<&str> = body.lines().collect();
+                let i = lines.iter().position(|l| l.contains(&mark))?;
+                let below = lines[i].trim_start().starts_with("//");
+                Some((name.clone(), if below { i + 2 } else { i + 1 }))
+            });
+            entry = at.join(&files[0].0);
+            // A fix that names files replaces those of the example; one that
+            // is a program on its own replaces the entry; one that shows only
+            // `main` keeps the example's declarations.
+            let fix_files = files_of(&fix_block);
+            let named = fix_block.lines().any(|l| l.starts_with("// ") && l.ends_with(".kite"));
+            write_all(&fixed_at, &files);
+            if named {
+                write_all(&fixed_at, &fix_files);
+            } else {
+                let only_main =
+                    ["fn main", "async fn main"].iter().any(|m| fix_block.trim_start().starts_with(m));
+                let text = match example_block.find("fn main") {
+                    Some(i) if only_main => format!(
+                        "{}{}",
+                        example_block[..i].trim_end_matches("async "),
+                        fix_block.trim_start()
+                    ),
+                    _ if fix_block.contains("fn main") => fix_block.clone(),
+                    _ => format!("{}\nfn main() {{}}\n", fix_block),
+                };
+                std::fs::write(fixed_at.join(&files[0].0), text).expect("write");
+            }
+            fixed_entry = fixed_at.join(&files[0].0);
+        }
+        let out = kitec(&["check", entry.to_str().unwrap()]);
+        // A warning is the code's own, too: E0116 and E0600 do not stop a build.
+        let said_err = stderr(&out);
+        assert!(
+            said_err.contains(&format!("error[{}]", code)) || said_err.contains(&format!("warning[{}]", code)),
+            "{} example:\n{}",
+            code,
+            said_err
+        );
+        if let Some((name, line)) = &marked {
+            let at_line = format!("{}:{}:", name, line);
+            assert!(said_err.contains(&at_line), "{} example marks {} but the report is elsewhere:\n{}", code, at_line, said_err);
+        }
+        if !also.contains(&code) {
+            let others: Vec<String> = said_err
+                .lines()
+                .filter_map(|l| l.strip_prefix("error[").and_then(|l| l.get(..5)).map(str::to_string))
+                .filter(|c| c != code)
+                .collect();
+            assert!(others.is_empty(), "{} example also gives {:?}:\n{}", code, others, said_err);
+        }
+        let out = kitec(&["check", fixed_entry.to_str().unwrap()]);
+        // A warning's fix compiles with the warning still there: what is
+        // checked is that the code is gone.
+        assert!(out.status.success(), "{} fix:\n{}", code, stderr(&out));
+        assert!(!stderr(&out).contains(&format!("[{}]", code)), "{} fix:\n{}", code, stderr(&out));
+        walked += 1;
+    }
+    assert!(walked > 50 && walked == list.split(", ").count());
     let _ = std::fs::remove_dir_all(&dir);
 }
 

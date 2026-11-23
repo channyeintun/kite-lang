@@ -405,7 +405,9 @@ no methods (`E0205`), so destructure where you bind.
 **What the analysis does not follow:** a failure stored into a struct field
 (`Held{ e: f() }`, `h.e = f()`), a map entry, or a slice element by index is
 handed on to that value, like an argument, and nothing reports it if the value
-is never read. So is a map literal of results, `{1: load(1)}`. `errs.push(f())`
+is never read. So is a map literal of results, `{1: load(1)}`, and so is a
+failure a closure captures, `let g = || e`, whether or not `g` is ever called.
+`errs.push(f())`
 *is* followed: a slice of errors is a binding. A `for` walk over a slice of
 results counts as reading all of it, so a `break` or `return` out of the walk
 drops the failures of the elements not yet reached, with no report.

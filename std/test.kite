@@ -25,6 +25,8 @@ pub fn is_true(cond: bool, what: str) -> error {
     return errors.new("\(what): expected true")
 }
 
+/// Passes when `cond` does not hold. The error says `what`, and that false was
+/// expected.
 pub fn is_false(cond: bool, what: str) -> error {
     if cond {
         return errors.new("\(what): expected false")
@@ -32,6 +34,13 @@ pub fn is_false(cond: bool, what: str) -> error {
     return nil
 }
 
+/// Passes when two `int`s are equal. The error says `what`, and which was
+/// wanted and which found.
+///
+/// ```kite
+/// assert(equal_int(4, 4, "same") == nil, "equal passes")
+/// assert(equal_int(3, 4, "differ") != nil, "unequal fails")
+/// ```
 pub fn equal_int(found: int, want: int, what: str) -> error {
     if found == want {
         return nil
@@ -39,6 +48,8 @@ pub fn equal_int(found: int, want: int, what: str) -> error {
     return errors.new("\(what): expected \(want), found \(found)")
 }
 
+/// Passes when two strings are equal. The error says `what`, and quotes the
+/// wanted and the found text.
 pub fn equal_str(found: str, want: str, what: str) -> error {
     if found == want {
         return nil
@@ -46,6 +57,8 @@ pub fn equal_str(found: str, want: str, what: str) -> error {
     return errors.new("\(what): expected \"\(want)\", found \"\(found)\"")
 }
 
+/// Passes when two booleans are equal. The error says `what`, and which was
+/// wanted and which found.
 pub fn equal_bool(found: bool, want: bool, what: str) -> error {
     if found == want {
         return nil
@@ -81,6 +94,8 @@ pub fn equal_float(found: float, want: float, tolerance: float, what: str) -> er
     return errors.new("\(what): expected \(want) ± \(tolerance), found \(found)")
 }
 
+/// Passes when two slices of `int` are equal: the same length, the same
+/// elements in the same order. The error says `what`, and lists both.
 pub fn equal_ints(found: [int], want: [int], what: str) -> error {
     if found == want {
         return nil
@@ -88,6 +103,8 @@ pub fn equal_ints(found: [int], want: [int], what: str) -> error {
     return errors.new("\(what): expected [\(join_ints(want))], found [\(join_ints(found))]")
 }
 
+/// Passes when two slices of strings are equal: the same length, the same
+/// elements in the same order. The error says `what`, and lists both.
 pub fn equal_strs(found: [str], want: [str], what: str) -> error {
     if found == want {
         return nil

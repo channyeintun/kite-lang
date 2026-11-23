@@ -198,6 +198,9 @@ pub fn scroll_y() -> int {
     return pixels("scrollY")
 }
 
+/// How far across the document the window is scrolled, in pixels. Negative past
+/// the left edge on a platform that overscrolls; 0 when the host has none to
+/// read.
 pub fn scroll_x() -> int {
     return pixels("scrollX")
 }
@@ -207,6 +210,8 @@ pub fn height() -> int {
     return pixels("innerHeight")
 }
 
+/// How wide the visible part of the document is, in pixels. 0 when the host has
+/// none to read.
 pub fn width() -> int {
     return pixels("innerWidth")
 }
@@ -224,6 +229,9 @@ pub fn scroll_to(x: int, y: int) -> error {
 
 // ---- the address bar ---------------------------------------------------------------
 
+/// The page's origin: the scheme, host and port that the address begins with,
+/// such as `https://example.com`, with no path. Empty when the host has no
+/// location.
 pub fn origin() -> str {
     return js.str_or(location(), "origin", "")
 }
@@ -393,6 +401,11 @@ fn step(method: str, url: str) -> error {
     return serr
 }
 
+/// Go one step back in the session history, as the browser's Back button does.
+/// It does nothing when there is no earlier entry.
+///
+/// The error is the host's, when there is no history to ask. The page changes
+/// after the call returns, not within it.
 pub fn back() -> error {
     let (entries, err) = history()
     check err
@@ -476,6 +489,10 @@ pub fn keep(key: str, value: str) -> error {
     return write("localStorage", key, value)
 }
 
+/// Forget something kept with [`keep`]. A key that was never kept is not an
+/// error, nor is a browser with no such store.
+///
+/// The error is the host's, when the store refuses.
 pub fn drop_kept(key: str) -> error {
     return erase("localStorage", key)
 }
@@ -485,10 +502,17 @@ pub fn cached(key: str) -> Option<str> {
     return read("sessionStorage", key)
 }
 
+/// Keep something for as long as the tab is open, in `sessionStorage`. **The
+/// error is worth handling**, as for [`keep`]: a full store, a browser that
+/// refuses storage, and one with no `sessionStorage` to write to.
 pub fn cache(key: str, value: str) -> error {
     return write("sessionStorage", key, value)
 }
 
+/// Forget something kept with [`cache`]. A key that was never kept is not an
+/// error, nor is a browser with no such store.
+///
+/// The error is the host's, when the store refuses.
 pub fn drop_cached(key: str) -> error {
     return erase("sessionStorage", key)
 }
