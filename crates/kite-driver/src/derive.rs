@@ -161,8 +161,12 @@ struct ByHand {
     /// keyed as [`ByHand::traits`] is, the trait and the bounds on each of
     /// the type's arguments, in order: what a field of that type must meet
     /// for the walk to reach the method.
-    bounded: HashMap<String, Vec<(String, Vec<(String, Vec<String>)>)>>,
+    bounded: HashMap<String, Vec<(String, Vec<ArgBounds>)>>,
 }
+
+/// One argument position of a hand-written `impl`'s type: the parameter
+/// written there, and the bounds the `impl` gives it.
+type ArgBounds = (String, Vec<String>);
 
 impl ByHand {
     /// Whether `ty` already has what deriving `trait_` would write — the
