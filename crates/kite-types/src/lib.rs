@@ -1607,11 +1607,12 @@ impl<'a> Checker<'a> {
             ast::Stmt::Expr(e) => {
                 let expr = self.expr(e, None);
                 // Asked after the expression is checked, so one already wrong
-                // for another reason is not reported a second time.
-                if !self.types.is_poisoned(expr.ty) {
-                    self.inert_statement(e);
+                // for another reason is not reported a second time; and one
+                // that does nothing is not also an error dropped.
+                let inert = !self.types.is_poisoned(expr.ty) && self.inert_statement(e);
+                if !inert {
+                    self.dropped_error(&expr);
                 }
-                self.dropped_error(&expr);
                 let flow = if expr.ty == TyId::NEVER { Flow::Diverges } else { Flow::Falls };
                 Some((hir::Stmt::Expr(expr), flow))
             }
@@ -7607,7 +7608,10 @@ impl<'a> Checker<'a> {
     /// included — is something happening, and is left alone.
     ///
     /// [§2.5]: ../../../SPECIFICATION.md#25-semicolon-insertion
-    fn inert_statement(&mut self, e: &ast::Expr) {
+    ///
+    /// Whether it reported one, so the statement is not reported again for
+    /// the error its value holds: a bare `err` is one mistake, not two.
+    fn inert_statement(&mut self, e: &ast::Expr) -> bool {
         if let ast::Expr::Closure { span, .. } = e {
             self.diags.push(
                 Diagnostic::error(codes::E0117, "this closure is built and thrown away")
@@ -7621,10 +7625,10 @@ impl<'a> Checker<'a> {
                          operator — put the `||` at the end of the line it continues",
                     ),
             );
-            return;
+            return true;
         }
         if expr_acts(e) {
-            return;
+            return false;
         }
         let mut d = Diagnostic::error(codes::E0117, "this statement has no effect")
             .with_primary(e.span(), "computed and thrown away");
@@ -7649,6 +7653,7 @@ impl<'a> Checker<'a> {
             ),
         };
         self.diags.push(d);
+        true
     }
 
     /// An error thrown away by leaving a call as a bare statement.
@@ -9373,13 +9378,20 @@ impl<'a> Checker<'a> {
         // beside a call returning an `int` — is fine, since nothing reads the
         // value. Each arm that has one is made a statement of its own, so the
         // match is `()` and the backends see arms that agree.
+        //
+        // An arm's error is dropped here, as a bare call's would be — whether
+        // or not the arms agree: `0 => fails(), _ => fails()` agrees on
+        // `error`, and throws it away just the same.
+        if discard {
+            for arm in &arms {
+                self.dropped_error(&arm.body);
+            }
+        }
         if disagree {
             for arm in &mut arms {
                 if arm.body.ty == TyId::UNIT || arm.body.ty == TyId::NEVER {
                     continue;
                 }
-                // An arm's error is dropped here, as a bare call's would be.
-                self.dropped_error(&arm.body);
                 let span = arm.body.span;
                 let body = std::mem::replace(
                     &mut arm.body,

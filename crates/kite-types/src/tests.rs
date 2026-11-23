@@ -1083,6 +1083,15 @@ fn an_arm_after_a_misspelt_variant_is_unreachable() {
     assert!(c.render().contains("did you mean `Directory`?"), "{}", c.render());
 }
 
+/// A bare error as a statement does nothing, and that is the one mistake:
+/// it is not reported a second time as an error thrown away.
+#[test]
+fn a_bare_error_statement_is_one_diagnostic() {
+    let c = run("fn fails() -> error {\n  return nil\n}\n\
+                 fn main() {\n  let err = fails()\n  err\n  _ = err\n}\n");
+    assert_eq!(c.codes(), vec!["E0117"], "{}", c.render());
+}
+
 /// A key the compiler knows, written twice in one map literal, is a warning:
 /// the later entry replaces the earlier, whose value nothing ever sees.
 #[test]

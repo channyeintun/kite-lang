@@ -1,7 +1,13 @@
 // An expression statement with no call and no `await` in it does nothing,
 // and is refused: each of these is a typo with a silently wrong answer.
+use std/errors
+
 fn one() -> int {
     return 1
+}
+
+fn fails() -> error {
+    return errors.new("no")
 }
 
 fn main() {
@@ -24,5 +30,9 @@ fn main() {
     (g)()
     // One already wrong for another reason is reported once.
     n == "s" //~ ERROR E0201
+    // A bare error is a statement that does nothing, not also an error dropped.
+    let err = fails()
+    err //~ ERROR E0117
+    _ = err
     io.print("\(n) \(done) \(first.len())")
 }
