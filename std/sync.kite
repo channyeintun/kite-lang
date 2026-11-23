@@ -145,10 +145,14 @@ pub async fn update<T>(var m: Mutex<T>, f: fn(T) -> T) {
 /// tasks of one program as a `var` parameter, as above.
 pub struct Queue<T> {
     var items: [T]
+    // The front is items[head]. A take moves the head on rather than copying
+    // what is left, and the taken values are let go of only once they are
+    // half the slice — so draining n values copies fewer than n in all.
+    var head: int
 }
 
 pub fn queue<T>() -> Queue<T> {
-    return Queue{ items: [] }
+    return Queue{ items: [], head: 0 }
 }
 
 /// Add a value at the back. Never waits: the queue has no bound.
@@ -160,11 +164,18 @@ pub fn put<T>(var q: Queue<T>, value: T) {
 ///
 /// Parked between looks, as [`lock`] is, so a taker waiting on a producer
 /// that sleeps lets the clock move on rather than holding it still.
+///
+/// Constant time, taken over a run of takes: it used to copy the whole backlog
+/// on every take, so draining a hundred thousand values took seconds.
 pub async fn take<T>(var q: Queue<T>) -> T {
     for {
-        if q.items.len() > 0 {
-            let front = q.items[0]
-            q.items = q.items[1..]
+        if q.head < q.items.len() {
+            let front = q.items[q.head]
+            q.head += 1
+            if q.head * 2 >= q.items.len() {
+                q.items = q.items[q.head..]
+                q.head = 0
+            }
             return front
         }
         task.park()
@@ -174,7 +185,7 @@ pub async fn take<T>(var q: Queue<T>) -> T {
 
 /// How many values are waiting. For diagnostics, as [`is_held`] is.
 pub fn size<T>(q: Queue<T>) -> int {
-    return q.items.len()
+    return q.items.len() - q.head
 }
 
 // ---- Atomic -----------------------------------------------------------------
