@@ -6,6 +6,7 @@
 
 mod common;
 
+#[cfg(target_os = "linux")]
 use kite_codegen_clif::RunConfig;
 
 /// The process's peak resident set, in kilobytes, as `/proc` reports it.
