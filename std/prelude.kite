@@ -477,9 +477,8 @@ pub fn replace(s: str, from: str, to: str) -> str {
 /// ```
 pub fn words(s: str) -> [str] {
     // Every other whitespace character is made a space, and the text is split
-    // at spaces: `index_of` and `split` move a piece at a time, where a walk
-    // with `code_at` counts from the start again for every character, and
-    // was several times slower on a long text.
+    // at spaces: `index_of` and `split` move a piece at a time rather than a
+    // character at a time.
     var spaced = s
     for code in white_codes() {
         let c = text.from_code(code)
@@ -584,8 +583,7 @@ pub fn pad_end(text: str, width: int, with: str) -> str {
 /// assert(lines("a\r\nb\n").len() == 2, "no phantom last line, no CR left over")
 /// ```
 pub fn lines(s: str) -> [str] {
-    // Split, not a walk with `code_at`, which counts from the start again for
-    // every character, and was several times slower on a long file.
+    // Split, which moves a piece at a time rather than a character at a time.
     var body = s
     if body.index_of("\r") >= 0 {
         body = replace(replace(body, "\r\n", "\n"), "\r", "\n")
@@ -679,8 +677,7 @@ pub fn last_index_of(s: str, needle: str) -> int {
     if needle.len() == 0 {
         return s.len()
     }
-    // What follows the last one is the last piece of a split; a walk back
-    // with `slice` counts from the start again at every position.
+    // What follows the last one is the last piece of a split.
     let pieces = split(s, needle)
     if pieces.len() < 2 {
         return -1
@@ -720,11 +717,11 @@ pub fn codes(s: str) -> [int] {
 /// assert(from_codes([104, 105]) == "hi", "back to text")
 /// ```
 pub fn from_codes(cs: [int]) -> str {
-    var out = ""
+    var out: [str] = []
     for c in cs {
-        out = out + text.from_code(c)
+        out.push(text.from_code(c))
     }
-    return out
+    return join(out, "")
 }
 
 /// The characters of `s`, each as a one-character string.
@@ -1783,14 +1780,11 @@ pub fn max_of(items: [int]) -> Option<int> {
 /// assert(join_ints([1, 2, 3], ", ") == "1, 2, 3", "joined")
 /// ```
 pub fn join_ints(items: [int], sep: str) -> str {
-    var out = ""
-    for i in 0..items.len() {
-        if i > 0 {
-            out = out + sep
-        }
-        out = out + "\(items[i])"
+    var out: [str] = []
+    for x in items {
+        out.push("\(x)")
     }
-    return out
+    return join(out, sep)
 }
 
 /// The floats written out, as `\(x)` writes them, and joined with `sep`.
@@ -1799,14 +1793,11 @@ pub fn join_ints(items: [int], sep: str) -> str {
 /// assert(join_floats([1.5, 2.0], " ") == "1.5 2.0", "joined")
 /// ```
 pub fn join_floats(items: [float], sep: str) -> str {
-    var out = ""
-    for i in 0..items.len() {
-        if i > 0 {
-            out = out + sep
-        }
-        out = out + "\(items[i])"
+    var out: [str] = []
+    for x in items {
+        out.push("\(x)")
     }
-    return out
+    return join(out, sep)
 }
 
 // ---- maps ---------------------------------------------------------------------
