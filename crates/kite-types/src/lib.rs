@@ -634,6 +634,7 @@ pub fn check_recording(
             fn_index: i,
             locals: Vec::new(),
             init: Vec::new(),
+            bare_lets: std::collections::HashSet::new(),
             taint: Vec::new(),
             guards: std::collections::HashMap::new(),
             narrowed: std::collections::HashMap::new(),
@@ -1167,6 +1168,9 @@ struct Checker<'a> {
     locals: Vec<hir::Local>,
     /// Definite-assignment state, parallel to `locals`.
     init: Vec<Init>,
+    /// The names of the `let`s declared without an initialiser. `var x: T` with
+    /// none is E0110, so E0114 offers no `var` fix for one.
+    bare_lets: std::collections::HashSet<Span>,
     /// Error-taint state, parallel to `locals`. See [`Taint`].
     taint: Vec<Taint>,
     /// Which value local each error local guards, so checking the error cleans
@@ -1748,6 +1752,9 @@ impl<'a> Checker<'a> {
         // this declaration afresh on every iteration.
         self.init[local_id as usize] =
             if init.is_some() { Init::Assigned } else { Init::Unassigned };
+        if init.is_none() {
+            self.bare_lets.insert(name.span);
+        }
         // **A failure bound to a name is still a failure.** `let (v, err) = f()`
         // has always marked `err`, and a bare `f()` on its own line is caught
         // too — but a function returning `error` alone, bound and never looked
@@ -2321,8 +2328,8 @@ impl<'a> Checker<'a> {
                 why
             ));
         }
-        if let Some(kw) = self.let_keyword_span(decl) {
-            d = d.with_fix(Fix::replace("make the binding mutable", kw, "var"));
+        if let Some(fix) = self.var_fix(decl) {
+            d = d.with_fix(fix);
         }
         self.diags.push(d);
     }
@@ -9107,8 +9114,8 @@ impl<'a> Checker<'a> {
                     noun
                 ),
             });
-        if let Some(kw) = self.let_keyword_span(decl) {
-            d = d.with_fix(Fix::replace("make the binding mutable", kw, "var"));
+        if let Some(fix) = self.var_fix(decl) {
+            d = d.with_fix(fix);
         }
         self.diags.push(d);
         None
@@ -9290,8 +9297,8 @@ impl<'a> Checker<'a> {
         )
         .with_primary(base.span(), "this binding is immutable")
         .with_secondary(decl, "declared with `let` here");
-        if let Some(kw) = self.let_keyword_span(decl) {
-            d = d.with_fix(Fix::replace("make the binding mutable", kw, "var"));
+        if let Some(fix) = self.var_fix(decl) {
+            d = d.with_fix(fix);
         }
         self.diags.push(d);
         false
@@ -9387,8 +9394,8 @@ impl<'a> Checker<'a> {
                 "the enclosing method takes a plain `self`; it would have to take \
                  `var self` to pass its receiver on",
             );
-        } else if let Some(kw) = self.let_keyword_span(decl) {
-            d = d.with_fix(Fix::replace("make the binding mutable", kw, "var"));
+        } else if let Some(fix) = self.var_fix(decl) {
+            d = d.with_fix(fix);
         }
         self.diags.push(d);
     }
@@ -13189,6 +13196,24 @@ impl<'a> Checker<'a> {
              optional inputs takes a struct",
         );
         self.diags.push(d);
+    }
+
+    /// E0114's "make the binding mutable", offered only where it compiles.
+    /// `kitec fix` applies every fix it is shown, so one that swaps this error
+    /// for another is worse than none: a `let` with no initialiser would become
+    /// a `var` with none (E0110), and a `let` that the closure being checked
+    /// captures would become a captured `var` (E0211).
+    fn var_fix(&self, decl: Span) -> Option<Fix> {
+        if self.bare_lets.contains(&decl) {
+            return None;
+        }
+        if let Some(region) = self.closure_span {
+            if !(decl.start >= region.start && decl.end <= region.end) {
+                return None;
+            }
+        }
+        let kw = self.let_keyword_span(decl)?;
+        Some(Fix::replace("make the binding mutable", kw, "var"))
     }
 
     /// The span of the `let` keyword preceding a binding, so E0114 can offer a

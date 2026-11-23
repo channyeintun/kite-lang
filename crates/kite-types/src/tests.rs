@@ -263,6 +263,22 @@ fn assigning_to_a_let_is_rejected_with_a_var_fix() {
     assert!(out.contains("var total = 0"), "{}", out);
 }
 
+/// `kitec fix` applies every fix it is shown, so a "make the binding mutable"
+/// that gives another error is a trap. A `let x: int` with no initialiser would
+/// become a `var` with none (E0110); a `let` a closure captures would become a
+/// captured `var` (E0211). Neither gets the fix, and one that does compile does.
+#[test]
+fn the_var_fix_is_offered_only_where_it_compiles() {
+    let c = body("  let b: int\n  b = 1\n  b = 2");
+    assert!(c.has("E0114"), "{}", c.render());
+    assert!(!c.render().contains("make the binding mutable"), "{}", c.render());
+    let c = body("  let xs = [1]\n  let f = || {\n    xs.push(2)\n  }\n  f()");
+    assert!(c.has("E0114"), "{}", c.render());
+    assert!(!c.render().contains("make the binding mutable"), "{}", c.render());
+    let c = body("  let f = || {\n    let ys = [1]\n    ys.push(2)\n  }\n  f()");
+    assert!(c.render().contains("help: make the binding mutable"), "{}", c.render());
+}
+
 #[test]
 fn assigning_to_a_var_is_accepted() {
     ok_body("  var total = 0\n  total = 1\n  total += 2");
