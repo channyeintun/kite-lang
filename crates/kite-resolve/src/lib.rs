@@ -1921,10 +1921,23 @@ impl<'a> FnResolver<'a> {
                 self.expr(end);
             }
 
-            // A bare name is a binding unless it names a unit variant.
+            // A bare name is a binding unless it names a unit variant or a
+            // module-level constant.
+            //
+            // A constant's name *is* its value everywhere else, so here it is
+            // the literal it stands for: `LIMIT => …` matches ten. Binding it
+            // afresh made the arm a catch-all that shadowed the constant, and
+            // the match answered "at the limit" for every number, silently.
+            // A local of the same name in scope is what the name means there,
+            // so a pattern under one binds as it always has.
             Pattern::Binding(name) => {
                 if let Some(&(ty, vi)) = self.map.variant_index.get(&name.name) {
                     self.map.uses.insert(name.span, Res::Variant(ty, vi));
+                } else if let Some(ci) =
+                    self.find_const(&name.name).filter(|_| self.lookup(&name.name).is_none())
+                {
+                    self.check_visible(Res::Const(ci), name.span, &name.name);
+                    self.map.uses.insert(name.span, Res::Const(ci));
                 } else {
                     self.declare(name, false, false);
                 }
@@ -2036,6 +2049,15 @@ impl<'a> FnResolver<'a> {
             self.check_visible(Res::Type(ti), path.span, name);
             self.map.uses.insert(path.span, Res::Type(ti));
             return;
+        }
+        // `limits.MAX` — another module's constant, which is its value in a
+        // pattern exactly as the bare name of one of this module's is.
+        if path.segments.len() >= 2 {
+            if let Some(ci) = self.find_const(&path.text()) {
+                self.check_visible(Res::Const(ci), path.span, &path.text());
+                self.map.uses.insert(path.span, Res::Const(ci));
+                return;
+            }
         }
 
         let mut d = Diagnostic::error(codes::E0111, format!("cannot find `{}`", name))

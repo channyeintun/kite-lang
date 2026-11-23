@@ -5384,6 +5384,49 @@ fn main() {
 "#,
         "true\ntrue\ntrue\n3|3\n2.5|2.5\ntrue|true\ns|s\nS(1)\nS(two)\n3\n1.5\nfalse\n\"a\\\"b\"\ntrue\ntrue\ntrue\n",
     ),
+    // A module-level constant named in a pattern is its value, as it is
+    // everywhere else. `LIMIT => …` bound a fresh `LIMIT` that matched every
+    // number, so `classify(5)` said "at the limit".
+    (
+        "constant-in-a-pattern-is-its-value",
+        r#"let LIMIT = 10
+let TWENTY = 20
+let NAME = "kite"
+let HALF = 0.5
+let ON = true
+
+fn classify(n: int) -> str {
+  return match n {
+    0 => "zero",
+    LIMIT => "at the limit",
+    -1 | TWENTY => "minus one or twenty",
+    _ => "other",
+  }
+}
+
+fn opt(o: Option<int>) -> str {
+  return match o {
+    nil => "none",
+    LIMIT => "ten",
+    _ => "some",
+  }
+}
+
+fn main() {
+  io.print(classify(5))
+  io.print(classify(10))
+  io.print(classify(20))
+  io.print(opt(10))
+  io.print(opt(11))
+  io.print(match "kite" { NAME => "name", _ => "no" })
+  io.print(match 0.25 { HALF => "half", _ => "no" })
+  io.print(match false { ON => "on", _ => "off" })
+  let LIMIT = 3
+  io.print(match 4 { LIMIT => "bound \(LIMIT)" })
+}
+"#,
+        "other\nat the limit\nminus one or twenty\nten\nsome\nname\nno\noff\nbound 4\n",
+    ),
 ];
 
 #[test]

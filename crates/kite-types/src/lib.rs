@@ -9305,6 +9305,25 @@ impl<'a> Checker<'a> {
         (expr, flow)
     }
 
+    /// A module-level constant named in a pattern: the literal it stands for,
+    /// checked as one — against an optional, the value inside.
+    fn const_pattern(&mut self, index: u32, span: Span, scrut: TyId) -> hir::Pattern {
+        let want = match *self.types.kind(scrut) {
+            TyKind::Optional(inner) => inner,
+            _ => scrut,
+        };
+        let lit = self.const_expr(index, span);
+        self.expect_ty(lit.ty, want, lit.span, None);
+        match lit.kind {
+            ExprKind::Int(v) => hir::Pattern::Int(v),
+            ExprKind::Float(v) => hir::Pattern::Float(v),
+            ExprKind::Str(s) => hir::Pattern::Str(s),
+            ExprKind::Bool(b) => hir::Pattern::Bool(b),
+            // Its declaration already said why it has no value.
+            _ => hir::Pattern::Wildcard,
+        }
+    }
+
     /// Whether a pattern matches the whole scrutinee without testing it: `_`,
     /// or a name that is not one of the scrutinee's unit variants.
     fn binds_whole(&self, p: &ast::Pattern, scrut: TyId) -> bool {
@@ -9962,6 +9981,7 @@ impl<'a> Checker<'a> {
                     Some(Res::Variant(ti, vi)) => {
                         self.variant_pattern(ti, vi, None, scrut, name.span)
                     }
+                    Some(Res::Const(index)) => self.const_pattern(index, name.span, scrut),
                     _ => hir::Pattern::Wildcard,
                 },
             },
@@ -10084,6 +10104,24 @@ impl<'a> Checker<'a> {
                 match self.resolved.lookup_use(path.span) {
                     Some(Res::Variant(ti, vi)) => {
                         self.variant_pattern(ti, vi, Some(args), scrut, *span)
+                    }
+                    // `limits.MAX`, written without parentheses.
+                    Some(Res::Const(index)) if *span == path.span => {
+                        self.const_pattern(index, path.span, scrut)
+                    }
+                    Some(Res::Const(_)) => {
+                        self.diags.push(
+                            Diagnostic::error(
+                                codes::E0200,
+                                format!("`{}` is a constant, not a variant", path.text()),
+                            )
+                            .with_primary(*span, "a constant has no payload to match")
+                            .with_note(format!(
+                                "write `{}` alone to match its value",
+                                path.text()
+                            )),
+                        );
+                        hir::Pattern::Wildcard
                     }
                     Some(Res::Type(ti)) => match self.type_ids[ti as usize] {
                         Some(TypeTarget::Struct(_)) => {
@@ -10666,7 +10704,10 @@ impl<'a> Checker<'a> {
             let ast::Pattern::Binding(name) = &arm.pattern else { continue };
             // Only a name written like a variant — capitalised — is taken for
             // one that was misspelled; `other` and `x` mean what they say.
-            if checked.guard.is_some() || !name.name.starts_with(char::is_uppercase) {
+            if checked.guard.is_some()
+                || !matches!(checked.pattern, hir::Pattern::Binding { .. })
+                || !name.name.starts_with(char::is_uppercase)
+            {
                 continue;
             }
             let close = variants.iter().find(|v| {

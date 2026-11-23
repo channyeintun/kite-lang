@@ -137,6 +137,26 @@ slice or map constant would be an allocation, so it stays an ordinary `let` insi
 function that wants it. A `float` interpolated into a constant is written as every
 backend writes it at run time: `"\(1e21)"` is `"1e+21"`.
 
+In a `match` pattern a constant is its value as well: `LIMIT => …` (or `limits.MAX_BODY =>
+…`) matches that one value, like the literal would, and is never a binding that takes
+everything. A constant of the wrong type for the scrutinee is `E0200` at the pattern.
+
+```kite
+let LIMIT = 10
+
+fn classify(n: int) -> str {
+    return match n {
+        0 => "zero",
+        LIMIT => "at the limit",
+        _ => "other",
+    }
+}
+
+fn main() {
+    io.print(classify(5)) // other
+}
+```
+
 There is no module-level `var`: a mutable binding every function can reach is state none
 of their signatures mentions. Put it in a struct and pass it to what changes it.
 

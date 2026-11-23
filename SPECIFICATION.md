@@ -449,6 +449,11 @@ A constant shares the value name space with functions, so a module cannot
 declare both `fn limit` and `let limit`; a cycle among constants is
 [E0119](#16-diagnostics).
 
+In a `match` pattern a constant's name is its value too, so `LIMIT => …` and
+`limits.MAX_BODY => …` match that one value, exactly as the literal would — they
+are never a fresh binding that takes everything. A local of the same name in
+scope is what the name means there, and a pattern under one binds as usual.
+
 A `float` interpolated into a constant is written the way every backend writes
 one at run time, so `let LABEL = "max \(1e21)"` is `"max 1e+21"` everywhere:
 
