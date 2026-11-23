@@ -1789,8 +1789,12 @@ impl<'a> Parser<'a> {
             if self.at(T::RBrace) || self.at_end() || self.left_open(&open) {
                 break;
             }
-            if self.at(T::Pub) && self.peek_at(1) == T::Ident {
+            // The variant may be on the line below its `pub`: a layout as much
+            // a `pub` on a variant as `pub A`, and the refusal says why.
+            let named_next = (1..).map(|i| self.peek_at(i)).find(|t| *t != T::Newline) == Some(T::Ident);
+            if self.at(T::Pub) && named_next {
                 self.refuse_pub_on_variant(&name, is_pub, "a variant");
+                self.skip_newlines();
             }
             if self.declaration_starts_line() {
                 self.misplaced_declaration(
