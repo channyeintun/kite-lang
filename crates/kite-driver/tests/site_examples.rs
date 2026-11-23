@@ -235,6 +235,32 @@ fn a_list_item_holds_what_is_indented_under_it() {
     assert_eq!(html.trim(), "<ul><li>one wrapped</li><li>two</li></ul>");
 }
 
+/// A line that starts with `|` but has no `|---|` row under it is a paragraph.
+///
+/// The block loop saw a table row, wanted the rule under it, did not find one,
+/// and then the paragraph loop refused the same line as the start of a block:
+/// nothing moved, for ever. A stray pipe in a document stopped the site build.
+/// Run on a thread so a regression is a failed test and not a hung one.
+#[test]
+fn a_pipe_line_without_a_rule_is_a_paragraph() {
+    for (doc, want) in [
+        ("| a | b |", "<p>| a | b |</p>"),
+        ("|", "<p>|</p>"),
+        ("| a\n\nafter", "<p>| a</p>\n<p>after</p>"),
+        ("| a | b |\n| 1 | 2 |", "<p>| a | b |</p>\n<p>| 1 | 2 |</p>"),
+        ("text\n| a | b |\n|---|---|\n| 1 | 2 |", "<p>text</p>\n<table>"),
+    ] {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(rendered(doc));
+        });
+        let html = rx
+            .recv_timeout(std::time::Duration::from_secs(20))
+            .unwrap_or_else(|_| panic!("the renderer never finished {:?}", doc));
+        assert!(html.trim().starts_with(want), "{:?} gave {}", doc, html);
+    }
+}
+
 /// The Vite starter's Kite compiles, and every export crosses the boundary.
 ///
 /// The starter is the adoption story made concrete: a normal web project that
