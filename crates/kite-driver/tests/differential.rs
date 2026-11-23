@@ -4905,6 +4905,18 @@ fn a_race_of_no_tasks_names_the_mistake() {
 /// says the program prints.
 const EXPECTED: &[(&str, &str, &str)] = &[
     (
+        // A hole is an ordinary expression (§2.4), and that includes a block
+        // string: the lexer ended the outer one at the inner one's `"""`.
+        "a-block-string-in-a-hole-of-a-block-string",
+        "fn wrap(s: str) -> str {\n  return \"(\\(s))\"\n}\n\
+         fn main() {\n  io.print(\"\"\"p \\(\"\"\"in\"\"\") q\"\"\")\n\
+         \x20 io.print(\"\"\"p \\(wrap(\"\"\"a\"b\"\"\")) q\"\"\")\n\
+         \x20 io.print(\"\"\"x\\\\(y\"\"\")\n  let n = 3\n\
+         \x20 let block = \"\"\"\n    first \\(wrap(\"\"\"(\\(n))\"\"\"))\n    second\n    \"\"\"\n\
+         \x20 io.print(block)\n}\n",
+        "p in q\np (a\"b) q\nx\\(y\nfirst ((3))\nsecond\n",
+    ),
+    (
         // Writing to a key that is already there changes the value and keeps
         // the stored key. `-0.0 == 0.0`, so the two keys are one, and Wasm
         // alone wrote the new key over the old: iterating the map printed

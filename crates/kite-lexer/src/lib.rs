@@ -518,6 +518,23 @@ impl<'a> Lexer<'a> {
                     self.pos += 3;
                     return TokenKind::Str;
                 }
+                // A hole is skipped as a `"` string's is, so a string inside
+                // it — a block string included — is read as one: its `"""`
+                // is its own, not the end of this one (§2.4: a hole is an
+                // ordinary expression). `\\` is stepped over whole, so the
+                // `(` after an escaped backslash opens nothing; any other
+                // escape is left as it was read before holes were.
+                if self.bytes[self.pos] == b'\\' && self.pos + 1 < self.limit {
+                    match self.bytes[self.pos + 1] {
+                        b'(' => {
+                            self.pos += 1;
+                            self.skip_interpolation();
+                            continue;
+                        }
+                        b'\\' => self.pos += 1,
+                        _ => {}
+                    }
+                }
                 self.pos += 1;
             }
         }

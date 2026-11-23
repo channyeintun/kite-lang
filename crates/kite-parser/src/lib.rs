@@ -96,16 +96,36 @@ fn matching_paren(bytes: &[u8], open: usize) -> Option<usize> {
                     return Some(i);
                 }
             }
-            b'"' => {
-                // A nested literal: its own parens are not ours.
-                i += 1;
-                while i < bytes.len() && bytes[i] != b'"' {
-                    i += if bytes[i] == b'\\' { 2 } else { 1 };
-                }
-            }
+            // A nested literal: its own parens are not ours.
+            b'"' => i = string_end(bytes, i)?,
             _ => {}
         }
         i += 1;
+    }
+    None
+}
+
+/// The index of the closing quote of the string literal opening at `at`,
+/// read as the lexer reads one: a `\(` hole is skipped as a whole, so a
+/// string inside it closes itself, and a `"""` string ends only at `"""`.
+/// Pairing quotes one by one read `"""p \("""in""") q"""` as five
+/// strings.
+fn string_end(bytes: &[u8], at: usize) -> Option<usize> {
+    let block = bytes[at..].starts_with(b"\"\"\"");
+    let mut i = at + if block { 3 } else { 1 };
+    while i < bytes.len() {
+        if block && bytes[i..].starts_with(b"\"\"\"") {
+            return Some(i + 2);
+        }
+        match (bytes[i], bytes.get(i + 1)) {
+            (b'"', _) if !block => return Some(i),
+            (b'\\', Some(b'(')) => i = matching_paren(bytes, i + 1)? + 1,
+            // The lexer ends a block string at the first `"""` after
+            // anything but a hole, an escaped `\\` included, so this does.
+            (b'\\', Some(b'\\')) => i += 2,
+            (b'\\', _) if !block => i += 2,
+            _ => i += 1,
+        }
     }
     None
 }

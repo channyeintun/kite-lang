@@ -597,6 +597,18 @@ fn a_hole_may_contain_a_string_with_parens() {
     assert_eq!(expr_sexp(r#""\(f(")("))""#), r#"(str (call f ")("))"#);
 }
 
+/// A hole is an ordinary expression (§2.4), so a block string may hold one
+/// whose own `"""` — or lone `"` — would otherwise end it, and a block string
+/// inside a hole of a block string lexes. It was "unterminated
+/// interpolation".
+#[test]
+fn a_hole_in_a_block_string_may_hold_a_block_string() {
+    assert_eq!(expr_sexp(r#""""p \("""in""") q""""#), r#"(str "p " """in""" " q")"#);
+    assert_eq!(expr_sexp(r#""""p \(f("""a"b(""")) q""""#), r#"(str "p " (call f """a"b(""") " q")"#);
+    // An escaped backslash before a paren opens nothing, in a block too.
+    assert_eq!(expr_sexp(r#""""x\\(y""""#), r#""""x\\(y""""#);
+}
+
 /// Section 2.1: identifiers are compared after NFC normalisation, so two
 /// spellings a reader cannot tell apart are one name. `café` here is written
 /// once with U+00E9 and once with `e` followed by the combining acute U+0301.
