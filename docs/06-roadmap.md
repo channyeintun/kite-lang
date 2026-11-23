@@ -2515,6 +2515,16 @@ segment naming a declared dependency roots there.
   copy of each level per change, as the hand-written version cost: a loop
   pushing through a field is still quicker on a local assigned back once.
 
+  *Closed later still:* a slice or map taken out of a field for a change is
+  the field's own when nothing else holds it, so the change goes straight in
+  and a loop pushing through a field is linear on all three backends — and one
+  writing keys through a field on the VM and natively, Wasm maps being copied
+  by every write wherever they are held. The VM's take empties the field, so
+  the count says so; natively and on Wasm the field's slice or map carries a
+  mark that the write-back sets and any read that could keep it clears
+  (docs/03 §7). A level below a field — `b.rows[i].push(x)` — is still a copy
+  of that level per change, as it is below a local.
+
 ---
 
 ## Phase 27 — `std/window`, and a calendar that is not the host's

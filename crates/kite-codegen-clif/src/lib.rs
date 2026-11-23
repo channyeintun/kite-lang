@@ -852,6 +852,13 @@ struct FnLower<'a, 'b, M: Module> {
     /// by local index: whether nothing but that local can reach its slice or
     /// map, so a write may go straight in. See the `slices` module.
     owned: HashMap<usize, Variable>,
+    /// By local index: whether a `FieldTake` assigns it, so the `SetField`
+    /// that writes it back marks the field the one holder when it is.
+    taken: Vec<bool>,
+    /// By local index: whether it only glances at a field's slice or map
+    /// (`kite_mir::held_reads`), so reading the field into it leaves the
+    /// field's mark alone.
+    glance: Vec<bool>,
     blocks: Vec<cranelift_codegen::ir::Block>,
     /// Function references imported into this function, on first use.
     rt_refs: HashMap<&'static str, cranelift_codegen::ir::FuncRef>,
@@ -930,6 +937,18 @@ fn define_fn<M: Module>(
         values: vec![None; direct.len()],
         direct,
         owned,
+        taken: f
+            .locals
+            .iter()
+            .enumerate()
+            .map(|(i, _)| {
+                f.blocks.iter().flat_map(|b| &b.stmts).any(|s| {
+                    matches!(s, mir::Inst::Assign { dst, value: mir::Rvalue::FieldTake { .. } }
+                        if dst.index() == i)
+                })
+            })
+            .collect(),
+        glance: mir::held_reads(f).iter().map(Option::is_some).collect(),
         blocks,
         rt_refs: HashMap::new(),
         fn_refs: HashMap::new(),
@@ -1318,6 +1337,20 @@ impl<'a, 'b, M: Module> FnLower<'a, 'b, M> {
         }
     }
 
+    /// Set `obj`'s `HELD_BIT` to `owned`, or clear it when that is `None`.
+    /// `obj` is a slice or map, never nil: a struct's fields are all given
+    /// values when it is made.
+    fn set_held(&mut self, obj: Value, owned: Option<Value>) {
+        let w = self.b.ins().load(I64, MemFlagsData::trusted(), obj, 0);
+        let mut w = self.b.ins().band_imm_s(w, !(kite_rt::HELD_BIT as i64));
+        if let Some(owned) = owned {
+            let bit = self.b.ins().uextend(I64, owned);
+            let bit = self.b.ins().ishl_imm_u(bit, kite_rt::HELD_BIT.trailing_zeros() as i64);
+            w = self.b.ins().bor(w, bit);
+        }
+        self.b.ins().store(MemFlagsData::trusted(), w, obj, 0);
+    }
+
     /// `xs.push(v)`, `xs[i] = v` or `m[k] = v`: the runtime writes in place
     /// when the flag says the local owns its slice or map and copies when it
     /// does not, and either way answers the one the local keeps — which it
@@ -1336,19 +1369,53 @@ impl<'a, 'b, M: Module> FnLower<'a, 'b, M> {
     }
 
     fn stmt(&mut self, s: &mir::Inst) {
+        // A write-back marks the slice or map it puts back as the field's
+        // alone when the local owned it — read before `release` clears the
+        // flag, since storing the local is what releases it. A suspension's
+        // spill of the same local into its frame is not one: it can come
+        // before the local holds anything.
+        if let mir::Inst::SetField { base, index, value: mir::Operand::Local(l) } = s {
+            if let (true, true, Some(&flag)) = (
+                self.taken[l.index()],
+                mir::takeable_field(self.cx.types, self.operand_ty(base), *index),
+                self.owned.get(&l.index()),
+            ) {
+                let owned = self.b.use_var(flag);
+                let obj = self.operand(&mir::Operand::Local(*l));
+                self.set_held(obj, Some(owned));
+            }
+        }
         self.release(s);
         match s {
             mir::Inst::Assign { dst, value } => {
                 self.rvalue(*dst, value);
                 // A slice made here is the destination's alone; one read from
                 // anywhere else may be shared with where it came from — unless
-                // it is a spilled local coming back, which brings its flag.
+                // it is a spilled local coming back, which brings its flag, or
+                // a field's taken out of it, whose mark is its flag.
                 if let Some(&flag) = self.owned.get(&dst.index()) {
                     let now = match value {
                         mir::Rvalue::Unspill { owned, .. } => self.operand(owned),
+                        mir::Rvalue::FieldTake { .. } => {
+                            let obj = self.operand(&mir::Operand::Local(*dst));
+                            let w = self.b.ins().load(I64, MemFlagsData::trusted(), obj, 0);
+                            let bit = self.b.ins().ushr_imm_u(w, kite_rt::HELD_BIT.trailing_zeros() as i64);
+                            let bit = self.b.ins().band_imm_u(bit, 1);
+                            self.b.ins().ireduce(I8, bit)
+                        }
                         _ => self.b.ins().iconst(I8, i64::from(slices::fresh(value))),
                     };
                     self.b.def_var(flag, now);
+                }
+                // Any other read of a field a write can go through may keep
+                // what it read, so the field is no longer its one holder.
+                if let mir::Rvalue::FieldGet { base, index } = value {
+                    if !self.glance[dst.index()]
+                        && mir::takeable_field(self.cx.types, self.operand_ty(base), *index)
+                    {
+                        let obj = self.operand(&mir::Operand::Local(*dst));
+                        self.set_held(obj, None);
+                    }
                 }
             }
             mir::Inst::SetField { base, index, value } => {
@@ -1644,6 +1711,7 @@ impl<'a, 'b, M: Module> FnLower<'a, 'b, M> {
             // spill overwrites it, which costs nothing here: this heap has no
             // count for a second holder to spoil. `stmt` sets the flag.
             mir::Rvalue::FieldGet { base, index }
+            | mir::Rvalue::FieldTake { base, index }
             | mir::Rvalue::Unspill { base, index, .. }
             | mir::Rvalue::VariantGet { base, index, .. } => {
                 let obj = self.operand(base);

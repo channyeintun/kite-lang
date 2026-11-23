@@ -898,6 +898,10 @@ impl<'a> FnLowerer<'a> {
                 let b = self.operand(base);
                 Rvalue::FieldGet { base: b, index: *index }
             }
+            hir::ExprKind::FieldTake { base, index } => {
+                let b = self.operand(base);
+                Rvalue::FieldTake { base: b, index: *index }
+            }
             _ => Rvalue::Use(self.operand(e)),
         }
     }

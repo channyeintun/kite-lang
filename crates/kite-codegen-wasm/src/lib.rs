@@ -1237,6 +1237,12 @@ pub fn compile_with(program: &mir::Program, types: &Types, debug_info: bool) -> 
                         element_type: StorageType::Val(ValType::I32),
                         mutable: true,
                     },
+                    // Whether a struct field is the one thing holding this
+                    // slice: see the `slices` module. Made clear, always.
+                    FieldType {
+                        element_type: StorageType::I8,
+                        mutable: true,
+                    },
                 ],
                 None,
                 true,
@@ -2419,6 +2425,15 @@ fn compile_fn(
     // are reachable from nowhere else — so a write may go straight into them.
     // See `Emitter::release`, which is what keeps the flag honest.
     let mut owned: std::collections::HashMap<u32, u32> = std::collections::HashMap::new();
+    let taken: Vec<bool> = (0..f.locals.len())
+        .map(|i| {
+            f.blocks.iter().flat_map(|b| &b.stmts).any(|s| {
+                matches!(s, mir::Inst::Assign { dst, value: mir::Rvalue::FieldTake { .. } }
+                    if dst.index() == i)
+            })
+        })
+        .collect();
+    let glance: Vec<bool> = mir::held_reads(f).iter().map(Option::is_some).collect();
     for b in &f.blocks {
         for s in &b.stmts {
             let target = match s {
@@ -2603,6 +2618,8 @@ fn compile_fn(
             map_scratch: &map_scratch,
             slice_scratch: &slice_scratch,
             owned: &owned,
+            taken: &taken,
+            glance: &glance,
             slice_helpers,
             map_helpers,
             index_wide,
@@ -2711,6 +2728,13 @@ struct Emitter<'a> {
     /// Per slice local the function mutates, the i32 local saying whether its
     /// header and buffer are this local's alone.
     owned: &'a std::collections::HashMap<u32, u32>,
+    /// By local: whether a `FieldTake` assigns it, so the `SetField` that
+    /// writes it back marks the header the field's alone when it is.
+    taken: &'a [bool],
+    /// By local: whether it only glances at a field's slice
+    /// (`kite_mir::held_reads`), so reading the field into it leaves the
+    /// header's mark alone.
+    glance: &'a [bool],
     /// The functions `xs[i]`, `xs[i] = v` and `xs.push(v)` call.
     slice_helpers: &'a slices::SliceHelpers,
     /// The functions `m[k] = v` and a map literal's collapsing call.
@@ -2754,6 +2778,31 @@ impl<'a> Emitter<'a> {
     }
 
     fn stmt(&mut self, func: &mut Function, stmt: &mir::Inst) {
+        // A write-back marks the header it puts back as the field's alone
+        // when the local owned it — read before `release` clears the flag,
+        // since storing the local is what releases it. A suspension's spill
+        // of the same local into its frame is not one: it can come before the
+        // local holds anything.
+        if let mir::Inst::SetField { base: holder, index, value: mir::Operand::Local(l) } = stmt {
+            let base = mir::Operand::Local(*l);
+            let holder_ty = match holder {
+                mir::Operand::Local(h) => self.f.locals[h.index()].ty,
+                _ => TyId::UNIT,
+            };
+            if let (true, true, Some(&flag), Some(parts)) = (
+                self.taken[l.index()],
+                mir::takeable_field(self.types, holder_ty, *index),
+                self.owned.get(&l.0),
+                self.slice_of(&base),
+            ) {
+                func.instruction(&Instruction::LocalGet(self.slots[l.index()]));
+                func.instruction(&Instruction::LocalGet(flag));
+                func.instruction(&Instruction::StructSet {
+                    struct_type_index: parts.header,
+                    field_index: 2,
+                });
+            }
+        }
         self.release(func, stmt);
         match stmt {
             mir::Inst::Assign { dst, value } => {
@@ -2764,12 +2813,44 @@ impl<'a> Emitter<'a> {
                 if self.rvalue(func, value) {
                     func.instruction(&Instruction::LocalSet(self.slots[dst.index()]));
                 }
+                // Any other read of a field a write can go through may keep
+                // what it read, so the field is no longer its one holder.
+                if let mir::Rvalue::FieldGet { base, index } = value {
+                    let here = mir::Operand::Local(*dst);
+                    let base_ty = match base {
+                        mir::Operand::Local(b) => self.f.locals[b.index()].ty,
+                        _ => TyId::UNIT,
+                    };
+                    if let (false, true, Some(parts)) = (
+                        self.glance[dst.index()],
+                        mir::takeable_field(self.types, base_ty, *index),
+                        self.slice_of(&here),
+                    ) {
+                        func.instruction(&Instruction::LocalGet(self.slots[dst.index()]));
+                        func.instruction(&Instruction::I32Const(0));
+                        func.instruction(&Instruction::StructSet {
+                            struct_type_index: parts.header,
+                            field_index: 2,
+                        });
+                    }
+                }
                 // A slice made here is the destination's alone; one read from
                 // anywhere else may be shared with where it came from — unless
-                // it is a spilled local coming back, which brings its flag.
+                // it is a spilled local coming back, which brings its flag, or
+                // a field's taken out of it, whose mark is its flag.
                 if let Some(&flag) = self.owned.get(&dst.0) {
                     if let mir::Rvalue::Unspill { owned, .. } = value {
                         self.operand(func, owned);
+                        func.instruction(&Instruction::LocalSet(flag));
+                        return;
+                    }
+                    let here = mir::Operand::Local(*dst);
+                    if let (mir::Rvalue::FieldTake { .. }, Some(parts)) = (value, self.slice_of(&here)) {
+                        func.instruction(&Instruction::LocalGet(self.slots[dst.index()]));
+                        func.instruction(&Instruction::StructGetU {
+                            struct_type_index: parts.header,
+                            field_index: 2,
+                        });
                         func.instruction(&Instruction::LocalSet(flag));
                         return;
                     }
@@ -3286,7 +3367,9 @@ impl<'a> Emitter<'a> {
             // The frame keeps a resumed local's reference until the next
             // spill overwrites it, which costs nothing here: there is no
             // count for a second holder to spoil. `stmt` sets the flag.
-            mir::Rvalue::FieldGet { base, index } | mir::Rvalue::Unspill { base, index, .. } => {
+            mir::Rvalue::FieldGet { base, index }
+            | mir::Rvalue::FieldTake { base, index }
+            | mir::Rvalue::Unspill { base, index, .. } => {
                 let Some((record, shift)) = self.record_of(base) else {
                     func.instruction(&Instruction::Unreachable);
                     return true;
@@ -3422,6 +3505,7 @@ impl<'a> Emitter<'a> {
                 func.instruction(&Instruction::RefAsNonNull);
                 func.instruction(&Instruction::LocalGet(hold));
                 func.instruction(&Instruction::ArrayLen);
+                func.instruction(&Instruction::I32Const(0));
                 func.instruction(&Instruction::StructNew(header));
                 return true;
             }
@@ -3625,6 +3709,7 @@ impl<'a> Emitter<'a> {
                 let hold = self.hold(parts.array);
                 self.fixed_array(func, parts.array, &elems, hold);
                 func.instruction(&Instruction::I32Const(elems.len() as i32));
+                func.instruction(&Instruction::I32Const(0));
                 func.instruction(&Instruction::StructNew(parts.header));
                 return true;
             }
@@ -3758,6 +3843,7 @@ impl<'a> Emitter<'a> {
                 func.instruction(&Instruction::LocalGet(lo));
                 func.instruction(&Instruction::I64Sub);
                 func.instruction(&Instruction::I32WrapI64);
+                func.instruction(&Instruction::I32Const(0));
                 func.instruction(&Instruction::StructNew(parts.header));
                 return true;
             }

@@ -15,6 +15,17 @@
 //! count to ask, but it has the compiler, which can see every place a local is
 //! read.
 //!
+//! A slice in a struct field is written through it by being taken into a
+//! local, changed, and put back (`q.items.push(v)`; §5.4). A field has
+//! nowhere to keep an owned flag, so the header keeps it, in a third field:
+//! the write-back sets it when the local owned what it put back, the next
+//! take reads it as the local's flag, and every read of the field that could
+//! keep what it read clears it — every read but a glance, which keeps nothing
+//! and is over before anything could write in place
+//! (`kite_mir::held_reads`). A header made anywhere starts with it clear. The
+//! native backend keeps the same mark, on the object, for the same reason;
+//! see its `slices` module.
+//!
 //! The writes themselves are small functions, one per element type and
 //! operation a program uses, rather than inline code: a push is fifty bytes of
 //! logic, and an island pushes in dozens of places.
@@ -199,6 +210,7 @@ impl Parts {
         f.instruction(&Instruction::LocalGet(buf));
         f.instruction(&Instruction::RefAsNonNull);
         f.instruction(&Instruction::LocalGet(n));
+        f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::StructNew(self.header));
         f.instruction(&Instruction::LocalSet(0));
     }
@@ -346,6 +358,9 @@ pub fn escaping_operands(stmt: &mir::Inst) -> Vec<&mir::Operand> {
         | R::ToStr { .. }
         | R::Cast { .. }
         | R::FieldGet { .. }
+        // What a take hands the local is put back by the write-back, which is
+        // the `SetField` that comes next; the take itself keeps nothing.
+        | R::FieldTake { .. }
         | R::TagOf { .. }
         | R::VariantGet { .. }
         | R::MapGet { .. }

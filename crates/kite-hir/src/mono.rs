@@ -809,6 +809,7 @@ fn expr_children(k: &mut ExprKind) -> Vec<&mut Expr> {
         | ExprKind::Await { value }
         | ExprKind::Unwrap { value } => vec![value],
         ExprKind::FieldGet { base, .. }
+        | ExprKind::FieldTake { base, .. }
         | ExprKind::PairValue { base }
         | ExprKind::PairError { base }
         | ExprKind::ErrorMessage { base }

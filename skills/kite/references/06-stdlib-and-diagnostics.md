@@ -629,7 +629,10 @@ arrays. `buffer.F64` is a flat `[float]` with a `stride` written down beside it.
 `push(b, values)` `set(b, record, field, value)` `column(b, field)`
 `extent(b, field)`. `push` and `set` **return a new buffer** — bind the result.
 Each is a copy of the whole buffer, so a loop of `push` is quadratic: build
-many records as rows with `from_records(stride, rows)`. The shape is checked: `push` of anything but exactly `stride` numbers, a field
+many records as rows with `from_records(stride, rows)`, or push the numbers
+onto a `var` buffer's `values` field (`b.values.push(x)`, `stride` to a
+record), which writes in place like any slice in a field. The shape is
+checked: `push` of anything but exactly `stride` numbers, a field
 outside `0..stride` or a record outside `0..count(b)` traps with a message
 naming the mistake (a ragged push used to be accepted and shift every record
 after it, and a field past the stride read the next record).
