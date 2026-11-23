@@ -106,7 +106,59 @@ codes! {
 
     // ---- syntax and bindings ---------------------------------------------
     E0100 = "E0100", "unexpected token",
-        "The parser found a token that cannot appear in this position.";
+        "The parser found something that cannot be written where it is. The \
+         message says what was expected and what was there instead, and the \
+         caret is on the token where the parser gave up, which can be one \
+         past the mistake: a line that ends in an operator carries on to \
+         the next line, so `let x = 1 +` followed by a line holding `}` is \
+         reported at the `}`.\n\
+         \n\
+         Every syntax error that has no code of its own is this one. The \
+         situations:\n\
+         \n\
+         - A token that does not fit. `let x = (1 + )` has no operand \
+         after the `+`, `let x = 1 let y = 2` has no line break between \
+         two statements, `f(1 2)` and `{\"a\": 1 \"b\": 2}` have no comma \
+         between their arguments or entries, and `[1 2]` is `expected \
+         `]``. Look at the line the caret is on and at the one before it.\n\
+         - A comma where a line break goes. Struct fields and enum \
+         variants are separated by line breaks, not commas, so `struct P \
+         { a: int, b: int }` and `enum E { A, B }` are refused. Put each \
+         on a line of its own.\n\
+         - A declaration where only statements or members go. A function \
+         cannot be written inside a function (`expected a statement, \
+         found `fn``), and a method cannot be written inside a `struct` \
+         (`expected a field, found `fn``). Write a helper at the top \
+         level, and write methods in an `impl` block. The reverse also \
+         holds, because only declarations may stand at the top of a file: \
+         `return 1` there is `expected a declaration`.\n\
+         - A chain. `1 < a < 3` is refused: write `1 < a && a < 3`. \
+         `1..2..3` is refused too, since a range has one start and one \
+         end.\n\
+         - An `if` used as a value without an `else`: `let x = if c { 1 \
+         }` would have no value when `c` is false. Write the `else`.\n\
+         - An attribute Kite does not have. `@host(\"group\")` and \
+         `@derive(...)` are the only two, so `@oops` is refused.\n\
+         - `pub use`. A module's imports are its own and are not exported \
+         (§4.3), so there is no `pub use`; each module that wants a name \
+         writes its own `use`. And an `extern fn` cannot be `async`: a \
+         host call is answered when it is made, and the Kite function \
+         that wraps the declaration is the one that is `async`.\n\
+         - A string interpolation that does not close, `\"a \\(1 + \"`, or \
+         one that holds more than a single expression, `\"a \\(1 2)\"`. An \
+         interpolated string is not a pattern either: `match n { \"a\\(n)\" \
+         => … }` is `only a literal may appear here`.\n\
+         \n\
+         Example:\n\
+         \n\
+         \x20   struct P { a: int, b: int }    // E0100: a comma between fields\n\
+         \n\
+         The fix is a line break where the comma was:\n\
+         \n\
+         \x20   struct P {\n\
+         \x20       a: int\n\
+         \x20       b: int\n\
+         \x20   }";
 
     E0101 = "E0101", "unclosed delimiter",
         "A bracket, brace, or parenthesis was opened and never closed.";
@@ -135,7 +187,46 @@ codes! {
          before the first read.";
 
     E0111 = "E0111", "unknown name",
-        "This identifier does not resolve to anything in scope.";
+        "A name was used that nothing in scope defines. A name is looked up \
+         in the blocks around the use, then among the module's own \
+         declarations, then in the prelude. Nothing is brought in from \
+         another module unqualified (§13.1), so another module's names are \
+         written `module.name`. The situations:\n\
+         \n\
+         - A variable, function or constant that is not there: \
+         `io.print(cuont)` where the variable is `count`. A name is in \
+         scope from its `let` to the end of the block it is declared in, \
+         so using it before the `let`, or after the `}` that closes the \
+         block, is this error too.\n\
+         - A module that was not imported. `text.trim(s)` without `use \
+         std/text` is `cannot find `text``. Write the `use`.\n\
+         - A name an imported module does not declare: `text.trimm(s)` is \
+         `cannot find `trimm` in module `text``, and when a name it does \
+         declare is close enough the note offers it. A name the module \
+         declares but does not mark `pub` is `E0401` instead.\n\
+         - A type that does not exist, written where a value is expected: \
+         `Foo.make()`. Written where a type is expected it is `E0204`.\n\
+         - A variant its enum does not have: `Dir.Left` where `Dir` has \
+         `Up` and `Down`. The note lists the variants it has. The same \
+         holds in a pattern.\n\
+         - A loop label no enclosing loop carries: `break outer` with no \
+         `outer: for …` around it.\n\
+         - `self` in a function that is not a method. `self` is the \
+         receiver of a method, so there is none to name.\n\
+         \n\
+         Example:\n\
+         \n\
+         \x20   fn main() {\n\
+         \x20       let count = 0\n\
+         \x20       io.print(cuont)    // E0111: `cuont` is not in scope\n\
+         \x20   }\n\
+         \n\
+         The fix is the name that is in scope:\n\
+         \n\
+         \x20   fn main() {\n\
+         \x20       let count = 0\n\
+         \x20       io.print(count)\n\
+         \x20   }";
 
     E0112 = "E0112", "duplicate definition",
         "Two items in the same scope share a name. Shadowing is permitted in a \
@@ -227,8 +318,58 @@ codes! {
         "This function declares a return type but a path through it returns \
          nothing.";
 
-    E0204 = "E0204", "unknown type",
-        "This type name does not resolve.";
+    E0204 = "E0204", "a type that cannot be named or worked out",
+        "The compiler could not settle a type: either a name written where \
+         a type goes names no type, or there is nothing to work a type out \
+         from. The situations:\n\
+         \n\
+         - A type name that does not resolve: `let x: Foo = 1`, in an \
+         annotation, a signature, a field or a struct literal `Foo{ … }`. \
+         A close type that is in scope is offered in a note. `Self` \
+         outside an `impl` or a trait is one. So is a qualified name \
+         whose module was not imported: `json.Json` without `use \
+         std/json`, and the note asks whether the module is imported. An \
+         unknown name followed by type arguments, `Foo<int>`, is reported \
+         as a name that takes none.\n\
+         - A name that is the wrong sort of thing. A trait used as a \
+         type, `fn f(x: Display)`, is refused, and `dyn Display` is the \
+         way to name one. `dyn S` where `S` is a struct, `impl S for S` \
+         and `impl Nope for S` name something that is not a trait. An \
+         `impl` is for a struct or an enum declared in the same module, \
+         so `impl int` is refused: wrap the built-in type in a struct of \
+         your own and implement the methods on that.\n\
+         - Nothing to infer from. `let x = nil`, `let xs = []`, `let m = \
+         {}`, a `let x` with neither a type nor a value, and a `let (a, \
+         b)` with nothing to take apart all leave the type open, and \
+         inference never guesses. Annotate the binding.\n\
+         - A host declaration that cannot be one. An `@host` `extern fn` \
+         takes and returns `int`, `float`, `bool`, `str` or `JsValue`, so \
+         `[int]` is refused, and it answers with one value, so `-> (int, \
+         error)` is too: the Kite function that wraps the declaration is \
+         the one that returns the `error`.\n\
+         - A target that cannot hold the program. `kitec run --native` \
+         refuses a program that uses `JsValue`, because a `JsValue` is a \
+         reference the JavaScript engine owns and there is no engine \
+         outside a browser. It is reported once, at the first function \
+         that touches one, with a note counting the others; `--emit wasm` \
+         is the target that has a host. The same code reports a struct, \
+         variant, tuple, closure or host call made of more than 4096 \
+         parts on the native target, which is a limit of the generated \
+         code and not of the language; the bytecode target runs it.\n\
+         \n\
+         Example:\n\
+         \n\
+         \x20   fn main() {\n\
+         \x20       let xs = []    // E0204: an empty slice has no elements to infer from\n\
+         \x20       io.print(xs.len())\n\
+         \x20   }\n\
+         \n\
+         The fix is the annotation:\n\
+         \n\
+         \x20   fn main() {\n\
+         \x20       let xs: [int] = []\n\
+         \x20       io.print(xs.len())\n\
+         \x20   }";
 
     E0205 = "E0205", "no such method, function, or callable value",
         "A name was called and there is nothing of that name to call here: a \
@@ -376,11 +517,86 @@ codes! {
 
     // ---- modules ----------------------------------------------------------
     E0400 = "E0400", "module not found",
-        "The import path does not resolve to a module.";
+        "A `use` names a module that cannot be found. The note under the \
+         error lists every place that was looked in.\n\
+         \n\
+         A module is a file or a directory (§13.1). A path is looked for \
+         beside the module that writes the `use`, then in each directory \
+         enclosing that one, stopping at the root of the package the module \
+         belongs to, and the nearest match wins. A first segment that names \
+         one of the package's declared dependencies roots in that \
+         dependency instead. Every segment counts, so `use shapes/circle` \
+         is the `circle` module inside `shapes`, never the `circle` beside \
+         it. The situations:\n\
+         \n\
+         - A path with nothing at it: `use shape` when the file is \
+         `shapes.kite`, or a file in another directory.\n\
+         - A directory that is not a module. A directory is a module when \
+         a `.kite` file is directly in it; one that holds only other \
+         directories is found, refused, and said to be refused in the \
+         note.\n\
+         - A standard-library module that does not exist. The path is \
+         exactly `std/<name>`, so `use std/nothing` and `use \
+         std/json/extra` are refused, and the note lists the modules \
+         there are. `io` is built in and reached without a `use`, so `use \
+         std/io` is refused too.\n\
+         - A dependency that is declared but not in place. A `git` \
+         dependency is read from `.kite/vendor`, which `kitec pkg` fills, \
+         so a program that has not run it cannot find the dependency. \
+         When `kite.toml` itself does not read (`E0405`) nothing it \
+         declares can be found, and the note says so.\n\
+         - A file that was found and could not be read; the operating \
+         system's reason is in the message.\n\
+         \n\
+         Example:\n\
+         \n\
+         \x20   use shape    // E0400: the file is shapes.kite\n\
+         \n\
+         The fix is the name that is there:\n\
+         \n\
+         \x20   use shapes";
 
     E0401 = "E0401", "private item",
-        "This item is not marked `pub`, so it is visible only within its own \
-         module.";
+        "Something is used outside its module that its module did not mark \
+         `pub`. `pub` is the only visibility modifier (§4.3): an unmarked \
+         declaration is visible within the module that declares it, and \
+         `pub` makes it visible to anything that imports the module. A \
+         module is a directory, so every file in it shares what is \
+         unmarked. The situations:\n\
+         \n\
+         - A function, constant, type or trait: `m.hidden()` where \
+         `hidden` is not `pub`. A type that is not `pub` cannot be named \
+         outside its module at all, not in an expression, a signature, a \
+         field, an annotation or an `impl` header, and a trait that is \
+         not `pub` cannot be implemented outside its module. A `pub` \
+         alias may not name a type that is not `pub`, since an alias is \
+         the type it names.\n\
+         - A variant of an enum that is not `pub`. A variant has no \
+         visibility of its own: it is exactly as visible as its enum, so \
+         `m.Dir.Up` and a bare `Up` in a pattern are both refused while \
+         `Dir` is private, and both are fine once it is `pub`.\n\
+         - A field. `p.n` where `n` is not marked `pub` is refused, and \
+         so is building the struct with a literal, `m.P{ n: 1, k: 2 }`, \
+         even one that starts from `..base`, since a literal has to give \
+         every field. A `pub struct` with unmarked fields is an opaque \
+         type: callers can hold it and pass it on, and its module exports \
+         the function that builds one.\n\
+         - A method or an associated function. Those in an `impl` block \
+         are private unless they say `pub`: `s.secret()` and \
+         `m.S.assoc()` are refused. The methods of a trait implementation \
+         are as visible as the trait, so `s.go()` is refused while the \
+         trait that declares `go` is not `pub`.\n\
+         \n\
+         Example, with `m` declaring `fn hidden() -> int { return 1 }`:\n\
+         \n\
+         \x20   use m\n\
+         \n\
+         \x20   fn main() {\n\
+         \x20       io.print(m.hidden())    // E0401: `hidden` is not `pub`\n\
+         \x20   }\n\
+         \n\
+         The fix is `pub fn hidden()` in `m`, or a `pub` function in `m` \
+         that does what is needed and keeps `hidden` to itself.";
 
     E0403 = "E0403", "module name is reserved by the standard library",
         "A use site spells a module by the last segment of its `use` path, so \
@@ -429,8 +645,34 @@ codes! {
          reported instead, at the line that did not read.";
 
     E0402 = "E0402", "module cycle",
-        "Modules may not depend on each other cyclically. Extract the shared \
-         part into a third module.";
+        "Modules import each other in a circle, directly or through others. \
+         Cyclic modules make separate compilation, incremental rebuilds and \
+         initialisation order all harder (§13.3), so a cycle is an error \
+         and not something the compiler picks an order for.\n\
+         \n\
+         The note prints the chain, such as `b → a`. The error sits on the \
+         `use` that closes the cycle, except when the cycle leads back to \
+         the entry file: then it sits on the entry's own `use` that began \
+         it, so that checking the entry alone, which is what an editor \
+         does, shows it. A module that imports itself is a cycle of one.\n\
+         \n\
+         Example, `a.kite` and `b.kite` in one directory, checking `a.kite`:\n\
+         \n\
+         \x20   // a.kite\n\
+         \x20   use b    // E0402: the chain is b → a\n\
+         \n\
+         \x20   // b.kite\n\
+         \x20   use a    // the import that closes it\n\
+         \n\
+         Every cycle can be broken by extracting what both modules need \
+         into a third module that imports neither, and having both import \
+         that:\n\
+         \n\
+         \x20   // shared.kite holds what a and b both use\n\
+         \x20   // a.kite:  use shared        b.kite:  use shared\n\
+         \n\
+         A cycle among packages in `kite.toml` is not this code: `kitec \
+         pkg` refuses it and names the chain of packages.";
 
     E0406 = "E0406", "implementation outside its type's module",
         "An `impl` block belongs to the module that declares its type — or, \
@@ -449,16 +691,89 @@ codes! {
 
     // ---- concurrency ------------------------------------------------------
     E0520 = "E0520", "type cannot be moved to another task",
-        "Only `Share` values may cross a task boundary. A type is `Share` when \
-         it is deeply immutable, or explicitly synchronised.\n\n\
-         Because struct fields are immutable by default, most types satisfy \
-         this without the author doing anything. A `var` field anywhere in the \
-         transitive structure disqualifies the type, because two tasks holding \
-         the same mutable value is a data race.";
+        "A value whose type is not `Share` is being handed to something \
+         that requires `Share`. `Share` is the marker for a value that may \
+         be moved to another task, and it is inferred, never written: a \
+         type is `Share` when it is a primitive or a `str`, when it is a \
+         struct or an enum all of whose fields are `Share` and none of \
+         which is `var`, when it is a slice, map or tuple of `Share` \
+         elements, or when it is wrapped in `sync.Mutex<T>` or \
+         `sync.Atomic` (§12.3). It is not `Share` when a `var` field is \
+         anywhere in its structure, because two tasks holding one mutable \
+         value is a data race. It is not `Share` when it holds a `JsValue`, \
+         because a host reference belongs to the isolate that created it, \
+         and no change to the type makes it travel. And a function or a \
+         `dyn Trait` is not `Share`, because what it holds is not known \
+         where the type is.\n\
+         \n\
+         The places that ask are a `T: Share` bound, which is how \
+         `task.parallel` asks for its items and its results, and any bound \
+         written the same way. `task.parallel` is not parallel on any \
+         target yet; the rule is enforced now so that the same source \
+         starts using cores when a reference can cross a thread. The \
+         situations:\n\
+         \n\
+         - A type that fails the rule is passed: `task.parallel(counters, \
+         |c| c.count)` where `Counter` has a `var` field. The error \
+         points at the argument, at the bound that requires `Share`, and \
+         at the field that breaks it.\n\
+         - A closure that captures such a value: it goes to the other \
+         task with everything it captured, so `|x| x + k.count` is \
+         refused where `k` is a `Counter`. The error says which capture.\n\
+         - A function whose captures cannot be seen. A closure held in a \
+         binding or returned from a call, `let f = |x: int| x + 1` and \
+         then `task.parallel(xs, f)`, may carry anything, so it is \
+         refused. Write the closure where it is handed over, or name a \
+         function.\n\
+         - A type parameter that is not known to be `Share`. In `fn \
+         f<T>(x: T)` that calls a function bounded by `T: Share`, `T` \
+         could be any type, so it is refused until `f` says `T: Share` as \
+         well.\n\
+         \n\
+         Example:\n\
+         \n\
+         \x20   struct Counter {\n\
+         \x20       var count: int\n\
+         \x20   }\n\
+         \n\
+         \x20   fn need<T: Share>(x: T) -> int { return 1 }\n\
+         \n\
+         \x20   fn main() {\n\
+         \x20       io.print(need(Counter{ count: 0 }))    // E0520: `count` is `var`\n\
+         \x20   }\n\
+         \n\
+         The fix is to stop mutating, so that a new value is returned in \
+         place of the old one, and drop the `var`; or to wrap the counter \
+         in `sync.Mutex<Counter>`; or to send the task what it needs, a \
+         number or a string, and keep the counter where it is.";
 
     E0521 = "E0521", "`await` outside an async function",
-        "`await` suspends the enclosing function, so that function must be \
-         declared `async`.";
+        "`await` and `task.yield` suspend the function they are written in, \
+         so that function has to be declared `async`; an ordinary `fn` \
+         cannot be suspended. The situations:\n\
+         \n\
+         - `await` or `task.yield()` in a function that is not `async`. \
+         That includes `main`, which is `async fn main()` when it awaits.\n\
+         - `await` or `task.yield()` inside a closure. A closure is a \
+         function of its own and is never `async`, so one inside an \
+         `async fn` is refused too: `|| await work()`. Await before \
+         making the closure, or have the closure return the task and \
+         await it where it is called; `task.yield` goes in the enclosing \
+         `async fn`, before or after the closure runs.\n\
+         \n\
+         Example:\n\
+         \n\
+         \x20   async fn work() -> int { return 1 }\n\
+         \n\
+         \x20   fn main() {\n\
+         \x20       let n = await work()    // E0521: `main` is not `async`\n\
+         \x20   }\n\
+         \n\
+         The fix is to declare the function that waits as `async`:\n\
+         \n\
+         \x20   async fn main() {\n\
+         \x20       let n = await work()\n\
+         \x20   }";
 
     // ---- cryptography -----------------------------------------------------
     E0600 = "E0600", "comparing a secret with `==`",

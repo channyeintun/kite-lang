@@ -237,6 +237,19 @@ impl Requirement {
                     text.trim()
                 ));
             }
+            // An operator is written once. `^^1` was read as `^` and then `^1`,
+            // and the complaint about the operand quoted `^1` — a text the
+            // manifest never contained.
+            let operand = [">=", "<=", ">", "<", "=", "^"]
+                .iter()
+                .find_map(|op| piece.strip_prefix(op));
+            if operand.is_some_and(|o| o.trim_start().starts_with(['^', '>', '<', '=', '~'])) {
+                return Err(format!(
+                    "`{}` is not a version requirement: an operator is written once, like \
+                     `^1.2`, `=1.2.3`, or `>=1.2, <2.0`",
+                    piece
+                ));
+            }
             let clause = if piece == "*" {
                 Clause::Any
             } else if let Some(rest) = piece.strip_prefix(">=") {
@@ -536,5 +549,13 @@ mod tests {
         assert!(err.contains("`about 1.2`"), "{}", err);
         assert!(Requirement::parse("1.2,").is_err());
         assert!(Requirement::parse("").is_err());
+    }
+
+    #[test]
+    fn a_doubled_operator_is_quoted_as_written() {
+        for text in ["^^1", ">>1", ">=>=1", "=^1", "^ ^1"] {
+            let err = Requirement::parse(text).expect_err(text);
+            assert!(err.starts_with(&format!("`{}` is not a version requirement", text)), "{}", err);
+        }
     }
 }

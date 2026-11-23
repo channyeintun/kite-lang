@@ -72,9 +72,15 @@ fn command() -> ExitCode {
     }
 
     if let Some(i) = args.iter().position(|a| a == "--explain") {
+        // One code, and nothing else. `--explain E0117 E0118` explained the
+        // first and said nothing of the second, which reads as "that one has
+        // no explanation" and is not what happened.
         return match args.get(i + 1) {
-            Some(code) => explain(code),
             None => fail("`--explain` needs a diagnostic code, e.g. `--explain E0301`"),
+            Some(_) if args.len() > 2 => fail(
+                "`--explain` takes one diagnostic code and nothing else, e.g. `--explain E0301`",
+            ),
+            Some(code) => explain(code),
         };
     }
 
@@ -159,6 +165,21 @@ fn command() -> ExitCode {
             }
             _ if a.starts_with('-') => {
                 return fail(&format!("unknown option `{}`", a));
+            }
+            // `kitec file.kite` is `kitec run file.kite`, so a word in the
+            // command's place is read as a path. One that names nothing on
+            // disk and cannot be a path — no `/`, no `.` — is a command
+            // misspelt, and says so rather than "cannot read ./frobnicate".
+            _ if command.is_none()
+                && path.is_none()
+                && !a.contains(['/', '\\', '.'])
+                && !std::path::Path::new(a).exists() =>
+            {
+                return fail(&format!(
+                    "unknown command `{}`\n\ncommands: run, check, build, test, fmt, doc, fix, \
+                     bundle, pkg (`kitec --help` lists them)",
+                    a
+                ));
             }
             _ if path.is_none() => {
                 path = Some(a.clone());
@@ -829,7 +850,10 @@ fn explain(code: &str) -> ExitCode {
         Some((summary, body)) => answer(&format!("{}: {}\n\n{}\n", code, summary, body)),
         None => {
             eprintln!("error: `{}` is not a known diagnostic code", code);
-            let known: Vec<&str> = kite_diag::codes::all().iter().map(|(c, _)| *c).collect();
+            // In code order: the table is in the order the codes were
+            // written, which is not the order they are numbered in.
+            let mut known: Vec<&str> = kite_diag::codes::all().iter().map(|(c, _)| *c).collect();
+            known.sort_unstable();
             eprintln!("note: known codes: {}", known.join(", "));
             ExitCode::FAILURE
         }

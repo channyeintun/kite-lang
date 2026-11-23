@@ -2058,7 +2058,9 @@ declared for itself. A `path` is relative to the manifest that writes it; a
 `git` dependency is read from the program's `.kite/vendor`, where `kitec pkg`
 puts every package in the graph. A name — package or dependency — is an
 identifier, because it is written in a `use`. A key the manifest does not
-define is an error rather than something ignored, and a manifest that does not
+define is an error rather than something ignored; so is a key or a table written
+twice, and a trailing comma in an inline table, as TOML says. Strings are TOML's
+two forms, `"…"` with its escapes and `'…'` as written. And a manifest that does not
 parse — or does not read at all, as one that is not UTF-8 — is `E0405` in every
 command that reads it.
 
@@ -2109,6 +2111,10 @@ rather than by policy.
 Module cycles are an error. Cyclic dependencies make separate compilation,
 incremental rebuilds, and initialisation order all harder, and every cycle can be
 broken by extracting the shared part.
+
+That holds between packages too: a package that depends on itself, directly or
+through others, is an error — `kitec pkg` names the chain (`a -> b -> a`) and
+writes no lockfile.
 
 ---
 

@@ -16,7 +16,9 @@
 //!
 //! The TOML reader is a subset: tables, string values, and nothing else. A
 //! manifest that needs more than that is a manifest that has grown a
-//! programming language, which is what this is avoiding.
+//! programming language, which is what this is avoiding. Within that subset it
+//! is TOML: both string forms (`"…"` with its escapes, and `'…'` taken
+//! literally), and a key or table written twice is an error, as TOML says.
 
 use crate::semver::{Requirement, Version};
 use std::collections::BTreeMap;
@@ -78,6 +80,14 @@ impl std::fmt::Display for ManifestError {
 pub fn parse(text: &str) -> Result<Manifest, ManifestError> {
     let mut manifest = Manifest::default();
     let mut table = String::new();
+    // A key or table written twice is an error in TOML, and here it would
+    // otherwise be the last one winning, silently. Tables are remembered by
+    // name and the keys of `[package]` by name; targets and dependencies are
+    // keys of their own tables, checked against what was collected.
+    let mut tables: Vec<String> = Vec::new();
+    let mut package_keys: Vec<String> = Vec::new();
+    // A byte-order mark is not part of the first line.
+    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
 
     for (i, raw) in text.lines().enumerate() {
         let line_number = i + 1;
@@ -87,6 +97,13 @@ pub fn parse(text: &str) -> Result<Manifest, ManifestError> {
         }
         if let Some(name) = line.strip_prefix('[').and_then(|l| l.strip_suffix(']')) {
             table = name.trim().to_string();
+            if tables.contains(&table) {
+                return Err(ManifestError {
+                    line: line_number,
+                    message: format!("the table `[{}]` is written twice", table),
+                });
+            }
+            tables.push(table.clone());
             continue;
         }
         let Some((key, value)) = line.split_once('=') else {
@@ -100,7 +117,14 @@ pub fn parse(text: &str) -> Result<Manifest, ManifestError> {
 
         match table.as_str() {
             "package" => match key {
+                _ if package_keys.iter().any(|k| k == key) => {
+                    return Err(ManifestError {
+                        line: line_number,
+                        message: format!("`{}` is written twice in `[package]`", key),
+                    })
+                }
                 "name" => {
+                    package_keys.push(key.to_string());
                     let name = unquote(value, line_number)?;
                     check_name("package", &name, line_number)?;
                     manifest.name = name;
@@ -109,6 +133,7 @@ pub fn parse(text: &str) -> Result<Manifest, ManifestError> {
                 // only when this package was somebody's dependency, so a
                 // program's own `version = "banana"` passed every command.
                 "version" => {
+                    package_keys.push(key.to_string());
                     let version = unquote(value, line_number)?;
                     Version::parse(&version).map_err(|message| ManifestError {
                         line: line_number,
@@ -124,6 +149,12 @@ pub fn parse(text: &str) -> Result<Manifest, ManifestError> {
                 }
             },
             "targets" => {
+                if manifest.targets.contains_key(key) {
+                    return Err(ManifestError {
+                        line: line_number,
+                        message: format!("target `{}` is written twice", key),
+                    });
+                }
                 let fields = inline_table(value, line_number)?;
                 only_keys(&fields, &["entry", "renderer"], &format!("target `{}`", key), line_number)?;
                 let Some(entry) = fields.get("entry") else {
@@ -145,7 +176,7 @@ pub fn parse(text: &str) -> Result<Manifest, ManifestError> {
                         message: format!("dependency `{}` is declared twice", key),
                     });
                 }
-                let (source, version) = if value.starts_with('"') {
+                let (source, version) = if value.starts_with(['"', '\'']) {
                     (Source::Path(unquote(value, line_number)?), None)
                 } else {
                     let fields = inline_table(value, line_number)?;
@@ -291,30 +322,98 @@ fn only_keys(
     }
 }
 
+/// Where the string that opens at `start` (a `"` or a `'`) ends: the index just
+/// past its closing quote, or `None` if it never closes on this line. A `"`
+/// string skips what a backslash escapes; a `'` string is literal to its end.
+fn string_end(text: &str, start: usize) -> Option<usize> {
+    let quote = text[start..].chars().next()?;
+    let mut chars = text[start + 1..].char_indices();
+    while let Some((i, c)) = chars.next() {
+        if c == quote {
+            return Some(start + 1 + i + 1);
+        }
+        if c == '\\' && quote == '"' {
+            chars.next();
+        }
+    }
+    None
+}
+
 fn strip_comment(line: &str) -> &str {
     // A `#` inside a string is not a comment, and a manifest's strings are
-    // paths and URLs, which contain them.
-    let mut in_string = false;
-    for (i, c) in line.char_indices() {
+    // paths and URLs, which contain them. Either quote opens a string, and
+    // `'"'` is a string holding a quote, not the start of another.
+    let mut i = 0;
+    while let Some(c) = line[i..].chars().next() {
         match c {
-            '"' => in_string = !in_string,
-            '#' if !in_string => return &line[..i],
+            '"' | '\'' => match string_end(line, i) {
+                Some(end) => {
+                    i = end;
+                    continue;
+                }
+                // Never closed: leave it for the value's own error.
+                None => return line,
+            },
+            '#' => return &line[..i],
             _ => {}
         }
+        i += c.len_utf8();
     }
     line
 }
 
+/// A TOML string, `"…"` with its escapes or `'…'` as written, and nothing after.
 fn unquote(value: &str, line: usize) -> Result<String, ManifestError> {
     let trimmed = value.trim();
-    trimmed
-        .strip_prefix('"')
-        .and_then(|v| v.strip_suffix('"'))
-        .map(|v| v.to_string())
-        .ok_or(ManifestError {
+    let wrong = || ManifestError {
+        line,
+        message: format!("expected a quoted string, found `{}`", trimmed),
+    };
+    if !trimmed.starts_with(['"', '\'']) || string_end(trimmed, 0) != Some(trimmed.len()) {
+        return Err(wrong());
+    }
+    let inner = &trimmed[1..trimmed.len() - 1];
+    if trimmed.starts_with('\'') {
+        return Ok(inner.to_string());
+    }
+    let mut out = String::new();
+    let mut chars = inner.chars();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        let bad_escape = |what: String| ManifestError {
             line,
-            message: format!("expected a quoted string, found `{}`", trimmed),
-        })
+            message: format!("`{}` is not an escape TOML knows, in `{}`", what, trimmed),
+        };
+        let escaped = match chars.next() {
+            Some('b') => '\u{8}',
+            Some('t') => '\t',
+            Some('n') => '\n',
+            Some('f') => '\u{c}',
+            Some('r') => '\r',
+            Some('"') => '"',
+            Some('\\') => '\\',
+            Some(k @ ('u' | 'U')) => {
+                let want = if k == 'u' { 4 } else { 8 };
+                let digits: String = chars.by_ref().take(want).collect();
+                // Hex digits only: `from_str_radix` also takes a sign, and
+                // `\u+041` is not an escape.
+                u32::from_str_radix(&digits, 16)
+                    .ok()
+                    .filter(|_| {
+                        digits.len() == want && digits.chars().all(|d| d.is_ascii_hexdigit())
+                    })
+                    .and_then(char::from_u32)
+                    .ok_or_else(|| bad_escape(format!("\\{}{}", k, digits)))?
+            }
+            Some(other) => return Err(bad_escape(format!("\\{}", other))),
+            None => return Err(wrong()),
+        };
+        out.push(escaped);
+    }
+    Ok(out)
 }
 
 /// `{ entry = "src/main.kite", renderer = "dom" }`
@@ -328,10 +427,23 @@ fn inline_table(value: &str, line: usize) -> Result<BTreeMap<String, String>, Ma
             message: format!("expected `{{ … }}`, found `{}`", value.trim()),
         })?;
     let mut out = BTreeMap::new();
-    for field in split_fields(inner) {
+    let fields = split_fields(inner);
+    for (n, field) in fields.iter().enumerate() {
         let field = field.trim();
         if field.is_empty() {
-            continue;
+            // `{ }` is the empty table; any other empty field is a comma with
+            // nothing after it, which TOML does not allow in an inline table.
+            if fields.len() == 1 {
+                continue;
+            }
+            return Err(ManifestError {
+                line,
+                message: if n == fields.len() - 1 {
+                    "an inline table takes no trailing comma".to_string()
+                } else {
+                    "an inline table has an empty field between two commas".to_string()
+                },
+            });
         }
         let Some((key, value)) = field.split_once('=') else {
             return Err(ManifestError {
@@ -339,7 +451,13 @@ fn inline_table(value: &str, line: usize) -> Result<BTreeMap<String, String>, Ma
                 message: format!("expected `key = value`, found `{}`", field),
             });
         };
-        out.insert(key.trim().to_string(), unquote(value, line)?);
+        let key = key.trim();
+        if out.insert(key.to_string(), unquote(value, line)?).is_some() {
+            return Err(ManifestError {
+                line,
+                message: format!("`{}` is written twice in one inline table", key),
+            });
+        }
     }
     Ok(out)
 }
@@ -348,18 +466,20 @@ fn inline_table(value: &str, line: usize) -> Result<BTreeMap<String, String>, Ma
 fn split_fields(inner: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut current = String::new();
-    let mut in_string = false;
-    for c in inner.chars() {
+    let mut i = 0;
+    while let Some(c) = inner[i..].chars().next() {
         match c {
-            '"' => {
-                in_string = !in_string;
-                current.push(c);
+            '"' | '\'' => {
+                // A string that never closes is left whole; `unquote` says so.
+                let end = string_end(inner, i).unwrap_or(inner.len());
+                current.push_str(&inner[i..end]);
+                i = end;
+                continue;
             }
-            ',' if !in_string => {
-                out.push(std::mem::take(&mut current));
-            }
+            ',' => out.push(std::mem::take(&mut current)),
             _ => current.push(c),
         }
+        i += c.len_utf8();
     }
     out.push(current);
     out
@@ -394,10 +514,31 @@ pub fn lockfile(entries: &[Locked]) -> String {
     );
     for entry in entries {
         out.push_str(&format!(
-            "[[locked]]\nname = \"{}\"\nversion = \"{}\"\nsource = \"{}\"\nhash = \"{}\"\n\n",
-            entry.name, entry.version, entry.source, entry.hash
+            "[[locked]]\nname = {}\nversion = {}\nsource = {}\nhash = {}\n\n",
+            quote(&entry.name),
+            quote(&entry.version),
+            quote(&entry.source),
+            quote(&entry.hash)
         ));
     }
+    out
+}
+
+/// A `"…"` string that `unquote` reads back as `text`. The reader honours
+/// TOML's escapes, so a path written with a `\` or a `"` in it — a source is a
+/// path as the manifest spelled it — has to be escaped on the way out, or the
+/// lockfile `kitec pkg` wrote is one it cannot read.
+fn quote(text: &str) -> String {
+    let mut out = String::from("\"");
+    for c in text.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            c if c.is_control() => out.push_str(&format!("\\u{:04X}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
     out
 }
 
@@ -409,6 +550,7 @@ pub fn lockfile(entries: &[Locked]) -> String {
 /// that was added, removed or moved to a new version is only reported — and
 /// prefers the recorded versions over newer ones nobody asked for.
 pub fn parse_lockfile(text: &str) -> Result<Vec<Locked>, ManifestError> {
+    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
     let mut out = Vec::new();
     let mut entry: Option<(usize, BTreeMap<String, String>)> = None;
     let finish = |entry: Option<(usize, BTreeMap<String, String>)>,

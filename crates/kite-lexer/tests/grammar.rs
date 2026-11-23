@@ -65,3 +65,31 @@ fn the_grammar_has_balanced_brackets_and_the_right_scope() {
     assert!(GRAMMAR.contains(r#""scopeName": "source.kite""#));
     assert!(GRAMMAR.contains(r#""fileTypes": ["kite"]"#));
 }
+
+/// Kite has no `char` type: `'a'` lexes, and the checker refuses it (`E0200`).
+/// The grammar coloured it as a string literal, which says it is one.
+#[test]
+fn the_grammar_does_not_colour_a_char_literal() {
+    assert!(!GRAMMAR.contains("\"#char\""), "a `char` rule is included");
+    assert!(!GRAMMAR.contains("\"char\":"), "a `char` rule is defined");
+    assert!(!GRAMMAR.contains("string.quoted.single"));
+}
+
+/// The interpolation ended at the first `)`, so in `"\(f(x))"` the last one
+/// was coloured as text. A `(` inside an interpolation has to open a group of
+/// its own, tried before the general rules, which would otherwise take it as a
+/// lone parenthesis and leave the `)` to close the interpolation early.
+#[test]
+fn an_interpolation_nests_its_parentheses() {
+    let at = GRAMMAR.find("\"interpolation\": {").expect("an interpolation rule");
+    let rule = &GRAMMAR[at..];
+    let rule = &rule[..rule.find("\"escape\"").expect("the rule after it")];
+    let group = rule.find("\"#interpolation-parens\"").expect("the interpolation includes a group");
+    let general = rule.find("\"$self\"").expect("and the general rules");
+    assert!(group < general, "the group must come before the general rules");
+    assert!(rule.contains("\"interpolation-parens\": {"), "the group rule is defined");
+    // And it recurses, so `\(f(g(x)))` is three levels.
+    let defined = &rule[rule.find("\"interpolation-parens\": {").unwrap()..];
+    assert!(defined.contains("\"begin\": \"\\\\(\"") && defined.contains("\"end\": \"\\\\)\""));
+    assert!(defined.matches("\"#interpolation-parens\"").count() >= 1);
+}

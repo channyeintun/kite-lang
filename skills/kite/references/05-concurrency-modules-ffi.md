@@ -791,6 +791,10 @@ solver   = { git = "https://github.com/example/solver", version = "^1.2" }
 shortcut = "../shortcut"
 ```
 
+- Strings are TOML's two forms: `"…"` with its escapes (`\"`, `\\`, `\n`,
+  `\uXXXX`, …) and `'…'` taken literally. A key or a table written twice is
+  `E0405` at the second one, as is a trailing comma in an inline table; a
+  leading byte-order mark is ignored.
 - `[package]` accepts `name` and `version` and nothing else, and the version
   must be a version (`1.2.0`, no leading zeros).
 - A target needs an `entry`; `renderer` is optional; nothing else.
@@ -799,6 +803,8 @@ shortcut = "../shortcut"
   else — a misspelt `verison` or a `branch` is an error, not something dropped —
   and a `tag` goes only with `git`.
 - `tag` and `version` are mutually exclusive: a tag pins, a version resolves.
+- Package cycles are an error: `kitec pkg` names the chain (`a -> b -> a`), a package that
+  names itself is one, and no lockfile is written.
 - Names — package and dependency alike — are identifiers: ASCII letters,
   digits and `_`, not starting with a digit, at most 64. The name is written in
   a `use`, so `kite-md` could never be imported, and it becomes a directory

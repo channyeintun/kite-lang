@@ -6,7 +6,6 @@
   "patterns": [
     { "include": "#comment" },
     { "include": "#string" },
-    { "include": "#char" },
     { "include": "#number" },
     { "include": "#attribute" },
     { "include": "#declaration" },
@@ -53,17 +52,21 @@
       "end": "\\)",
       "beginCaptures": { "0": { "name": "punctuation.section.embedded.begin.kite" } },
       "endCaptures": { "0": { "name": "punctuation.section.embedded.end.kite" } },
-      "patterns": [{ "include": "$self" }]
+      "patterns": [{ "include": "#interpolation-parens" }, { "include": "$self" }]
+    },
+
+    "interpolation-parens": {
+      "comment": "A `(` inside an interpolation opens a group of its own, so the `)` that closes it is not the one that closes the interpolation: `\"\\(f(x))\"` ends at the second `)`. Without it the first `)` ended the interpolation and the last was coloured as text.",
+      "begin": "\\(",
+      "end": "\\)",
+      "beginCaptures": { "0": { "name": "punctuation.section.parens.kite" } },
+      "endCaptures": { "0": { "name": "punctuation.section.parens.kite" } },
+      "patterns": [{ "include": "#interpolation-parens" }, { "include": "$self" }]
     },
 
     "escape": {
       "name": "constant.character.escape.kite",
       "match": "\\\\(n|t|r|0|\\\\|\"|'|u\\{[0-9A-Fa-f]+\\})"
-    },
-
-    "char": {
-      "name": "string.quoted.single.kite",
-      "match": "'(\\\\(n|t|r|0|\\\\|\"|'|u\\{[0-9A-Fa-f]+\\})|[^'\\\\])'"
     },
 
     "number": {

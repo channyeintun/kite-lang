@@ -433,3 +433,104 @@ fn what_a_use_can_reach_is_hashed() {
     assert!(hash_directory(&dir).is_err(), "a reachable link to a directory");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+// ---- TOML as TOML says it --------------------------------------------------------
+
+#[test]
+fn both_string_forms_are_read() {
+    let m = parse(
+        "[package]\nname = 'app'    # literal: no escapes\nversion = \"1.0.0\"\n\n[dependencies]\n\
+         a = \"dir\\\\one\"\nb = 'dir\\two'\nc = { path = 'a#b', version = \"^1\" }\n\
+         d = { path = \"q\\\",}\\u0041\" }\n",
+    )
+    .expect("parses");
+    assert_eq!(m.name, "app");
+    assert_eq!(m.dependencies[0].source, Source::Path("dir\\one".into()));
+    assert_eq!(m.dependencies[1].source, Source::Path("dir\\two".into()));
+    assert_eq!(m.dependencies[2].source, Source::Path("a#b".into()));
+    assert_eq!(m.dependencies[3].source, Source::Path("q\",}A".into()));
+}
+
+#[test]
+fn a_quote_of_the_other_kind_is_just_a_character() {
+    let m = parse("[package]\nname = \"a\"\n[dependencies]\nx = 'say \"hi\" # not a comment'\n")
+        .expect("parses");
+    assert_eq!(m.dependencies[0].source, Source::Path("say \"hi\" # not a comment".into()));
+}
+
+#[test]
+fn an_escape_toml_does_not_have_is_refused() {
+    let err = parse("[package]\nname = \"a\\q\"\n").expect_err("no \\q");
+    assert_eq!(err.line, 2);
+    assert!(err.message.contains("\\q"), "{}", err);
+}
+
+#[test]
+fn a_string_that_does_not_end_is_refused() {
+    let err = parse("[package]\nname = \"a\n").expect_err("open string");
+    assert!(err.message.contains("quoted string"), "{}", err);
+}
+
+#[test]
+fn a_byte_order_mark_is_not_part_of_the_first_line() {
+    let m = parse("\u{feff}[package]\nname = \"a\"\n").expect("parses");
+    assert_eq!(m.name, "a");
+}
+
+#[test]
+fn a_key_written_twice_is_refused_at_the_second() {
+    let err = parse("[package]\nname = \"a\"\nname = \"b\"\n").expect_err("twice");
+    assert_eq!(err.line, 3);
+    assert!(err.message.contains("`name` is written twice"), "{}", err);
+    let err = parse("[package]\nname = \"a\"\nversion = \"1.0.0\"\nversion = \"1.0.1\"\n")
+        .expect_err("twice");
+    assert_eq!(err.line, 4);
+    let err = parse(
+        "[package]\nname = \"a\"\n[targets]\nweb = { entry = \"a\" }\nweb = { entry = \"b\" }\n",
+    )
+    .expect_err("twice");
+    assert_eq!(err.line, 5);
+    assert!(err.message.contains("target `web`"), "{}", err);
+}
+
+#[test]
+fn a_table_written_twice_is_refused_at_the_second() {
+    let err = parse("[package]\nname = \"a\"\n[package]\nname = \"b\"\n").expect_err("twice");
+    assert_eq!(err.line, 3);
+    assert!(err.message.contains("`[package]` is written twice"), "{}", err);
+    let err = parse("[package]\nname = \"a\"\n[dependencies]\n[dependencies]\n").expect_err("twice");
+    assert_eq!(err.line, 4);
+}
+
+#[test]
+fn an_inline_table_takes_no_trailing_comma_and_no_repeated_key() {
+    let head = "[package]\nname = \"a\"\n[dependencies]\n";
+    let err = parse(&format!("{head}x = {{ path = \"p\", }}\n")).expect_err("trailing comma");
+    assert_eq!(err.line, 4);
+    assert!(err.message.contains("trailing comma"), "{}", err);
+    let err = parse(&format!("{head}x = {{ path = \"p\",, version = \"1\" }}\n")).expect_err("empty");
+    assert!(err.message.contains("empty field"), "{}", err);
+    let err = parse(&format!("{head}x = {{ path = \"p\", path = \"q\" }}\n")).expect_err("twice");
+    assert!(err.message.contains("`path` is written twice"), "{}", err);
+}
+
+/// The reader honours escapes, so the writer has to make them: a path
+/// dependency at `../we\ird` was locked as `"../we\ird"`, and the next
+/// `kitec pkg` could not read the lockfile it had written.
+#[test]
+fn a_source_with_a_backslash_or_a_quote_reads_back() {
+    let entries = vec![Locked {
+        name: "a".into(),
+        version: "1.0.0".into(),
+        source: "../we\\ird \"x\"\tq".into(),
+        hash: "ab".repeat(32),
+    }];
+    let back = parse_lockfile(&lockfile(&entries)).expect("reads");
+    assert_eq!(back, entries);
+}
+
+#[test]
+fn a_unicode_escape_is_hex_digits_only() {
+    let err = parse("[package]\nname = \"a\\u+041\"\n").expect_err("a sign is not a digit");
+    assert!(err.message.contains("\\u+041"), "{}", err);
+}

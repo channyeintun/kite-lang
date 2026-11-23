@@ -79,6 +79,7 @@ pub fn resolve_preferring(
         wanted: BTreeMap::new(),
         order: Vec::new(),
         chosen: Vec::new(),
+        edges: BTreeMap::new(),
         conflict: None,
         preferred,
     };
@@ -94,6 +95,19 @@ pub fn resolve_preferring(
         solver.want(&by, &dep.name, requirement);
     }
     if solver.step()? {
+        // The root's own edges, so a package that leads back to the root, or a
+        // root that names itself, is found like any other cycle.
+        solver
+            .edges
+            .insert(root.name.clone(), root.dependencies.iter().map(|d| d.name.clone()).collect());
+        if let Some(chain) = find_cycle(&root.name, &solver.edges) {
+            return Err(format!(
+                "dependency cycle: {}\n  a package that needs itself, directly or through others, \
+                 has nothing to be resolved before it; extract the shared part into a package of \
+                 its own",
+                chain.join(" -> ")
+            ));
+        }
         let mut out: Vec<Resolved> = solver
             .chosen
             .into_iter()
@@ -104,6 +118,42 @@ pub fn resolve_preferring(
     } else {
         Err(solver.render_conflict())
     }
+}
+
+/// A cycle reachable from `from`, as the chain of names that closes it
+/// (`a -> b -> a`), or `None` if the graph below `from` is acyclic.
+///
+/// Checked on the solution rather than during the search. The module header's
+/// promise — one version per name, over a graph with no cycles — is about what
+/// is built, and a cycle among versions an older candidate would not have had
+/// is reported rather than backtracked away: choosing between a cycle and a
+/// different version of a package is the manifest author's call.
+fn find_cycle(from: &str, edges: &BTreeMap<String, Vec<String>>) -> Option<Vec<String>> {
+    fn walk<'a>(
+        node: &'a str,
+        edges: &'a BTreeMap<String, Vec<String>>,
+        path: &mut Vec<&'a str>,
+        done: &mut Vec<&'a str>,
+    ) -> Option<Vec<String>> {
+        if let Some(at) = path.iter().position(|n| *n == node) {
+            let mut chain: Vec<String> = path[at..].iter().map(|n| n.to_string()).collect();
+            chain.push(node.to_string());
+            return Some(chain);
+        }
+        if done.contains(&node) {
+            return None;
+        }
+        path.push(node);
+        for next in edges.get(node).into_iter().flatten() {
+            if let Some(chain) = walk(next, edges, path, done) {
+                return Some(chain);
+            }
+        }
+        path.pop();
+        done.push(node);
+        None
+    }
+    walk(from, edges, &mut Vec::new(), &mut Vec::new())
 }
 
 /// One requirement, with who placed it — kept together because the pair *is*
@@ -133,6 +183,9 @@ struct Solver<'a> {
     /// conflict it reports — deterministic.
     order: Vec<String>,
     chosen: Vec<(String, Version)>,
+    /// What each chosen package depends on, by name, so a cycle can be found
+    /// in the solution once there is one.
+    edges: BTreeMap<String, Vec<String>>,
     conflict: Option<Conflict>,
     /// Versions to try before the highest, by name.
     preferred: &'a BTreeMap<String, Version>,
@@ -195,6 +248,10 @@ impl Solver<'_> {
                 ));
             }
             self.chosen.push((name.clone(), version.clone()));
+            self.edges.insert(
+                name.clone(),
+                manifest.dependencies.iter().map(|d| d.name.clone()).collect(),
+            );
             let by = format!("{} {}", name, version);
             let mut added: Vec<String> = Vec::new();
             let mut dead = false;
@@ -228,6 +285,7 @@ impl Solver<'_> {
                 }
             }
             self.chosen.pop();
+            self.edges.remove(&name);
             self.registry.unwind(&name, &version);
         }
         Ok(false)
@@ -472,13 +530,39 @@ mod tests {
     }
 
     #[test]
-    fn a_cycle_terminates() {
+    fn a_cycle_is_an_error_naming_the_chain() {
         let mut table = Table(vec![
             ("a", "1.0.0", vec![("b", "^1")]),
-            ("b", "1.0.0", vec![("a", "^1")]),
+            ("b", "1.0.0", vec![("c", "^1")]),
+            ("c", "1.0.0", vec![("a", "^1")]),
         ]);
-        let out = resolve(&root(&[("a", "*")]), &mut table).expect("resolves");
-        assert_eq!(out.len(), 2);
+        let err = resolve(&root(&[("a", "*")]), &mut table).expect_err("a cycle");
+        assert!(err.contains("a -> b -> c -> a"), "{}", err);
+    }
+
+    #[test]
+    fn a_package_that_leads_back_to_the_root_is_a_cycle() {
+        let mut table = Table(vec![("a", "1.0.0", vec![("myapp", "*")]), ("myapp", "1.0.0", vec![])]);
+        let err = resolve(&root(&[("a", "*")]), &mut table).expect_err("a cycle");
+        assert!(err.contains("myapp -> a -> myapp"), "{}", err);
+    }
+
+    #[test]
+    fn a_package_that_names_itself_is_a_cycle() {
+        let mut table = Table(vec![("a", "1.0.0", vec![("a", "^1")])]);
+        let err = resolve(&root(&[("a", "*")]), &mut table).expect_err("a cycle");
+        assert!(err.contains("a -> a"), "{}", err);
+    }
+
+    #[test]
+    fn a_diamond_is_not_a_cycle() {
+        let mut table = Table(vec![
+            ("a", "1.0.0", vec![("c", "^1")]),
+            ("b", "1.0.0", vec![("c", "^1")]),
+            ("c", "1.0.0", vec![]),
+        ]);
+        let out = resolve(&root(&[("a", "*"), ("b", "*")]), &mut table).expect("resolves");
+        assert_eq!(out.len(), 3);
     }
 
     /// A version already agreed to is kept while it still satisfies
