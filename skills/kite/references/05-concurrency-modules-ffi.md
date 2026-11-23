@@ -776,7 +776,7 @@ imported module is said the same way — `m.Pnt` where `m` has `Pt` is
 | `E0402` | Import cycle. The diagnostic prints the chain (`a → b`). Extract the shared part into a third module. A module that imports itself (`use ui` in a file of `ui/`) is "imports itself": delete the `use`. |
 | `E0403` | Reserved standard-library name (above). |
 | `E0404` | One module spelling two modules alike — give one an alias — or two packages of one name reached from two different places, or one file reached as two modules: a file of a directory module imported on its own (`use shape` inside `lib/`, or `use lib/shape` beside `use lib`) — or one module reached as part of two packages. |
-| `E0405` | A `kite.toml` that does not read. Reported at the offending line; a build no longer treats a broken manifest as no manifest. |
+| `E0405` | A `kite.toml` that does not read. Reported at the offending line; a build no longer treats a broken manifest as no manifest. It is the one error: the `use`s it leaves unresolvable are not reported as `E0400` too. |
 | `E0111` | A qualified name whose module this module never imported — **or** an unknown member of one it did, reported at the member (above). |
 
 **An unmarked field makes a `pub struct` opaque outside its module**

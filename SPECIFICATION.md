@@ -2171,7 +2171,8 @@ define is an error rather than something ignored; so is a key or a table written
 twice, and a trailing comma in an inline table, as TOML says. Strings are TOML's
 two forms, `"…"` with its escapes and `'…'` as written. And a manifest that does not
 parse — or does not read at all, as one that is not UTF-8 — is `E0405` in every
-command that reads it.
+command that reads it, and the one error: a `use` it leaves unresolvable is not
+reported again.
 
 A package name means one thing across the whole program: two manifests naming
 one package from two places is an error. It does not take the name from the

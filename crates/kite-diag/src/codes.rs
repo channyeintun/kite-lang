@@ -566,7 +566,8 @@ codes! {
          dependency is read from `.kite/vendor`, which `kitec pkg` fills, \
          so a program that has not run it cannot find the dependency. \
          When `kite.toml` itself does not read (`E0405`) nothing it \
-         declares can be found, and the note says so.\n\
+         declares can be found, so that is the one error: a `use` \
+         of the package it belongs to is not reported as well.\n\
          - A file that was found and could not be read; the operating \
          system's reason is in the message.\n\
          \n\

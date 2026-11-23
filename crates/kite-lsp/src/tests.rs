@@ -1304,9 +1304,9 @@ fn an_unsaved_directory_module_is_found_through_a_linked_project() {
 // ---- a manifest that does not read -------------------------------------------
 
 /// A manifest that does not read is shown in the manifest, as `kitec check`
-/// reports it, and the `use` it broke says so. The editor showed only
-/// `cannot find module`: the manifest's own error is in a file that is never
-/// an open Kite document, and only the open file's diagnostics were sent.
+/// reports it, and it is the one error. The editor showed only `cannot find
+/// module`: the manifest's own error is in a file that is never an open Kite
+/// document, and only the open file's diagnostics were sent.
 #[test]
 fn a_manifest_that_does_not_read_is_published_under_its_own_uri() {
     let p = Project::new("manifest-e0405");
@@ -1335,9 +1335,8 @@ fn a_manifest_that_does_not_read_is_published_under_its_own_uri() {
         panic!("no diagnostics for the manifest");
     };
     assert_eq!(items[0].path("range.start.line").and_then(|l| l.as_u32()), Some(3));
-    // The `use` it broke names it.
-    let said = messages_for(&mut s, &main).join("\n");
-    assert!(said.contains("kite.toml") && said.contains("E0405"), "{}", said);
+    // It is the one error: the `use` it broke is not a second.
+    assert_eq!(codes_for(&published, &main), Some(Vec::new()), "{:?}", published);
     // Opened in the editor, the manifest is not compiled as Kite: its list is
     // what the files reading it report, and its buffer is what they read.
     let broken = std::fs::read_to_string(p.dir.join("app/kite.toml")).expect("read");
@@ -1351,9 +1350,8 @@ fn a_manifest_that_does_not_read_is_published_under_its_own_uri() {
     // Closed unsaved, the disk's manifest is what is read again.
     let reply = s.handle("textDocument/didClose", &at(&manifest, 0, 0));
     let published: Vec<Json> = reply.notifications.into_iter().map(|(_, p)| p).collect();
-    // The `use` it broke, and nothing for `a.hello` under it: a failed `use`
-    // is one error.
-    assert_eq!(codes_for(&published, &main), Some(vec!["E0400".to_string()]), "{:?}", published);
+    // Nothing for the `use` it broke, nor for `a.hello` under that.
+    assert_eq!(codes_for(&published, &main), Some(Vec::new()), "{:?}", published);
     assert_eq!(codes_for(&published, &manifest), Some(vec!["E0405".to_string()]));
     // Mended on disk, the manifest's list is cleared.
     p.file("app/kite.toml", good);

@@ -1376,14 +1376,11 @@ fn a_manifest_that_does_not_read_is_reported_at_its_line() {
     assert!(said.contains("E0405"), "{}", said);
     assert!(said.contains("kite.toml:4"), "points at the line: {}", said);
     assert!(said.contains("has no `edition`"), "{}", said);
-    // And the `use` it broke says so, where an editor showing only the
-    // file's own diagnostics shows it.
-    assert!(said.contains("kite.toml` did not read (E0405)"), "{}", said);
-    // The cause first, and nothing after it but the `use` it broke: the
-    // manifest's error came last, under a `cannot find` at `a.hello`.
-    let (manifest, missing) = (said.find("E0405").unwrap(), said.find("E0400").unwrap());
-    assert!(manifest < missing, "the manifest is said first: {}", said);
-    assert!(!said.contains("E0111"), "`a.hello` is not a second error: {}", said);
+    // The one error: not a `cannot find module` for the `use` it broke, nor
+    // a `cannot find` at `a.hello` under that.
+    assert!(!said.contains("E0400"), "the `use` is not a second error: {}", said);
+    assert!(!said.contains("E0111"), "`a.hello` is not a third: {}", said);
+    assert!(said.contains("1 previous error"), "{}", said);
 }
 
 /// A directory module checked on its own, as an editor renaming a name its

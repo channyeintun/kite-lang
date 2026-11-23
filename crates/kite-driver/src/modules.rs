@@ -1416,6 +1416,16 @@ impl Loader {
                 }
             }
         }
+        // **A manifest that did not read is the one error.** Its `E0405` is
+        // reported at its line — and an editor publishes it under the
+        // manifest's own name — and every dependency it declares is missing
+        // because of it, so a `cannot find module` for each `use` of one was
+        // a second error for the same cause. With the manifest unread there
+        // is no telling a dependency from a module that is not there; the
+        // `use` is left until it reads.
+        if self.unread_manifest(&scope.package).is_some() {
+            return None;
+        }
         let places: Vec<String> =
             tried.places.iter().map(|p| format!("`{}`", p.display())).collect();
         let places = match places.split_last() {
@@ -1437,16 +1447,6 @@ impl Loader {
             missing = missing.with_note(format!(
                 "`{}` is a directory with no `.kite` file directly in it, so it is not a module",
                 dir.display()
-            ));
-        }
-        // The manifest's own error is reported in the manifest, which is not
-        // the file anyone looking at this `use` has open — an editor shows a
-        // file's own diagnostics beside it. Said here as well, the reason is
-        // where the symptom is.
-        if let Some(manifest) = self.unread_manifest(&scope.package) {
-            missing = missing.with_note(format!(
-                "`{}` did not read (E0405), so no dependency it declares could be looked for",
-                manifest.display()
             ));
         }
         diags.push(missing);
