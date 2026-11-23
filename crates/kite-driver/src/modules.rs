@@ -1117,12 +1117,23 @@ impl Loader {
     /// The labels of the packages only a dependency declares, `@` and all,
     /// that a module was loaded from — what [`shown`] takes out of what a
     /// diagnostic says.
+    ///
+    /// **Not where the name is the program's too.** A program with a module
+    /// `b` of its own, and a dependency using a package `b` it alone
+    /// declares, has two `b.T`s; without the `@` a mismatch between them was
+    /// `expected b.T, found b.T`. There the mark stays, and tells them apart.
     pub fn marked(&self) -> Vec<String> {
+        let own = |name: &str| {
+            self.taken.keys().any(|identity| {
+                identity == name || identity.strip_prefix(name).is_some_and(|r| r.starts_with('/'))
+            })
+        };
         let mut out: Vec<String> = self
             .taken
             .keys()
             .filter(|identity| identity.starts_with('@'))
             .map(|identity| identity.split('/').next().unwrap_or(identity).to_string())
+            .filter(|mark| !own(&mark[1..]))
             .collect();
         out.sort();
         out.dedup();

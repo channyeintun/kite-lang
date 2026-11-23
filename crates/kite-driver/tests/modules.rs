@@ -1938,6 +1938,32 @@ fn a_package_only_a_dependency_declares_is_named_without_its_mark() {
     assert!(!said.contains("@b"), "{}", said);
 }
 
+/// But not where the program has a module of that name too: then there are
+/// two `b.T`s, and without the mark a mismatch between them read `expected
+/// b.T, found b.T`.
+#[test]
+fn a_mark_stays_where_the_program_has_a_module_of_the_name() {
+    let p = Project::new("marked-package-clash");
+    p.file("b/kite.toml", "[package]\nname = \"b\"\nversion = \"1.0.0\"\n");
+    p.file("b/b.kite", "pub struct T {\n  pub v: int\n}\n");
+    p.file(
+        "a/kite.toml",
+        "[package]\nname = \"a\"\nversion = \"1.0.0\"\n\n[dependencies]\nb = { path = \"../b\" }\n",
+    );
+    p.file("a/a.kite", "use b\n\npub fn get() -> b.T {\n  return b.T{ v: 1 }\n}\n");
+    p.file(
+        "app/kite.toml",
+        "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n[dependencies]\na = { path = \"../a\" }\n",
+    );
+    p.file("app/b.kite", "pub struct T {\n  pub v: int\n}\n");
+    let main = p.file(
+        "app/main.kite",
+        "use a\nuse b\n\nfn main() {\n  let t: b.T = a.get()\n  io.print(t.v)\n}\n",
+    );
+    let said = p.run(&main).expect_err("two types called b.T");
+    assert!(said.contains("expected `b.T`, found `@b.T`"), "{}", said);
+}
+
 /// A `use` matches a file's or a directory's name exactly, case included, on
 /// every system. Where the file system ignores case — macOS, Windows — `use
 /// Util` loaded `util.kite`, and the program was `cannot find module` on
