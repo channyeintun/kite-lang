@@ -21,7 +21,15 @@ fn refused(hex: str) -> bool {
     return err != nil
 }
 
-fn checks() -> [error] {
+// A stored hash is refused before the host is asked for anything, so the
+// shapes `password_hash` never writes are tested here, on every backend. The
+// round trip, which needs the host's PBKDF2, is in host.rs.
+async fn malformed(stored: str) -> bool {
+    let (_, err) = await crypto.password_verify("x", stored)
+    return err != nil
+}
+
+async fn checks() -> [error] {
     var out: [error] = []
 
     out.push(test.equal_str(crypto.hex_of(""), "", "nothing is nothing"))
@@ -62,16 +70,41 @@ fn checks() -> [error] {
     out.push(test.is_true(refused("f8888080"), "a five-byte lead"))
     out.push(test.is_true(refused("ff"), "0xff"))
     out.push(test.is_false(refused("6162"), "and plain text is fine"))
+    let salt = "00112233445566778899aabbccddeeff"
+    let digest = "0000000000000000000000000000000000000000000000000000000000000000"
+    let shapes = [
+        "pbkdf2$1$$\(digest)",
+        "pbkdf2$1$00$\(digest)",
+        "pbkdf2$1$\(salt)ff$\(digest)",
+        "pbkdf2$0$\(salt)$\(digest)",
+        "pbkdf2$-1$\(salt)$\(digest)",
+        "pbkdf2$+1$\(salt)$\(digest)",
+        "pbkdf2$01$\(salt)$\(digest)",
+        "pbkdf2$ten$\(salt)$\(digest)",
+        "pbkdf2$$\(salt)$\(digest)",
+        "pbkdf2$99999999999999999999$\(salt)$\(digest)",
+        "pbkdf2$10000001$\(salt)$\(digest)",
+        "pbkdf2$1$\(salt)$",
+        "pbkdf2$1$\(salt)$00",
+        "pbkdf2$1$\(salt)$\(digest)00",
+        "pbkdf2$1$\(salt)",
+        "pbkdf2$1$\(salt)$\(digest)$extra",
+        "scrypt$1$\(salt)$\(digest)",
+        "",
+    ]
+    for shape in shapes {
+        out.push(test.is_true(await malformed(shape), "refused: \(shape)"))
+    }
     return out
 }
 
-fn main() {
+async fn main() {
     var failed = 0
-    for e in checks() {
+    for e in await checks() {
         if e != nil {
             io.print("FAILED \(e.message())")
             failed += 1
         }
     }
-    io.print("crypto: \(checks().len() - failed) passed, \(failed) failed")
+    io.print("crypto: \(failed) failed")
 }
