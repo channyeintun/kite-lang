@@ -2195,6 +2195,9 @@ reach the importing program's own modules by naming them.
 program-wide table, so `use leak as crypto` written anywhere — including inside
 a dependency — rewrote every `crypto.…` call in every other module, silently
 and with no diagnostic. An alias is a convenience for the file that writes it.
+It names the whole module, the builtins reached through it included: after
+`use std/errors as errs`, `errs.new` is `errors.new` as `errs.wrap` is
+`errors.wrap`.
 
 **A module is where its source is.** Two `use` lines reach one module exactly
 when they reach one file or directory: `use utils` inside `a/` and `use utils`

@@ -8883,17 +8883,23 @@ impl<'a> Checker<'a> {
     /// `std/errors`, and with the import it needs where it does not — the
     /// bare spelling was E0111 when copied.
     fn wrap_spelled(&self, name: &str) -> String {
-        let wrap = format!("`{} = errors.wrap({}, \"…\")`", name, name);
-        let imported = self
-            .resolved
-            .modules
-            .aliases
-            .get(&(self.module.clone(), "errors".to_string()))
-            .is_some_and(|m| m == "errors");
-        if imported {
-            wrap
+        // The module is named as this one's `use` spells it: `errs.wrap`
+        // after `use std/errors as errs`, where a second `use std/errors`
+        // would be the fix the note offered.
+        let aliases = &self.resolved.modules.aliases;
+        let spelled = |s: &str| aliases.get(&(self.module.clone(), s.to_string())).is_some_and(|m| m == "errors");
+        let alias = if spelled("errors") {
+            Some("errors".to_string())
         } else {
-            format!("{} after `use std/errors`", wrap)
+            aliases
+                .iter()
+                .filter(|((m, s), to)| *m == self.module && to.as_str() == "errors" && s.as_str() != "errors")
+                .map(|((_, s), _)| s.clone())
+                .min()
+        };
+        match alias {
+            Some(a) => format!("`{} = {}.wrap({}, \"…\")`", name, a, name),
+            None => format!("`{} = errors.wrap({}, \"…\")` after `use std/errors`", name, name),
         }
     }
 

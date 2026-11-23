@@ -634,6 +634,9 @@ fn main() {
 
 An alias is the same: after `use std/math as m`, `m.floor(1.5)` resolves and
 `math.floor(2.5)` does not, in the entry file as everywhere else.
+An alias names the whole module, its builtins too: after
+`use std/errors as errs`, `errs.new` resolves as `errs.wrap` does (and the
+builtin `errors.new`, in scope without a `use`, still does too).
 
 **Unqualified variants are the module's own.** A bare `Circle` — in an
 expression or a pattern with a payload — is one of the asking module's own
