@@ -2403,8 +2403,11 @@ worse than absent.
   file and a line. The granularity is one entry per function, because that is
   the granularity the compiler's information exists at — a MIR function carries
   its declaration span and a MIR instruction carries nothing. Both are dropped
-  by `--release`: they were more than half of a hello world, and debug
-  information is not semantics.
+  by `--release`: debug information is not semantics, and it is bytes a shipped
+  page does not need — the name section is about a tenth of a small program's
+  module (61 of the 834 bytes of `examples/hello.kite`), and the map is a file
+  beside it nearly half as large again (389 bytes). An early note here said
+  they were more than half of a hello world; that was never measured.
 
   *Reviewed later:* the map resolved nowhere. It named a source as the command
   line had — `src/main.kite`, which a browser looks for beside the map, in
@@ -2932,8 +2935,9 @@ Existing functions that answer differently:
 - **`std/math`.** `exp` overflows to infinity; `min`, `max` and `clamp` — and
   the prelude's `minf`, `maxf` and `clampf` — carry a NaN whichever side it is
   on; `round`, `trunc`, `floor` and `ceil` keep a zero's sign; `powf` of a
-  negative base and a whole exponent is the real answer; `ipow`, new in the
-  first round, is `checked_pow`. The prelude's `divides(x, 0)` answers
+  negative base and a whole exponent is the real answer; `checked_pow`
+  is new (it was called `ipow` while it was being written, and no release has
+  had that name). The prelude's `divides(x, 0)` answers
   `x == 0` rather than trapping, and its `approx_eq` and `test.equal_float`
   pass equal infinities.
 - **`std/json` and `std/toml`.** An `int` at or past 2⁵³ in magnitude encodes

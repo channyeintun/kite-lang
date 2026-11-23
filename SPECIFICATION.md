@@ -2783,8 +2783,10 @@ Requirements on the implementation:
   **The granularity is one entry per function** — a frame resolves to the line
   the function was declared on, not the line that trapped, because that is the
   granularity the compiler's own information exists at. Both are **dropped by
-  `--release`**: they are more than half of a hello world, and debug
-  information is not semantics.
+  `--release`**: debug information is not semantics, and it is bytes a shipped
+  page does not need — the name section is about a tenth of a small program's
+  module (61 of the 834 bytes of `examples/hello.kite`), and the map is a file
+  beside it nearly half as large again (389 bytes).
 
 ---
 
