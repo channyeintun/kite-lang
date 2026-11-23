@@ -62,14 +62,71 @@ macro_rules! codes {
 codes! {
     // ---- lexical ----------------------------------------------------------
     E0001 = "E0001", "unterminated string literal",
-        "A string literal was opened but never closed. Kite strings may not \
-         span lines unless written as a triple-quoted block string.";
+        "A string literal was opened and never closed. The lexer reports it where the string starts. The situations:\n\
+         \n\
+         - A `\"` string that reaches the end of its line. A `\"` string may not span lines, so a closing quote forgotten at the end of a line is this error, and so is a line break written inside one. The next line is read as code again.\n\
+         - A `\"\"\"` block string with no closing `\"\"\"`. It reads to the end of the file as its text, so this is the file's one error: the braces it swallowed are not reported as unclosed on top of it. A block string is how text is written over several lines (§2.4).\n\
+         - A character literal, `'a'`, with no closing `'`. Kite has no character type, so a closed one is refused too (`E0200`): write a one-character `str` in double quotes.\n\
+         \n\
+         Example:\n\
+         \n\
+         \x20   fn main() {\n\
+         \x20       // E0001: the string on the next line is never closed\n\
+         \x20       let s = \"abc\n\
+         \x20       io.print(s)\n\
+         \x20   }\n\
+         \n\
+         The fix is the closing quote:\n\
+         \n\
+         \x20   fn main() {\n\
+         \x20       let s = \"abc\"\n\
+         \x20       io.print(s)\n\
+         \x20   }";
 
     E0002 = "E0002", "invalid character in source",
-        "The lexer found a byte that cannot begin any Kite token.";
+        "The lexer found a character that cannot begin any Kite token. It skips the character and reports it where it stands. The ones that come in by habit:\n\
+         \n\
+         - `;`. Kite has no semicolons: a statement ends at its line break (§3), so the `;` is deleted.\n\
+         - `#` for a comment. Write `//`.\n\
+         - `?`, `~`, a backtick and `\\`. None is an operator or a delimiter in Kite.\n\
+         - A character that only looks like one: a curly quote in place of `\"`, an en dash in place of `-`. These arrive by copy and paste from a document or a web page; retype them.\n\
+         \n\
+         An identifier may use any Unicode letter, so a name in another script is not this error. A parse error beside it — `expected a line break` after a stray character in the middle of a line — is the gap the skipped character left; removing the character removes both.\n\
+         \n\
+         Example:\n\
+         \n\
+         \x20   fn main() {\n\
+         \x20       let a = 1\n\
+         \x20       ~\n\
+         \x20       io.print(a)\n\
+         \x20   }\n\
+         \n\
+         The fix is to remove it (or, if it was meant to be a comment, to write `//`):\n\
+         \n\
+         \x20   fn main() {\n\
+         \x20       let a = 1\n\
+         \x20       io.print(a)\n\
+         \x20   }";
 
     E0003 = "E0003", "invalid escape sequence",
-        "Recognised escapes are \\n \\t \\r \\0 \\\\ \\\" \\' and \\u{...}.";
+        "A backslash escape in a string that Kite does not know. The escapes are `\\n`, `\\t`, `\\r`, `\\0`, `\\\\`, `\\\"`, `\\'` and `\\u{…}`, and `\\(` which opens an interpolation (§2.4). The situations:\n\
+         \n\
+         - An unknown letter or character: `\"C:\\path\"`, `\"\\d\"`, `\"\\e\"`. A backslash that is meant as one is written twice: `\"C:\\\\path\"`.\n\
+         - `\\u` not followed by `{`: `\"\\u0041\"`. A unicode escape is hex digits between braces, `\"\\u{41}\"`.\n\
+         - A `\\u{` that is never closed: `\"\\u{41\"`.\n\
+         - A `\\u{…}` that holds no character: no digits, a digit that is not hexadecimal, a value past `10FFFF`, or one in the surrogate range `D800` to `DFFF`.\n\
+         \n\
+         Example:\n\
+         \n\
+         \x20   fn main() {\n\
+         \x20       io.print(\"C:\\path\")\n\
+         \x20   }\n\
+         \n\
+         The fix is the escaped backslash:\n\
+         \n\
+         \x20   fn main() {\n\
+         \x20       io.print(\"C:\\\\path\")\n\
+         \x20   }";
 
     E0004 = "E0004", "invalid number literal",
         "A numeric literal is malformed. A digit separator `_` sits between two \
@@ -98,11 +155,23 @@ codes! {
          written on purpose comes near it.";
 
     E0005 = "E0005", "block comments are not supported",
-        "Kite's comments are line comments: `//` for a comment, `///` for the \
-         documentation of the declaration that follows, and `//!` for the \
-         module's own, at the top of its file. There is no block comment. \
-         Nested block comments are a recurring source of lexer bugs and every \
-         editor has supported toggling line comments for decades.";
+        "Kite's comments are line comments: `//` for a comment, `///` for the documentation of the declaration that follows, and `//!` for the module's own, at the top of its file. There is no block comment. Nested block comments are a recurring source of lexer bugs and every editor has supported toggling line comments for decades.\n\
+         \n\
+         The lexer reads on to the closing `*/` and skips what it found, so a comment that was meant is one error and the code after it is read normally. A `/*` inside a string or a line comment is just text.\n\
+         \n\
+         Example:\n\
+         \n\
+         \x20   fn main() {\n\
+         \x20       /* print one */\n\
+         \x20       io.print(1)\n\
+         \x20   }\n\
+         \n\
+         The fix is a line comment per line:\n\
+         \n\
+         \x20   fn main() {\n\
+         \x20       // print one\n\
+         \x20       io.print(1)\n\
+         \x20   }";
 
     // ---- syntax and bindings ---------------------------------------------
     E0100 = "E0100", "unexpected token",
@@ -161,7 +230,21 @@ codes! {
          \x20   }";
 
     E0101 = "E0101", "unclosed delimiter",
-        "A bracket, brace, or parenthesis was opened and never closed.";
+        "A `{` was opened and never closed. Only a brace is reported this way: a missing `)` is `E0100`, `expected `)``, at the place the parser needed it.\n\
+         \n\
+         One mistake is one report, however many braces it leaves open. Where the file's indentation shows which block lost its `}` — a line indented like a new declaration, with a block still open above it — the report names that `{`, and the parser carries on with the declarations after it, so one missing brace does not become a hundred errors. Where nothing says, it is one report at the end of the file for however many braces are still open. The situations are all the same mistake: a function body, an `if`, `for` or `match` block, an `impl`, a `struct` or an `enum` body.\n\
+         \n\
+         Example:\n\
+         \n\
+         \x20   // E0101: the `{` below is never closed\n\
+         \x20   fn main() {\n\
+         \x20       io.print(1)\n\
+         \n\
+         The fix is the closing brace:\n\
+         \n\
+         \x20   fn main() {\n\
+         \x20       io.print(1)\n\
+         \x20   }";
 
     E0102 = "E0102", "expression nested too deeply",
         "The parser is recursive descent, so how deeply an expression, type, \
@@ -182,9 +265,38 @@ codes! {
          every pass after the parser walks that tree by recursion.";
 
     E0110 = "E0110", "use of possibly-uninitialised binding",
-        "A `let` binding may be assigned after declaration, but only if the \
-         compiler can prove exactly one assignment happens on every path \
-         before the first read.";
+        "A `let` declared without a value, `let x: int`, may be given one later, but only if the compiler can prove that exactly one assignment has happened on every path before the value is read. A read it cannot prove is refused, because there is no zero value to fall back on. The situations:\n\
+         \n\
+         - A read with no assignment before it: `let x: int` and then `io.print(x)`.\n\
+         - An assignment on only some paths: `if ok { x = 1 }` and then a read. The note says the `let` must be assigned on every path before it is read.\n\
+         - A `var` declared without a value, `var x: int`: a `var` is initialised where it is declared (`var x = 0`), and the diagnostic says so at the declaration. `let` is the one that may wait.\n\
+         - `x += 1` on a binding that has no value yet: it reads `x` first.\n\
+         \n\
+         A second assignment to the `let` is a different mistake, `E0114`, and so is an assignment to it inside a loop, which could run twice.\n\
+         \n\
+         Example:\n\
+         \n\
+         \x20   fn main() {\n\
+         \x20       let ok = false\n\
+         \x20       let x: int\n\
+         \x20       if ok {\n\
+         \x20           x = 1\n\
+         \x20       }\n\
+         \x20       io.print(x)    // E0110: when `ok` is false, `x` has no value\n\
+         \x20   }\n\
+         \n\
+         The fix is to assign it on the other path too:\n\
+         \n\
+         \x20   fn main() {\n\
+         \x20       let ok = false\n\
+         \x20       let x: int\n\
+         \x20       if ok {\n\
+         \x20           x = 1\n\
+         \x20       } else {\n\
+         \x20           x = 0\n\
+         \x20       }\n\
+         \x20       io.print(x)\n\
+         \x20   }";
 
     E0111 = "E0111", "unknown name",
         "A name was used that nothing in scope defines. A name is looked up \
@@ -245,9 +357,33 @@ codes! {
          so `0.0` and `-0.0` are one key.";
 
     E0113 = "E0113", "wrong number of arguments",
-        "Kite has no default arguments, no variadics, and no overloading, so \
-         the argument count must match the declaration exactly. A function \
-         needing many optional inputs should take a struct.";
+        "Kite has no default arguments, no variadics, no named arguments and no overloading, so what is written at a call, a variant or a pattern has to match the declaration exactly. A function needing many optional inputs takes a struct, whose literal names every field. The situations:\n\
+         \n\
+         - A call with too many or too few arguments: `f(1, 2, 3)` for `fn f(a: int, b: int)`. The message counts both, and the declaration is the secondary label.\n\
+         - A named argument: `f(a: 1, b: 2)`. Write `f(1, 2)`; a struct is the way to name what is passed.\n\
+         - A variant given a payload it does not carry (`Shape.Dot(1)`) or a different number of values than it carries; and a variant literal missing a field it names.\n\
+         - A tuple pattern that names a different number of elements than the tuple has.\n\
+         - A method in an `impl` of a trait that takes a different number of parameters than the trait declares.\n\
+         \n\
+         Example:\n\
+         \n\
+         \x20   fn add(a: int, b: int) -> int {\n\
+         \x20       return a + b\n\
+         \x20   }\n\
+         \n\
+         \x20   fn main() {\n\
+         \x20       io.print(add(1))    // E0113: `add` takes 2 arguments, but 1 was given\n\
+         \x20   }\n\
+         \n\
+         The fix is the missing argument:\n\
+         \n\
+         \x20   fn add(a: int, b: int) -> int {\n\
+         \x20       return a + b\n\
+         \x20   }\n\
+         \n\
+         \x20   fn main() {\n\
+         \x20       io.print(add(1, 2))\n\
+         \x20   }";
 
     E0114 = "E0114", "cannot assign to immutable binding",
         "Bindings introduced with `let` are immutable. Use `var` for a binding \
@@ -258,7 +394,31 @@ codes! {
          threads.";
 
     E0115 = "E0115", "`break` or `continue` outside a loop",
-        "These statements are only meaningful inside a `for` loop.";
+        "`break` and `continue` only mean something inside a loop, and they are checked against the loop that is *lexically* around them. The situations:\n\
+         \n\
+         - Nowhere near a loop: in a function body, or in an `if` or a `match` that no `for` encloses.\n\
+         - Inside a closure that is written in a loop. A closure is a function of its own and runs when it is called, not as one step of the loop, so it has no loop to leave. Have the closure return a value and let the loop decide.\n\
+         - After the loop's `}`, which is outside it.\n\
+         \n\
+         To leave a function early, `return`; to leave an outer loop from an inner one, label it (`break outer`).\n\
+         \n\
+         Example:\n\
+         \n\
+         \x20   fn main() {\n\
+         \x20       let n = 3\n\
+         \x20       if n > 2 {\n\
+         \x20           break    // E0115: no loop for this `break` to leave\n\
+         \x20       }\n\
+         \x20   }\n\
+         \n\
+         The fix, where a return was meant:\n\
+         \n\
+         \x20   fn main() {\n\
+         \x20       let n = 3\n\
+         \x20       if n > 2 {\n\
+         \x20           return\n\
+         \x20       }\n\
+         \x20   }";
 
     E0116 = "E0116", "unreachable code",
         "This statement follows one that always diverges, so it can never run.\n\n\
@@ -327,27 +487,150 @@ codes! {
          Put it in a struct and pass it to what changes it.";
 
     E0119 = "E0119", "constant defined in terms of itself",
-        "A constant's value is computed from the constants it names, so a \
-         cycle among them has no value to compute. The chain is listed in the \
-         order it was followed, ending where it returned to where it began.";
+        "A module-level constant's value is computed from the constants it names (§4.2), so a cycle among them has no value to compute. One report is made for the cycle, not one for each member, and the note lists the chain in the order it was followed, ending where it came back to where it began: `A → B → A`. The situations:\n\
+         \n\
+         - A constant that names itself: `let A = A + 1`.\n\
+         - A chain that comes back: `A` uses `B`, which uses `C`, which uses `A`.\n\
+         \n\
+         A constant cannot call a function (`E0118`), so a cycle can only run through other constants.\n\
+         \n\
+         Example:\n\
+         \n\
+         \x20   let A = B + 1\n\
+         \x20   let B = A + 1    // E0119: `A` is defined in terms of itself\n\
+         \n\
+         \x20   fn main() {\n\
+         \x20       io.print(A)\n\
+         \x20   }\n\
+         \n\
+         The fix is to break the chain with a value that stands on its own:\n\
+         \n\
+         \x20   let A = B + 1\n\
+         \x20   let B = 1\n\
+         \n\
+         \x20   fn main() {\n\
+         \x20       io.print(A)\n\
+         \x20   }";
 
     // ---- types ------------------------------------------------------------
     E0200 = "E0200", "type mismatch",
-        "An expression's type does not match what this position requires. Kite \
-         performs no implicit numeric conversion: write an explicit `as` cast.";
+        "An expression has one type and this position needs another. Kite converts nothing implicitly — no numeric widening, no truthiness, no `nil` for a missing value — so a type that is not the expected one is this error and the message says which two met. The situations:\n\
+         \n\
+         - A value of the wrong type where one is annotated or declared: `let n: int = 1.5`, a call argument against its parameter, a returned value against the function's `->` type, a field against its struct's.\n\
+         - `int` and `float` in each other's place. The note offers the cast: `n as float`.\n\
+         - `nil` for a type that cannot be absent. The note says to write `Option<T>` where a value may be missing.\n\
+         - A field or method taken from a type that has none (`n.foo` on an `int`: `int has no fields`), and a `for` over something that is not a range or a slice.\n\
+         \n\
+         Operators on mismatched operands are `E0201`; a condition that is not a `bool` is `E0202`.\n\
+         \n\
+         Example:\n\
+         \n\
+         \x20   fn half(n: float) -> float {\n\
+         \x20       return n / 2.0\n\
+         \x20   }\n\
+         \n\
+         \x20   fn main() {\n\
+         \x20       let n = 3\n\
+         \x20       io.print(half(n))    // E0200: expected `float`, found `int`\n\
+         \x20   }\n\
+         \n\
+         The fix is the explicit cast:\n\
+         \n\
+         \x20   fn half(n: float) -> float {\n\
+         \x20       return n / 2.0\n\
+         \x20   }\n\
+         \n\
+         \x20   fn main() {\n\
+         \x20       let n = 3\n\
+         \x20       io.print(half(n as float))\n\
+         \x20   }";
 
     E0201 = "E0201", "cannot apply operator to these types",
-        "The operand types have no such operation. Kite has no operator \
-         overloading, so `+` is always numeric addition or string \
-         concatenation, never a user-defined call.";
+        "The operator has no meaning for these operand types. Kite has no operator overloading, so `+` is always numeric addition or string concatenation, never a call a type supplied, and the operands of a binary operator have the same type. The situations:\n\
+         \n\
+         - Two numbers of different types: `1 + 2.5`. There is no implicit conversion; the note says to write an explicit `as` cast.\n\
+         - An operator the type does not have: `\"a\" - 1`, `-\"x\"` (`-` applies to `int` and `float`), `!1` (`!` applies to `bool`).\n\
+         - An ordering between types that have none, or between different ones: `1 < \"x\"`.\n\
+         - `&&` or `||` on something that is not a `bool`: Kite has no truthiness, so write the comparison.\n\
+         \n\
+         A cast between types that cannot convert (`1 as str`) is `E0212`; to put a number in a string, interpolate it: `\"\\(n)\"`.\n\
+         \n\
+         Example:\n\
+         \n\
+         \x20   fn main() {\n\
+         \x20       let a = 1\n\
+         \x20       let b = 2.5\n\
+         \x20       io.print(a + b)    // E0201: `+` cannot be applied to `int` and `float`\n\
+         \x20   }\n\
+         \n\
+         The fix is to say which type is meant:\n\
+         \n\
+         \x20   fn main() {\n\
+         \x20       let a = 1\n\
+         \x20       let b = 2.5\n\
+         \x20       io.print(a as float + b)\n\
+         \x20   }";
 
     E0202 = "E0202", "condition must be `bool`",
-        "Kite has no truthiness. A condition must be exactly `bool`; compare \
-         explicitly, for example `if n != 0`.";
+        "Kite has no truthiness: nothing but a `bool` is true or false, so a number, a string, a slice or an optional is not a condition. The compiler would otherwise have to choose, and `0`, `\"\"`, `[]` and `nil` each mean something different in the languages people come from. The message says what was found. The conditions are:\n\
+         \n\
+         - the condition of an `if`, an `else if` or a `for` loop's `for cond {`;\n\
+         - a `match` guard, `Pat if cond =>`;\n\
+         - the first argument of `assert` and `require`, `assert(ok, \"message\")`.\n\
+         \n\
+         Write the comparison that was meant: `n != 0`, `s != \"\"`, `xs.len() > 0`, `o != nil`.\n\
+         \n\
+         Example:\n\
+         \n\
+         \x20   fn main() {\n\
+         \x20       let n = 3\n\
+         \x20       if n {    // E0202: this is an `int`\n\
+         \x20           io.print(1)\n\
+         \x20       }\n\
+         \x20   }\n\
+         \n\
+         The fix is the comparison:\n\
+         \n\
+         \x20   fn main() {\n\
+         \x20       let n = 3\n\
+         \x20       if n != 0 {\n\
+         \x20           io.print(1)\n\
+         \x20       }\n\
+         \x20   }";
 
     E0203 = "E0203", "missing return value",
-        "This function declares a return type but a path through it returns \
-         nothing.";
+        "A function that declares a return type has to hand one back on every path through it, and `return` has to carry what the signature says. The situations:\n\
+         \n\
+         - A path that reaches the closing `}` without returning: an `if` with no `else` that returns, a `for` after which nothing is returned. A loop is not assumed to run, and a `match` has to return in every arm.\n\
+         - A bare `return` in a function that declares a value: `return` alone in `-> int`.\n\
+         - One value from a fallible function. A function declared `-> (T, error)` returns two: `return value, nil` on success and `return _, err` on failure (§7). `return 1` is this error, and the note says so.\n\
+         \n\
+         A function with no return type may fall off its end, and `return` alone leaves it early.\n\
+         \n\
+         Example:\n\
+         \n\
+         \x20   fn sign(n: int) -> int {\n\
+         \x20       if n > 0 {\n\
+         \x20           return 1\n\
+         \x20       }\n\
+         \x20   }    // E0203: not every path returns a value\n\
+         \n\
+         \x20   fn main() {\n\
+         \x20       io.print(sign(1))\n\
+         \x20   }\n\
+         \n\
+         The fix is a return for the path that was missing:\n\
+         \n\
+         \x20   fn sign(n: int) -> int {\n\
+         \x20       if n > 0 {\n\
+         \x20           return 1\n\
+         \x20       }\n\
+         \x20       return 0\n\
+         \x20   }\n\
+         \n\
+         \x20   fn main() {\n\
+         \x20       io.print(sign(1))\n\
+         \x20   }";
 
     E0204 = "E0204", "a type that cannot be named or worked out",
         "The compiler could not settle a type: either a name written where \
@@ -446,9 +729,44 @@ codes! {
          value of that type, or return a concrete type instead.";
 
     E0210 = "E0210", "non-exhaustive match",
-        "A `match` must cover every possible value. Exhaustiveness is what \
-         makes adding an enum variant safe: the compiler shows you every place \
-         that must change.";
+        "A `match` has to cover every value its subject can take, because exhaustiveness is what makes adding a variant safe: the compiler then shows every `match` that has to change. The message names a value that no arm covers. What counts as covering:\n\
+         \n\
+         - An enum: an arm for each variant, or a catch-all `_` or binding. The message names a variant that is missing.\n\
+         - A `bool`: `true` and `false`.\n\
+         - An `int`, a `float` or a `str`: literals can never cover them all, so an arm of `_` (or a name) is needed; the message says `_` is not covered.\n\
+         - An optional: `nil` and an arm for a present value.\n\
+         - A match with no arms at all, `match x { }`, which could never produce a value.\n\
+         \n\
+         A guard (`Pat if cond =>`) does not count towards covering, since it may be false.\n\
+         \n\
+         Example:\n\
+         \n\
+         \x20   enum Dir {\n\
+         \x20       Up\n\
+         \x20       Down\n\
+         \x20   }\n\
+         \n\
+         \x20   fn main() {\n\
+         \x20       let d = Dir.Up\n\
+         \x20       match d {    // E0210: `Down` is not covered\n\
+         \x20           Dir.Up => io.print(1)\n\
+         \x20       }\n\
+         \x20   }\n\
+         \n\
+         The fix is the arm that was missing (or `_` if every other value is handled alike):\n\
+         \n\
+         \x20   enum Dir {\n\
+         \x20       Up\n\
+         \x20       Down\n\
+         \x20   }\n\
+         \n\
+         \x20   fn main() {\n\
+         \x20       let d = Dir.Up\n\
+         \x20       match d {\n\
+         \x20           Dir.Up => io.print(1)\n\
+         \x20           Dir.Down => io.print(2)\n\
+         \x20       }\n\
+         \x20   }";
 
     E0211 = "E0211", "invalid closure",
         "A closure's parameter types come from where it is used. Where that is \
@@ -546,8 +864,40 @@ codes! {
          `err != nil`.";
 
     E0303 = "E0303", "`check` outside a fallible function",
-        "`check` returns the error to the caller, so the enclosing function \
-         must declare `(T, error)` as its return type.";
+        "`check err` is the return of an error: if `err` is not nil, the enclosing function returns it. So the function around it has to be able to — its return type is `(T, error)` or `error`. The situations:\n\
+         \n\
+         - `check` in `main`, which cannot return an error to anyone. This is the error met first when writing a scratch program.\n\
+         - `check` in a function with no error in its return type.\n\
+         - `check` inside a closure. A closure's `return` leaves the closure, and a closure has no error to give back to the function around it, so it is refused even in a fallible function.\n\
+         \n\
+         In `main`, test the error and say what to do about it. In another function, either declare the error and let callers decide, or handle it here.\n\
+         \n\
+         Example:\n\
+         \n\
+         \x20   fn read() -> (int, error) {\n\
+         \x20       return 1, nil\n\
+         \x20   }\n\
+         \n\
+         \x20   fn main() {\n\
+         \x20       let (n, err) = read()\n\
+         \x20       check err    // E0303: `main` returns nothing, so there is nowhere to send `err`\n\
+         \x20       io.print(n)\n\
+         \x20   }\n\
+         \n\
+         The fix, in `main`, is to deal with it:\n\
+         \n\
+         \x20   fn read() -> (int, error) {\n\
+         \x20       return 1, nil\n\
+         \x20   }\n\
+         \n\
+         \x20   fn main() {\n\
+         \x20       let (n, err) = read()\n\
+         \x20       if err != nil {\n\
+         \x20           io.print(err.message())\n\
+         \x20           return\n\
+         \x20       }\n\
+         \x20       io.print(n)\n\
+         \x20   }";
 
     // ---- modules ----------------------------------------------------------
     E0400 = "E0400", "module not found",
@@ -835,10 +1185,30 @@ codes! {
 
     // ---- derivation -------------------------------------------------------
     E0700 = "E0700", "malformed `@derive`",
-        "`@derive(…)` names traits to write bodies for, and goes in front of a \
-         `struct` or an `enum`. A derived body is written from a type's \
-         fields, so there has to be a type and there has to be something to \
-         derive.";
+        "`@derive(…)` names traits whose bodies the compiler writes from a type's fields (`Debug`, `Hash`, `Encode`, `Decode`), so it goes in front of a `struct` or an `enum` and names at least one trait. A trait it cannot write is `E0701`. The situations:\n\
+         \n\
+         - `@derive` in front of something that is not a type: a function, an `impl` or a constant. A derived body is written from fields, so there has to be a type.\n\
+         - `@derive()` with nothing in the parentheses.\n\
+         \n\
+         Example:\n\
+         \n\
+         \x20   @derive(Debug)    // E0700: not a type declaration\n\
+         \x20   fn f() {\n\
+         \x20   }\n\
+         \n\
+         \x20   fn main() {\n\
+         \x20       f()\n\
+         \x20   }\n\
+         \n\
+         The fix is to put it on the type it is for:\n\
+         \n\
+         \x20   @derive(Debug)\n\
+         \x20   struct P {\n\
+         \x20       x: int\n\
+         \x20   }\n\
+         \n\
+         \x20   fn main() {\n\
+         \x20   }";
 
     E0701 = "E0701", "nothing derives that",
         "The compiler writes bodies for `Debug`, `Hash`, `Encode` and \

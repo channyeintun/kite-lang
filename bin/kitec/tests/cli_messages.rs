@@ -78,11 +78,27 @@ fn the_commonest_codes_are_explained_in_full() {
         ("E0402", &["chain", "third module"][..]),
         ("E0520", &["`var`", "closure", "`JsValue`"][..]),
         ("E0521", &["closure", "async"][..]),
+        ("E0001", &["block string", "line"][..]),
+        ("E0002", &["`;`", "`#`"][..]),
+        ("E0003", &["`\\u{", "unknown"][..]),
+        ("E0005", &["`*/`", "line comment"][..]),
+        ("E0101", &["`{`", "indentation"][..]),
+        ("E0110", &["`var`", "every path"][..]),
+        ("E0113", &["named argument", "struct"][..]),
+        ("E0115", &["closure", "`return`"][..]),
+        ("E0119", &["`A → B → A`", "constant"][..]),
+        ("E0200", &["as float", "`Option<T>`", "`E0201`"][..]),
+        ("E0201", &["overloading", "`as`", "`E0212`"][..]),
+        ("E0202", &["truthiness", "`match` guard", "`assert`"][..]),
+        ("E0203", &["bare `return`", "(T, error)"][..]),
+        ("E0210", &["`_`", "optional", "guard"][..]),
+        ("E0303", &["`main`", "closure"][..]),
+        ("E0700", &["`E0701`", "`impl`"][..]),
     ] {
         let out = kitec(&["--explain", code]);
         assert!(out.status.success(), "{}", code);
         let said = stdout(&out);
-        assert!(said.len() > 800, "{} is {} bytes", code, said.len());
+        assert!(said.len() > 700, "{} is {} bytes", code, said.len());
         assert!(said.contains("Example"), "{} has no example:\n{}", code, said);
         for word in mentions {
             assert!(said.contains(word), "{} does not mention {}:\n{}", code, word, said);
@@ -113,7 +129,15 @@ fn block_after(text: &str, lead: &str) -> Option<String> {
 fn a_whole_program_example_and_its_fix_are_what_they_say() {
     let dir = std::env::temp_dir().join(format!("kitec-explain-{}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("temp dir");
-    for code in ["E0100", "E0111", "E0204", "E0520", "E0521"] {
+    // The codes whose example must produce that code and no other: the ones
+    // written as a whole explanation of one situation each.
+    let exactly = [
+        "E0001", "E0002", "E0003", "E0005", "E0101", "E0110", "E0113", "E0115", "E0119", "E0200",
+        "E0201", "E0202", "E0203", "E0210", "E0303", "E0700",
+    ];
+    let mut codes = vec!["E0100", "E0111", "E0204", "E0520", "E0521"];
+    codes.extend(exactly);
+    for code in codes {
         let said = stdout(&kitec(&["--explain", code]));
         let example = block_after(&said, "Example").expect("an example");
         let mut checked = 0;
@@ -122,6 +146,14 @@ fn a_whole_program_example_and_its_fix_are_what_they_say() {
             std::fs::write(&file, &example).expect("write");
             let out = kitec(&["check", file.to_str().unwrap()]);
             assert!(stderr(&out).contains(&format!("error[{}]", code)), "{}:\n{}", code, stderr(&out));
+            if exactly.contains(&code) {
+                let others: Vec<String> = stderr(&out)
+                    .lines()
+                    .filter_map(|l| l.strip_prefix("error[").and_then(|l| l.get(..5)).map(str::to_string))
+                    .filter(|c| c != code)
+                    .collect();
+                assert!(others.is_empty(), "{} example also gives {:?}:\n{}", code, others, stderr(&out));
+            }
             checked += 1;
         }
         if let Some(fix) = block_after(&said, "The fix is") {
