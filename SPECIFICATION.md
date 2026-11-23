@@ -1974,6 +1974,9 @@ walking it hands each one to the loop's binding to be checked.
 `task.all([...])`, `task.race([...])`, and `task.timeout(t, ms)` cover the
 remaining combinators. There is no channel type; a `Task<T>` *is* the
 one-shot result channel, and it is awaited rather than received from.
+`task.timeout` answers `nil` only when the time ran out: a task that finished
+in time gives a present optional whatever its result, a nil `error` included,
+so `r == nil` means "late" and the error it holds is tested after.
 
 A task carries which task it is, so under `==` a `Task` is equal only to
 itself: two calls of `one()` are two tasks and never equal, finished or not,

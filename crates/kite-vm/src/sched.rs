@@ -25,7 +25,8 @@
 //! completion, and so is every deadline.
 //!
 //! The native runtime keeps a copy of this file, as it keeps the rest of the
-//! VM's scheduler: the two must poll in the same order.
+//! VM's scheduler: the two must poll in the same order. Below this comment
+//! the two are one text, and a test in `kite-rt` fails when they are not.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 

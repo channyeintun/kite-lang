@@ -52,7 +52,7 @@ pub fn run_native_with(src: &str, config: kite_codegen_clif::RunConfig) -> (Stri
 /// The oracle: the same program on the bytecode VM.
 pub fn run_vm(src: &str) -> String {
     let l = lower(src);
-    let chunk = kite_codegen_kbc::compile(&l.mir);
+    let chunk = kite_codegen_kbc::compile(&l.mir, &l.types);
     let mut out = Vec::new();
     kite_vm::run(&chunk, &mut out).expect("the VM runs");
     String::from_utf8(out).expect("output is valid UTF-8")

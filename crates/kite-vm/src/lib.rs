@@ -77,6 +77,16 @@ pub enum Value {
     /// `nil`, or a present optional. Only ever produced where the type is
     /// `?T`; Kite has no null anywhere else.
     Nil,
+    /// An `Option<error>` that holds the nil error.
+    ///
+    /// An optional is otherwise its payload, unboxed, because no other
+    /// payload's value is `Nil`. An `error`'s can be, and an `Option<error>`
+    /// that is present must not read as absent: `task.timeout` of a task that
+    /// finished in time with a nil error has its result, and the other two
+    /// backends, which box every payload, say so. Made only by `WrapErr` and a
+    /// lookup in a slice or map of errors, and turned back into `Nil` by
+    /// `UnwrapErr`, so no `error` ever holds it.
+    PresentNil,
 }
 
 #[derive(Debug)]
@@ -181,7 +191,8 @@ fn drop_iteratively(mut work: Vec<Value>) {
             | Value::Float(_)
             | Value::Bool(_)
             | Value::Str(_)
-            | Value::Nil => {}
+            | Value::Nil
+            | Value::PresentNil => {}
         }
     }
 }
@@ -218,6 +229,16 @@ impl Drop for ErrorValue {
     }
 }
 
+/// A value found in a slice or map, as the optional a lookup answers: an
+/// `error` that is nil, found where `err` says the payload is an `error`, is
+/// a present nil rather than an absent optional.
+fn present(v: Value, err: bool) -> Value {
+    match v {
+        Value::Nil if err => Value::PresentNil,
+        v => v,
+    }
+}
+
 /// Structural equality, per the specification: two structs are equal when
 /// their fields are. Reference identity is `ptr.same`, not `==`.
 ///
@@ -250,6 +271,7 @@ fn shallow_eq(a: &Value, b: &Value) -> Option<bool> {
         (Value::Bool(a), Value::Bool(b)) => a == b,
         (Value::Str(a), Value::Str(b)) => a == b,
         (Value::Nil, Value::Nil) => true,
+        (Value::PresentNil, Value::PresentNil) => true,
         // Two errors are equal when they say the same thing. What they carry
         // is provenance rather than identity: a caller comparing errors is
         // comparing failures, and two failures that read alike are alike.
@@ -341,6 +363,7 @@ impl Value {
             Value::Err(_) => "error",
             Value::Closure(_) => "closure",
             Value::Nil => "nil",
+            Value::PresentNil => "present nil",
         }
     }
 }
@@ -567,7 +590,7 @@ impl fmt::Display for Value {
                     }
                     stack.push(Piece::Text("{"));
                 }
-                Value::Nil => write!(f, "nil")?,
+                Value::Nil | Value::PresentNil => write!(f, "nil")?,
             }
         }
         Ok(())
@@ -1053,6 +1076,20 @@ impl<'a> Vm<'a> {
                     let v = matches!(self.get(base, obj), Value::Nil);
                     self.set(base, dst, Value::Bool(v));
                 }
+                Op::WrapErr { dst, src } => {
+                    let v = match self.get(base, src) {
+                        Value::Nil => Value::PresentNil,
+                        v => v,
+                    };
+                    self.set(base, dst, v);
+                }
+                Op::UnwrapErr { dst, src } => {
+                    let v = match self.get(base, src) {
+                        Value::PresentNil => Value::Nil,
+                        v => v,
+                    };
+                    self.set(base, dst, v);
+                }
                 Op::LoadStr { dst, idx } => {
                     let s = self.chunk.strings[idx as usize].clone();
                     self.set(base, dst, Value::Str(s));
@@ -1396,12 +1433,13 @@ impl<'a> Vm<'a> {
                     self.set(base, dst, Value::Map(Rc::new(entries)));
                 }
 
-                Op::MapGet { dst, obj, key } => {
+                Op::MapGet { dst, obj, key, err } => {
                     let (m, k) = (self.get(base, obj), self.get(base, key));
                     let Value::Map(entries) = m else {
                         return Err(Trap::TypeConfusion { op: "map index", found: m.type_name() });
                     };
-                    let v = entries.get(&k, self.keys()).cloned().unwrap_or(Value::Nil);
+                    let v = entries.get(&k, self.keys()).cloned().map(|v| present(v, err));
+                    let v = v.unwrap_or(Value::Nil);
                     self.set(base, dst, v);
                 }
 
@@ -1556,7 +1594,7 @@ impl<'a> Vm<'a> {
                     self.set(base, dst, Value::Int(len as i64));
                 }
 
-                Op::SliceGet { dst, obj, index } => {
+                Op::SliceGet { dst, obj, index, err } => {
                     let (seq, i) = (self.get(base, obj), self.get(base, index));
                     let items = Self::as_slice(&seq)?;
                     let i = Self::as_index(&i)?;
@@ -1564,6 +1602,7 @@ impl<'a> Vm<'a> {
                         .ok()
                         .and_then(|u| items.get(u))
                         .cloned()
+                        .map(|v| present(v, err))
                         .unwrap_or(Value::Nil);
                     self.set(base, dst, v);
                 }
