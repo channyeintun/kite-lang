@@ -1,0 +1,106 @@
+// A tuple or a slice of results is a binding of failures like a whole pair
+// (R7) — the shapes `task.both` and `task.all` answer with, and the ones §12
+// recommends. Each used to compile with a failure inside it never looked at.
+// Taking one apart, or walking it with `for`, hands each failure to the name
+// it is bound to; counting it with `len` reads none of them.
+
+use std/task
+
+async fn load(n: int) -> (int, error) {
+    if n == 2 {
+        return _, errors.new("two failed")
+    }
+    return n * 10, nil
+}
+
+fn load_now(n: int) -> (int, error) {
+    if n == 2 {
+        return _, errors.new("two failed")
+    }
+    return n, nil
+}
+
+fn both<A, B>(a: A, b: B) -> (A, B) {
+    return (a, b)
+}
+
+async fn one_left_unread() {
+    let (ra, rb) = await task.both(load(1), load(2))
+    let (a, ea) = ra
+    if ea != nil {
+        return //~ ERROR E0302
+    }
+    io.print(a)
+}
+
+async fn a_slice_only_counted() {
+    let rs = await task.all([load(1), load(2)]) //~ ERROR E0302
+    io.print(rs.len())
+}
+
+fn a_tuple_from_a_call() {
+    let (x, y) = both(load_now(1), load_now(2)) //~ ERROR E0302
+    io.print("dropped")
+}
+
+fn a_slice_literal() {
+    let xs = [load_now(1), load_now(2)] //~ ERROR E0302
+    io.print("dropped \(xs.len())")
+}
+
+fn walked_and_dropped() {
+    for r in [load_now(1), load_now(2)] { //~ ERROR E0302
+        io.print("dropped")
+    }
+}
+
+// Every failure inspected, or passed on: nothing is dropped.
+async fn both_checked() -> (int, error) {
+    let (ra, rb) = await task.both(load(1), load(2))
+    let (a, ea) = ra
+    let (b, eb) = rb
+    if ea != nil {
+        _ = eb
+        return _, ea
+    }
+    check eb
+    return a + b, nil
+}
+
+async fn every_one_checked() -> (int, error) {
+    var total = 0
+    let rs = await task.all([load(1), load(3)])
+    for r in rs {
+        let (n, err) = r
+        check err
+        total += n
+    }
+    return total, nil
+}
+
+fn count<T>(xs: [T]) -> int {
+    return xs.len()
+}
+
+fn handed_on() -> int {
+    let xs = [load_now(1), load_now(2)]
+    return count(xs)
+}
+
+async fn main() {
+    await one_left_unread()
+    await a_slice_only_counted()
+    a_tuple_from_a_call()
+    a_slice_literal()
+    walked_and_dropped()
+    let (n, err) = await both_checked()
+    if err != nil {
+        return
+    }
+    let (m, e2) = await every_one_checked()
+    if e2 != nil {
+        return
+    }
+    io.print(n + m)
+    io.print(handed_on())
+}

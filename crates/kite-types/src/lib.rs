@@ -1275,16 +1275,26 @@ enum Holder {
     Pair,
     /// The `Task` of a call to an `async fn` whose result holds one.
     Task,
+    /// A tuple or a slice with one or more of these in it.
+    Many,
 }
 
 /// An error state: the taint, and which locals are copies of which.
 type ErrorState = (Vec<Taint>, std::collections::BTreeSet<(u32, u32)>);
 
 /// The error states a loop's body hands on other than by falling into what
-/// follows it: back to its top, from its end and every `continue`, and out
+/// follows it: back to its start, from its end and every `continue`, and out
 /// past it, from every `break`. Each is the join of all that arrive.
+///
+/// A loop is checked until what comes back to the start of its body says
+/// nothing new; `carried` is what earlier rounds found coming back, `start`
+/// the state the body began in with that joined in, and `head` the state
+/// the loop is left in when its header finds nothing more to do.
 #[derive(Default)]
 struct LoopEdges {
+    carried: Option<ErrorState>,
+    start: Option<ErrorState>,
+    head: Option<ErrorState>,
     back: Option<ErrorState>,
     exit: Option<ErrorState>,
 }
@@ -1960,8 +1970,21 @@ impl<'a> Checker<'a> {
         if self.types.fallible_value(ty).is_some() {
             return Some(Holder::Pair);
         }
-        match self.types.task_payload(ty) {
-            Some(inner) if self.may_hold_failure(inner) => Some(Holder::Task),
+        if let Some(inner) = self.types.task_payload(ty) {
+            return self.may_hold_failure(inner).then_some(Holder::Task);
+        }
+        // Binding everything under one name is not a way out (R7), and nor is
+        // binding a tuple or a slice of everything: `let r = await
+        // task.both(a, b)` and `let rs = await task.all(ts)` each hold
+        // failures nobody has looked at, and they are the shapes §12
+        // recommends. Each is watched as a whole pair is.
+        if let TyKind::Tuple(parts) = self.types.kind(ty) {
+            if parts.iter().any(|p| self.may_hold_failure(*p)) {
+                return Some(Holder::Many);
+            }
+        }
+        match self.types.slice_elem(ty) {
+            Some(elem) if self.may_hold_failure(elem) => Some(Holder::Many),
             _ => None,
         }
     }
@@ -2779,38 +2802,40 @@ impl<'a> Checker<'a> {
         let entry_nonnil = self.error_nonnil.clone();
 
         // **The body runs again from its own end**, and from every
-        // `continue`, so the state at its top is not only the one the loop
+        // `continue`, so the state it starts in is not only the one the loop
         // was entered in. A failure the body leaves unchecked in a binding
         // declared outside it is still there when the next iteration writes
         // over it: `var e: error = nil` then `for … { e = f(i) }` dropped
         // every failure but the last, unseen, because the write was checked
         // against the state before the first iteration alone. So the body is
-        // checked from the entry state, and if what flows back to its top
-        // says more than that, it is checked again from the join, and what
-        // the earlier check reported is thrown away with it. Each round makes
+        // checked, and if what flows back to its start says more than the
+        // state it was checked from, it is checked again with that joined in
+        // — after the header, which runs once, for a walk; before the
+        // condition, which runs every time, for a `for cond` — and what the
+        // earlier check reported is thrown away with it. Each round makes
         // some state worse, and none can get worse than Tainted, so this
         // ends; a body that hands nothing new back — almost every one — is
         // checked once.
         let depth = self.loops.len() - 1;
+        let entry: ErrorState = (self.taint.clone(), self.copies.clone());
+        let mut carried: Option<ErrorState> = None;
         let mut round = 0;
-        let (result, runs, top) = loop {
+        let (result, runs, edges) = loop {
             round += 1;
-            let top: ErrorState = (self.taint.clone(), self.copies.clone());
             let defers = self.defers;
             let trial = self.begin_trial();
-            self.loop_edges[depth] = LoopEdges::default();
+            self.loop_edges[depth] = LoopEdges { carried: carried.take(), ..LoopEdges::default() };
             let (result, runs) = self.loop_parts(f, sig);
-            let back = self.loop_edges[depth].back.take();
-            let Some((taint, copies)) = back.and_then(|b| self.loop_top(f.span, &top, b, round)) else {
+            let edges = std::mem::take(&mut self.loop_edges[depth]);
+            let Some(next) = self.carry(f.span, &edges, round) else {
                 self.keep_trial(trial);
-                break (result, runs, top);
+                break (result, runs, edges);
             };
             self.end_trial(trial);
             self.defers = defers;
-            self.restore_taint(taint);
-            self.copies = copies;
+            carried = Some(next);
         };
-        let exits = self.loop_edges.pop().and_then(|e| e.exit);
+        self.loop_edges.pop();
 
         self.loops.pop();
         let merged: Vec<Init> = self
@@ -2827,13 +2852,17 @@ impl<'a> Checker<'a> {
         // runs the body zero times, which does not exist, made the walk's
         // subject look unread.
         //
-        // Otherwise control also leaves from the top, in whatever state the
-        // fixed point says arrives there — the entry state on the way that
-        // runs the body zero times — and from every `break`.
+        // Otherwise control also leaves where the header finds nothing more
+        // to do — before the first iteration, or after any — and from every
+        // `break`.
         if !runs {
-            self.merge_loop_taint(&top.0, &top.1);
+            let (taint, copies) = edges.head.unwrap_or(entry);
+            self.merge_loop_taint(&taint, &copies);
+            if let Some((taint, copies)) = edges.back {
+                self.merge_loop_taint(&taint, &copies);
+            }
         }
-        if let Some((taint, copies)) = exits {
+        if let Some((taint, copies)) = edges.exit {
             self.merge_loop_taint(&taint, &copies);
         }
         // What the body proved is not known after it, which may be after zero
@@ -2873,6 +2902,7 @@ impl<'a> Checker<'a> {
                 let ast::Expr::Range { start, end, inclusive, .. } = iter else {
                     // Iterating a slice. The `Iterate` trait generalises this
                     // later; slices are the case that matters now.
+                    let before = self.taint.clone();
                     let seq = self.expr(iter, None);
                     let Some(elem) = self.types.slice_elem(seq.ty) else {
                         if !self.types.is_poisoned(seq.ty) {
@@ -2896,6 +2926,16 @@ impl<'a> Checker<'a> {
                     };
                     self.locals[local_id as usize].ty = elem;
                     self.init[local_id as usize] = Init::Assigned;
+                    // Walking a slice of failures hands each one to the loop's
+                    // binding, which has to look at it, as taking a pair apart
+                    // hands its error to the name it binds (R1).
+                    self.forget_copies(local_id);
+                    self.taint[local_id as usize] =
+                        if self.may_hold_failure(elem) && self.holds_obligation(&seq, &before) {
+                            Taint::Unchecked
+                        } else {
+                            Taint::Clean
+                        };
 
                     let body = self.loop_body(&f.body, sig);
                     let stmt = hir::Stmt::ForSlice {
@@ -2938,7 +2978,9 @@ impl<'a> Checker<'a> {
                 (Some(stmt), runs && !jumps)
             }
             ast::ForHeader::While(c) => {
+                self.loop_start();
                 let cond = self.condition(c);
+                self.loop_head();
                 let body = self.loop_body(&f.body, sig);
                 (Some(hir::Stmt::While { cond, body, label, span: f.span }), false)
             }
@@ -2963,6 +3005,7 @@ impl<'a> Checker<'a> {
         let ast::Binding::Tuple { elems, span } = binding else {
             return None;
         };
+        let before = self.taint.clone();
         let map = self.expr(iter, None);
 
         // A slice of two-element tuples destructures the same way a map does,
@@ -2972,7 +3015,8 @@ impl<'a> Checker<'a> {
         if let Some(elem) = self.types.slice_elem(map.ty) {
             if let TyKind::Tuple(parts) = self.types.kind(elem).clone() {
                 if parts.len() == 2 {
-                    return self.for_tuple_slice(f, elems, *span, map, elem, &parts, sig);
+                    let held = self.holds_obligation(&map, &before);
+                    return self.for_tuple_slice(f, elems, *span, map, elem, &parts, held, sig);
                 }
             }
         }
@@ -3099,6 +3143,7 @@ impl<'a> Checker<'a> {
         seq: hir::Expr,
         elem_ty: TyId,
         parts: &[TyId],
+        held: bool,
         sig: &Signature,
     ) -> Option<(hir::Stmt, Flow)> {
         if elems.len() != 2 {
@@ -3123,7 +3168,12 @@ impl<'a> Checker<'a> {
             let Some(local) = self.resolved.lookup_binding(name.span) else { continue };
             self.locals[local as usize].ty = parts[i];
             self.init[local as usize] = Init::Assigned;
-            self.taint[local as usize] = Taint::Clean;
+            self.forget_copies(local);
+            self.taint[local as usize] = if held && self.may_hold_failure(parts[i]) {
+                Taint::Unchecked
+            } else {
+                Taint::Clean
+            };
             body_stmts.push(hir::Stmt::Let {
                 local: hir::LocalId(local),
                 init: Some(hir::Expr {
@@ -3188,8 +3238,14 @@ impl<'a> Checker<'a> {
         self.restore_taint(merged);
     }
 
-    /// A loop body, noting the state its end hands back to its top.
+    /// A loop body, noting the state its end hands back to its start. A
+    /// header that runs once — a walk, or none at all — has run by now; a
+    /// condition, which runs every time, has noted both itself.
     fn loop_body(&mut self, b: &ast::Block, sig: &Signature) -> hir::Block {
+        if self.loop_edges.last().is_some_and(|e| e.start.is_none()) {
+            self.loop_head();
+            self.loop_start();
+        }
         let (body, flow) = self.block(b, sig);
         if flow == Flow::Falls {
             if let Some(edges) = self.loop_edges.len().checked_sub(1) {
@@ -3225,42 +3281,85 @@ impl<'a> Checker<'a> {
         *if back { &mut edges.back } else { &mut edges.exit } = Some(here);
     }
 
-    /// The state at a loop's top once what its body hands back is joined
-    /// into it, if that says more than `top` did. Only what is declared
-    /// outside the loop is carried round: everything inside it is declared
-    /// afresh on each iteration.
-    fn loop_top(
-        &self,
-        region: Span,
-        top: &ErrorState,
-        back: ErrorState,
-        round: usize,
-    ) -> Option<ErrorState> {
-        let mut taint = top.0.clone();
-        let mut changed = false;
+    /// What the next round of a loop's check has to carry to the start of
+    /// its body, if what came back says more than the body began with. Only
+    /// what is declared outside the loop is carried: everything inside it is
+    /// declared afresh on each iteration.
+    fn carry(&self, region: Span, edges: &LoopEdges, round: usize) -> Option<ErrorState> {
+        let (Some(start), Some(back)) = (&edges.start, &edges.back) else {
+            return None;
+        };
+        let outside = |i: u32| !self.declared_inside(i, region);
+        let n = start.0.len().min(self.locals.len());
+        let mut changed = (0..n).any(|i| {
+            outside(i as u32) && start.0[i].merge(back.0.get(i).copied().unwrap_or(Taint::Clean)) != start.0[i]
+        });
+        let pairs = |c: &std::collections::BTreeSet<(u32, u32)>| -> std::collections::BTreeSet<(u32, u32)> {
+            c.iter().copied().filter(|p| outside(p.0) && outside(p.1)).collect()
+        };
+        // Copies only ever narrow the report, so past a few rounds they are
+        // given up rather than followed, and only the taint, which can only
+        // get worse, is left to settle.
+        let follow_copies = round < 4;
+        if follow_copies {
+            changed |= pairs(&join_copies((&start.1, &start.0), (&back.1, &back.0))) != pairs(&start.1);
+        }
+        if !changed {
+            return None;
+        }
+        let mut taint: Vec<Taint> = vec![Taint::Clean; n];
+        let prior = edges.carried.as_ref();
+        for (i, t) in taint.iter_mut().enumerate() {
+            if outside(i as u32) {
+                let was = prior.and_then(|c| c.0.get(i).copied()).unwrap_or(Taint::Clean);
+                *t = was.merge(back.0.get(i).copied().unwrap_or(Taint::Clean));
+            }
+        }
+        let copies = if !follow_copies {
+            std::collections::BTreeSet::new()
+        } else {
+            match prior {
+                Some((pt, pc)) => pairs(&join_copies((pc, pt), (&back.1, &back.0))),
+                None => pairs(&back.1),
+            }
+        };
+        Some((taint, copies))
+    }
+
+    /// The start of a loop's body: join in what earlier rounds found
+    /// coming back to it, and note the state it begins in.
+    fn loop_start(&mut self) {
+        let Some(edges) = self.loop_edges.last() else { return };
+        if let Some((taint, copies)) = &edges.carried {
+            self.copies = join_copies((&self.copies, &self.taint), (copies, taint));
+            let merged = self.join_taint(&self.taint, taint);
+            self.restore_taint(merged);
+        }
+        let here = (self.taint.clone(), self.copies.clone());
+        if let Some(edges) = self.loop_edges.last_mut() {
+            edges.start = Some(here);
+        }
+    }
+
+    /// Where the loop is left when its header finds nothing more to do. What
+    /// the header binds for the body is not bound on that way out.
+    fn loop_head(&mut self) {
+        let Some(&(region, _)) = self.loops.last() else { return };
+        let mut taint = self.taint.clone();
         for (i, t) in taint.iter_mut().enumerate() {
             if self.declared_inside(i as u32, region) {
-                continue;
+                *t = Taint::Clean;
             }
-            let joined = t.merge(back.0.get(i).copied().unwrap_or(Taint::Clean));
-            changed |= joined != *t;
-            *t = joined;
         }
-        let outside = |p: &(u32, u32)| {
-            !self.declared_inside(p.0, region) && !self.declared_inside(p.1, region)
-        };
-        let before: std::collections::BTreeSet<(u32, u32)> =
-            top.1.iter().copied().filter(outside).collect();
-        // Copies only ever narrow the report, so past a few rounds they are
-        // given up rather than followed: what is left to settle is the
-        // taint, which can only get worse.
-        let copies = if round < 4 {
-            join_copies((&top.1, &top.0), (&back.1, &back.0)).into_iter().filter(outside).collect()
-        } else {
-            std::collections::BTreeSet::new()
-        };
-        changed |= before != copies;
-        changed.then_some((taint, copies))
+        let copies = self
+            .copies
+            .iter()
+            .copied()
+            .filter(|p| !self.declared_inside(p.0, region) && !self.declared_inside(p.1, region))
+            .collect();
+        if let Some(edges) = self.loop_edges.last_mut() {
+            edges.head = Some((taint, copies));
+        }
     }
 
     /// Join two taint states at a point where control arrives from either.
@@ -5620,7 +5719,25 @@ impl<'a> Checker<'a> {
         span: Span,
         expected: Option<TyId>,
     ) -> hir::Expr {
+        // `rs.len()` counts the failures in a slice of them without looking
+        // at any, so it is not the read that inspects them.
+        let counted: Option<Vec<(u32, Taint)>> = match base {
+            ast::Expr::Path(p) if name.name == "len" => match self.resolved.lookup_use(p.span) {
+                Some(Res::Local(id)) => Some(
+                    self.copies_of(id).into_iter().map(|j| (j, self.taint[j as usize])).collect(),
+                ),
+                _ => None,
+            },
+            _ => None,
+        };
         let receiver = self.expr(base, None);
+        if let Some(states) = counted {
+            if self.types.slice_elem(receiver.ty).is_some() && self.may_hold_failure(receiver.ty) {
+                for (j, t) in states {
+                    self.taint[j as usize] = t;
+                }
+            }
+        }
         if self.types.is_poisoned(receiver.ty) {
             return self.lit(ExprKind::Error, TyId::ERROR, span);
         }
@@ -7291,6 +7408,11 @@ impl<'a> Checker<'a> {
                 "write `check` to propagate it, or bind it and test it — \
                  `let err = …` then `if err != nil { … }`",
             ),
+            Holder::Many => (
+                "this call returns errors, and they are thrown away",
+                "bind the result and take it apart — `let (a, b) = …`, or `for r in …` \
+                 for a slice — and check each error in it",
+            ),
             Holder::Task => (
                 "this call starts a task whose error nobody will see",
                 "`await` it and check what it gives, or bind the task and hand it to \
@@ -7552,6 +7674,7 @@ impl<'a> Checker<'a> {
                             Holder::Error => "this error goes out of scope uninspected",
                             Holder::Pair => "the error in this result goes out of scope uninspected",
                             Holder::Task => "this task's error is never awaited",
+                            Holder::Many => "the errors this holds go out of scope uninspected",
                         },
                     )
                 }
@@ -7574,6 +7697,10 @@ impl<'a> Checker<'a> {
                      or `let (value, err) = await {}` — or hand it to something that will",
                     name, name
                 )),
+                Holder::Many => d.with_note(
+                    "take it apart — `let (a, b) = …`, or `for r in …` for a slice — and \
+                     check each error in it",
+                ),
             };
             self.diags.push(d);
         }
@@ -7602,6 +7729,9 @@ impl<'a> Checker<'a> {
                 "await it and check what it gives before the write — `let err = await {}`",
                 name
             )),
+            Holder::Many => d.with_note(
+                "take it apart before writing over it, and check each error in it",
+            ),
             Holder::Error => d.with_note(format!(
                 "test `{} != nil` or `check {}` before the write; to pass it on instead, \
                  write `{} = errors.wrap({}, \"…\")`",

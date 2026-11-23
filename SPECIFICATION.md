@@ -1016,7 +1016,11 @@ The rules:
 > apart, passing it on — inspects it, and R3 applies otherwise; copying it
 > is not reading it, and nor is a `match` whose every arm is `_` or a bare
 > name. Binding everything under one name is not a way out either, and nor
-> is a tuple literal: `let (n, e) = (1, f())` makes `e` Unchecked.
+> is a tuple literal: `let (n, e) = (1, f())` makes `e` Unchecked. The same
+> holds one level further out: a tuple or a slice with one of these in it
+> — what `task.both` and `task.all` answer with — is Unchecked when bound,
+> taking it apart or walking it with `for` hands each failure in it to the
+> name it is bound to, and counting it with `len` is not reading it.
 
 R1–R5 are about bindings, and R6 and R7 close the shapes they leave open: a
 call written as a statement makes no binding, so nothing in R1–R5 ever sees it,
@@ -1717,10 +1721,19 @@ let ta = fetch_user(1)
 let tb = fetch_user(2)
 let (ra, rb) = await task.both(ta, tb)
 let (a, ea) = ra
-check ea
 let (b, eb) = rb
+if ea != nil {
+    _ = eb          // the first failure is the one reported
+    return _, ea
+}
 check eb
 ```
+
+Both results arrive together, so both errors are in scope together, and a way
+out taken for one leaves the other behind ([§7.3](#73-correlated-results-and-taint-analysis)
+R3): checking `ea` with `check` while `rb` is still unread drops `rb`'s
+failure, and is `E0302`. `task.all` answers with a slice of results, and
+walking it hands each one to the loop's binding to be checked.
 
 `task.all([...])`, `task.race([...])`, and `task.timeout(t, ms)` cover the
 remaining combinators. There is no channel type; a `Task<T>` *is* the

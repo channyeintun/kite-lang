@@ -400,6 +400,51 @@ Taking it apart, `let (v, err) = p`, re-enters the normal rules, and returning
 it passes it on; either clears the mark. `p` itself has no fields (`E0200`) and
 no methods (`E0205`), so destructure where you bind.
 
+**A tuple or slice of results is watched the same way** — the shapes
+`task.both` and `task.all` answer with. Bound to one name it is Unchecked
+(`rs.len()` does not count as reading it); taking it apart, or walking it with
+`for`, hands each failure to the name it lands in. Both results of
+`task.both` arrive together, so deal with both before any exit — a `check` on
+the first leaves the second behind:
+
+```kite
+use std/task
+
+async fn load(n: int) -> (int, error) {
+    if n == 2 {
+        return _, errors.new("two failed")
+    }
+    return n * 10, nil
+}
+
+async fn sum() -> (int, error) {
+    let (ra, rb) = await task.both(load(1), load(2))
+    let (a, ea) = ra
+    let (b, eb) = rb
+    if ea != nil {
+        _ = eb
+        return _, ea
+    }
+    check eb
+    var total = a + b
+    for r in await task.all([load(3), load(4)]) {
+        let (n, err) = r
+        check err
+        total += n
+    }
+    return total, nil
+}
+
+async fn main() {
+    let (n, err) = await sum()
+    if err != nil {
+        io.print(err.message())
+        return
+    }
+    io.print(n)
+}
+```
+
 The same holds however the failure got into a single binding — `var e = f()`,
 `let e = await f()`, `let e = if c { f() } else { g() }`, `let (n, e) = (1,
 f())`: the binding has to be looked at. Only `nil` starts out Checked.
