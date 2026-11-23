@@ -3369,12 +3369,22 @@ impl<'a> Parser<'a> {
         };
         let found = if self.at(T::Ident) { "a label" } else { self.peek().describe() };
         let saved = self.arm_statement.replace(self.depth);
+        let reported = self.diags.len();
         let stmt = self.parse_stmt();
         self.arm_statement = saved;
         let stmt = stmt?;
-        let written = at.to(self.prev_span());
-        let _ = stmt;
+        // The statement's own span: what the parser went on to take after
+        // it — the line break that ended it — is not part of the fix.
+        let written = at.to(stmt.span());
+        let broken = self.diags.len() > reported;
         self.arm_holds_a_statement(at, found, &what, written);
+        // A statement that was itself cut short — `4 => let q = (1,` — may
+        // have taken the arms after it, so the match is one whose arms were
+        // not all read, as when an expression arm is cut short, and is not
+        // also reported as missing them.
+        if broken {
+            return None;
+        }
         Some(MatchBody::Expr(Expr::Error(written)))
     }
 

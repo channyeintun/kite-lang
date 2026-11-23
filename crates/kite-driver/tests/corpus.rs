@@ -443,3 +443,27 @@ fn a_type_that_does_not_parse_keeps_its_declaration() {
         );
     }
 }
+
+/// A statement written as an arm and ended by its line break, not a `,`, has
+/// the whole statement in its note's block; and one that was itself cut short
+/// — a `(` left open — leaves the match with arms unread, which is not also
+/// a match missing the arms it took.
+///
+/// Here rather than in `tests/corpus`: the corpus pins codes, not notes, and
+/// `kitec fmt` indents what follows an unclosed bracket.
+#[test]
+fn an_arm_that_is_a_statement_ended_by_its_line_is_shown_whole() {
+    let src = "fn main() {\n    match 1 {\n        0 => let y = 5\n        _ => {},\n    }\n}\n";
+    let result = compile(Path::new("t.kite"), src, Emit::Check);
+    let codes: Vec<&str> = result.diags.iter().filter_map(|d| d.code.map(|c| c.0)).collect();
+    assert_eq!(codes, vec!["E0100"], "{}", result.render_diagnostics());
+    let shown =
+        result.diags.iter().flat_map(|d| &d.notes).any(|n| n.contains("`=> { let y = 5 }`"));
+    assert!(shown, "{}", result.render_diagnostics());
+
+    let src = "fn main() {\n    match 1 {\n        4 => let q = (1,\n        5 => io.print(2),\n        \
+               _ => {},\n    }\n}\n";
+    let result = compile(Path::new("t.kite"), src, Emit::Check);
+    let codes: Vec<&str> = result.diags.iter().filter_map(|d| d.code.map(|c| c.0)).collect();
+    assert!(!codes.contains(&"E0210"), "{}", result.render_diagnostics());
+}
