@@ -1510,6 +1510,25 @@ mod tests {
         assert!(!text.contains("write `impl<T> Error"), "{}", text);
     }
 
+    /// A default method that asks of `Self` what its trait does not declare
+    /// is not told to "add the bound: `Self: Display`", which no program
+    /// can write.
+    #[test]
+    fn a_default_asking_more_of_self_is_not_told_to_bound_it() {
+        let c = compile(
+            "t.kite",
+            "fn tell<T: Display>(x: T) -> str {\n  return x.show()\n}\n\
+             trait Greet {\n  fn hi(self) -> str\n  fn a(self) -> str {\n    return tell(self)\n  }\n\
+             \x20 fn b(self) -> str {\n    return \"\\(self)\"\n  }\n}\nfn main() {\n}\n",
+            Emit::Check,
+        );
+        let codes: Vec<&str> = c.diags.iter().filter_map(|d| d.code.map(|x| x.0)).collect();
+        assert_eq!(codes, vec!["E0208", "E0207"], "{}", c.render_diagnostics());
+        let text = c.render_diagnostics();
+        assert!(!text.contains("add the bound"), "{}", text);
+        assert_eq!(text.matches("knows `Self` only by its trait's methods").count(), 2, "{}", text);
+    }
+
     /// `wrap(wrap(…(x)))`, `depth` calls deep.
     fn nested(call: &str, depth: usize, core: &str) -> String {
         let mut s = core.to_string();

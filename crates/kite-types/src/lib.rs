@@ -9678,6 +9678,7 @@ impl<'a> Checker<'a> {
                 d = match *self.types.kind(*t) {
                     // A parameter is known only by its bounds, so the fix is
                     // to say more about it where it is declared.
+                    TyKind::Param { .. } if tn == "Self" => d.with_note(SELF_IN_A_DEFAULT),
                     TyKind::Param { index, .. } => {
                         match self.generic_defs.get(index as usize).map(|d| d.span) {
                             Some(decl) => d
@@ -11670,6 +11671,7 @@ impl<'a> Checker<'a> {
         match *self.types.kind(ty) {
             // Neither of these can be given an `impl`: a parameter is known by
             // its bounds, and a trait object by its trait.
+            TyKind::Param { .. } if name == "Self" => return SELF_IN_A_DEFAULT.to_string(),
             TyKind::Param { .. } => return format!("add the bound: `{}: Display`", name),
             TyKind::Dyn(_) => {
                 return format!(
@@ -12563,6 +12565,13 @@ fn check_impls(
 /// A diagnostic as far as saying it twice goes: its code, its message and
 /// where it points.
 type DiagKey = (Option<&'static str>, String, Option<Span>);
+
+/// The note for a default method that asks of `Self` what its trait does not
+/// declare. A `Self` cannot be given a bound the way a `T` can — a trait has
+/// no supertraits and no `where` — so "add the bound" would not compile.
+const SELF_IN_A_DEFAULT: &str = "a default method knows `Self` only by its trait's methods; \
+     write this method in each `impl`, where the type is known, or have the trait declare \
+     what the default needs";
 
 /// An `impl` is for its type at the block's own parameters, in order:
 /// `impl<A, B> Named for Pair<A, B>`, or a type without any.
