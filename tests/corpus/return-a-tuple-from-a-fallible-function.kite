@@ -11,6 +11,28 @@ fn g(n: int) -> (int, error) {
     return (n, errors.new("no")) //~ ERROR E0203
 }
 
+// The elements are checked as the pair's are (and the E0203 is still there): a
+// value of the wrong type is told at the value, a second element that is no
+// error at that element.
+fn h() -> (str, error) {
+    return (1, nil) //~ ERROR E0200
+}
+
+fn k() -> (int, error) {
+    return (1, 2) //~ ERROR E0200
+}
+
+// A tuple that is the value side is that value with no error after it: one
+// error, and its `nil` is given the tuple's type.
+fn t() -> ((int, Option<int>), error) {
+    return (1, nil) //~ ERROR E0203
+}
+
+// One value short is one error; the function is not also "not returning".
+fn one() -> (int, error) {
+    return 5 //~ ERROR E0203
+}
+
 fn main() {
     let (a, e) = f()
     if e != nil {

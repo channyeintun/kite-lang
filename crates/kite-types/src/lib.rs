@@ -2843,18 +2843,31 @@ impl<'a> Checker<'a> {
             // errors for the one slip — the tuple is one value, `nil` has no
             // type to be given, and then the function "does not return".
             // One error, with the line the reader meant.
+            //
+            // Not when the value side is itself a tuple: `return (1, nil)`
+            // in a `((int, ?int), error)` function is that tuple with no
+            // error after it, which the arm below says. The two elements are
+            // checked as the pair's would be, so a value of the wrong type,
+            // or a second element that is no error, is told too — the note
+            // alone would be a fix that does not compile.
             Some(ast::ReturnValue::Single(ast::Expr::Tuple { elems, span: tuple_span }))
                 if sig.fallible
                     && elems.len() == 2
-                    && (matches!(elems[1], ast::Expr::Nil(_))
-                        || !self
-                            .types
-                            .fallible_value(sig.ret)
-                            .is_some_and(|t| self.types.name(t).starts_with('('))) =>
+                    && !self
+                        .types
+                        .fallible_value(sig.ret)
+                        .is_some_and(|t| matches!(self.types.kind(t), TyKind::Tuple(_))) =>
             {
-                for e in elems.iter().filter(|e| !matches!(e, ast::Expr::Nil(_))) {
-                    let _ = self.expr(e, None);
+                let inner = self.types.fallible_value(sig.ret).unwrap_or(TyId::ERROR);
+                let want = (!self.unlearned_ret(inner)).then_some(inner);
+                let v = self.expr(&elems[0], want);
+                if let Some(inner) = want {
+                    let v = self.coerce(v, Some(inner));
+                    self.expect_ty(v.ty, inner, v.span, Some(sig.name_span));
                 }
+                let e = self.expr(&elems[1], Some(TyId::ERR));
+                let e = self.coerce(e, Some(TyId::ERR));
+                self.expect_ty(e.ty, TyId::ERR, e.span, None);
                 self.diags.push(
                     Diagnostic::error(codes::E0203, "a fallible function returns two values")
                         .with_primary(*tuple_span, "a tuple is one value, not two")
@@ -2869,7 +2882,15 @@ impl<'a> Checker<'a> {
             }
             Some(ast::ReturnValue::Single(e)) if sig.fallible => {
                 let inner = self.types.fallible_value(sig.ret).unwrap_or(TyId::ERROR);
-                let want = (!self.unlearned_ret(sig.ret)).then_some(sig.ret);
+                // A tuple literal is never the pair, so it is typed as the
+                // value it can only be meant as: `return (1, nil)` in a
+                // `((int, Option<int>), error)` function gives `nil` its type
+                // rather than a second error for having none.
+                let want = if matches!(e, ast::Expr::Tuple { .. }) {
+                    (!self.unlearned_ret(inner)).then_some(inner)
+                } else {
+                    (!self.unlearned_ret(sig.ret)).then_some(sig.ret)
+                };
                 let value = self.expr(e, want);
                 let inner = self.learn_ret(inner, self.types.fallible_value(value.ty).unwrap_or(value.ty));
                 // `return parse_user(raw)` — passing a fallible call's result
@@ -2895,7 +2916,9 @@ impl<'a> Checker<'a> {
                              that is itself fallible",
                         ),
                 );
-                None
+                // Still a way out: `return 5` is one value short, and the
+                // function is not then also said not to return.
+                Some((hir::Stmt::Return { value: None, span: r.span }, Flow::Diverges))
             }
 
             Some(ast::ReturnValue::Single(e)) => {
