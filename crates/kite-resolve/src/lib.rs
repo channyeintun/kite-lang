@@ -1014,11 +1014,11 @@ fn index_aliases(file: &SourceFile, map: &mut ResolveMap) {
             end[p] = Some(last);
         }
     }
-    for index in 0..map.types.len() {
+    for (index, last) in end.into_iter().enumerate() {
         if map.types[index].kind != TypeKind::Alias {
             continue;
         }
-        let at = end[index].unwrap_or(index);
+        let at = last.unwrap_or(index);
         let plain = match &file.items[map.types[at].decl_index] {
             Item::Struct(st) => st.generics.is_empty(),
             Item::Enum(e) => e.generics.is_empty(),
