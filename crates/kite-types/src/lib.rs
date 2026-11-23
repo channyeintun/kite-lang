@@ -4386,20 +4386,10 @@ impl<'a> Checker<'a> {
                 // The same test of a result no binding holds leaves its
                 // failure where nothing can reach it again: the task came in
                 // time, and what it gave is gone. Only a fresh result is
-                // meant — a call or an `await` — since a field, an entry or
-                // an element read this way is still where it was stored.
-                if held.is_none()
-                    && self.holder(value.ty) == Some(Holder::Maybe)
-                    && matches!(
-                        value.kind,
-                        ExprKind::Call { .. }
-                            | ExprKind::CallVirtual { .. }
-                            | ExprKind::CallBuiltin { .. }
-                            | ExprKind::CallExtern { .. }
-                            | ExprKind::CallClosure { .. }
-                            | ExprKind::Await { .. }
-                    )
-                {
+                // meant — a call or an `await`, or a value `if` or `match`
+                // that gives one — since a field, an entry or an element read
+                // this way is still where it was stored.
+                if held.is_none() && self.holder(value.ty) == Some(Holder::Maybe) && fresh_result(&value) {
                     let then = match *self.types.kind(value.ty) {
                         TyKind::Optional(TyId::ERR) => "test the error in it with `if r != nil { … }`",
                         _ => "take the pair in it apart with `let (v, err) = r`",
@@ -16100,6 +16090,24 @@ fn projected_source(e: &ast::Expr) -> &ast::Expr {
             _ => e,
         },
         _ => e,
+    }
+}
+
+/// Whether a value is a result made where it is written — a call or an
+/// `await`, or a value `if` or `match` one of whose branches is — rather
+/// than one read from where it is stored. A nil test of such a result is
+/// the only look anything gets at it.
+fn fresh_result(e: &hir::Expr) -> bool {
+    match &e.kind {
+        ExprKind::Call { .. }
+        | ExprKind::CallVirtual { .. }
+        | ExprKind::CallBuiltin { .. }
+        | ExprKind::CallExtern { .. }
+        | ExprKind::CallClosure { .. }
+        | ExprKind::Await { .. } => true,
+        ExprKind::If { then, else_, .. } => fresh_result(then) || fresh_result(else_),
+        ExprKind::Match { arms, .. } => arms.iter().any(|a| fresh_result(&a.body)),
+        _ => false,
     }
 }
 
