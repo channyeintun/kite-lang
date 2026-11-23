@@ -147,18 +147,6 @@ fn the_standard_librarys_tests_pass_on_wasm_too() {
     assert!(mismatches.is_empty(), "{}", mismatches.join("\n\n"));
 }
 
-/// Every `kite` fence in the standard library's own doc comments compiles and
-/// runs.
-///
-/// §2.3 says a doc comment's fences "are extracted and compiled as tests", and
-/// for a long time nothing did it — so the examples on the reference site were
-/// the one part of the library that could rot with nothing going red. This is
-/// what makes the sentence true.
-///
-/// A fence marked ` ```kite ignore ` is an illustration and is skipped. Most of
-/// the module headers are: one showing `html.mount(body, map(rows, row))` is
-/// teaching a shape, and inventing a `Row` and a `body` to make it compile
-/// would make it a worse explanation of the thing it exists to explain.
 #[test]
 fn std_json_compiles_without_a_warning_as_its_own_entry() {
     // `kitec test std/json.kite` compiles the module as the entry, where its
@@ -172,6 +160,18 @@ fn std_json_compiles_without_a_warning_as_its_own_entry() {
     assert!(shown.trim().is_empty(), "{}", shown);
 }
 
+/// Every `kite` fence in the standard library's own doc comments compiles and
+/// runs.
+///
+/// §2.3 says a doc comment's fences "are extracted and compiled as tests", and
+/// for a long time nothing did it — so the examples on the reference site were
+/// the one part of the library that could rot with nothing going red. This is
+/// what makes the sentence true.
+///
+/// A fence marked ` ```kite ignore ` is an illustration and is skipped. Most of
+/// the module headers are: one showing `html.mount(body, map(rows, row))` is
+/// teaching a shape, and inventing a `Row` and a `body` to make it compile
+/// would make it a worse explanation of the thing it exists to explain.
 #[test]
 fn the_standard_librarys_documentation_examples_run() {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../std");
