@@ -1,0 +1,31 @@
+// A block closure passed where a generic `fn() -> (T, error)` is wanted
+// learns `T` from its `return`s. When none of them names a value — each is
+// `_, err` or a `check` — there is nothing to learn, and that is one E0209 at
+// the closure. It used to be accepted with `T` left as poison, which ran.
+
+fn retry<T>(g: fn() -> (T, error)) -> (T, error) {
+    return g()
+}
+
+fn fails() -> error {
+    return errors.new("y")
+}
+
+fn main() {
+    let (v, e) = retry(|| { return _, errors.new("x") }) //~ ERROR E0209
+    if e != nil {
+        io.print(e.message())
+    }
+    let (w, e2) = retry(|| { //~ ERROR E0209
+            let err = fails()
+            check err
+            return _, errors.new("z")
+        })
+    if e2 != nil {
+        io.print(e2.message())
+    }
+    let (n, e3) = retry(|| { io.print("x") }) //~ ERROR E0209
+    if e3 != nil {
+        io.print(e3.message())
+    }
+}

@@ -4683,6 +4683,17 @@ impl<'a> Checker<'a> {
                 let ret = match stand_in {
                     Some((_, fallible)) => {
                         let found = self.inferred_ret.and_then(|(_, t)| t);
+                        // Nothing to learn from: every `return` is `_, err`
+                        // or a `check`, or there is none. The value is then
+                        // poison, which silences the call's own `cannot infer
+                        // T`, so this is where that one error is said.
+                        if fallible && found.is_none() {
+                            self.diags.push(
+                                Diagnostic::error(codes::E0209, "cannot infer what this closure returns")
+                                    .with_primary(span, "no `return` in it gives a value")
+                                    .with_note("write its result type, as in `|| -> (int, error) { … }`"),
+                            );
+                        }
                         let value = found.unwrap_or(if fallible { TyId::ERROR } else { TyId::UNIT });
                         let mut targs: Vec<TyId> = self.generic_defs.iter().map(|g| g.ty).collect();
                         targs.push(value);
@@ -4701,7 +4712,7 @@ impl<'a> Checker<'a> {
                 };
                 // Falling off the end of a closure that promised a value is
                 // the same mistake as in a named function.
-                if ret != TyId::UNIT && flow != Flow::Diverges {
+                if ret != TyId::UNIT && flow != Flow::Diverges && !self.made_of_error(ret) {
                     self.diags.push(
                         Diagnostic::error(
                             codes::E0211,
