@@ -2890,6 +2890,18 @@ accepted as it is rather than fixed.
   a struct field is written in place when nothing else holds it. Iteration
   order, `==`, `Debug` output and value semantics are as they were; loops that
   were quadratic are linear.
+- **A slice or map handed to a function that keeps nothing of it** is still
+  written in place afterwards — `if !seen(m, w) { m[w] = 1 }`, on a local or
+  through a field, was quadratic on every backend and is linear. What a
+  function may keep is worked out over the call graph (`kite_mir::Kept`); a
+  function value, a `dyn` method, the host, and a function that stores,
+  returns or captures its argument still end the caller's right, so the next
+  write after one of those copies, once. `m = f(m)`, a value handed to a
+  function that changes and returns it, still copies on every call: the owned
+  flag has no way across a call, and moving it would be new machinery. So
+  `toml.parse` reads a document into flat tables written in place and nests
+  them once at the end, and is linear in sections, dotted keys and inline
+  tables; what it returns and reports is unchanged.
 - **On the VM, an `Option<error>` holding a nil error is present**, as it was
   natively and on Wasm — so a `task.timeout` around a task that finished with
   no error is no longer `nil` there.
@@ -2978,6 +2990,8 @@ Each is stated where a reader of that part looks:
 - A second route to a module through another package is `E0404` whatever it
   resolves to, and a module's name in a type's name and in the Wasm name
   section is measured from `kite.toml`.
+- `m = f(m)` copies `m` on every call, on all three backends: a function
+  that changes a slice or map it is given changes its own copy (§3.2).
 - Not bounded yet: the number of diagnostics one file can produce, the native
   compile time of a map literal of tens of thousands of entries, a function
   large enough to abort V8 below `E0902`'s limits, and the Wasm size of a

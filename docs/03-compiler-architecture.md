@@ -638,16 +638,19 @@ put back, and the next take reads it as the local's flag. Every other read of a
 `var` slice field clears it first, unless the local it reads into only glances
 — is read for a length, an element, a comparison or as the argument of a
 quiet call that keeps nothing of it in the same block, with no other call,
-suspension or in-place write before the last of those
-(`kite_mir::held_reads`). A call is quiet (`Kept::quiet`) when nothing it
-runs, to any depth, takes a field, resumes a frame, renders a value, or calls
-a function value, a `dyn` method, the host or a builtin that runs code: taking
-a field is the only way a local comes to own a slice or map it did not make,
-so such a call writes in place nothing that was there before it. So the mark is set only while the field is the one
-holder, and a loop that pushes through a field, reading its length between the
-pushes, is linear. The VM needs none of this: its take empties the field, so
-the count is the truth, and it empties a glancing register after its last read
-so a stale one does not make the field's slice look shared.
+rendering, suspension or in-place write before the last of those
+(`kite_mir::held_reads`). A rendering counts unless its type renders itself —
+`int`, `float`, `bool` and `str` — since any other can reach a `Display` the
+program wrote. A call is quiet (`Kept::quiet`) when nothing it runs, to any
+depth, takes a field, resumes a frame, renders such a value, or calls a
+function value, a `dyn` method, the host or a builtin that runs code (printing
+among them): taking a field is the only way a local comes to own a slice or
+map it did not make, so such a call writes in place nothing that was there
+before it. So the mark is set only while the field is the one holder, and a
+loop that pushes through a field, reading its length between the pushes, is
+linear. The VM needs none of this: its take empties the field, so the count is
+the truth, and it empties a glancing register after its last read so a stale
+one does not make the field's slice look shared.
 
 `push` and `xs[i] = v` call a small helper per element type with the header and
 the flag. Owned with room, `push` writes the next slot and bumps the length;

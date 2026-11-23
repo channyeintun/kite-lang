@@ -375,6 +375,18 @@ eight tuples, structs, enums, slices or optionals inside it, and at an enum
 met again inside its own payload, so keys that differ only beyond that are
 compared in turn in the same way ([roadmap, Phase 4](docs/06-roadmap.md)).
 
+Being values costs nothing where nothing else can see the change: a write to a
+slice or map that one variable or one struct field alone holds goes straight
+into it, on every target. Reading a length, an element or a key does not
+change that, and nor does passing it to a function that keeps nothing of it —
+one that does not store, return or capture it or pass it on to something that
+might. A function value, a `dyn` method and the host are taken to keep what
+they are given, and so is everything else not proved otherwise; after a call
+to one, the next write copies, once. A function that changes a slice or map it
+was given changes its own copy, so `m = f(m)` copies `m` on each call: build
+in a loop on a variable the loop owns, not through a function that returns
+what it was handed.
+
 **There is no fixed-length array.** A `[N]T` was listed here for a long time
 and never existed in the compiler, and the resolution was to strike it rather
 than build it — because this document already said twice that it should not be
