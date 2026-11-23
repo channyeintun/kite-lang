@@ -1729,6 +1729,9 @@ impl<'a> Parser<'a> {
             if self.at(T::RBrace) || self.at_end() || self.left_open(&open) {
                 break;
             }
+            if self.at(T::Pub) && self.peek_at(1) == T::Ident {
+                self.refuse_pub_on_variant(&name, is_pub, "a variant");
+            }
             if self.declaration_starts_line() {
                 self.misplaced_declaration(
                     "a variant",
@@ -1738,7 +1741,7 @@ impl<'a> Parser<'a> {
             }
             self.member(&mut open);
             let before = self.pos;
-            match self.parse_variant(&mut commas) {
+            match self.parse_variant(&mut commas, &name, is_pub) {
                 Some(v) => variants.push(v),
                 None => self.skip_rest(before, Resume::Line),
             }
@@ -1750,7 +1753,45 @@ impl<'a> Parser<'a> {
         Some(EnumDecl { is_pub, name, generics, variants, derives, span: start.to(end) })
     }
 
-    fn parse_variant(&mut self, commas: &mut Option<usize>) -> Option<VariantDecl> {
+    /// `pub` before a variant, or before a field of its payload: refused
+    /// once, with the reason (§4.3), and then read past, so the variant is
+    /// still declared and nothing that uses it is reported as well. It was
+    /// `expected a variant, found pub`, which says what was not written
+    /// rather than why this cannot be.
+    fn refuse_pub_on_variant(&mut self, enum_name: &Ident, enum_is_pub: bool, what: &str) {
+        let at = self.span();
+        let next = self.tokens.get(self.pos + 1).map_or(at, |t| t.span);
+        let note = if enum_is_pub {
+            format!("`{}` is `pub`, so its variants are visible wherever it is", enum_name.name)
+        } else {
+            format!("to make the variants visible outside this module, mark `{}` `pub`", enum_name.name)
+        };
+        self.diags.push(
+            Diagnostic::error(codes::E0100, format!("{} cannot be marked `pub`", what))
+                .with_primary(
+                    at,
+                    if what == "a variant" {
+                        "a variant is exactly as visible as its enum"
+                    } else {
+                        "a variant's fields are exactly as visible as its enum"
+                    },
+                )
+                .with_note(note)
+                .with_fix(Fix::replace(
+                    "remove `pub`",
+                    Span::new(self.file, at.start, next.start),
+                    "",
+                )),
+        );
+        self.bump();
+    }
+
+    fn parse_variant(
+        &mut self,
+        commas: &mut Option<usize>,
+        enum_name: &Ident,
+        enum_is_pub: bool,
+    ) -> Option<VariantDecl> {
         let start = self.span();
         let name = self.ident()?;
 
@@ -1758,11 +1799,16 @@ impl<'a> Parser<'a> {
             self.bump();
             self.skip_newlines();
             // `Circle(radius: float)` is named; `Number(float)` positional.
-            // One token of lookahead past the first name decides.
-            let named = self.at(T::Ident) && self.peek_at(1) == T::Colon;
+            // One token of lookahead past the first name decides — past a
+            // `pub`, which is refused.
+            let skip = (self.at(T::Pub) && self.peek_at(1) == T::Ident) as usize;
+            let named = self.peek_at(skip) == T::Ident && self.peek_at(skip + 1) == T::Colon;
             let payload = if named {
                 let mut fields = Vec::new();
                 while !self.at(T::RParen) && !self.at_end() {
+                    if self.at(T::Pub) {
+                        self.refuse_pub_on_variant(enum_name, enum_is_pub, "a variant's field");
+                    }
                     let f_start = self.span();
                     let f_name = self.ident()?;
                     self.expect(T::Colon)?;
@@ -1784,6 +1830,9 @@ impl<'a> Parser<'a> {
             } else {
                 let mut tys = Vec::new();
                 while !self.at(T::RParen) && !self.at_end() {
+                    if self.at(T::Pub) {
+                        self.refuse_pub_on_variant(enum_name, enum_is_pub, "a variant's field");
+                    }
                     tys.push(self.parse_type()?);
                     self.skip_newlines();
                     if !self.eat(T::Comma) {

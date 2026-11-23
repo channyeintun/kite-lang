@@ -523,7 +523,8 @@ folding it would have had to pick one.
 - **`pub`** — visible to anything that imports the module.
 
 `pub` applies to functions, types, struct fields, traits and trait methods. A
-variant is exactly as visible as its enum, and cannot be marked on its own. There
+variant and its payload's fields are exactly as visible as their enum, and
+cannot be marked on their own: `pub` on either is an error. There
 is no `pub use`: a module's imports are its own (§13.1) and are not exported, so
 `pub` on a `use` is an error. A `pub struct` with unmarked fields is an opaque type: callers
 can hold it and pass it, but cannot read, construct, or destructure it — not
