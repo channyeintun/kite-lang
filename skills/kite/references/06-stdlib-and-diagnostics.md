@@ -26,9 +26,10 @@ repository says otherwise, the compiler won.
 - **The prelude is unqualified and always present.** `map`, `filter`, `sorted`,
   `split`, `join`, `parse_int`, `or_else` are bare names. There is no
   `std/prelude` to import — `use std/prelude` is `E0400`.
-- **`map` needs an annotated closure; `filter` does not.** `map`'s `U` is
-  determined only by the closure's return, and Kite has no turbofish, so
-  `map(xs, |n| n * 2)` is `E0209`. Write `map(xs, |n: int| n * 2)`.
+- **A closure passed to `map`, `filter` or `fold` needs no annotation.** Each
+  parameter's type comes from the other arguments (`xs` fixes `n` in
+  `map(xs, |n| n * 2)`), and a result type nothing else fixes, such as `map`'s
+  `U`, is what the closure returns.
 - **Slices and maps have almost no methods.** A slice has exactly `len`, `get`
   (bounds-checked, `-> Option<T>`) and `push`; `xs[i]` traps out of range. A map
   has `len`, `keys`, `values` and `remove`, and is read with `m[k]` (an
@@ -316,27 +317,26 @@ fn main() {
 }
 ```
 
-### The one prelude trap
+### Closures passed to the prelude
 
-A closure's parameter types come from the place it is used. `filter`'s `T` is
-already fixed by the slice, so `|n| n > 2` infers. `map`'s `U` is fixed by
-nothing, so the whole expected function type is unknown and the parameter goes
-with it:
-
-```kite fails
-fn main() {
-    let xs = [1, 2, 3]
-    let doubled = map(xs, |n| n * 2)   //~ E0209
-    io.print("\(sum(doubled))")
-}
-```
+A closure's parameter types come from the place it is used, one parameter at a
+time: `map`'s `T` is fixed by the slice, so `n` in `map(xs, |n| n * 2)` is an
+`int`, and `map`'s `U` — fixed by nothing else — is whatever the closure
+returns. A block body says it with its `return`s. Only a closure with no place
+to be used at all, `let f = |n| n * 2`, needs its parameter annotated (`E0211`).
 
 ```kite
 fn main() {
     let xs = [1, 2, 3]
-    let doubled = map(xs, |n: int| n * 2)
-    let big = filter(xs, |n| n > 2)          // no annotation needed
-    io.print("\(sum(doubled)) \(big.len())")
+    let doubled = map(xs, |n| n * 2)
+    let labels = map(xs, |n| {
+        if n > 2 {
+            return "big"
+        }
+        return "small"
+    })
+    let big = filter(xs, |n| n > 2)
+    io.print("\(sum(doubled)) \(labels[2]) \(big.len())")
 }
 ```
 

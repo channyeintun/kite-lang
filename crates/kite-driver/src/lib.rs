@@ -973,8 +973,10 @@ fn run_passes(
             diags.push(unbounded_instantiation("function", &u.template, u.span, u.why));
             return (String::new(), None, None, None, index);
         }
-        Err(kite_hir::mono::Refused::NoTable(n)) => {
-            diags.push(no_table(&hir.types, &n));
+        Err(kite_hir::mono::Refused::NoTable(all)) => {
+            for n in &all {
+                diags.push(no_table(&hir.types, n));
+            }
             return (String::new(), None, None, None, index);
         }
     }
@@ -1216,11 +1218,6 @@ fn run_passes(
     (String::new(), Some(chunk), None, None, index)
 }
 
-/// `E0220`: a generic `what` (a function or a type) named `name` could not
-/// be specialised — because it asks for copies of itself without end, or
-/// because what a finite program asks for is past what the compiler makes.
-/// Only the first is a claim about the program's recursion, so only it makes
-/// one.
 /// A copy of a generic function that converts a built-in value to a `dyn`:
 /// the value meets the bound, but has no table row for a `dyn` to dispatch
 /// through. See [`kite_hir::mono::NoTable`].
@@ -1232,9 +1229,15 @@ fn no_table(types: &kite_hir::Types, n: &kite_hir::mono::NoTable) -> Diagnostic 
         kite_diag::codes::E0200,
         format!("`{}` cannot be held as a `dyn {}`", ty, tr),
     )
-    .with_primary(n.span, format!("in `{}`, this is {} made a `dyn {}`", n.copy, types.with_article(n.ty), tr));
+    .with_primary(n.span, format!("in {}, this is {} made a `dyn {}`", n.copy, types.with_article(n.ty), tr));
+    // A closure's copy is made with the copy it is written in, so the call
+    // and the note both name that one.
+    let what = n.copy.strip_prefix("the closure in ").unwrap_or(&n.copy);
+    if let Some(at) = n.asked_at {
+        d = d.with_secondary(at, format!("this call asks for {}", what));
+    }
     if let Some(by) = &n.asked_by {
-        d = d.with_note(format!("`{}` is the copy `{}` asks for", n.copy, by));
+        d = d.with_note(format!("{} is the copy {} asks for", what, by));
     }
     d.with_note(format!(
         "`{}` meets `{}` as a bound, but a `dyn` holds a value of a type with methods of its \
@@ -1248,6 +1251,11 @@ fn no_table(types: &kite_hir::Types, n: &kite_hir::mono::NoTable) -> Diagnostic 
     ))
 }
 
+/// `E0220`: a generic `what` (a function or a type) named `name` could not
+/// be specialised — because it asks for copies of itself without end, or
+/// because what a finite program asks for is past what the compiler makes.
+/// Only the first is a claim about the program's recursion, so only it makes
+/// one.
 fn unbounded_instantiation(what: &str, name: &str, span: Span, why: kite_hir::Refusal) -> Diagnostic {
     use kite_hir::Refusal;
     let specialised = "generics are specialised: every set of type arguments gets its own copy";
@@ -1701,6 +1709,76 @@ mod tests {
         let text = c.render_diagnostics();
         assert!(text.contains("only where `T: Display`, and `[int]` is not one"), "{}", text);
         assert!(!text.contains("write `impl<T> Error"), "{}", text);
+    }
+
+    /// A value whose bounded `impl` does not reach its argument, converted to
+    /// that trait's `dyn` or to an `error`, is told which bound it misses —
+    /// not to write the `impl` it already has, which is E0112.
+    #[test]
+    fn a_conversion_outside_a_bounded_impl_names_the_bound() {
+        let c = compile(
+            "t.kite",
+            "struct Box<T> {\n  v: T\n}\n\
+             impl<T: Display> Display for Box<T> {\n  fn show(self) -> str {\n    return \"b\"\n  }\n}\n\
+             impl<T: Display> Error for Box<T> {\n  fn message(self) -> str {\n    return \"b\"\n  }\n}\n\
+             fn fail() -> error {\n  return Box{ v: [1] }\n}\n\
+             fn main() {\n  let d: dyn Display = Box{ v: [1] }\n  io.print(d)\n  io.print(fail() != nil)\n}\n",
+            Emit::Check,
+        );
+        let codes: Vec<&str> = c.diags.iter().filter_map(|d| d.code.map(|x| x.0)).collect();
+        assert_eq!(codes, vec!["E0200", "E0200"], "{}", c.render_diagnostics());
+        let text = c.render_diagnostics();
+        assert!(text.contains("`Box<[int]>` implements `Error` only where `T: Display`, and `[int]` is not one"), "{}", text);
+        assert!(text.contains("`Box<[int]>` implements `Display` only where `T: Display`, and `[int]` is not one"), "{}", text);
+        assert!(!text.contains("write `impl<T>"), "{}", text);
+    }
+
+    /// A built-in value made a `dyn` inside a generic copy is reported once
+    /// per copy, in the order of the calls that asked for them, each with a
+    /// label at that call; and a copy is named as its reader writes it — a
+    /// method by its receiver's type, a closure by the function it is in —
+    /// not by its lifted name (`d<int>`, `mk#closure0<float>`).
+    #[test]
+    fn a_built_in_made_a_dyn_is_reported_at_each_call_that_asks() {
+        let c = compile(
+            "t.kite",
+            "fn wrap<T: Display>(x: T) -> dyn Display {\n  return x\n}\n\
+             struct Box<T> {\n  value: T\n}\n\
+             impl<T: Display> Box<T> {\n  fn d(self) -> dyn Display {\n    return self.value\n  }\n}\n\
+             fn mk<T: Display>(x: T) -> fn() -> dyn Display {\n  return || {\n    let d: dyn Display = x\n    return d\n  }\n}\n\
+             fn main() {\n  io.print(wrap(3))\n  io.print(wrap(\"s\"))\n  io.print(Box{ value: 4 }.d())\n  io.print(mk(1.5)())\n}\n",
+            Emit::Check,
+        );
+        let codes: Vec<&str> = c.diags.iter().filter_map(|d| d.code.map(|x| x.0)).collect();
+        assert_eq!(codes, vec!["E0200", "E0200", "E0200", "E0200"], "{}", c.render_diagnostics());
+        let text = c.render_diagnostics();
+        let at = |s: &str| text.find(s).unwrap_or_else(|| panic!("no `{}` in\n{}", s, text));
+        assert!(at("this call asks for `wrap<int>`") < at("this call asks for `wrap<str>`"), "{}", text);
+        assert!(text.contains("in `Box<int>.d`, this is an `int` made a `dyn Display`"), "{}", text);
+        assert!(text.contains("this call asks for `Box<int>.d`"), "{}", text);
+        assert!(text.contains("in the closure in `mk<float>`, this is a `float` made a `dyn Display`"), "{}", text);
+        assert!(text.contains("this call asks for `mk<float>`"), "{}", text);
+        assert!(text.contains("`mk<float>` is the copy `main` asks for"), "{}", text);
+        assert!(!text.contains('#') && !text.contains("`d<int>`"), "{}", text);
+    }
+
+    /// A type name nothing declares is unknown whether or not it is written
+    /// with arguments — not a type that "does not take type arguments" — and
+    /// `nil` given the failed annotation is not also "cannot infer a type".
+    #[test]
+    fn an_unknown_generic_type_is_unknown_once() {
+        let c = compile(
+            "t.kite",
+            "use std/sync\nfn main() {\n  let x: Foo<int> = 1\n  let q: Nope<str> = nil\n  let r: sync.Nope<str> = nil\n  io.print(1)\n}\n",
+            Emit::Check,
+        );
+        let codes: Vec<&str> = c.diags.iter().filter_map(|d| d.code.map(|x| x.0)).collect();
+        assert_eq!(codes, vec!["E0204", "E0204", "E0204"], "{}", c.render_diagnostics());
+        let text = c.render_diagnostics();
+        assert!(text.contains("unknown type `Foo`"), "{}", text);
+        assert!(text.contains("unknown type `Nope`"), "{}", text);
+        assert!(text.contains("cannot find `Nope` in module `sync`"), "{}", text);
+        assert!(!text.contains("does not take type arguments") && !text.contains("`nil`"), "{}", text);
     }
 
     /// A default method that asks of `Self` what its trait does not declare

@@ -1,0 +1,19 @@
+// A closure given to a generic struct's field solves the parameter its result
+// names. When its body is wrong, that error is the one reported: the literal
+// does not also say that no field pins the parameter down, which hid it (the
+// trial pass that solves the literal discards its own diagnostics).
+
+struct Map2<A, B> {
+    seed: A
+    f: fn(A) -> B
+}
+
+struct Job<T> {
+    run: fn() -> (T, error)
+}
+
+fn main() {
+    let m = Map2{ seed: 3, f: |a| { return a * 1.5 } } //~ ERROR E0201
+    let n = Map2{ seed: 3, f: |a| a * 1.5 } //~ ERROR E0201
+    let j = Job{ run: || { return _, errors.new("x") } } //~ ERROR E0209
+}

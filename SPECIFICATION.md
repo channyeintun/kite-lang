@@ -645,9 +645,23 @@ let total = fold(items, 0, |acc, item| acc + item.price)   // types from `fold`'
 ```
 
 A closure's parameter types come from the place it is used: an annotated
-binding, or the parameter it is passed to once the other arguments have fixed
-that parameter's type. Where nothing fixes them, `|x| x * 2` is
-[E0211](#16-diagnostics), and the parameter is annotated instead.
+binding, a field, or the parameter it is passed to — each of the closure's
+parameters once the other arguments have fixed its type, so `map(xs, |n| n * 2)`
+knows `n` from `xs`. The place is looked through `Option`: a closure where an
+`Option<fn(int) -> int>` is wanted is typed as one where an `fn(int) -> int` is.
+Where nothing fixes them, `|x| x * 2` is [E0211](#16-diagnostics), and the
+parameter is annotated instead.
+
+Its result type comes from the same place, else from `-> T` written on it, else
+from an expression body's own type. A block body with none of these returns
+`()` — except where it is passed to a generic function's parameter whose result
+is a type parameter nothing else fixes, as `run<T>(g: fn() -> T)` or `map`'s
+`U`, or given to such a field of a generic struct's literal, as
+`Job{ run: || { … } }` for `struct Job<T> { run: fn() -> (T, error) }`. Then its `return` statements say what it returns: `run(|| { return 6 })`
+makes `T` an `int`, and where `fn() -> (T, error)` is wanted (or a `return`
+gives a pair or `_, err`) the closure is fallible, so `retry(|| { … return n,
+nil })` solves `T` from `n`. `-> (T, error)` written on a closure is the
+fallible form wherever it stands, exactly as on a named function.
 
 **Closures capture by value, taken when the closure is made.** Because `let`
 bindings are immutable, the vast majority of captures are trivially safe: the
@@ -759,7 +773,9 @@ one: `found == 5` is true exactly when `found` is present and five.
 value holding one ([E0201](#16-diagnostics)): a function has no identity to
 compare, a trait object is a record made where it was converted, and a host
 object has no structure Kite can see. A map compares its keys, so the same three
-cannot be keys. A generic function that compares its `T` with `==` is held to
+cannot be keys — nor be the argument of a generic type whose field is a map
+keyed by that parameter: `struct W<K> { m: {K: int} }` cannot be built as a
+`W<fn() -> int>`. A generic function that compares its `T` with `==` is held to
 that at every call — `T` may not be chosen as one of the three — and so is a
 generic function that passes its own parameter on to one that compares it. A
 trait's generic method called through a bound is held to what any of its
@@ -1778,9 +1794,12 @@ and deriving `Encode` or `Debug` publishes every field's value. An opaque type
 them.
 
 The walk handles primitives, slices, maps, optionals, tuples, and other types
-that derive the same trait. Where it cannot go — a function field, a `dyn
-Trait` — it says which field stopped it and what would fix it, and the
-hand-written implementation is still there to write. `Debug` and `Hash` derive
+that derive the same trait; `Encode` writes a tuple as a JSON array of its
+elements in order, and `Decode` reads back an array of exactly its length.
+Where it cannot go — a function field, a `dyn Trait` — it says which field
+stopped it and what would fix it, and the hand-written implementation is
+still there to write. That one error is the only one: the method is still
+declared, so a call to it elsewhere is not refused again. `Debug` and `Hash` derive
 for a generic type as well: a field of a parameter's type is walked through
 the parameter's own method, and the derived `impl` bounds that parameter by
 the trait, `impl<T: Debug> Debug for Box<T>`. `Encode` and `Decode` derive only
@@ -1906,7 +1925,9 @@ pub async fn fetch_user(id: UserId) -> (User, error) {
 
 An `async fn` returns a `Task<T>`. `await` suspends until it completes. A
 method or an associated function may be `async` too, and calling one yields
-its `Task` in the same way: `await conn.fetch()`.
+its `Task` in the same way: `await conn.fetch()`. Used as a value, a named
+`async fn` is what calling it is: `async fn dbl(x: int) -> int` is a
+`fn(int) -> Task<int>`, so it can be passed to `task.map` as it is.
 
 **Calling an `async fn` does not run its body.** It yields the `Task` and
 returns; the body runs when something drives it, which is `await`. Two calls

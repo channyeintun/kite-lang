@@ -1,0 +1,41 @@
+// A generic type is an `Error` only where its arguments meet the bounds of
+// its `impl Error` (§11). A `G<[int]>` has a `message` method, but it is no
+// error: converting it built a table for a body that renders a slice, and the
+// VM trapped, native code aborted and the Wasm module did not validate.
+
+use std/errors
+
+struct G<T> {
+    v: T
+}
+
+impl<T: Display> Error for G<T> {
+    fn message(self) -> str {
+        return "g \(self.v)"
+    }
+}
+
+fn fail() -> error {
+    return G{ v: [3] } //~ ERROR E0200
+}
+
+fn pair() -> (int, error) {
+    return _, G{ v: [3] } //~ ERROR E0200
+}
+
+fn fine() -> error {
+    return G{ v: 3 }
+}
+
+fn main() {
+    let wrapped = errors.wrap(G{ v: [3] }, "ctx") //~ ERROR E0200
+    io.print(wrapped != nil)
+    let es: [error] = [G{ v: [1] }] //~ ERROR E0200
+    io.print(es.len())
+    io.print(fail() != nil)
+    let (n, err) = pair()
+    if err == nil {
+        io.print(n)
+    }
+    io.print(fine() != nil)
+}
