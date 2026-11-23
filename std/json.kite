@@ -937,17 +937,21 @@ pub fn keys(value: Option<Json>) -> [str] {
 /// The value at a dotted path, or nil: `path(doc, "users.0.name")`.
 ///
 /// Each segment is a key of an object, or, when the value so far is an array
-/// and the segment is a whole number, an index into it. A key that itself
-/// contains a dot, or that is a number on an object, cannot be named this way;
-/// chain [`field`] and [`at`] for those. An empty path is the value itself.
+/// and the segment is a whole number, an index into it. On an object a segment
+/// is always a key, so `"1"` names the key `"1"`; on an array a segment is read
+/// as a whole number, so `"01"` is the index 1. A key that itself contains a
+/// dot cannot be named this way; chain [`field`] and [`at`] for it. An empty
+/// path is the value itself, and a trailing dot names the key `""`.
 ///
 /// ```kite
-/// let (doc, err) = parse("{\"users\": [{\"name\": \"ada\"}]}")
+/// let (doc, err) = parse("{\"users\": [{\"name\": \"ada\"}], \"1\": \"one\"}")
 /// if err != nil {
 ///     return
 /// }
 /// assert(text(path(doc, "users.0.name")) == "ada", "through an object, an array, an object")
 /// assert(path(doc, "users.1.name") == nil, "past the end")
+/// assert(text(path(doc, "1")) == "one", "a number on an object is a key")
+/// assert(text(path(doc, "users.00.name")) == "ada", "and on an array, an index with zeros")
 /// ```
 pub fn path(value: Option<Json>, dotted: str) -> Option<Json> {
     var here = value
