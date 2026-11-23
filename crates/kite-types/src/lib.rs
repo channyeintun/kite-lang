@@ -1345,6 +1345,9 @@ enum Holder {
 /// An error state: the taint, and which locals are copies of which.
 type ErrorState = (Vec<Taint>, std::collections::BTreeSet<(u32, u32)>);
 
+/// A field's name and where it is declared.
+type NamedSpan = (String, Span);
+
 /// The error states a loop's body hands on other than by falling into what
 /// follows it: back to its start, from its end and every `continue`, and out
 /// past it, from every `break`. Each is the join of all that arrive.
@@ -1820,16 +1823,10 @@ impl<'a> Checker<'a> {
         if let ast::Expr::Index { base, index, span } = &a.target {
             return self.assign_index(base, index, *span, a);
         }
+        // Anything else is not a place, and the parser said so (`E0114`) at
+        // the same span. Saying it again here was a second error for one
+        // cause.
         let ast::Expr::Path(p) = &a.target else {
-            self.diags.push(
-                Diagnostic::error(codes::E0200, "cannot assign to this expression")
-                    .with_primary(a.target.span(), "not something a value can be written to")
-                    .with_note(
-                        "a write names a binding, a field or an index — `x = …`, \
-                         `p.x = …`, `xs[i] = …`. Anything else is a value, and a value \
-                         has nowhere to put one",
-                    ),
-            );
             return None;
         };
         // A module-level constant is a name for a value, so there is nowhere
@@ -6655,24 +6652,71 @@ impl<'a> Checker<'a> {
         self.check_member_visible(module, is_pub, "field", &name, span, decl)
     }
 
+    /// Whether a struct is declared `pub`.
+    fn struct_is_pub(&self, sid: kite_hir::StructId) -> bool {
+        let template = self.types.struct_template_of(sid).unwrap_or(sid);
+        self.type_ids
+            .iter()
+            .position(|t| matches!(t, Some(TypeTarget::Struct(s)) if *s == template))
+            .is_none_or(|i| self.resolved.types[i].is_pub)
+    }
+
+    /// When a struct is opaque here — declared `pub` in another module, with
+    /// a field that module did not mark `pub` — that module, the struct's
+    /// name and its private fields. A struct that is not `pub` at all is not
+    /// opaque but private, and naming it was already `E0401`: a second one
+    /// saying it cannot be built was two errors for one cause.
+    fn opaque_here(&self, sid: kite_hir::StructId) -> Option<(String, String, Vec<NamedSpan>)> {
+        let module = self.module_of_struct(sid)?;
+        if module == self.module || !self.struct_is_pub(sid) {
+            return None;
+        }
+        let def = self.types.struct_def(sid);
+        let private: Vec<(String, Span)> =
+            def.fields.iter().filter(|f| !f.is_pub).map(|f| (f.name.clone(), f.span)).collect();
+        if private.is_empty() {
+            return None;
+        }
+        Some((module, def.name.clone(), private))
+    }
+
+    /// A struct pattern outside the struct's module needs every field to be
+    /// `pub`, as a literal does (§4.3): an opaque type cannot be taken apart,
+    /// not even by the fields it does publish. Reported once, at the path;
+    /// true when it was.
+    ///
+    /// **Naming only the public fields was a way in.** Each field a pattern
+    /// named was checked, and none was private, so `m.P{ k: k }` — or
+    /// `m.P{ k: k, .. }` — matched an opaque `m.P` from outside, which §4.3
+    /// says cannot be destructured.
+    fn check_destructurable(&mut self, sid: kite_hir::StructId, span: Span) -> bool {
+        let Some((module, name, private)) = self.opaque_here(sid) else { return false };
+        let fields: Vec<String> = private.iter().map(|(n, _)| format!("`{}`", n)).collect();
+        self.diags.push(
+            Diagnostic::error(
+                codes::E0401,
+                format!("`{}` cannot be taken apart outside module `{}`", name, module),
+            )
+            .with_primary(span, "not visible here")
+            .with_secondary(private[0].1, "this field is not marked `pub`")
+            .with_note(format!(
+                "{} {} private, which makes `{}` opaque outside its module: it can be held and \
+                 passed on, not destructured",
+                fields.join(", "),
+                if fields.len() == 1 { "is" } else { "are" },
+                name
+            ))
+            .with_note("bind it whole and read its `pub` fields with `.`"),
+        );
+        true
+    }
+
     /// A struct literal outside the struct's module needs every field to be
     /// `pub`: a private one cannot be named, and a literal cannot leave one
     /// out.
     fn check_constructible(&mut self, sid: kite_hir::StructId, span: Span) {
-        let Some(module) = self.module_of_struct(sid) else { return };
-        if module == self.module {
-            return;
-        }
-        let private: Vec<(String, Span)> = self
-            .types
-            .struct_def(sid)
-            .fields
-            .iter()
-            .filter(|f| !f.is_pub)
-            .map(|f| (f.name.clone(), f.span))
-            .collect();
-        let Some((_, first)) = private.first().cloned() else { return };
-        let name = self.types.struct_def(sid).name.clone();
+        let Some((module, name, private)) = self.opaque_here(sid) else { return };
+        let first = private[0].1;
         let fields: Vec<String> = private.iter().map(|(n, _)| format!("`{}`", n)).collect();
         self.diags.push(
             Diagnostic::error(
@@ -11001,6 +11045,9 @@ impl<'a> Checker<'a> {
                     return hir::Pattern::Wildcard;
                 }
 
+                // The fields are still checked, so what they bind has a type,
+                // but a field's own privacy is not reported a second time.
+                let opaque = self.check_destructurable(sid, path.span);
                 let mut out = Vec::new();
                 for f in fields {
                     let found = self
@@ -11021,7 +11068,9 @@ impl<'a> Checker<'a> {
                     };
                     // Taking a value apart reads its fields, so a private one
                     // is as out of reach here as through `.`.
-                    self.check_field_visible(sid, index, f.name.span);
+                    if !opaque {
+                        self.check_field_visible(sid, index, f.name.span);
+                    }
                     let sub = match &f.pattern {
                         Some(p) => self.pattern(p, fty),
                         // `Point{ x }` binds `x` to the field's value.
@@ -14177,7 +14226,17 @@ fn resolve_named_ty(
                 {
                     TyId::ERROR
                 }
-                None => resolve_ty(t, types, diags),
+                None if p.is_simple() && p.name() != "Self" => {
+                    diags.push(unknown_type_here(p, resolved, module, generics));
+                    TyId::ERROR
+                }
+                None => match resolved.missing_type_member(module, &p.segments, codes::E0204) {
+                    Some(d) => {
+                        diags.push(d);
+                        TyId::ERROR
+                    }
+                    None => resolve_ty(t, types, diags),
+                },
             }
         }
         ast::Type::Slice { elem, .. } => {
@@ -14271,6 +14330,48 @@ fn check_map_key(types: &Types, key: TyId, span: Span, diags: &mut DiagBag) -> b
     };
     diags.push(d);
     false
+}
+
+/// The `E0204` for a bare name that is no type `module` can name.
+///
+/// **What it can name, as it would write it.** The note listed every struct
+/// and enum the program had loaded — other modules' private ones, and
+/// modules this one never imported, qualified by their identities
+/// (`math.Wide`, `toml.Step`) — and for `Toml` under `use std/toml` it did not
+/// say `toml.Toml`, the one type that was meant.
+fn unknown_type_here(
+    p: &ast::TypePath,
+    resolved: &ResolveMap,
+    module: &str,
+    generics: &[(String, TyId)],
+) -> Diagnostic {
+    let name = p.name();
+    let d = Diagnostic::error(codes::E0204, format!("unknown type `{}`", name))
+        .with_primary(p.span, "not a known type");
+    let nameable = resolved.nameable_types(module);
+    let suffix = format!(".{}", name);
+    if let Some(qualified) = nameable.iter().find(|n| n.ends_with(&suffix)) {
+        return d.with_note(format!(
+            "an imported module has a type of this name: write `{}`",
+            qualified
+        ));
+    }
+    let mut candidates: Vec<String> = ["bool", "int", "float", "str"].map(String::from).to_vec();
+    candidates.extend(generics.iter().map(|(n, _)| n.clone()));
+    candidates.extend(nameable);
+    let mut best: Option<(usize, &str)> = None;
+    for cand in &candidates {
+        let dist = edit_distance(name, cand);
+        if best.is_none_or(|(bd, bc)| (dist, cand.as_str()) < (bd, bc)) {
+            best = Some((dist, cand));
+        }
+    }
+    match best {
+        Some((dist, near)) if dist <= (name.len() / 3).max(1) => {
+            d.with_note(format!("a similar type is in scope: `{}`", near))
+        }
+        _ => d.with_note(format!("known types: {}", candidates.join(", "))),
+    }
 }
 
 /// Reject naming another module's private type in a type — a parameter, a

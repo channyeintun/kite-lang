@@ -134,7 +134,11 @@ A ` ```kite ` fence is compiled and run by `kitec test`, alongside the file's
 `test_…` functions. It is appended to the module it was written in, so
 everything the comment documents is in scope with no import to get wrong; a
 fence that declares a type or a function lands at file scope and is checked by
-compiling. ` ```kite ignore ` marks an illustration instead — a fence naming
+compiling. `kitec test` and `kitec doc` take one file: a file of a directory
+module tested on its own is compiled as that file alone, so its fences and
+`test_…` functions do not see what its sibling files declare — a directory
+module's tests that need them belong in a test file that imports the module.
+` ```kite ignore ` marks an illustration instead — a fence naming
 types the reader supplies, which most module headers do — and is not compiled.
 A fence tagged anything else is prose.
 
@@ -2090,8 +2094,12 @@ fn start() -> error {
 outward.** The first place is the importing module's own directory — the
 directory a one-file module sits in, or a directory module itself — and then
 each directory enclosing it in turn, stopping at the root of the package the
-importing module belongs to: the entry file's directory for the program, the
-dependency's own directory for a module inside a dependency. The nearest match
+importing module belongs to: for the program, the nearest directory at or
+above the entry file that holds a `kite.toml`, or the entry file's own
+directory when none does; for a module inside a dependency, the dependency's
+own directory. So whichever file of a package is the entry — `kitec run
+main.kite`, or `kitec test ui/app.kite` on its own — a module finds the same
+modules, and is named by the same path below that root. The nearest match
 wins. So `ui/app.kite` above writing `use config` finds `ui/config/` if `ui`
 has one of its own and `config/` beside `ui/` otherwise, and a dependency never
 resolves a `use` into the program that imports it. A `use` that matches
@@ -2126,11 +2134,21 @@ and with no diagnostic. An alias is a convenience for the file that writes it.
 when they reach one file or directory: `use utils` inside `a/` and `use utils`
 inside `b/` are two modules when each finds a `utils` of its own, and one when
 both find the `utils` beside them, and `use dep/utils` and `use utils` are two
-modules, because every segment is honoured when the files are found. A `use`
+modules, because every segment is honoured when the files are found. A
+segment matches a file's or a directory's name exactly, case included, on
+every system — `use Util` does not find `util.kite`, even where the file
+system ignores case; it is `E0400`, with a note naming what is there. A `use`
 that finds nothing is `E0400` — never answered by some other module that
-happens to be spelled alike. A first segment naming one of the importing
+happens to be spelled alike. A module's own `use`s are looked for from where
+its source is, too — its real directory, past any symbolic link — so the route
+a `use` took to reach it does not change what its imports mean; and it
+belongs to one package, so reaching one module both through a dependency's
+name and by a path from the program is `E0404`. A first segment naming one of the importing
 package's declared dependencies roots there instead, so `use markdown/render`
-reaches inside the package.
+reaches inside the package. `use markdown` alone is the package's root
+module, which is its own directory and only that: a directory with no `.kite`
+file directly in it has no root module, and `use markdown` is then `E0400` —
+never a `markdown.kite` beside the package, which is not part of it.
 
 What a use site writes is a **spelling**, and by default it is the last
 segment. A spelling belongs to the module that writes it, so two modules may
@@ -2187,7 +2205,8 @@ define is an error rather than something ignored; so is a key or a table written
 twice, and a trailing comma in an inline table, as TOML says. Strings are TOML's
 two forms, `"…"` with its escapes and `'…'` as written. And a manifest that does not
 parse — or does not read at all, as one that is not UTF-8 — is `E0405` in every
-command that reads it.
+command that reads it, and the one error: a `use` it leaves unresolvable is not
+reported again.
 
 A package name means one thing across the whole program: two manifests naming
 one package from two places is an error. It does not take the name from the
@@ -2205,7 +2224,8 @@ build does on its way past, and fetches every checkout again to make it —
 beside the one it replaces, so a fetch that fails leaves that one in place.
 Anything else that changed — a dependency added or removed, a new version
 because the manifest now asks for one — is reported rather than refused, and
-resolution tries the versions the lockfile records before any newer one.
+resolution tries the versions the lockfile records before any newer one. A
+lockfile entry that writes a key twice is refused, as a manifest that does is.
 
 The digest is cryptographic because the party it is checked against is the one
 who chooses the bytes. It was FNV-1a, which is invertible, so a dependency's
@@ -2239,7 +2259,8 @@ broken by extracting the shared part.
 
 That holds between packages too: a package that depends on itself, directly or
 through others, is an error — `kitec pkg` names the chain (`a -> b -> a`) and
-writes no lockfile.
+writes no lockfile, and `kitec run`, `check`, `build` and `test` refuse to
+compile the program, with the same chain (`E0402`, at the program's manifest).
 
 ---
 

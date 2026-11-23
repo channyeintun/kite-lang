@@ -578,7 +578,8 @@ codes! {
          dependency is read from `.kite/vendor`, which `kitec pkg` fills, \
          so a program that has not run it cannot find the dependency. \
          When `kite.toml` itself does not read (`E0405`) nothing it \
-         declares can be found, and the note says so.\n\
+         declares can be found, so that is the one error: a `use` \
+         of the package it belongs to is not reported as well.\n\
          - A file that was found and could not be read; the operating \
          system's reason is in the message.\n\
          \n\
@@ -614,7 +615,9 @@ codes! {
          even one that starts from `..base`, since a literal has to give \
          every field. A `pub struct` with unmarked fields is an opaque \
          type: callers can hold it and pass it on, and its module exports \
-         the function that builds one.\n\
+         the function that builds one. Nor can a pattern take it apart, \
+         even one naming only its `pub` fields: `m.P{ k: k }` is refused, \
+         and `p.k` reads the field.\n\
          - A method or an associated function. Those in an `impl` block \
          are private unless they say `pub`: `s.secret()` and \
          `m.S.assoc()` are refused. The methods of a trait implementation \
@@ -668,7 +671,13 @@ codes! {
          inside `lib/`, or `use lib/shape` beside `use lib`, would compile \
          `shape.kite` a second time as a module of its own, and each of its \
          types would become two. Inside `lib`, its declarations are already \
-         in scope unqualified; elsewhere, write `lib.…`.";
+         in scope unqualified; elsewhere, write `lib.…`.\n\n\
+         Last, one module reached as part of two packages. A module's own \
+         `use`s are looked for within its package, so a dependency vendored \
+         inside the program — reachable both by the name its manifest \
+         declares and by a path from the program — would resolve its imports \
+         one way or the other depending on which `use` came first. Reach it \
+         one way only.";
 
     E0405 = "E0405", "a `kite.toml` that does not read",
         "The manifest is what says where a package's dependencies are, so a \
@@ -688,7 +697,10 @@ codes! {
          `use` that closes the cycle, except when the cycle leads back to \
          the entry file: then it sits on the entry's own `use` that began \
          it, so that checking the entry alone, which is what an editor \
-         does, shows it. A module that imports itself is a cycle of one.\n\
+         does, shows it. A module that imports itself — a file of `ui/` \
+         writing `use ui`, or a file naming itself — is a cycle of one, \
+         and the message says it imports itself: delete that `use`, since \
+         what a module declares is already in scope in its own files.\n\
          \n\
          Example, `a.kite` and `b.kite` in one directory, checking `a.kite`:\n\
          \n\
@@ -705,8 +717,10 @@ codes! {
          \x20   // shared.kite holds what a and b both use\n\
          \x20   // a.kite:  use shared        b.kite:  use shared\n\
          \n\
-         A cycle among packages in `kite.toml` is not this code: `kitec \
-         pkg` refuses it and names the chain of packages.";
+         A cycle among packages — a `kite.toml` whose dependencies lead \
+         back to it — is this code too, at the program's manifest, naming \
+         the chain of packages (`app -> a -> b -> app`) as `kitec pkg` \
+         does when it refuses the same graph.";
 
     E0406 = "E0406", "implementation outside its type's module",
         "An `impl` block belongs to the module that declares its type — or, \

@@ -839,6 +839,84 @@ impl ResolveMap {
         self.type_names.get(name).copied()
     }
 
+    /// Every type `module` can name, as it would write it: its own and the
+    /// prelude's bare, an imported module's public ones under the spelling
+    /// the module imported it by. Traits are left out, and sorted, so a note
+    /// listing them reads the same every run.
+    pub fn nameable_types(&self, module: &str) -> Vec<String> {
+        let mut out = Vec::new();
+        for decl in self.types.iter().filter(|t| t.kind != TypeKind::Trait) {
+            let home = self.modules.of(decl.decl_index);
+            let bare = |home: &str| {
+                if home.is_empty() {
+                    decl.name.clone()
+                } else {
+                    decl.name.strip_prefix(&format!("{}.", home)).unwrap_or(&decl.name).to_string()
+                }
+            };
+            if home == module || home == PRELUDE {
+                out.push(bare(home));
+                continue;
+            }
+            if !decl.is_pub {
+                continue;
+            }
+            for ((asking, spelling), target) in &self.modules.aliases {
+                if asking == module && target == home {
+                    out.push(format!("{}.{}", spelling, bare(home)));
+                }
+            }
+        }
+        out.sort();
+        out.dedup();
+        out
+    }
+
+    /// The diagnostic for `m.Name` naming a type, where `m` is a module
+    /// `asking` imported and `Name` is no type in it: ``cannot find `Name` in
+    /// module `m` ``, at the member, with the nearest public type of `m` when
+    /// one is close. `None` when the head is not a module `asking` imported,
+    /// for the caller's own message.
+    ///
+    /// **The value case's message, for types.** A misspelt type through an
+    /// imported module asked ``is that module imported?`` of a module the
+    /// first line imports, or said `no such type in this module`, and named no
+    /// near type — the value case was fixed alone. A trait is not offered: no
+    /// position that reaches here takes one.
+    pub fn missing_type_member(
+        &self,
+        asking: &str,
+        segments: &[Ident],
+        code: kite_diag::Code,
+    ) -> Option<Diagnostic> {
+        let [head, member] = segments else {
+            return None;
+        };
+        let module = self.modules.aliases.get(&(asking.to_string(), head.name.clone()))?;
+        let prefix = format!("{}.", module);
+        let members: Vec<&str> = self
+            .types
+            .iter()
+            .filter(|t| t.is_pub && t.kind != TypeKind::Trait)
+            .filter_map(|t| t.name.strip_prefix(&prefix))
+            .collect();
+        let d = Diagnostic::error(
+            code,
+            format!("cannot find `{}` in module `{}`", member.name, head.name),
+        )
+        .with_primary(
+            member.span,
+            format!("`{}` declares no public type of this name", module.trim_start_matches('@')),
+        );
+        Some(match nearest(&member.name, &members) {
+            Some(near) => d.with_note(format!("a similar type is in `{}`: `{}`", head.name, near)),
+            None => d.with_note(format!(
+                "`{}` is imported here; only what it marks `pub` can be reached from outside it",
+                head.name
+            )),
+        })
+    }
+
     /// The struct or enum a type found by name stands for: the type itself,
     /// or the one an alias names ([`ResolveMap::alias_of`]).
     pub fn nominal(&self, type_index: u32) -> u32 {
@@ -2206,6 +2284,10 @@ impl<'a> FnResolver<'a> {
             }
         }
 
+        if let Some(d) = self.map.missing_type_member(&self.module, &path.segments, codes::E0111) {
+            self.diags.push(d);
+            return;
+        }
         let mut d = Diagnostic::error(codes::E0111, format!("cannot find `{}`", name))
             .with_primary(path.span, "no such type or variant");
         if self.map.ambiguous_variants.iter().any(|a| a == name) {
@@ -2248,7 +2330,10 @@ impl<'a> FnResolver<'a> {
                 self.expr(rhs);
             }
             Expr::Call { callee, args, .. } => {
-                self.expr(callee);
+                match callee.as_ref() {
+                    Expr::Field { .. } => self.field_chain(callee, true),
+                    _ => self.expr(callee),
+                }
                 for a in args {
                     self.expr(a);
                 }
@@ -2258,7 +2343,7 @@ impl<'a> FnResolver<'a> {
             // associated function (`Rect.square`) — but only when its head is
             // not a local. Locals win, so a field named `print` on a value
             // called `io` still works.
-            Expr::Field { .. } => self.field_chain(e),
+            Expr::Field { .. } => self.field_chain(e, false),
             Expr::Index { base, index, .. } => {
                 self.expr(base);
                 self.expr(index);
@@ -2330,17 +2415,6 @@ impl<'a> FnResolver<'a> {
         }
     }
 
-    /// The `E0111` for `m.name` where `m` is a module this one imported and
-    /// `name` is nothing in it.
-    ///
-    /// The path fell through to being read as a field of a value called `m`,
-    /// so a misspelled member — `m.on()` for `m.one()` — said ``cannot find
-    /// `m` ``, with the caret on a module the first line imports, and no
-    /// similar name: the one diagnostic most likely to send someone to fix
-    /// the import rather than the member.
-    ///
-    /// The modules in scope without a `use` — `io.prnt` — are the same
-    /// mistake, and said the same way when one of their builtins is near.
     /// A run of field accesses, `a.b.c`, from the outside in: the longest
     /// prefix that names something dotted wins, and what is left is fields.
     ///
@@ -2350,7 +2424,10 @@ impl<'a> FnResolver<'a> {
     /// longest declared, plus a variant or an associated function. Asking
     /// every link, each spelling out its whole text, made `x.a.a.a…` of
     /// 8,000 links take ten seconds.
-    fn field_chain(&mut self, e: &Expr) {
+    ///
+    /// `called` when the chain is the callee of a call: only its outermost
+    /// link is what is called.
+    fn field_chain(&mut self, e: &Expr, called: bool) {
         let mut links = Vec::new();
         let mut head = e;
         while let Expr::Field { base, name, span } = head {
@@ -2379,7 +2456,7 @@ impl<'a> FnResolver<'a> {
                     return;
                 }
             }
-            if let Some(d) = self.missing_member(base, name) {
+            if let Some(d) = self.missing_member(base, name, called && i == 0) {
                 self.diags.push(d);
                 return;
             }
@@ -2401,7 +2478,24 @@ impl<'a> FnResolver<'a> {
             .unwrap_or(1)
     }
 
-    fn missing_member(&self, base: &Expr, name: &Ident) -> Option<Diagnostic> {
+    /// The `E0111` for `m.name` where `m` is a module this one imported and
+    /// `name` is nothing in it.
+    ///
+    /// **The near name is one that fits where it is written.** Every public
+    /// name was a candidate, so `m.outer()` was offered `Outer`, a trait, and
+    /// `json.encode(v)` the trait `Encode` — fixes that do not compile. A
+    /// call is offered functions; anything else functions, constants and the
+    /// types a path can go on through (`m.Shape.Circle`), never a trait.
+    ///
+    /// The path fell through to being read as a field of a value called `m`,
+    /// so a misspelled member — `m.on()` for `m.one()` — said ``cannot find
+    /// `m` ``, with the caret on a module the first line imports, and no
+    /// similar name: the one diagnostic most likely to send someone to fix
+    /// the import rather than the member.
+    ///
+    /// The modules in scope without a `use` — `io.prnt` — are the same
+    /// mistake, and said the same way when one of their builtins is near.
+    fn missing_member(&self, base: &Expr, name: &Ident, called: bool) -> Option<Diagnostic> {
         let Expr::Path(p) = base else { return None };
         if !p.is_simple() || self.lookup(&p.text()).is_some() {
             return None;
@@ -2418,8 +2512,12 @@ impl<'a> FnResolver<'a> {
         let mut names: Vec<&str> = Vec::new();
         if imported.is_some() {
             names.extend(self.map.fns.iter().filter(|f| f.is_pub).map(|f| f.name.as_str()));
-            names.extend(self.map.consts.iter().filter(|c| c.is_pub).map(|c| c.name.as_str()));
-            names.extend(self.map.types.iter().filter(|t| t.is_pub).map(|t| t.name.as_str()));
+            if !called {
+                let consts = self.map.consts.iter().filter(|c| c.is_pub);
+                names.extend(consts.map(|c| c.name.as_str()));
+                let types = self.map.types.iter().filter(|t| t.is_pub && t.kind != TypeKind::Trait);
+                names.extend(types.map(|t| t.name.as_str()));
+            }
         }
         if builtin {
             names.extend(BUILTIN_PATHS.iter().copied());
@@ -2502,6 +2600,12 @@ impl<'a> FnResolver<'a> {
             }
             None if path.segments.len() > 1 && self.failed_use(&path.segments[0].name) => {}
             None => {
+                if let Some(d) =
+                    self.map.missing_type_member(&self.module, &path.segments, codes::E0204)
+                {
+                    self.diags.push(d);
+                    return;
+                }
                 let mut d =
                     Diagnostic::error(codes::E0204, format!("unknown type `{}`", path.name()))
                         .with_primary(path.span, "no such type in this module");
