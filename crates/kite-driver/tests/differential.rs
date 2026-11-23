@@ -2529,6 +2529,59 @@ async fn main() {
 }
 "#,
     ),
+    // A string remembers how many characters it holds, and an ASCII one is
+    // indexed by byte, natively; the VM keeps the offset of every
+    // sixty-fourth character of a long string it has been asked about. So
+    // `slice` and `code_at` read by character at the ends, past them, across
+    // a stride and across a multi-byte character, of strings both short and
+    // long, ASCII and not — and of a slice and a concatenation, whose counts
+    // are carried over rather than taken afresh.
+    (
+        "strings-index-by-character",
+        r#"fn digest(s: str) -> int {
+    var h = 0
+    let n = s.len()
+    for i in -2..n + 3 {
+        h = (h * 31 + s.code_at(i)) % 1000000007
+        let piece = s.slice(i, i + 3)
+        h = (h * 31 + piece.len()) % 1000000007
+        if piece.len() > 0 {
+            h = (h * 31 + piece.code_at(piece.len() - 1)) % 1000000007
+        }
+    }
+    h = (h * 31 + s.slice(n - 70, n + 5).len()) % 1000000007
+    h = (h * 31 + s.slice(5, 2).len()) % 1000000007
+    h = (h * 31 + s.slice(-10, 200).code_at(199)) % 1000000007
+    return h
+}
+
+fn main() {
+    var ascii = ""
+    var mixed = ""
+    for i in 0..300 {
+        ascii = ascii + "abcdefghij".slice(i % 10, i % 10 + 1)
+        if i % 7 == 0 {
+            mixed = mixed + "é"
+        } else {
+            if i % 11 == 0 {
+                mixed = mixed + "日本"
+            } else {
+                mixed = mixed + "x"
+            }
+        }
+    }
+    io.print("\(ascii.len()) \(mixed.len())")
+    io.print("\(digest(ascii)) \(digest(mixed)) \(digest("é日")) \(digest(""))")
+    io.print(mixed.slice(60, 75))
+    io.print(mixed.slice(127, 130))
+    io.print("\(mixed.slice(250, 400).len()) \(mixed.index_of("日本x"))")
+    let both = ascii + mixed
+    io.print("\(both.len()) \(both.code_at(300)) \(both.slice(299, 302))")
+    let cut = mixed.slice(1, 200) + ascii.slice(0, 64)
+    io.print("\(cut.len()) \(cut.code_at(198)) \(cut.code_at(199)) \(digest(cut))")
+}
+"#,
+    ),
 ];
 
 /// Programs the type checker once refused, or accepted and then typed in a
@@ -3903,7 +3956,9 @@ fn run_on_native_with(name: &str, src: &str, config: kite_codegen_clif::RunConfi
 /// promoted, a young element written into it is reachable only through the
 /// write barrier, and a slice grown past the nursery is born in the old
 /// generation. The default nursery of a megabyte never fills for these
-/// programs, so they run here too with one of a page.
+/// programs, so they run here too with one of a page. The string program is
+/// here because a string's character count lives in its header, which must
+/// move with it.
 #[test]
 fn slices_agree_natively_with_a_page_of_nursery() {
     if !native_available() {
@@ -3914,7 +3969,7 @@ fn slices_agree_natively_with_a_page_of_nursery() {
         return;
     }
     let mut collections = 0;
-    for name in ["slices-are-values", "slices-grow-in-place-natively"] {
+    for name in ["slices-are-values", "slices-grow-in-place-natively", "strings-index-by-character"] {
         let (_, src) = WASM_TARGET
             .iter()
             .chain(NATIVE_TARGET)
@@ -3926,6 +3981,36 @@ fn slices_agree_natively_with_a_page_of_nursery() {
         collections += minor;
     }
     assert!(collections > 100, "only {} collections: the nursery did not fill", collections);
+}
+
+/// Reading a long string one character at a time is linear, on the VM and
+/// natively: `slice` and `code_at` walked from the front of the string —
+/// natively they also counted all of it to clamp — so a loop over the
+/// characters of 128 KB took minutes, and `json.parse` of a 114 KB document
+/// took 12.7 s natively and 29 s on the VM. Here it is a fraction of a
+/// second. The bound is generous by two orders of magnitude so that a loaded
+/// machine cannot fail it; the old cost exceeds it by as much again.
+#[test]
+fn a_long_string_is_read_by_character_in_linear_time() {
+    // Doubling builds the string in linear time of its own.
+    let src = "fn main() {\n  var s = \"abcdefgh\"\n  for i in 0..14 {\n    s = s + s\n  }\n\
+               \x20 var sum = 0\n  for i in 0..s.len() {\n\
+               \x20   sum = sum + s.code_at(i) + s.slice(i, i + 1).len()\n  }\n\
+               \x20 let mixed = \"é\" + s\n  for i in 0..200 {\n\
+               \x20   sum = sum + mixed.code_at(mixed.len() - 1 - i)\n  }\n\
+               \x20 io.print(\"\\(s.len()) \\(sum)\")\n}\n";
+    let expected = "131072 13323908\n";
+    let bound = std::time::Duration::from_secs(20);
+    let started = std::time::Instant::now();
+    assert_eq!(run_on_vm("long-string", src), expected);
+    let took = started.elapsed();
+    assert!(took < bound, "the VM took {:?}", took);
+    if native_available() {
+        let started = std::time::Instant::now();
+        assert_eq!(run_on_native("long-string", src), expected);
+        let took = started.elapsed();
+        assert!(took < bound, "the native backend took {:?}", took);
+    }
 }
 
 /// Literals longer than one `array.new_fixed` may be. V8 refuses more than

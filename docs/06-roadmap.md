@@ -348,6 +348,11 @@ one added is a thing that can drift.
 They count characters rather than bytes, on both sides: the VM walks a `char`
 iterator and the glue spreads with `[...s]`, so `"héllo日本"` is seven either
 way and `index_of` returns a position a caller can pass back to `slice`.
+Walking made every per-character loop quadratic on the VM and natively — a
+114 KB `json.parse` took 29 s and 12.7 s, against a quarter of a second on
+Wasm — until a string remembered its count (natively, in its header's second
+word) and was indexed by byte when it is ASCII, and the VM kept a sparse
+index of the long strings it was reading.
 
 **A `pub` function is a root, not a survivor.** Pruning used to take the entry
 point as the only root when a program had one, and the backend then exported

@@ -342,20 +342,97 @@ impl Value {
 /// glue's default, so the two backends measure text the same way under test.
 const NOMINAL_ADVANCE: f64 = 8.0;
 
-/// Every string operation, on characters rather than bytes.
+/// Where a string's characters start, worked out once.
 ///
-/// Rust indexes strings by byte and Kite by character, so each of these walks
-/// the `char` iterator. That is linear where a byte index would be constant,
-/// and it is the cost of a string being text rather than storage.
+/// Rust indexes a `str` by byte and Kite by character. A parser asks for
+/// `input.slice(i, i + 1)` of one long input once per character, and walking
+/// from the front on every call made each std parser quadratic here. So the
+/// count is taken once, and — unless the string is ASCII, where a character
+/// is a byte — so is the byte offset of every [`CharIndex::STRIDE`]-th
+/// character, which leaves at most that many to walk.
+struct CharIndex {
+    chars: usize,
+    /// `marks[j]` is where character `j * STRIDE` starts. Empty for ASCII.
+    marks: Vec<usize>,
+}
+
+impl CharIndex {
+    const STRIDE: usize = 64;
+
+    fn new(s: &str) -> CharIndex {
+        if s.is_ascii() {
+            return CharIndex { chars: s.len(), marks: Vec::new() };
+        }
+        let mut marks = Vec::new();
+        let mut chars = 0;
+        for (b, _) in s.char_indices() {
+            if chars % Self::STRIDE == 0 {
+                marks.push(b);
+            }
+            chars += 1;
+        }
+        CharIndex { chars, marks }
+    }
+
+    /// The byte at which character `c` starts, for `c` at most `chars`.
+    fn byte_at(&self, s: &str, c: usize) -> usize {
+        if self.marks.is_empty() {
+            return c.min(s.len());
+        }
+        // The last mark, for `c == chars` on a whole number of strides.
+        let j = (c / Self::STRIDE).min(self.marks.len() - 1);
+        let from = self.marks[j];
+        let skip = c - j * Self::STRIDE;
+        s[from..].char_indices().nth(skip).map_or(s.len(), |(b, _)| from + b)
+    }
+}
+
+/// The indexes of the long strings most recently operated on.
+///
+/// Each entry holds its string, so the address it is found by cannot be
+/// reused while the entry lives, and a string never changes, so an entry is
+/// never stale. A short string is indexed afresh instead — that costs as
+/// little as looking it up — so that the pieces a loop cuts from a long input
+/// do not push the input itself out.
+#[derive(Default)]
+struct CharIndexes {
+    recent: Vec<(Rc<str>, Rc<CharIndex>)>,
+    next: usize,
+}
+
+impl CharIndexes {
+    const KEPT: usize = 4;
+    const SHORT: usize = 64;
+
+    fn of(&mut self, s: &Rc<str>) -> Rc<CharIndex> {
+        if s.len() <= Self::SHORT {
+            return Rc::new(CharIndex::new(s));
+        }
+        if let Some((_, index)) = self.recent.iter().find(|(t, _)| Rc::ptr_eq(t, s)) {
+            return index.clone();
+        }
+        let index = Rc::new(CharIndex::new(s));
+        if self.recent.len() < Self::KEPT {
+            self.recent.push((s.clone(), index.clone()));
+        } else {
+            self.recent[self.next] = (s.clone(), index.clone());
+            self.next = (self.next + 1) % Self::KEPT;
+        }
+        index
+    }
+}
+
+/// Every string operation, on characters rather than bytes — through the
+/// string's [`CharIndex`], so that none of them walks more of it than it must.
 fn string_op(
     op: kite_hir::StrKind,
     s: &str,
+    index: &CharIndex,
     arg: impl Fn(u16) -> Value,
 ) -> Result<Value, Trap> {
     use kite_hir::StrKind;
-    let chars: Vec<char> = s.chars().collect();
     Ok(match op {
-        StrKind::Len => Value::Int(chars.len() as i64),
+        StrKind::Len => Value::Int(index.chars as i64),
         StrKind::Trim => Value::Str(Rc::from(s.trim())),
         StrKind::IndexOf => {
             let Value::Str(needle) = arg(1) else {
@@ -375,10 +452,10 @@ fn string_op(
             // Clamped rather than trapping: an out-of-range slice is an
             // ordinary condition in text processing, unlike an out-of-range
             // index into a slice, which is a bug.
-            let len = chars.len() as i64;
+            let len = index.chars as i64;
             let from = from.clamp(0, len) as usize;
             let to = to.clamp(from as i64, len) as usize;
-            Value::Str(Rc::from(chars[from..to].iter().collect::<String>().as_str()))
+            Value::Str(Rc::from(&s[index.byte_at(s, from)..index.byte_at(s, to)]))
         }
         StrKind::CodeAt => {
             let Value::Int(at) = arg(1) else {
@@ -388,9 +465,12 @@ fn string_op(
             // clamps: reading past the end is an ordinary condition in text
             // processing, and a loop that tests the answer is what a caller
             // writes anyway.
-            match usize::try_from(at).ok().and_then(|i| chars.get(i)) {
-                Some(c) => Value::Int(*c as i64),
-                None => Value::Int(-1),
+            match usize::try_from(at) {
+                Ok(i) if i < index.chars => {
+                    let c = s[index.byte_at(s, i)..].chars().next();
+                    Value::Int(c.map_or(-1, |c| c as i64))
+                }
+                _ => Value::Int(-1),
             }
         }
     })
@@ -580,6 +660,7 @@ pub fn run_with_host<'a>(
         result: Value::Unit,
         host,
         font_scale: 1.0,
+        char_indexes: CharIndexes::default(),
     };
     vm.execute(entry)?;
     // `main` returning is not the program ending: a task it started is still
@@ -624,6 +705,7 @@ pub fn run_function(chunk: &Chunk, name: &str, out: &mut dyn Write) -> Result<Va
         result: Value::Unit,
         host: None,
         font_scale: 1.0,
+        char_indexes: CharIndexes::default(),
     };
     vm.execute(index)?;
     // What the function answered, taken before the scheduler runs: every poll
@@ -670,6 +752,8 @@ struct Vm<'a> {
     /// layout measured at 22dp here and at 22dp in a browser would disagree
     /// about everything but the default.
     font_scale: f64,
+    /// See [`CharIndexes`].
+    char_indexes: CharIndexes,
 }
 
 /// What a program's `extern` declarations reach.
@@ -1517,8 +1601,7 @@ impl<'a> Vm<'a> {
                 }
 
                 Op::StrOp { dst, op, base: arg_base, argc } => {
-                    let a = |i: u16| self.get(base, arg_base + i as Reg);
-                    let subject = a(0);
+                    let subject = self.get(base, arg_base);
                     let Value::Str(s) = &subject else {
                         return Err(Trap::TypeConfusion {
                             op: op.name(),
@@ -1526,7 +1609,9 @@ impl<'a> Vm<'a> {
                         });
                     };
                     let _ = argc;
-                    let out = string_op(op, s, a)?;
+                    let index = self.char_indexes.of(s);
+                    let a = |i: u16| self.get(base, arg_base + i as Reg);
+                    let out = string_op(op, s, &index, a)?;
                     self.set(base, dst, out);
                 }
 
