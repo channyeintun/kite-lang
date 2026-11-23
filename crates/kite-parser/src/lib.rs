@@ -1791,10 +1791,26 @@ impl<'a> Parser<'a> {
             }
             // The variant may be on the line below its `pub`: a layout as much
             // a `pub` on a variant as `pub A`, and the refusal says why.
-            let named_next = (1..).map(|i| self.peek_at(i)).find(|t| *t != T::Newline) == Some(T::Ident);
+            //
+            // A `pub` with no variant after it — before the `}`, or before
+            // another `pub` — is the same mistake, and the same refusal: the
+            // enum's braces hold variants, so it was `pub` that was meant for
+            // one, not a declaration about methods. Further `pub`s in the row
+            // are the same one cause.
+            let named_next = matches!(
+                (1..).map(|i| self.peek_at(i)).find(|t| *t != T::Newline),
+                Some(T::Ident | T::Pub | T::RBrace | T::Eof)
+            );
             if self.at(T::Pub) && named_next {
                 self.refuse_pub_on_variant(&name, is_pub, "a variant");
                 self.skip_newlines();
+                while self.at(T::Pub) {
+                    self.bump();
+                    self.skip_newlines();
+                }
+                if self.at(T::RBrace) || self.at_end() {
+                    continue;
+                }
             }
             if self.declaration_starts_line() {
                 self.misplaced_declaration(
