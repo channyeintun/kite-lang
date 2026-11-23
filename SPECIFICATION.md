@@ -1879,7 +1879,11 @@ lowering, so adopting it later is a compiler change with no language change.
 
 A **module** is a directory, or a single `.kite` file. Every `.kite` file in a
 module directory contributes to the same namespace — within one there are no
-per-file imports of siblings and no header/implementation split.
+per-file imports of siblings and no header/implementation split. A file is part
+of one module only: `use shape` written inside `lib/`, or `use lib/shape` in a
+program that also has `use lib`, is `E0404`, because `shape.kite` is already
+part of `lib` and would otherwise be compiled twice, as two modules whose types
+are two types.
 
 `use x` takes the directory `x/` when there is one and the file `x.kite`
 otherwise. The directory is the general form; a file is the one-file case, and

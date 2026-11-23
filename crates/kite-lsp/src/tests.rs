@@ -880,7 +880,7 @@ fn a_dependencys_import_is_not_answered_by_an_application_buffer() {
     p.file("md/kite.toml", "[package]\nname = \"md\"\nversion = \"1.0.0\"\n");
     p.file("md/md.kite", "use util\n\npub fn render() -> util.Thing {\n    return util.make()\n}\n");
     p.file(
-        "md/util.kite",
+        "md/util/util.kite",
         "pub struct Thing {\n    pub v: int\n}\n\npub fn make() -> Thing {\n    return Thing{ v: 7 }\n}\n",
     );
     p.file(

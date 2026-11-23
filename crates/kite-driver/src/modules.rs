@@ -639,6 +639,15 @@ pub struct Loader {
     /// Whether any file derives `Encode` or `Decode`, whose bodies are written
     /// against `std/json` whether or not the module deriving them imported it.
     wants_json: bool,
+    /// Every file loaded so far, canonicalised, with the identity of the
+    /// module it was loaded as and whether that module is a directory.
+    ///
+    /// **One file is one module.** A file inside a directory module could be
+    /// imported on its own as well — `use shape` from a sibling inside `lib/`,
+    /// or `use lib/shape` from outside — and was then compiled twice, as part
+    /// of `lib` and as `lib/shape`, so one declaration became two types and
+    /// `expected lib/shape.Pt, found lib.Pt` was the only sign of it.
+    files_of: HashMap<PathBuf, (String, bool)>,
 }
 
 impl Loader {
@@ -1004,6 +1013,12 @@ impl Loader {
                 continue;
             };
             let origin = found.origin(&self.files);
+            if !self.seen.contains_key(&origin) {
+                if let Some(refusal) = self.already_a_member(&found, u.span) {
+                    diags.push(refusal);
+                    continue;
+                }
+            }
             let identity = match self.seen.get(&origin) {
                 Some(known) => known.clone(),
                 None => found.identity(),
@@ -1277,6 +1292,53 @@ impl Loader {
         None
     }
 
+    /// The `E0404` for a module `found` some of whose files already belong
+    /// to another: a file of a loaded directory module imported on its own,
+    /// or a directory one of whose files is already a module by itself.
+    fn already_a_member(&self, found: &Found, span: Span) -> Option<Diagnostic> {
+        let Found::Path { at, is_dir, .. } = found else {
+            return None;
+        };
+        let files = if *is_dir { self.files.kite_files(at) } else { vec![at.clone()] };
+        for file in files {
+            let Some((other, other_is_dir)) = self.files_of.get(&self.files.canonical(&file))
+            else {
+                continue;
+            };
+            let (directory, message, label) = if *other_is_dir {
+                (
+                    other.clone(),
+                    format!("`{}` is already part of the module `{}`", file.display(), other),
+                    "this file already belongs to the directory module",
+                )
+            } else if *is_dir {
+                (
+                    found.identity(),
+                    format!("`{}` is already the module `{}`", file.display(), other),
+                    "this directory holds a file already imported on its own",
+                )
+            } else {
+                continue;
+            };
+            return Some(
+                Diagnostic::error(codes::E0404, message)
+                    .with_primary(span, label)
+                .with_note(format!(
+                    "every `.kite` file in a module directory is part of that one module, so a \
+                     file of `{}` cannot also be a module of its own — its declarations would be \
+                     compiled twice, as two types",
+                    directory
+                ))
+                .with_note(format!(
+                    "inside `{0}` its declarations are in scope unqualified; elsewhere, `use {0}` \
+                     and write `{0}.…`",
+                    directory.trim_start_matches('@')
+                )),
+            );
+        }
+        None
+    }
+
     fn load_one(
         &mut self,
         found: Found,
@@ -1305,6 +1367,10 @@ impl Loader {
             }
             Found::Path { at, is_dir, package, prefix } => {
                 let paths = if is_dir { self.files.kite_files(&at) } else { vec![at.clone()] };
+                for path in &paths {
+                    let member = (identity.clone(), is_dir);
+                    self.files_of.insert(self.files.canonical(path), member);
+                }
                 for path in paths {
                     match self.files.read(&path) {
                         Ok(text) => {

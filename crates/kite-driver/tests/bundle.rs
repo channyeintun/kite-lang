@@ -152,7 +152,7 @@ fn a_bundle_carries_the_modules_its_program_uses() {
     let dir = work_dir("modules");
     write(dir.join("md/kite.toml"), "[package]\nname = \"md\"\nversion = \"1.0.0\"\n");
     write(dir.join("md/md.kite"), "use util\n\npub fn render() -> str {\n    return util.me()\n}\n");
-    write(dir.join("md/util.kite"), "pub fn me() -> str {\n    return \"md-util\"\n}\n");
+    write(dir.join("md/util/util.kite"), "pub fn me() -> str {\n    return \"md-util\"\n}\n");
     write(
         dir.join("app/kite.toml"),
         "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n[dependencies]\nmd = { path = \"../md\" }\n",

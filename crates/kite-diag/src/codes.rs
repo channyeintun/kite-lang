@@ -408,7 +408,13 @@ codes! {
          The same code reports two packages of one name reached from two \
          different places. A package's name means one thing across the whole \
          program — `kitec pkg` refuses the same manifests for the same \
-         reason — so the manifests naming it must agree on where it is.";
+         reason — so the manifests naming it must agree on where it is.\n\n\
+         And it reports one file reached as two modules. Every `.kite` file \
+         in a module directory is part of that module, so `use shape` written \
+         inside `lib/`, or `use lib/shape` beside `use lib`, would compile \
+         `shape.kite` a second time as a module of its own, and each of its \
+         types would become two. Inside `lib`, its declarations are already \
+         in scope unqualified; elsewhere, write `lib.…`.";
 
     E0405 = "E0405", "a `kite.toml` that does not read",
         "The manifest is what says where a package's dependencies are, so a \

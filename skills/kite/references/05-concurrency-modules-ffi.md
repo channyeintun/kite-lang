@@ -455,7 +455,9 @@ with no rewrite.
 
 **A module is a directory, or a single `.kite` file.** Every `.kite` file in a
 module directory contributes to one namespace; the files are read in sorted
-order and there are no per-file imports of siblings. Neither form is a module
+order and there are no per-file imports of siblings — `use shape` written
+inside `lib/` is `E0404`, since `shape.kite` is already part of `lib`, and so
+is `use lib/shape` beside `use lib`. Neither form is a module
 until a `use` names it — a `.kite` file nothing imports is never compiled.
 
 **The file you hand `kitec` is a one-file module, and the directory it sits in
@@ -743,7 +745,7 @@ the module's `pub fn` list before you touch the import.
 | `E0406` | An `impl` outside its type's module: an extension method, or an imported trait implemented for an imported type. |
 | `E0402` | Import cycle. The diagnostic prints the chain (`a → b`). Extract the shared part into a third module. |
 | `E0403` | Reserved standard-library name (above). |
-| `E0404` | One module spelling two modules alike — give one an alias — or two packages of one name reached from two different places. |
+| `E0404` | One module spelling two modules alike — give one an alias — or two packages of one name reached from two different places, or one file reached as two modules: a file of a directory module imported on its own (`use shape` inside `lib/`, or `use lib/shape` beside `use lib`). |
 | `E0405` | A `kite.toml` that does not read. Reported at the offending line; a build no longer treats a broken manifest as no manifest. |
 | `E0111` | A qualified name whose module this module never imported — **or** an unknown member of one it did (above). |
 

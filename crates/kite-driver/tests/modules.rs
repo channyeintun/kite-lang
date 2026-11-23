@@ -767,7 +767,9 @@ fn an_application_util_and_a_dependencys_util_are_two_modules() {
     let p = Project::new("app-and-dep-util");
     p.file("md/kite.toml", "[package]\nname = \"md\"\nversion = \"1.0.0\"\n");
     p.file("md/md.kite", "use util\n\npub fn render() -> str {\n  return util.me()\n}\n");
-    p.file("md/util.kite", "pub fn me() -> str {\n  return \"md-util\"\n}\n");
+    // In a directory of its own: `use md` reads every `.kite` file directly
+    // in `md/`, and a file of a module cannot also be a module by itself.
+    p.file("md/util/util.kite", "pub fn me() -> str {\n  return \"md-util\"\n}\n");
     p.file(
         "app/kite.toml",
         "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n\
@@ -951,6 +953,42 @@ fn a_provided_module_walks_out_as_far_as_its_package() {
     assert!(c.render_diagnostics().contains("cannot find module `helper`"));
 }
 
+/// One file is one module. A file of a directory module importing its own
+/// sibling loaded that sibling a second time as a module of its own, and one
+/// declaration became two types: ``expected `lib/shape.Pt`, found `lib.Pt` ``.
+#[test]
+fn a_file_of_a_directory_module_cannot_import_its_sibling() {
+    let p = Project::new("own-sibling");
+    p.file("lib/shape.kite", "pub struct Pt {\n  pub x: int\n}\n");
+    p.file(
+        "lib/use_it.kite",
+        "use shape\n\npub fn origin() -> Pt {\n  return Pt{ x: 0 }\n}\n",
+    );
+    let main = p.file("main.kite", "use lib\n\nfn main() {\n  io.print(lib.origin().x)\n}\n");
+    let said = p.run(&main).expect_err("the sibling is part of `lib`").replace('\\', "/");
+    assert!(said.contains("E0404"), "{}", said);
+    assert!(said.contains("lib/shape.kite` is already part of the module `lib`"), "{}", said);
+    assert!(said.contains("lib/use_it.kite:1:1"), "at the `use`: {}", said);
+}
+
+/// The same from outside, in either order: `use lib/shape` beside `use lib`.
+#[test]
+fn a_file_of_a_directory_module_cannot_be_imported_on_its_own() {
+    let p = Project::new("member-alone");
+    p.file("lib/shape.kite", "pub struct Pt {\n  pub x: int\n}\n");
+    p.file("lib/make.kite", "pub fn origin() -> Pt {\n  return Pt{ x: 0 }\n}\n");
+    for uses in ["use lib\nuse lib/shape\n", "use lib/shape\nuse lib\n"] {
+        let main = p.file(
+            "main.kite",
+            &format!("{}\nfn main() {{\n  io.print(lib.origin().x)\n}}\n", uses),
+        );
+        let said = p.run(&main).expect_err("one file, two modules").replace('\\', "/");
+        assert!(said.contains("E0404"), "{}", said);
+        assert!(said.contains("is already"), "{}", said);
+        assert!(said.contains("main.kite:2:1"), "at the second `use`: {}", said);
+    }
+}
+
 /// A diagnostic names a module by where it is, so two `util`s are told apart
 /// in what the compiler says as well as in what it does.
 #[test]
@@ -1106,7 +1144,9 @@ fn a_directory_module_checked_whole_finds_every_files_uses() {
         "config/schema.kite",
         "pub fn port() -> int {\n  return helper() + helper()\n}\n",
     );
-    p.file("config/util.kite", "pub fn base() -> int {\n  return 40\n}\n");
+    // Beside the module rather than inside it: a file inside `config/` is
+    // part of `config`, and cannot be imported as a module of its own.
+    p.file("util.kite", "pub fn base() -> int {\n  return 40\n}\n");
     let c = kite_driver::check_module(p.dir.join("config"), kite_driver::modules::Files::Disk);
     assert!(!c.failed(), "{}", c.render_diagnostics());
     let helper = c
@@ -1370,7 +1410,7 @@ fn a_program_module_may_share_a_name_with_a_package_it_never_declared() {
     p.file("a/a.kite", "use b\n\npub fn hello() -> str {\n  return \"a+\" + b.name()\n}\n");
     p.file("b/kite.toml", "[package]\nname = \"b\"\nversion = \"1.0.0\"\n");
     p.file("b/b.kite", "use util\n\npub fn name() -> str {\n  return util.who()\n}\n");
-    p.file("b/util.kite", "pub fn who() -> str {\n  return \"from b\"\n}\n");
+    p.file("b/util/util.kite", "pub fn who() -> str {\n  return \"from b\"\n}\n");
     let manifest =
         "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n[dependencies]\na = { path = \"../a\" }\n";
     p.file("app/kite.toml", manifest);
