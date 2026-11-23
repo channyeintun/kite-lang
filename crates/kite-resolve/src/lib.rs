@@ -287,6 +287,40 @@ pub enum BuiltinFn {
 /// that spelling (`E0403`).
 pub const BUILTIN_MODULES: &[&str] = &["io", "errors", "draw", "text", "task", "time", "ptr", "js"];
 
+/// Every dotted path [`BuiltinFn::from_path`] answers — what a misspelled
+/// `io.prnt` is compared against, since no `use` brought `io` and no item of
+/// the program declares `print`.
+pub const BUILTIN_PATHS: &[&str] = &[
+    "io.print",
+    "io.error",
+    "io.read_line",
+    "errors.new",
+    "errors.because",
+    "draw.rect",
+    "draw.rrect",
+    "draw.text",
+    "draw.font",
+    "draw.drrect",
+    "draw.alpha",
+    "text.width",
+    "text.height",
+    "text.from_code",
+    "draw.field",
+    "draw.image",
+    "draw.semantics",
+    "draw.clip",
+    "draw.unclip",
+    "task.yield",
+    "task.wake_at",
+    "task.park",
+    "task.wait_host",
+    "task.finished",
+    "task.get",
+    "time.now",
+    "ptr.same",
+    "js.func",
+];
+
 impl BuiltinFn {
     pub fn from_path(path: &str) -> Option<BuiltinFn> {
         match path {
@@ -2143,19 +2177,38 @@ impl<'a> FnResolver<'a> {
     /// `m` ``, with the caret on a module the first line imports, and no
     /// similar name: the one diagnostic most likely to send someone to fix
     /// the import rather than the member.
+    ///
+    /// The modules in scope without a `use` — `io.prnt` — are the same
+    /// mistake, and said the same way when one of their builtins is near.
     fn missing_member(&self, base: &Expr, name: &Ident) -> Option<Diagnostic> {
         let Expr::Path(p) = base else { return None };
         if !p.is_simple() || self.lookup(&p.text()).is_some() {
             return None;
         }
         let spelled = p.text();
-        let module = self.map.modules.aliases.get(&(self.module.clone(), spelled.clone()))?;
+        let imported = self.map.modules.aliases.get(&(self.module.clone(), spelled.clone()));
+        let builtin = BUILTIN_MODULES.contains(&spelled.as_str());
+        let module = match imported {
+            Some(module) => module.clone(),
+            None if builtin => spelled.clone(),
+            None => return None,
+        };
         let prefix = format!("{}.", module);
         let mut names: Vec<&str> = Vec::new();
-        names.extend(self.map.fns.iter().filter(|f| f.is_pub).map(|f| f.name.as_str()));
-        names.extend(self.map.consts.iter().filter(|c| c.is_pub).map(|c| c.name.as_str()));
-        names.extend(self.map.types.iter().filter(|t| t.is_pub).map(|t| t.name.as_str()));
+        if imported.is_some() {
+            names.extend(self.map.fns.iter().filter(|f| f.is_pub).map(|f| f.name.as_str()));
+            names.extend(self.map.consts.iter().filter(|c| c.is_pub).map(|c| c.name.as_str()));
+            names.extend(self.map.types.iter().filter(|t| t.is_pub).map(|t| t.name.as_str()));
+        }
+        if builtin {
+            names.extend(BUILTIN_PATHS.iter().copied());
+        }
         let members: Vec<&str> = names.into_iter().filter_map(|n| n.strip_prefix(&prefix)).collect();
+        // Not imported, and nothing near among the builtins: `text.trim`
+        // without `use std/text` is a missing `use`, which this would not say.
+        if imported.is_none() && nearest(&name.name, &members).is_none() {
+            return None;
+        }
         let shown = module.trim_start_matches('@');
         let mut d = Diagnostic::error(
             codes::E0111,

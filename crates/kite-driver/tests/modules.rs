@@ -210,6 +210,24 @@ fn a_misspelled_member_is_not_reported_as_a_missing_module() {
     assert_eq!(said.matches("error[").count(), 1, "{}", said);
 }
 
+/// The same for a module in scope without a `use`: `io.prnt` said
+/// ``cannot find `io` ``. One whose member is not near a builtin — `text.trim`
+/// with no `use std/text` — is a missing `use`, and is not told it is a typo.
+#[test]
+fn a_misspelled_builtin_is_not_reported_as_a_missing_module() {
+    let p = Project::new("misspelled-builtin");
+    let main = p.file("main.kite", "fn main() {\n  io.prnt(\"x\")\n}\n");
+    let said = p.run(&main).expect_err("no `io.prnt`").replace('\\', "/");
+    assert!(said.contains("cannot find `prnt` in module `io`"), "{}", said);
+    assert!(said.contains("main.kite:2:6"), "at the member: {}", said);
+    assert!(said.contains("a similar name is in `io`: `print`"), "{}", said);
+    assert_eq!(said.matches("error[").count(), 1, "{}", said);
+
+    let main = p.file("main.kite", "fn main() {\n  io.print(text.trim(\" x \"))\n}\n");
+    let said = p.run(&main).expect_err("`std/text` is not imported");
+    assert!(!said.contains("in module `text`"), "{}", said);
+}
+
 #[test]
 fn an_unmarked_declaration_is_private_to_its_module() {
     let p = Project::new("private");

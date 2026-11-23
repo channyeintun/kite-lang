@@ -742,7 +742,9 @@ fn main() {
 
 Same for a user module: with `use m`, where `m` exports `one`, `m.on()` is
 ``cannot find `on` in module `m` `` with the caret on `on` and the note "a
-similar name is in `m`: `one`".
+similar name is in `m`: `one`". And for the modules in scope without a `use`
+when the member is near one of their builtins: `io.prnt` is ``cannot find
+`prnt` in module `io` `` with the note naming `print`.
 
 ### The other module codes
 
