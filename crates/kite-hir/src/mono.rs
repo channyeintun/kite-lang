@@ -53,17 +53,22 @@ pub struct NoTable {
     pub span: kite_span::Span,
     pub ty: TyId,
     pub trait_id: TraitId,
-    /// The copy that converts, by its specialised name, and the function that
-    /// asked for that copy.
+    /// The copy that converts, as its reader would name it — `` `wrap<int>` ``,
+    /// `` `Box<int>.d` ``, `` the closure in `mk<float>` `` — and the function
+    /// that asked for that copy (for a closure, for the copy it is in).
     pub copy: String,
     pub asked_by: Option<String>,
+    /// The call that asked for it, which is what the reader can change.
+    pub asked_at: Option<kite_span::Span>,
 }
 
 /// Why monomorphisation stopped.
 #[derive(Clone, Debug)]
 pub enum Refused {
     Unbounded(Unbounded),
-    NoTable(NoTable),
+    /// Every copy that converts a built-in value to a `dyn`, in the order of
+    /// the calls that asked for them.
+    NoTable(Vec<NoTable>),
 }
 
 /// Specialise every generic function for the argument sets its callers use, and
@@ -105,17 +110,16 @@ pub fn monomorphise(program: &mut Program) -> Result<(), Refused> {
     // For each function made, the template it is a copy of and the function
     // whose body first asked for it; nothing, for one that was written.
     let mut lineage: Vec<Option<(u32, usize)>> = vec![None; out.len()];
+    // And, by the same index, the call in that body that asked for it.
+    let mut asked_at: Vec<Option<kite_span::Span>> = vec![None; out.len()];
     let mut pending: Vec<usize> = (0..out.len()).collect();
     let mut unbounded: Option<Unbounded> = None;
-    let mut no_table: Option<NoTable> = None;
+    let mut no_table: Vec<NoTable> = Vec::new();
     let mut rows: Vec<(TraitId, VTableEntry)> = Vec::new();
 
     while let Some(index) = pending.pop() {
         if let Some(u) = unbounded {
             return Err(Refused::Unbounded(u));
-        }
-        if let Some(n) = no_table {
-            return Err(Refused::NoTable(n));
         }
         // Take the body so the walk does not borrow `out` while `out` grows.
         let mut body = std::mem::take(&mut out[index].body);
@@ -127,6 +131,7 @@ pub fn monomorphise(program: &mut Program) -> Result<(), Refused> {
                 made: &mut made,
                 out: &mut out,
                 lineage: &mut lineage,
+                asked_at: &mut asked_at,
                 current: index,
                 pending: &mut pending,
                 unbounded: &mut unbounded,
@@ -141,8 +146,12 @@ pub fn monomorphise(program: &mut Program) -> Result<(), Refused> {
     if let Some(u) = unbounded {
         return Err(Refused::Unbounded(u));
     }
-    if let Some(n) = no_table {
-        return Err(Refused::NoTable(n));
+    // Each such copy is its own mistake, made at its own call, so each is
+    // reported — the walk goes on past the first, which only ever stopped
+    // lowering — in the order those calls are written.
+    if !no_table.is_empty() {
+        no_table.sort_by_key(|n| n.asked_at.map(|s| (s.file, s.start)));
+        return Err(Refused::NoTable(no_table));
     }
 
     if let Some(e) = entry {
@@ -187,14 +196,16 @@ struct Mono<'a> {
     /// By index into `out`: the template each copy was made from, and the
     /// function whose body asked for it.
     lineage: &'a mut Vec<Option<(u32, usize)>>,
+    /// By the same index, the call that asked for each copy.
+    asked_at: &'a mut Vec<Option<kite_span::Span>>,
     /// The function whose body is being walked, which asks for whatever is
     /// made now.
     current: usize,
     pending: &'a mut Vec<usize>,
     /// Set by the first specialisation refused; the walk stops there.
     unbounded: &'a mut Option<Unbounded>,
-    /// Set by the first built-in value converted to a `dyn`; likewise.
-    no_table: &'a mut Option<NoTable>,
+    /// Every built-in value converted to a `dyn`, one per copy.
+    no_table: &'a mut Vec<NoTable>,
     /// The tables the checker built, over the declared functions.
     vtables: &'a [VTable],
     /// Rows for specialisations of generic types that became a `dyn`, over
@@ -205,7 +216,7 @@ struct Mono<'a> {
 impl Mono<'_> {
     /// The specialisation for a template and its type arguments, creating it if
     /// this is the first call site to ask.
-    fn instantiate(&mut self, template: u32, targs: &[TyId]) -> u32 {
+    fn instantiate(&mut self, template: u32, targs: &[TyId], at: kite_span::Span) -> u32 {
         let key = (template, targs.to_vec());
         if let Some(&existing) = self.made.get(&key) {
             return existing;
@@ -240,6 +251,7 @@ impl Mono<'_> {
         // same instantiation finds it instead of making a second one.
         self.made.insert(key, index);
         self.lineage.push(Some((template, self.current)));
+        self.asked_at.push(Some(at));
 
         let source = &self.fns[template as usize];
         let mut copy = Function {
@@ -266,6 +278,28 @@ impl Mono<'_> {
         self.out.push(copy);
         self.pending.push(index as usize);
         index
+    }
+
+    /// A function as the reader would name it in a diagnostic, quoted: a
+    /// copy's specialised name, `` `wrap<int>` ``; a method's with its
+    /// receiver's type, `` `Box<int>.d` ``, rather than `d<int>`; and a
+    /// closure by the function it is written in, `` the closure in
+    /// `mk<float>` ``, rather than its lifted name `mk#closure0<float>`.
+    fn describe(&self, index: usize) -> String {
+        let f = &self.out[index];
+        if f.name.contains('#') {
+            if let Some((_, by)) = self.lineage[index] {
+                return format!("the closure in {}", self.describe(by));
+            }
+        }
+        let receiver = f.params().first().filter(|l| l.name == "self");
+        match receiver {
+            Some(own) if !f.is_free => {
+                let base = f.name.split('<').next().unwrap_or(&f.name);
+                format!("`{}.{}`", self.types.name(own.ty), base)
+            }
+            _ => format!("`{}`", f.name),
+        }
     }
 
     /// How many copies of `template` are on the chain that asked for the
@@ -311,18 +345,33 @@ impl Mono<'_> {
         }
         if let ExprKind::ToDyn { value, trait_id } = &e.kind {
             if matches!(self.types.kind(value.ty), TyKind::Int | TyKind::Float | TyKind::Bool | TyKind::Str) {
-                if self.no_table.is_none() {
-                    let asked_by = self.lineage[self.current].map(|(_, by)| self.out[by].name.clone());
-                    *self.no_table = Some(NoTable {
-                        span: e.span,
-                        ty: value.ty,
-                        trait_id: *trait_id,
-                        copy: self.out[self.current].name.clone(),
-                        asked_by,
-                    });
+                if !self.no_table.iter().any(|n| n.span == e.span && n.ty == value.ty) {
+                    // A closure's copy is asked for by the copy it is written
+                    // in; the call the reader wrote is the one that asked for
+                    // that.
+                    let mut origin = self.current;
+                    while self.out[origin].name.contains('#') {
+                        match self.lineage[origin] {
+                            Some((_, by)) => origin = by,
+                            None => break,
+                        }
+                    }
+                    let asked_by = self.lineage[origin].map(|(_, by)| self.describe(by));
+                    *self.no_table = {
+                        let mut all = std::mem::take(self.no_table);
+                        all.push(NoTable {
+                            span: e.span,
+                            ty: value.ty,
+                            trait_id: *trait_id,
+                            copy: self.describe(self.current),
+                            asked_by,
+                            asked_at: self.asked_at[origin],
+                        });
+                        all
+                    };
                 }
             } else {
-                self.dispatch_row(*trait_id, value.ty);
+                self.dispatch_row(*trait_id, value.ty, e.span);
             }
         }
         // A value converted into an `error` carries its type's tag. Inside a
@@ -359,7 +408,7 @@ impl Mono<'_> {
                 }
             } else {
                 let args = std::mem::take(targs);
-                *callee = FnId(self.instantiate(callee.0, &args));
+                *callee = FnId(self.instantiate(callee.0, &args, e.span));
             }
         }
         for c in expr_children(&mut e.kind) {
@@ -475,7 +524,7 @@ impl Mono<'_> {
     /// tag of its specialisation. Rows are made only for what actually
     /// becomes a `dyn`, which is also what the checker proved satisfies the
     /// `impl`'s bounds.
-    fn dispatch_row(&mut self, trait_id: TraitId, ty: TyId) {
+    fn dispatch_row(&mut self, trait_id: TraitId, ty: TyId, at: kite_span::Span) {
         let Some((tag, template, args)) = self.identity(ty) else { return };
         if tag == template || self.rows.iter().any(|(t, r)| *t == trait_id && r.tag == tag) {
             return;
@@ -489,7 +538,7 @@ impl Mono<'_> {
             let made = if count == 0 {
                 self.moved.get(&m.0).copied()
             } else if args.len() >= count {
-                Some(self.instantiate(m.0, &args[..count]))
+                Some(self.instantiate(m.0, &args[..count], at))
             } else {
                 None
             };
