@@ -1204,7 +1204,7 @@ fn split_dots(path: str) -> [str] {
 /// assert(again == flat, "a document with its scalars first comes back equal")
 /// ```
 pub fn emit(doc: Toml) -> str {
-    return emit_section(as_table(doc), [], "")
+    return join(emit_section(as_table(doc), [], ""), "")
 }
 
 /// A table under its header: its own keys, then each sub-table under a
@@ -1215,14 +1215,21 @@ pub fn emit(doc: Toml) -> str {
 /// or `b.c = 1` in it emitted as a bare `[[a]]` and the data was gone. Under
 /// `[[a]]`, `[a.b]` means the last `a`'s `b`, so an element's sub-tables are
 /// written after it with the full path and read back into it.
-fn emit_section(table: { str: Toml }, path: [str], header: str) -> str {
-    var out = header
+///
+/// The text comes back as pieces to be joined once, not as a string grown a
+/// key at a time: `out = out + piece` copies everything written so far, which
+/// made a document's cost the square of its size.
+fn emit_section(table: { str: Toml }, path: [str], header: str) -> [str] {
+    var out: [str] = [header]
     // Scalars.
     for key in keys_of(table) {
         let held = table[key]
         if held != nil {
             if !is_table(held) && !all_tables(held) {
-                out = out + "\(emit_key(key)) = \(emit_value(held))\n"
+                out.push(emit_key(key))
+                out.push(" = ")
+                out.push(emit_value(held))
+                out.push("\n")
             }
         }
     }
@@ -1233,12 +1240,18 @@ fn emit_section(table: { str: Toml }, path: [str], header: str) -> str {
         if held != nil {
             let inner = concat(path, [key])
             if is_table(held) {
-                out = out + "\n" + emit_section(as_table(held), inner, "[\(join_dots(inner))]\n")
+                out.push("\n")
+                for piece in emit_section(as_table(held), inner, "[\(join_dots(inner))]\n") {
+                    out.push(piece)
+                }
             } else if all_tables(held) {
                 let items = as_array(held)
                 if items != nil {
                     for element in items {
-                        out = out + "\n" + emit_section(as_table(element), inner, "[[\(join_dots(inner))]]\n")
+                        out.push("\n")
+                        for piece in emit_section(as_table(element), inner, "[[\(join_dots(inner))]]\n") {
+                            out.push(piece)
+                        }
                     }
                 }
             }
@@ -1310,29 +1323,21 @@ fn emit_text(s: str) -> str {
 }
 
 fn emit_array(items: [Toml]) -> str {
-    var out = "["
-    for i in 0..items.len() {
-        if i > 0 {
-            out = out + ", "
-        }
-        out = out + emit_value(items[i])
+    var out: [str] = []
+    for item in items {
+        out.push(emit_value(item))
     }
-    return out + "]"
+    return "[" + join(out, ", ") + "]"
 }
 
 /// A table nested inside a value position has to be inline — a header would
 /// change what the keys after it belong to.
 fn emit_inline(table: { str: Toml }) -> str {
-    var out = "{ "
-    var first = true
+    var out: [str] = []
     for (key, held) in table {
-        if !first {
-            out = out + ", "
-        }
-        out = out + "\(emit_key(key)) = \(emit_value(held))"
-        first = false
+        out.push("\(emit_key(key)) = \(emit_value(held))")
     }
-    return out + " }"
+    return "{ " + join(out, ", ") + " }"
 }
 
 fn emit_string(body: str) -> str {
