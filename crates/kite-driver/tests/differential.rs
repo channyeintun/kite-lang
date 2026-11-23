@@ -5935,6 +5935,245 @@ fn main() {
         "[greet 1][greet 1]\n[greet 2][greet 2]\n[greet 5][greet 5]\n\
          [greet 6][greet 6]\n[q][q]\n",
     ),
+    // A bound's generic method whose signature mentions `Self`, called from
+    // a default (where `Self` is a parameter) and from a generic function
+    // whose first parameter is the bound one. The receiver's type was written
+    // into the signature in the caller's numbering, where it collided with
+    // the method's own `U`: E0209 "conflicting types for U".
+    (
+        "a-generic-method-mentioning-self-through-a-bound",
+        r#"trait Pipe {
+  fn val(self) -> int
+  fn conv<U>(self, o: Self, u: U) -> U
+  fn pipe<U>(self, f: fn(Self) -> U) -> U {
+    return f(self)
+  }
+  fn text(self) -> str {
+    return self.pipe(|y: Self| "v\(y.val())") + self.conv(self, "s")
+  }
+}
+struct P {
+  n: int
+}
+impl Pipe for P {
+  fn val(self) -> int {
+    return self.n
+  }
+  fn conv<U>(self, o: P, u: U) -> U {
+    return u
+  }
+}
+fn run<T: Pipe>(x: T) -> str {
+  return x.conv(x, "r") + x.pipe(|y: T| "\(y.val())")
+}
+fn main() {
+  io.print(P{ n: 5 }.text())
+  io.print(run(P{ n: 7 }))
+}
+"#,
+        "v5s\nr7\n",
+    ),
+    // A closure is typed by the place it is used: through an `Option<fn …>`
+    // (an argument, a binding, a field, a fallible one), with `-> (T, error)`
+    // written on it as the fallible form wherever it stands, and — passed
+    // where a generic `fn() -> T` or `fn() -> (T, error)` is wanted — with a
+    // block body's result learned from its `return`s. Each of these was
+    // E0211 or E0200.
+    (
+        "a-closure-is-typed-by-where-it-is-used",
+        r#"struct Hooks {
+  on_load: Option<fn() -> (int, error)>
+  on_step: Option<fn(int) -> int>
+}
+struct Job<T> {
+  run: fn() -> (T, error)
+}
+fn apply(f: Option<fn(int) -> int>, x: int) -> int {
+  if f != nil {
+    return f(x)
+  }
+  return x
+}
+fn run<T>(g: fn() -> T) -> T {
+  return g()
+}
+fn retry<T>(g: fn() -> (T, error)) -> (T, error) {
+  let (v, err) = g()
+  check err
+  return v, nil
+}
+fn main() {
+  io.print(apply(|n| n * 3, 2))
+  let f: Option<fn(int) -> int> = |n| n + 1
+  if f != nil {
+    io.print(f(2))
+  }
+  let h = Hooks{ on_load: || { return 1, nil }, on_step: |x| x + 10 }
+  let step = h.on_step
+  if step != nil {
+    io.print(step(2))
+  }
+  let load = h.on_load
+  if load != nil {
+    let (n, e) = load()
+    if e == nil {
+      io.print(n)
+    }
+  }
+  let g: fn() -> (bool, error) = || -> (bool, error) { return true, nil }
+  let (b, e1) = g()
+  if e1 == nil {
+    io.print(b)
+  }
+  let j = Job{ run: || -> (str, error) { return "job", nil } }
+  let (s, e2) = j.run()
+  if e2 == nil {
+    io.print(s)
+  }
+  io.print(run(|| {
+    return 6
+  }))
+  let (v, e3) = retry(|| {
+    if false {
+      return _, errors.new("no")
+    }
+    return 7, nil
+  })
+  if e3 == nil {
+    io.print(v)
+  }
+}
+"#,
+        "6\n3\n12\n1\ntrue\njob\n6\n7\n",
+    ),
+    // A closure given to a generic struct's field is typed as a generic
+    // call's argument is: its parameters from the fields that fix them, and
+    // a block body's result from its `return`s, fallible where the field is.
+    // `Job{ run: || { return true, nil } }` was E0209, nothing pinning `T`.
+    (
+        "a-closure-in-a-generic-literal-solves-its-type",
+        r#"struct Job<T> {
+  run: fn() -> (T, error)
+}
+struct Holder<T> {
+  f: fn(T) -> int
+  v: T
+}
+struct Gen<T> {
+  g: fn() -> T
+}
+fn main() {
+  let j = Job{ run: || {
+    return true, nil
+  } }
+  let (b, e) = j.run()
+  if e == nil {
+    io.print(b)
+  }
+  let h = Holder{ f: |x| x + 1, v: 3 }
+  io.print(h.f(h.v))
+  let g = Gen{ g: || {
+    return "s"
+  } }
+  io.print(g.g())
+}
+"#,
+        "true\n4\ns\n",
+    ),
+    // A named `async fn` used as a value is its starter, a function that
+    // returns the task: passed where `fn(int) -> Task<int>` is wanted, bound
+    // and called, or handed to `task.map`. It was typed `fn(int) -> int`, so
+    // the first two were refused, and called through a binding it answered
+    // a task typed as an `int`.
+    (
+        "an-async-fn-as-a-value-returns-its-task",
+        r#"use std/task
+async fn dbl(x: int) -> int {
+  return x * 2
+}
+fn apply(f: fn(int) -> Task<int>, x: int) -> Task<int> {
+  return f(x)
+}
+async fn main() {
+  let t = apply(dbl, 4)
+  io.print(await t)
+  let f = dbl
+  io.print(await f(5))
+  let all = await task.map([1, 2, 3], dbl)
+  io.print(join_ints(all, ","))
+}
+"#,
+        "8\n10\n2,4,6\n",
+    ),
+    // A derived `Encode` writes a tuple as an array of its elements in order,
+    // in a field, a slice, a nested tuple and a payload, and `Decode` reads
+    // back an array of exactly its length. Both used to refuse a tuple.
+    (
+        "a-tuple-derives-encode-and-decode",
+        r#"use std/json
+
+@derive(Encode, Decode, Debug)
+struct Inner {
+    n: int
+}
+
+@derive(Encode, Decode)
+struct P {
+    t: (int, str)
+    nested: [(bool, Option<float>)]
+    deep: (Inner, (int, int))
+}
+
+@derive(Encode, Decode)
+enum E {
+    Pt(at: (int, int))
+    Bare((str, int))
+}
+
+fn main() {
+    let p = P{ t: (1, "a"), nested: [(true, nil), (false, 2.5)], deep: (Inner{ n: 7 }, (8, 9)) }
+    let text = json.stringify(p.encode())
+    io.print(text)
+    let (doc, err) = json.parse(text)
+    if err == nil {
+        let (q, e2) = P.decode(doc)
+        if e2 == nil {
+            io.print("\(q.t.0) \(q.t.1) \(q.nested.len()) \(q.deep.0.n) \(q.deep.1.1)")
+        }
+    }
+    for bad in ["{\"t\":[1],\"nested\":[],\"deep\":[{\"n\":1},[1,2]]}", "{\"t\":[1,2],\"nested\":[],\"deep\":[{\"n\":1},[1,2]]}"] {
+        let (d, e3) = json.parse(bad)
+        if e3 == nil {
+            let (_, e4) = P.decode(d)
+            if e4 != nil {
+                io.print(e4.message())
+            }
+        }
+    }
+    io.print(json.stringify(E.Pt(at: (1, 2)).encode()))
+    io.print(json.stringify(E.Bare(("x", 3)).encode()))
+    let (ed, e5) = json.parse("{\"Bare\":[[\"y\",4]]}")
+    if e5 == nil {
+        let (ev, e6) = E.decode(ed)
+        if e6 == nil {
+            match ev {
+                E.Bare(b) => io.print("\(b.0)\(b.1)")
+                E.Pt(at) => io.print(at.0)
+            }
+        }
+    }
+}
+
+"#,
+        r#"{"t":[1,"a"],"nested":[[true,null],[false,2.5]],"deep":[{"n":7},[8,9]]}
+1 a 2 7 9
+P.t: expected an array of 2 values
+P.t.1: expected a string
+{"Pt":{"at":[1,2]}}
+{"Bare":[["x",3]]}
+y4
+"#,
+    ),
     // An `Option<fn(…)>` proved present is the function it holds, so it can
     // be called as written, after an `if` or an early return. The call
     // looked at the declared type and said it was not a function.

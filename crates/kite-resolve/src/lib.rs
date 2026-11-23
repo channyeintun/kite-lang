@@ -1293,8 +1293,13 @@ fn collect_functions(file: &SourceFile, map: &mut ResolveMap, diags: &mut DiagBa
                 let _ = &seen;
                 let Some(written) = map.type_by_name_in(&module, &target) else {
                     // A built-in type is known everywhere, so "no such type
-                    // in this module" said something false about it.
-                    if matches!(target.as_str(), "int" | "float" | "bool" | "str" | "error" | "JsValue") {
+                    // in this module" said something false about it. That
+                    // includes the built-in generic ones, `Option<int>` and
+                    // `Task<int>`, written unqualified.
+                    let builtin = matches!(target.as_str(), "int" | "float" | "bool" | "str" | "error" | "JsValue")
+                        || imp.self_ty.is_generic_name("Option")
+                        || imp.self_ty.is_generic_name("Task");
+                    if builtin {
                         let mut d = Diagnostic::error(
                             codes::E0204,
                             format!("`{}` is not a struct or an enum", target),

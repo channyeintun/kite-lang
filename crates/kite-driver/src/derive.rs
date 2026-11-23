@@ -157,7 +157,16 @@ struct ByHand {
     /// Methods and associated functions in an inherent `impl`, with where
     /// each was written.
     methods: HashMap<String, Vec<(String, Span)>>,
+    /// For each generic type's hand-written `impl<T: B> Trait for Type<T>`,
+    /// keyed as [`ByHand::traits`] is, the trait and the bounds on each of
+    /// the type's arguments, in order: what a field of that type must meet
+    /// for the walk to reach the method.
+    bounded: HashMap<String, Vec<(String, Vec<ArgBounds>)>>,
 }
+
+/// One argument position of a hand-written `impl`'s type: the parameter
+/// written there, and the bounds the `impl` gives it.
+type ArgBounds = (String, Vec<String>);
 
 impl ByHand {
     /// Whether `ty` already has what deriving `trait_` would write — the
@@ -297,6 +306,27 @@ pub fn expand(
                 } else {
                     text
                 };
+                let bounds: Vec<(String, Vec<String>)> = imp
+                    .self_ty
+                    .args
+                    .iter()
+                    .map(|arg| {
+                        let param = match arg {
+                            Type::Path(p) if p.is_simple() => p.segments[0].name.clone(),
+                            _ => String::new(),
+                        };
+                        let on = imp
+                            .generics
+                            .iter()
+                            .find(|g| g.name.name == param)
+                            .map(|g| g.bounds.iter().map(|b| b.text()).collect())
+                            .unwrap_or_default();
+                        (param, on)
+                    })
+                    .collect();
+                if bounds.iter().any(|(_, on)| !on.is_empty()) {
+                    by_hand.bounded.entry(target.clone()).or_default().push((trait_name.clone(), bounds));
+                }
                 by_hand.traits.entry(target).or_default().push(trait_name);
             }
             None => {
@@ -398,10 +428,14 @@ pub fn expand(
                 avoid,
                 diags,
                 failed: false,
+                clash: false,
             };
-            let text = w.item(&decls[index], at);
+            let mut text = w.item(&decls[index], at);
             if w.failed {
-                continue;
+                if w.clash {
+                    continue;
+                }
+                text = w.stand_in(&decls[index]);
             }
             source.push('\n');
             source.push_str(&text);
@@ -566,6 +600,9 @@ struct Writer<'a, 'd> {
     /// emitted half-written, so one bad field is one diagnostic and not a
     /// cascade of parse errors in generated text.
     failed: bool,
+    /// Set when the failure is that the method is already written by hand,
+    /// so that no stand-in is declared beside it (see [`Writer::stand_in`]).
+    clash: bool,
 }
 
 /// Statements accumulate as lines at a known indent; an expression is a string.
@@ -638,6 +675,7 @@ impl<'a> Writer<'a, '_> {
         // derived `impl Debug`, which is the one a call reaches.
         if let Some(written) = self.by_hand.covers(&decl.qualified, self.trait_) {
             self.failed = true;
+            self.clash = true;
             let mut d = match written {
                 None => Diagnostic::error(
                     codes::E0701,
@@ -667,6 +705,44 @@ impl<'a> Writer<'a, '_> {
             Derivable::Hash => self.hash_item(decl),
             Derivable::Encode => self.encode_item(decl),
             Derivable::Decode => self.decode_item(decl),
+        }
+    }
+
+    /// What a derive that was refused declares instead: the method, with a
+    /// body that is never run — the refusal is an error, so nothing is built.
+    /// Without it each later `x.encode()` or `T.decode(doc)` was an E0205 of
+    /// its own, and one field the derive could not write was four errors.
+    fn stand_in(&mut self, decl: &Decl) -> String {
+        let j = self.json.clone();
+        let (head, target) = self.header(decl);
+        match self.trait_ {
+            Derivable::Debug => wrap_impl(
+                &target,
+                Some(&format!("{}Debug", head)),
+                "fn debug(self) -> str",
+                &["    return \"\"".to_string()],
+            ),
+            Derivable::Hash => wrap_impl(
+                &target,
+                Some(&format!("{}Hash", head)),
+                "fn hash(self) -> int",
+                &["    return 0".to_string()],
+            ),
+            Derivable::Encode => wrap_impl(
+                &target,
+                Some(&format!("{}{j}.Encode", head)),
+                &format!("fn encode(self) -> {j}.Json"),
+                &[format!("    return {j}.Json.Null")],
+            ),
+            Derivable::Decode => {
+                let doc = self.local("doc");
+                wrap_impl(
+                    &format!("{}{}", head, target),
+                    None,
+                    &format!("pub fn decode({doc}: {j}.Json) -> ({}, error)", target),
+                    &["    return _, errors.new(\"not derived\")".to_string()],
+                )
+            }
         }
     }
 
@@ -1147,12 +1223,19 @@ impl<'a> Writer<'a, '_> {
                 out.push(format!("{}}}", pad));
                 format!("{j}.Json.Object({})", object)
             }
-            Type::Tuple { .. } => self.cannot(
-                ty.span(),
-                "a tuple",
-                "a tuple has no field names, so what it should become in JSON is a choice — use \
-                 a struct, which has made that choice",
-            ),
+            // A tuple is an array of its elements in order, as a positional
+            // payload is: the order is the only name an element has.
+            Type::Tuple { elems, .. } => {
+                let held = self.temp("tuple");
+                let list = self.temp("items");
+                out.push(format!("{}let {} = {}", pad, held, expr));
+                out.push(format!("{}var {}: [{j}.Json] = []", pad, list));
+                for (i, e) in elems.iter().enumerate() {
+                    let value = self.encode_of(e, &format!("{}.{}", held, i), depth, out);
+                    out.push(format!("{}{}.push({})", pad, list, value));
+                }
+                format!("{j}.Json.Array({})", list)
+            }
             Type::Fn { .. } => {
                 self.cannot(ty.span(), "a function", "a function value is not data")
             }
@@ -1522,12 +1605,32 @@ impl<'a> Writer<'a, '_> {
                 out.push(format!("{}}}", pad));
                 object
             }
-            Type::Tuple { .. } => self.cannot(
-                ty.span(),
-                "a tuple",
-                "a tuple has no field names, so what it should become in JSON is a choice — use \
-                 a struct, which has made that choice",
-            ),
+            // An array of exactly the tuple's arity, read element by element;
+            // a longer or shorter one is refused, as a positional payload's is.
+            Type::Tuple { elems, .. } => {
+                let node = self.temp("node");
+                let n = elems.len();
+                out.push(format!("{}let {} = {}", pad, node, source));
+                out.push(format!("{}if {} == nil {{", pad, node));
+                out.push(format!("{}    return _, errors.new(\"{}: missing\")", pad, where_));
+                out.push(format!("{}}}", pad));
+                out.push(format!("{}if {j}.items({}).len() != {} {{", pad, node, n));
+                out.push(format!(
+                    "{}    return _, errors.new(\"{}: expected an array of {} value{}\")",
+                    pad,
+                    where_,
+                    n,
+                    if n == 1 { "" } else { "s" }
+                ));
+                out.push(format!("{}}}", pad));
+                let mut values = Vec::new();
+                for (i, e) in elems.iter().enumerate() {
+                    let at = format!("{}.{}", where_, i);
+                    let value = self.decode_of(e, &format!("{j}.at({}, {})", node, i), &at, depth, out);
+                    values.push(value);
+                }
+                format!("({})", values.join(", "))
+            }
             Type::Fn { .. } => {
                 self.cannot(ty.span(), "a function", "a function value is not data")
             }
@@ -1562,11 +1665,78 @@ impl<'a> Writer<'a, '_> {
             return "\"\"".to_string();
         }
         if let Type::Path(p) = ty {
-            if !p.args.is_empty() && !self.args_meet(&base, p) {
+            if !p.args.is_empty() && (!self.args_meet(&base, p) || !self.hand_bounds_met(&base, p)) {
                 return "\"\"".to_string();
             }
         }
         format!("{}.{}()", expr, self.trait_.method())
+    }
+
+    /// Whether the arguments of a field's generic type meet the bounds of the
+    /// trait's hand-written `impl` for it, having said which one does not.
+    /// `b: Box<Plain>` beside `impl<T: Hash> Debug for Box<T>` otherwise
+    /// reached the checker as a call in generated code, and was reported at a
+    /// line of `<derive>` nobody wrote. Only the prelude traits a built-in or
+    /// derived type is known to have are judged here; any other bound is the
+    /// checker's.
+    fn hand_bounds_met(&mut self, base: &str, p: &TypePath) -> bool {
+        let qualified = declared_name(self.aliases, &self.lookup, base);
+        let path = self.trait_.path();
+        let Some(impls) = self.by_hand.bounded.get(&qualified) else { return true };
+        let Some((_, bounds)) = impls.iter().find(|(t, _)| t == path) else { return true };
+        for ((param, on), arg) in bounds.iter().zip(&p.args) {
+            for bound in on {
+                if !matches!(bound.as_str(), "Debug" | "Hash" | "Display") || !self.lacks(arg, bound) {
+                    continue;
+                }
+                let fix = match Derivable::parse(bound) {
+                    Some(d) => format!("add `@derive({})` to it", d.name()),
+                    None => format!("write `impl {} for {}`", bound, render_type(arg)),
+                };
+                self.cannot(
+                    arg.span(),
+                    &format!("a field of type `{}`", path_text(p)),
+                    &format!(
+                        "`{}` implements `{}` only where `{}: {}`, and `{}` is not one — {}",
+                        base,
+                        self.trait_.name(),
+                        param,
+                        bound,
+                        render_type(arg),
+                        fix
+                    ),
+                );
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Whether a declared struct or enum, written as `arg`, is known not to
+    /// have the prelude trait `bound`: it neither derives it nor implements
+    /// it by hand. A built-in, a parameter, an alias, a generic type or a
+    /// name the walk does not know is left to the checker.
+    fn lacks(&self, arg: &Type, bound: &str) -> bool {
+        let Type::Path(p) = arg else { return false };
+        if !p.args.is_empty() || self.through_alias(arg).is_some() {
+            return false;
+        }
+        if p.segments.len() == 1 {
+            let name = &p.segments[0].name;
+            if matches!(name.as_str(), "int" | "float" | "bool" | "str") || self.params.contains(name) {
+                return false;
+            }
+        }
+        let text = p.text();
+        let qualified = declared_name(self.aliases, &self.lookup, &text);
+        let Some(decl) = self.known.get(&qualified).map(|i| &self.decls[*i]) else {
+            // A type that derives nothing is still declared, and still has
+            // only what is written for it.
+            return self.all_types.iter().any(|(n, _)| *n == qualified)
+                && !self.by_hand.traits.get(&qualified).is_some_and(|t| t.iter().any(|t| t == bound));
+        };
+        let derives = decl.derives.iter().any(|(t, _)| t.name() == bound);
+        !derives && !self.by_hand.traits.get(&qualified).is_some_and(|t| t.iter().any(|t| t == bound))
     }
 
     /// Whether the arguments of a field's generic type meet what that type's

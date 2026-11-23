@@ -1,0 +1,34 @@
+// A derived walk that reaches a generic type through its hand-written,
+// bounded `impl` checks the field's argument against that bound, and says so
+// at the field. It was an E0208 at a line of `<derive>` nobody wrote.
+
+struct Box<T> {
+    item: T
+}
+
+impl<T: Hash> Debug for Box<T> {
+    fn debug(self) -> str {
+        return "Box(\(self.item.hash()))"
+    }
+}
+
+struct Plain {
+    n: int
+}
+
+@derive(Hash)
+struct Hashed {
+    n: int
+}
+
+@derive(Debug)
+struct Outer {
+    b: Box<Plain> //~ ERROR E0702
+    h: Box<Hashed>
+    i: Box<int>
+}
+
+fn main() {
+    let o = Outer{ b: Box{ item: Plain{ n: 1 } }, h: Box{ item: Hashed{ n: 2 } }, i: Box{ item: 3 } }
+    io.print(o.debug())
+}

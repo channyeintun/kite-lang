@@ -1515,13 +1515,12 @@ fn main() {
 }
 ```
 
-A closure's parameter types come from the parameter it is passed to, once that
-parameter's type is fully known. `fold(items, 0, |acc, item| acc + item.price)`
-and `filter(xs, |n| n > 0)` need no annotation, because every type parameter in
-the function type is fixed by the other arguments. When the closure is the only
-thing that could fix one — `U` in `fn(T) -> U` — a bare `|n| …` is `E0211`,
-"cannot infer the type of `n`", even though `T` is known. Annotate the
-parameter, or pass a named function.
+A closure's parameter types come from the parameter it is passed to, each one once
+the other arguments have fixed its type. `fold(items, 0, |acc, item| acc + item.price)`,
+`filter(xs, |n| n > 0)` and `apply([1, 2, 3], |n| "n\(n)")` below need no annotation:
+`T` is fixed by the slice, and `U` in `fn(T) -> U` — which only the closure could
+fix — is whatever it returns (a block body's `return`s say it). A parameter whose own
+type nothing fixes is still `E0211`, "cannot infer the type of `n`".
 
 ```kite
 fn apply<T, U>(items: [T], f: fn(T) -> U) -> [U] {
@@ -1540,25 +1539,19 @@ fn main() {
     for s in apply([1, 2, 3], label) {
         io.print(s)
     }
-    for s in apply([1, 2], |n: int| "x\(n)") {
+    for s in apply([1, 2], |n| "x\(n)") {
         io.print(s)
     }
 }
 ```
 
 ```kite fails
-fn apply<T, U>(items: [T], f: fn(T) -> U) -> [U] {
-    var out: [U] = []
-    for item in items {
-        out.push(f(item))
-    }
-    return out
+fn each<T>(f: fn(T) -> int) -> int {
+    return 0
 }
 
 fn main() {
-    for s in apply([1, 2, 3], |n| "n\(n)") { //~ E0211
-        io.print(s)
-    }
+    io.print(each(|n| 1)) //~ E0211
 }
 ```
 
@@ -1951,7 +1944,8 @@ Book.year: expected a whole number
 
 So the JSON encoding of an enum is: unit variant → its own name as a string;
 positional payload → `{"Variant": [...]}`; named payload → `{"Variant": {...}}`.
-Decoding holds to that: a positional payload must be an array of exactly its
+A tuple, wherever it stands, is an array of its elements in order. Decoding
+holds to that: a positional payload or a tuple must be an array of exactly its
 length, an object with two keys is an error, and a unit variant written as an
 object (or a payload variant written as a string) is refused with a message that
 says which form to write. An `int` too big for a JSON number to carry exactly
@@ -1997,7 +1991,10 @@ parameters is walked through that parameter's own method, and the generated
 `impl` bounds the parameter by the trait — `impl<T: Debug> Debug for Box<T>` —
 so a `Box<int>` is `Debug` and a `Box<[int]>` is not (`E0208` where it is
 used; `E0702` naming the field when a type deriving `Debug` has a
-`Box<[int]>` field). A parameter no field reaches gets no bound. `Encode` and `Decode` still
+`Box<[int]>` field). The same `E0702` names a field whose generic type
+implements the trait by hand with a bound its argument misses —
+`b: Box<Plain>` beside `impl<T: Hash> Debug for Box<T>`, where `Plain` is not
+`Hash`. A parameter no field reaches gets no bound. `Encode` and `Decode` still
 refuse a generic type (`E0702`).
 
 ```kite
