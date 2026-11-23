@@ -1231,7 +1231,10 @@ read as a different number), so `@derive(Decode)` refuses `3.7` for an `int`
 field. `of_int(n) -> Json` is what `@derive(Encode)` writes for an `int`: a
 number inside that range, and outside it the decimal text as a string, which
 `int_of` reads back — so no `int` is silently changed in either direction.
-`stringify` writes a number
+`parse` stops at 128 levels of nesting, and `stringify` and `pretty` trap past
+the same depth (`check_nesting(v) -> error` tests first), so everything `parse`
+returns can be written and no backend runs out of stack on the way. `stringify`
+writes a number
 that is whole and fits an `int` without a `.0`, and any other finite one as the
 float it is: 2⁶³ is `9223372036854775808.0`. JSON cannot spell an infinity or
 a NaN, so each is written `null`, as JavaScript's `JSON.stringify` does.

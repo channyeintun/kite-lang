@@ -240,6 +240,16 @@ fn checks() -> [error] {
     out.push(test.is_true(json.int_of(parsed("\"9223372036854775808\"")) == nil, "text past the range is nil"))
     out.push(test.is_true(json.int_of(parsed("\"12abc\"")) == nil, "text that is not a number is nil"))
 
+    // ---- writing stops where reading does ----
+    //
+    // `stringify` of 2,000 nested arrays ran out of stack on Wasm alone.
+    out.push(test.ok(json.check_nesting(wrapped(128)), "128 levels can be written"))
+    out.push(test.failed(json.check_nesting(wrapped(129)), "129 levels cannot"))
+    out.push(test.equal_int(json.stringify(wrapped(128)).len(), 256, "the deepest value that parses is written"))
+    out.push(test.is_true(json.pretty(wrapped(128)).len() > 256, "and written indented"))
+    out.push(test.failed(json.check_nesting(wrapped_object(129)), "an object counts as a level"))
+    out.push(test.ok(json.check_nesting(wrapped_object(128)), "128 objects can be written"))
+
     // ---- a derived enum decoder is as strict as the encoder is exact ----
     out.push(test.equal_str(kind("\"Plain\""), "Plain", "a unit variant is its name"))
     out.push(test.equal_str(kind("{\"Two\":[1,\"x\"]}"), "Two(1, \"x\")", "a payload is an object with one key"))
@@ -309,6 +319,25 @@ fn nested(depth: int) -> str {
         close = close + "]"
     }
     return open + close
+}
+
+/// An array nested `levels` deep, built directly rather than parsed.
+fn wrapped(levels: int) -> json.Json {
+    var v = json.Json.Array([])
+    for n in 1..levels {
+        v = json.Json.Array([v])
+    }
+    return v
+}
+
+fn wrapped_object(levels: int) -> json.Json {
+    var v = json.Json.Object({ })
+    for n in 1..levels {
+        var fields: { str: json.Json } = { }
+        fields["k"] = v
+        v = json.Json.Object(fields)
+    }
+    return v
 }
 
 fn main() {
