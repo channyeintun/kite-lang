@@ -4279,7 +4279,7 @@ impl<'a> Checker<'a> {
                 let mut key_ty = hint.map(|(k, _)| k);
                 let mut val_ty = hint.map(|(_, v)| v);
                 // The keys the compiler knows, and where each was first given.
-                let mut known_keys: std::collections::HashMap<String, Span> =
+                let mut known_keys: std::collections::HashMap<String, (Span, String)> =
                     std::collections::HashMap::new();
                 for e in entries {
                     let k = self.expr(&e.key, key_ty);
@@ -4303,24 +4303,25 @@ impl<'a> Checker<'a> {
                         Some(want) => self.accept(v, want, None),
                     };
                     // A key the compiler knows, written twice: the later
-                    // entry replaces the earlier, whose value is never seen.
+                    // entry's value replaces the earlier, which is never seen.
                     // Almost always a copied line whose key was not edited.
-                    let known = |e: &hir::Expr| match &e.kind {
-                        ExprKind::Int(i) => Some(i.to_string()),
-                        ExprKind::Str(s) => Some(format!("{:?}", s)),
-                        ExprKind::Bool(b) => Some(b.to_string()),
-                        _ => None,
-                    };
-                    if let Some(key) = known(&k) {
-                        if let Some(&first) = known_keys.get(&key) {
-                            self.diags.push(
-                                Diagnostic::warning(codes::E0112, format!("the key {} is given twice", key))
-                                    .with_primary(k.span, "this entry replaces the earlier one")
-                                    .with_secondary(first, "first given here, and never seen")
-                                    .with_note("a map holds one value per key; remove one of the two"),
-                            );
+                    if let Some((key, shown)) = known_key(&k) {
+                        if let Some((first, first_shown)) = known_keys.get(&key) {
+                            let mut d =
+                                Diagnostic::warning(codes::E0112, format!("the key {} is given twice", shown))
+                                    .with_primary(k.span, "this entry's value replaces the earlier one's")
+                                    .with_secondary(*first, "first given here, and its value never seen");
+                            // `0.0` and `-0.0` are one key, and the map keeps
+                            // the one written first.
+                            if *first_shown != shown {
+                                d = d.with_note(format!(
+                                    "`{}` and `{}` are equal, so they are one key; the map keeps `{}`",
+                                    first_shown, shown, first_shown
+                                ));
+                            }
+                            self.diags.push(d.with_note("a map holds one value per key; remove one of the two"));
                         } else {
-                            known_keys.insert(key, k.span);
+                            known_keys.insert(key, (k.span, shown));
                         }
                     }
                     flat.push(k);
@@ -14658,6 +14659,46 @@ fn expr_defers(e: &ast::Expr) -> bool {
     let mut found = false;
     visit_expr_stmts(e, false, &mut |s| found |= matches!(s, ast::Stmt::Defer { .. }));
     found
+}
+
+/// A map key the compiler can see the value of, as a text that is the same
+/// exactly when two keys are equal under the map's `==`, and as it is shown:
+/// a literal or a constant of any key type, a negated number, an optional's
+/// wrapping of one, and a tuple of them. `0.0` and `-0.0` are one key, as the
+/// maps hold them; a NaN equals nothing, so it is never a duplicate.
+fn known_key(e: &hir::Expr) -> Option<(String, String)> {
+    match &e.kind {
+        ExprKind::Int(i) => Some((i.to_string(), i.to_string())),
+        ExprKind::Str(s) => Some((format!("{:?}", s), format!("{:?}", s))),
+        ExprKind::Bool(b) => Some((b.to_string(), b.to_string())),
+        ExprKind::Float(f) => float_key(*f),
+        ExprKind::Unary { op: hir::UnOp::NegInt | hir::UnOp::NegIntWrap, operand } => match operand.kind {
+            ExprKind::Int(i) => i.checked_neg().map(|n| (n.to_string(), n.to_string())),
+            _ => None,
+        },
+        ExprKind::Unary { op: hir::UnOp::NegFloat, operand } => match operand.kind {
+            ExprKind::Float(f) => float_key(-f),
+            _ => None,
+        },
+        ExprKind::Wrap { value } => known_key(value),
+        ExprKind::TupleNew { elems } => {
+            let parts = elems.iter().map(known_key).collect::<Option<Vec<_>>>()?;
+            let key = parts.iter().map(|(k, _)| k.as_str()).collect::<Vec<_>>().join(", ");
+            let shown = parts.iter().map(|(_, s)| s.as_str()).collect::<Vec<_>>().join(", ");
+            Some((format!("({})", key), format!("({})", shown)))
+        }
+        _ => None,
+    }
+}
+
+/// A float key as [`known_key`] gives it.
+fn float_key(f: f64) -> Option<(String, String)> {
+    if f.is_nan() {
+        return None;
+    }
+    let shown = format!("{:?}", f);
+    let key = if f == 0.0 { "0.0".to_string() } else { shown.clone() };
+    Some((key, shown))
 }
 
 /// A constructor's evaluation order as `StructNew` and `EnumNew` carry it:

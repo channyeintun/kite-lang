@@ -1136,6 +1136,37 @@ fn a_map_literal_giving_one_key_twice_warns() {
     assert!(c.render().contains("the key \"a\" is given twice"), "{}", c.render());
 }
 
+/// Every key the compiler can see is compared: a negated number, a float by
+/// value (so `0.0` and `-0.0` are one key, and a NaN is never a duplicate),
+/// a constant standing for one, and a tuple of them.
+#[test]
+fn a_map_literal_key_of_any_literal_form_given_twice_warns() {
+    let c = run("let NEG = -1\n\
+                 fn main() {\n  let a = {-1: 1, NEG: 2}\n  let b = {1.5: 1, 1.5: 2}\n\
+                 \x20 let z = {0.0: 1, -0.0: 2}\n  let t = {(1, \"x\"): 1, (1, \"x\"): 2}\n\
+                 \x20 let nan = 0.0 / 0.0\n  let d = {(1, -2.5): 1, (1, 2.5): 2, (-1, -2.5): 3}\n\
+                 \x20 io.print(a.len() + b.len() + z.len() + t.len() + d.len())\n  io.print(nan)\n}\n");
+    let twice: Vec<String> = c
+        .diags
+        .iter()
+        .filter(|d| d.code == Some(codes::E0112))
+        .map(|d| d.message.clone())
+        .collect();
+    assert_eq!(
+        twice,
+        vec![
+            "the key -1 is given twice",
+            "the key 1.5 is given twice",
+            "the key -0.0 is given twice",
+            "the key (1, \"x\") is given twice",
+        ],
+        "{}",
+        c.render()
+    );
+    assert!(!c.diags.has_errors(), "must be warnings:\n{}", c.render());
+    assert!(c.render().contains("`0.0` and `-0.0` are equal, so they are one key"), "{}", c.render());
+}
+
 /// A built-in type with no text form cannot be given an `impl`, so E0207's
 /// note names what does compile for its shape — it used to say "write `impl
 /// Display for Option<int>`", which can never compile.

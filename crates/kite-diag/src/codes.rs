@@ -239,8 +239,10 @@ codes! {
          A loop label is a name too: a loop inside another may not reuse the \
          outer one's label, or `break outer` would leave the inner loop. And a \
          map literal giving one known key twice, `{\"a\": 1, \"a\": 2}`, is a \
-         warning under this code: the later entry wins, and the earlier value \
-         is never seen.";
+         warning under this code: the later value replaces the earlier, which \
+         is never seen. A key is known when it is a literal or a constant, a \
+         negated number, or a tuple of those; floats are compared by value, \
+         so `0.0` and `-0.0` are one key.";
 
     E0113 = "E0113", "wrong number of arguments",
         "Kite has no default arguments, no variadics, and no overloading, so \

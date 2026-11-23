@@ -679,9 +679,10 @@ fn main() {
 }
 ```
 
-A literal that gives one key twice, `{"a": 1, "a": 2}`, keeps the later entry; where both
-keys are literals or constants it is the `E0112` warning, since the earlier value is never
-seen.
+A literal that gives one key twice, `{"a": 1, "a": 2}`, keeps the later value under the key
+as first written (`{-0.0: 1, 0.0: 2}` holds `-0.0` with `2`; two NaN keys are two entries).
+Where both keys are literals or constants — negative numbers, floats and tuples of them
+included — it is the `E0112` warning, since the earlier value is never seen.
 
 ### Maps iterate in pairs
 

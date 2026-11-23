@@ -785,9 +785,15 @@ m.remove("a")         // takes the entry out; a key that is not there is not an 
 
 Map indexing returns `Option<V>`, never a zero value.
 
-A map literal that gives one key twice keeps the later entry. Where the two
-keys are literals or constants, so the compiler can see they are equal, that is
-a warning ([E0112](#16-diagnostics)): the earlier value is never seen.
+A map literal that gives one key twice holds one entry for it: the later value,
+under the key as it was first written. That is what `m[k] = v` does to a key
+already there — the value changes and the stored key stays — and it shows only
+for keys that are equal without being the same: `{-0.0: 1, 0.0: 2}` holds
+`-0.0` with `2`. A NaN equals nothing, itself included, so two NaN keys are two
+entries. Where the two keys are literals or constants — a negated number, a
+float compared by value, and a tuple of them included — so the compiler can see
+they are equal, that is a warning ([E0112](#16-diagnostics)): the earlier value
+is never seen.
 
 `remove` shifts the entries after it down, so insertion order keeps meaning what
 it says and `keys()` and `values()` still line up element for element. Its
