@@ -72,6 +72,15 @@ async fn checks() -> [error] {
     let parallel = await task.parallel([1, 2, 3], |n: int| n * 2)
     out.push(test.equal_ints(parallel, [2, 4, 6], "parallel maps"))
 
+    // map starts one task per item before awaiting any, so they run
+    // together, and answers in the order of the items, not of finishing.
+    let begun = time.now()
+    let names = await task.map([30, 10, 20], |ms: int| work("w\(ms)", ms))
+    out.push(test.equal_strs(names, ["w30", "w10", "w20"], "map keeps the order of the items"))
+    out.push(test.equal_int(time.now() - begun, 30, "map runs them together"))
+    let none: [int] = []
+    out.push(test.equal_int((await task.map(none, |ms: int| work("x", ms))).len(), 0, "map of nothing"))
+
     return out
 }
 

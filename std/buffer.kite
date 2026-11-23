@@ -28,13 +28,39 @@ pub fn count(b: F64) -> int {
     return b.values.len() / b.stride
 }
 
+// The shape is checked, with `require`, everywhere it is used. The slice
+// underneath only knows its own length, so a field past the stride, or a
+// negative one, is a valid index into the *neighbouring* record, and a push
+// of the wrong length shifts every record after it: both were silent wrong
+// answers, and a trap that names the mistake is the better failure.
+//
+// Each check tests first and calls `require` only once it has failed: the
+// arguments of a call are worked out before it, so `require(ok, "\(…)")`
+// builds its message on every call, and inside `get` that made reading a
+// buffer ten times slower on the VM and thirty on native code.
+
+fn check_field(b: F64, field: int) {
+    if field < 0 || field >= b.stride {
+        require(false, "buffer: field \(field) is outside a record of \(b.stride)")
+    }
+}
+
+fn check_record(b: F64, record: int) {
+    if record < 0 || record >= count(b) {
+        require(false, "buffer: record \(record) is outside a buffer of \(count(b))")
+    }
+}
+
 /// One number of one record.
 pub fn get(b: F64, record: int, field: int) -> float {
+    check_record(b, record)
+    check_field(b, field)
     return b.values[record * b.stride + field]
 }
 
 /// A whole record, as a slice of `stride` numbers.
 pub fn record(b: F64, index: int) -> [float] {
+    check_record(b, index)
     var out: [float] = []
     for i in 0..b.stride {
         out.push(b.values[index * b.stride + i])
@@ -44,12 +70,19 @@ pub fn record(b: F64, index: int) -> [float] {
 
 /// A buffer with one record appended. Buffers are values, like slices: this
 /// produces a new one rather than editing the one it was given.
+///
+/// `values` must be exactly one record, `stride` numbers long.
 pub fn push(b: F64, values: [float]) -> F64 {
+    if values.len() != b.stride {
+        require(false, "buffer: pushed \(values.len()) numbers into records of \(b.stride)")
+    }
     return F64{ values: concat(b.values, values), stride: b.stride }
 }
 
 /// A buffer with one number replaced.
 pub fn set(b: F64, record: int, field: int, value: float) -> F64 {
+    check_record(b, record)
+    check_field(b, field)
     var out = b.values
     out[record * b.stride + field] = value
     return F64{ values: out, stride: b.stride }
@@ -58,11 +91,71 @@ pub fn set(b: F64, record: int, field: int, value: float) -> F64 {
 /// Every value of one field, across every record — the column form, which is
 /// what a bounds check or a sum wants.
 pub fn column(b: F64, field: int) -> [float] {
+    check_field(b, field)
     var out: [float] = []
     for i in 0..count(b) {
         out.push(get(b, i, field))
     }
     return out
+}
+
+/// Every record, as a slice of slices — the copy out of the flat layout.
+///
+/// ```kite
+/// let b = from_records(2, [[0.0, 1.0], [2.0, 3.0]])
+/// assert(records(b).len() == 2 && records(b)[1][0] == 2.0, "records")
+/// ```
+pub fn records(b: F64) -> [[float]] {
+    var out: [[float]] = []
+    for i in 0..count(b) {
+        out.push(record(b, i))
+    }
+    return out
+}
+
+/// A buffer of `stride`-long records built from rows, in one go — the copy
+/// into the flat layout. Every row must be exactly `stride` long, as with
+/// [`push`]; the stride is given rather than read off the first row so that
+/// no rows at all is still a buffer of a known shape.
+///
+/// ```kite
+/// let b = from_records(3, [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])
+/// assert(count(b) == 2 && get(b, 1, 2) == 6.0, "from_records")
+/// ```
+///
+/// One copy of each row, where pushing them one at a time copies the whole
+/// buffer each time.
+pub fn from_records(stride: int, rows: [[float]]) -> F64 {
+    let shape = max(stride, 1)
+    var values: [float] = []
+    for row in rows {
+        if row.len() != shape {
+            require(false, "buffer: a row of \(row.len()) numbers in records of \(shape)")
+        }
+        for v in row {
+            values.push(v)
+        }
+    }
+    return F64{ values: values, stride: shape }
+}
+
+/// A buffer with `f` applied to one field of every record, the others
+/// untouched.
+///
+/// ```kite
+/// let b = from_records(2, [[1.0, 2.0], [3.0, 4.0]])
+/// let scaled = map_column(b, 1, |v: float| v * 10.0)
+/// assert(get(scaled, 1, 1) == 40.0 && get(scaled, 1, 0) == 3.0, "map_column")
+/// ```
+pub fn map_column(b: F64, field: int, f: fn(float) -> float) -> F64 {
+    check_field(b, field)
+    var out = b.values
+    var i = field
+    for i < out.len() {
+        out[i] = f(out[i])
+        i += b.stride
+    }
+    return F64{ values: out, stride: b.stride }
 }
 
 /// The smallest and largest value in a field.

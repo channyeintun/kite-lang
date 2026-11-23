@@ -56,7 +56,25 @@ pub fn equal_bool(found: bool, want: bool, what: str) -> error {
 /// Floats compare within a tolerance, because comparing them exactly is
 /// almost never what is meant — the compiler warns about `==` on floats for
 /// the same reason.
+///
+/// Equal floats pass whatever the tolerance, infinities included, and a NaN
+/// passes when a NaN was wanted. Both used to fail, since the test was only
+/// `|found − want| ≤ tolerance`, and `inf − inf` is a NaN, which is within no
+/// tolerance: `equal_float(inf, inf, 0.0, …)` said "expected inf, found inf".
+///
+/// ```kite
+/// let inf = 1.0 / 0.0
+/// assert(equal_float(inf, inf, 0.0, "inf") == nil, "an infinity is itself")
+/// assert(equal_float(0.0 / 0.0, 0.0 / 0.0, 0.0, "nan") == nil, "a NaN was wanted")
+/// assert(equal_float(0.0 / 0.0, 1.0, 1000.0, "nan") != nil, "and only then")
+/// ```
 pub fn equal_float(found: float, want: float, tolerance: float, what: str) -> error {
+    if found <= want && found >= want {
+        return nil
+    }
+    if !(found >= found) && !(want >= want) {
+        return nil
+    }
     if absf(found - want) <= tolerance {
         return nil
     }
@@ -75,6 +93,57 @@ pub fn equal_strs(found: [str], want: [str], what: str) -> error {
         return nil
     }
     return errors.new("\(what): expected [\(join(want, ", "))], found [\(join(found, ", "))]")
+}
+
+/// Floats, pair by pair, under [`equal_float`]'s rule: the same length, and
+/// each found float equal to its wanted one or within `tolerance` of it.
+///
+/// ```kite
+/// assert(equal_floats([0.1 + 0.2, 1.0], [0.3, 1.0], 0.000001, "sums") == nil, "within tolerance")
+/// assert(equal_floats([1.0], [1.0, 2.0], 0.0, "short") != nil, "a length differs")
+/// ```
+pub fn equal_floats(found: [float], want: [float], tolerance: float, what: str) -> error {
+    if found.len() != want.len() {
+        return errors.new("\(what): expected \(want.len()) floats, found \(found.len())")
+    }
+    for i in 0..found.len() {
+        if equal_float(found[i], want[i], tolerance, what) != nil {
+            return errors.new("\(what): at \(i), expected \(want[i]) ± \(tolerance), found \(found[i])")
+        }
+    }
+    return nil
+}
+
+/// Passes when `found` contains `needle`, which is how a test of an error
+/// message usually wants to ask: the exact wording is the message's to change.
+///
+/// ```kite
+/// assert(contains("no such file: a.txt", "no such file", "message") == nil, "contains")
+/// assert(contains("ok", "error", "message") != nil, "and when it does not")
+/// ```
+pub fn contains(found: str, needle: str, what: str) -> error {
+    // `index_of` rather than the prelude's `contains`, which this function's
+    // own name hides inside this module.
+    if found.index_of(needle) >= 0 {
+        return nil
+    }
+    return errors.new("\(what): expected text containing \"\(needle)\", found \"\(found)\"")
+}
+
+/// Passes when an optional holds a value — a lookup that should have found
+/// something and did.
+///
+/// ```kite
+/// let hit: Option<int> = 3
+/// let miss: Option<int> = nil
+/// assert(some(hit, "lookup") == nil, "a value")
+/// assert(some(miss, "lookup") != nil, "nil")
+/// ```
+pub fn some<T>(value: Option<T>, what: str) -> error {
+    if value == nil {
+        return errors.new("\(what): expected a value, found nil")
+    }
+    return nil
 }
 
 /// Passes when an error happened, which is what a test of a failure path

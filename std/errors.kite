@@ -36,8 +36,13 @@ pub fn of(subject: str, problem: str) -> error {
 /// ```kite
 /// // Unqualified because this example is compiled inside this module, where
 /// // its siblings are in scope by name. A caller writes `errors.chain(…)`.
+/// // For the same reason `join` here would be this module's own, so the
+/// // links are printed one to a line.
 /// let outer = wrap(errors.new("no such file"), "loading config")
-/// io.print(join(chain(outer), " <- "))
+/// let links = chain(outer)
+/// for link in links {
+///     io.print(link)
+/// }
 /// ```
 pub fn chain(err: error) -> [str] {
     var out: [str] = []
@@ -94,6 +99,74 @@ pub fn mentions(err: error, needle: str) -> bool {
         return false
     }
     return contains(err.message(), needle)
+}
+
+/// Whether any message in the cause chain mentions `needle` — [`mentions`]
+/// for an error that was joined with `errors.because`, whose outer message
+/// does not repeat the inner one.
+///
+/// ```kite
+/// let err = errors.because("could not start", errors.new("port 80 in use"))
+/// assert(!mentions(err, "in use"), "the outer message does not say it")
+/// assert(caused_by(err, "in use"), "the cause does")
+/// ```
+///
+/// Bounded at 64 links, as [`chain`] is.
+pub fn caused_by(err: error, needle: str) -> bool {
+    if err == nil {
+        return false
+    }
+    if contains(err.message(), needle) {
+        return true
+    }
+    var next = err.cause()
+    for i in 0..64 {
+        if next == nil {
+            return false
+        }
+        if contains(next.message(), needle) {
+            return true
+        }
+        next = next.cause()
+    }
+    _ = next
+    return false
+}
+
+/// Several errors as one, for a loop that should report every failure rather
+/// than stop at the first: nil when every one is nil, the error itself when
+/// exactly one is not, and otherwise an error whose message is the non-nil
+/// messages in order, joined by `"; "`, and whose cause is the first of them.
+///
+/// ```kite
+/// let none: [error] = [nil, nil]
+/// assert(join(none) == nil, "nothing failed")
+/// let err = join([errors.new("a is missing"), nil, errors.new("b is missing")])
+/// assert(message_or(err, "") == "a is missing; b is missing", "both are reported")
+/// ```
+///
+/// The cause is the first failure so that [`root`] and [`chain`] still lead
+/// somewhere; the others are in the message only.
+pub fn join(errs: [error]) -> error {
+    var first: error = nil
+    var count = 0
+    var text = ""
+    for err in errs {
+        if err != nil {
+            text = if count == 0 { err.message() } else { text + "; " + err.message() }
+            if count == 0 {
+                first = err
+            }
+            count += 1
+        }
+    }
+    if count == 0 {
+        return nil
+    }
+    if count == 1 {
+        return first
+    }
+    return errors.because(text, first)
 }
 
 /// The message, or a stand-in for nil, so a caller can print without testing.

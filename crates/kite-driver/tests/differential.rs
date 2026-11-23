@@ -4351,6 +4351,95 @@ fn main() {
 }
 ",
     ),
+    // A `buffer.F64` checks its shape. A push of the wrong length was
+    // accepted and shifted every record after it, and a field past the
+    // stride read the neighbouring record: both silent, on every backend.
+    (
+        "a-ragged-buffer-push-traps",
+        "\
+use std/buffer
+
+fn main() {
+  var b = buffer.f64(2)
+  b = buffer.push(b, [1.0, 2.0])
+  io.print(buffer.count(b))
+  b = buffer.push(b, [1.0, 2.0, 3.0])
+  io.print(\"after\")
+}
+",
+    ),
+    (
+        "a-buffer-field-outside-the-stride-traps",
+        "\
+use std/buffer
+
+fn main() {
+  var b = buffer.f64(2)
+  b = buffer.push(b, [1.0, 2.0])
+  b = buffer.push(b, [3.0, 4.0])
+  io.print(buffer.get(b, 0, 1))
+  io.print(buffer.get(b, 0, 2))
+  io.print(\"after\")
+}
+",
+    ),
+    // A race of no tasks has no winner. It waited forever, until the
+    // scheduler gave up on every task without saying which call was at
+    // fault; now it is a `require` at the call.
+    (
+        "a-race-of-no-tasks-traps",
+        "\
+use std/task
+
+async fn go() {
+  let none: [Task<int>] = []
+  io.print(\"before\")
+  io.print(await task.race(none))
+}
+
+fn main() {
+  _ = go()
+}
+",
+    ),
+    // The one gcd an `int` cannot hold is 2⁶³, and `math.gcd` says so rather
+    // than overflowing as it negates.
+    (
+        "a-gcd-of-two-to-the-63-traps",
+        "\
+use std/math
+
+fn main() {
+  io.print(math.gcd(math.min_int(), 6))
+  io.print(math.gcd(math.min_int(), 0))
+}
+",
+    ),
+    (
+        "a-ragged-row-in-from-records-traps",
+        "\
+use std/buffer
+
+fn main() {
+  io.print(buffer.count(buffer.from_records(2, [[1.0, 2.0]])))
+  io.print(buffer.count(buffer.from_records(2, [[1.0, 2.0], [3.0]])))
+}
+",
+    ),
+    (
+        "a-negative-buffer-field-traps",
+        "\
+use std/buffer
+
+fn main() {
+  var b = buffer.f64(2)
+  b = buffer.push(b, [1.0, 2.0])
+  b = buffer.push(b, [3.0, 4.0])
+  b = buffer.set(b, 1, -1, 9.0)
+  io.print(buffer.get(b, 0, 1))
+}
+",
+    ),
     // A shift count outside 0..=63 traps in a debug build. Wasm took it
     // modulo 64 while the other two trapped.
     (
@@ -4649,6 +4738,27 @@ fn a_nil_error_beside_a_hole_traps_with_one_message() {
         let _ = std::fs::remove_dir_all(&dir);
         assert_eq!(outcome, (printed, true));
         assert!(stderr.contains(&format!("{}\n", MESSAGE)), "wasm said:\n{}", stderr);
+    }
+}
+
+/// `task.race` of no tasks traps at the call, saying so. It used to wait
+/// forever for a winner, until the scheduler trapped with "2 tasks can never
+/// make progress" — true, and no help finding the call.
+#[test]
+fn a_race_of_no_tasks_names_the_mistake() {
+    const MESSAGE: &str = "task.race of no tasks: there is nothing to finish first";
+    let name = "a-race-of-no-tasks-traps";
+    let (_, src) = TRAPPING.iter().find(|(n, _)| *n == name).expect("the program");
+    let c = compile(format!("{}.kite", name), src, Emit::Check);
+    assert!(!c.failed(), "{}", c.render_diagnostics());
+    let mut out = Vec::new();
+    let trap = c.run(&mut out).expect_err("a trap on the VM");
+    assert_eq!(String::from_utf8(out).unwrap(), "before\n");
+    assert_eq!(trap.to_string(), MESSAGE);
+    if native_available() {
+        let (outcome, stderr) = trap_on_native_with_stderr(name);
+        assert_eq!(outcome, ("before\n".to_string(), true));
+        assert!(stderr.contains(&format!("error: {}\n", MESSAGE)), "native said:\n{}", stderr);
     }
 }
 

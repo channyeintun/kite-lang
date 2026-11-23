@@ -1,0 +1,64 @@
+// std/fmt's integer and float renderings and its table. `library_test.kite`
+// holds the module's older checks; `fixed` is there.
+
+use std/test
+use std/fmt
+
+fn checks() -> [error] {
+    var out: [error] = []
+
+    out.push(test.equal_str(fmt.signed(5), "+5", "signed positive"))
+    out.push(test.equal_str(fmt.signed(-5), "-5", "signed negative"))
+    out.push(test.equal_str(fmt.signed(0), "+0", "signed zero, as %+d writes it"))
+    out.push(test.equal_str(fmt.signed(-9223372036854775807 - 1), "-9223372036854775808", "signed smallest"))
+
+    out.push(test.equal_str(fmt.hex(255, 0), "ff", "hex"))
+    out.push(test.equal_str(fmt.hex(0, 0), "0", "hex(0)"))
+    out.push(test.equal_str(fmt.hex(0, 4), "0000", "hex(0) padded"))
+    out.push(test.equal_str(fmt.hex(0x1a2b3c, 8), "001a2b3c", "hex padded"))
+    out.push(test.equal_str(fmt.hex(0xabcdef, 2), "abcdef", "a width shorter than the digits"))
+    out.push(test.equal_str(fmt.hex(-255, 4), "-00ff", "hex of a negative is its size, signed"))
+    out.push(test.equal_str(fmt.hex(9223372036854775807, 0), "7fffffffffffffff", "hex largest"))
+    out.push(test.equal_str(fmt.hex(-9223372036854775807 - 1, 0), "-8000000000000000", "hex smallest"))
+    out.push(test.equal_str(fmt.binary(5, 8), "00000101", "binary"))
+    out.push(test.equal_str(fmt.binary(-2, 0), "-10", "binary negative"))
+    out.push(test.equal_str(fmt.binary(0, 0), "0", "binary(0)"))
+
+    // As JavaScript's toExponential writes them, and checked against it on
+    // 656 values.
+    out.push(test.equal_str(fmt.scientific(1500.0, 2), "1.50e+3", "scientific"))
+    out.push(test.equal_str(fmt.scientific(-1500.0, 0), "-2e+3", "no places, rounded away from zero"))
+    out.push(test.equal_str(fmt.scientific(0.000123456, 3), "1.235e-4", "a small number"))
+    out.push(test.equal_str(fmt.scientific(9.999, 2), "1.00e+1", "rounding carries into the exponent"))
+    out.push(test.equal_str(fmt.scientific(1.0, 0), "1e+0", "one"))
+    out.push(test.equal_str(fmt.scientific(0.0, 1), "0.0e+0", "zero"))
+    out.push(test.equal_str(fmt.scientific(-0.0, 1), "-0.0e+0", "negative zero keeps its sign, as fixed does"))
+    out.push(test.equal_str(fmt.scientific(0.125, 1), "1.3e-1", "an exact half rounds away from zero"))
+    out.push(test.equal_str(fmt.scientific(1.35, 1), "1.4e+0", "1.35 is a little above itself"))
+    out.push(test.equal_str(fmt.scientific(0.1, 20), "1.00000000000000005551e-1", "every digit is the float's own"))
+    out.push(test.equal_str(fmt.scientific(5e-324, 2), "4.94e-324", "the smallest float"))
+    out.push(test.equal_str(fmt.scientific(1.7976931348623157e308, 3), "1.798e+308", "the largest float"))
+    out.push(test.equal_str(fmt.scientific(1.0 / 0.0, 2), "inf", "inf"))
+    out.push(test.equal_str(fmt.scientific(-1.0 / 0.0, 2), "-inf", "-inf"))
+    out.push(test.equal_str(fmt.scientific(0.0 / 0.0, 2), "nan", "nan"))
+    out.push(test.equal_str(fmt.scientific(2.5, -1), "3e+0", "a negative places is zero"))
+
+    let t = fmt.table([["name", "qty", "note"], ["bolt", "30", "steel"], ["washer", "5", ""]])
+    out.push(test.equal_str(t, "name    qty  note\nbolt    30   steel\nwasher  5    ", "table"))
+    out.push(test.equal_str(fmt.table([["a", "bb"], ["ccc"]]), "a    bb\nccc", "a short row has fewer columns"))
+    out.push(test.equal_str(fmt.table([]), "", "no rows"))
+    out.push(test.equal_str(fmt.table([["x"]]), "x", "one cell is never padded"))
+    return out
+}
+
+fn main() {
+    let results = checks()
+    var failed = 0
+    for e in results {
+        if e != nil {
+            io.print("FAILED \(e.message())")
+            failed += 1
+        }
+    }
+    io.print("fmt: \(results.len() - failed) passed, \(failed) failed")
+}

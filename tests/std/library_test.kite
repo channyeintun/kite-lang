@@ -1,4 +1,4 @@
-// std/math, std/fmt, std/time, std/errors and std/buffer.
+// std/math, std/fmt, std/time, std/errors, std/buffer and std/test itself.
 
 use std/test
 use std/math
@@ -88,7 +88,7 @@ fn checks() -> [error] {
     out.push(test.is_true(near(math.exp(709.7), 1.6549840276802644e308), "exp(709.7)"))
     out.push(test.is_true(near(math.exp(-700.0), 9.85967654375977e-305), "exp(-700)"))
     out.push(test.is_true(math.exp(-740.0) > 0.0, "exp(-740) is not zero"))
-    out.push(exactly(math.exp(710.0), 1.7976931348623157e308, "exp(710) saturates"))
+    out.push(test.is_true(math.exp(710.0) > 1.7976931348623157e308, "exp(710) is infinite"))
     out.push(exactly(math.exp(-746.0), 0.0, "exp(-746) is zero"))
     out.push(exactly(math.exp(0.0), 1.0, "exp(0)"))
 
@@ -171,6 +171,11 @@ fn checks() -> [error] {
     out.push(test.equal_str(fmt.centre("ab", 6), "  ab  ", "centre"))
     out.push(test.equal_str(fmt.ellipsis("abcdef", 4), "abc…", "ellipsis"))
     out.push(test.equal_str(fmt.ellipsis("abc", 4), "abc", "ellipsis leaves short text alone"))
+    // Never wider than asked: a width of zero or less was answered "…".
+    out.push(test.equal_str(fmt.ellipsis("abc", 1), "…", "ellipsis at one"))
+    out.push(test.equal_str(fmt.ellipsis("abc", 0), "", "ellipsis at zero"))
+    out.push(test.equal_str(fmt.ellipsis("abc", -3), "", "ellipsis below zero"))
+    out.push(test.equal_str(fmt.ellipsis("", 0), "", "ellipsis of nothing"))
     out.push(test.equal_str(fmt.fixed(3.14159, 2), "3.14", "fixed"))
     out.push(test.equal_str(fmt.fixed(2.125, 2), "2.13", "fixed rounds a half away from zero"))
     out.push(test.equal_str(fmt.fixed(-1.25, 1), "-1.3", "fixed keeps the sign"))
@@ -220,6 +225,10 @@ fn checks() -> [error] {
     out.push(test.equal_str(fmt.fixed(2.0, -1), "2", "a negative count of places is none"))
     out.push(test.equal_str(fmt.grouped(1234567), "1,234,567", "grouped"))
     out.push(test.equal_str(fmt.grouped(-12), "-12", "grouped keeps the sign"))
+    // abs(min_int()) has no answer, and negating it trapped.
+    out.push(test.equal_str(fmt.grouped(math.min_int()), "-9,223,372,036,854,775,808", "grouped(min_int)"))
+    out.push(test.equal_str(fmt.grouped(-123456), "-123,456", "grouped, a negative multiple of three digits"))
+    out.push(test.equal_str(fmt.grouped(0), "0", "grouped(0)"))
     out.push(test.equal_str(fmt.percent(1.0, 4.0), "25.0%", "percent"))
 
     // ---- time ----
@@ -239,6 +248,56 @@ fn checks() -> [error] {
         ))
     out.push(test.is_true(errors.wrap(nil, "context") == nil, "wrap passes nil through"))
     out.push(test.is_true(errors.mentions(wrapped, "no such file"), "mentions"))
+    // caused_by walks the chain that mentions reads only the top of.
+    let joined = errors.because("could not start", errors.because("binding", errors.new("port 80 in use")))
+    out.push(test.is_false(errors.mentions(joined, "in use"), "mentions reads the outer message only"))
+    out.push(test.is_true(errors.caused_by(joined, "in use"), "caused_by reads the whole chain"))
+    out.push(test.is_true(errors.caused_by(joined, "could not"), "caused_by reads the outer message too"))
+    out.push(test.is_false(errors.caused_by(joined, "disk"), "caused_by, when nothing says it"))
+    out.push(test.is_false(errors.caused_by(nil, ""), "caused_by of nil"))
+    // join: nil for nothing, the error itself for one, every message for more.
+    let nothing: [error] = []
+    out.push(test.is_true(errors.join(nothing) == nil, "join of none"))
+    out.push(test.is_true(errors.join([nil, nil]) == nil, "join of nils"))
+    let one = errors.new("only")
+    let alone = errors.join([nil, one, nil])
+    out.push(test.equal_str(errors.message_or(alone, "?"), "only", "join of one is that error"))
+    out.push(test.is_true(errors.root(alone) == one, "and the same error, not a copy"))
+    let several = errors.join([errors.new("a is missing"), nil, errors.wrap(errors.new("gone"), "b"), errors.new("c")])
+    out.push(test.equal_str(errors.message_or(several, "?"), "a is missing; b: gone; c", "join of several"))
+    out.push(test.equal_str(errors.message_or(errors.root(several), "?"), "a is missing", "its cause is the first"))
+
+    // ---- test ----
+    // inf - inf is a NaN, which is within no tolerance, so equal infinities
+    // failed: "expected inf ± 0.0, found inf".
+    let inf = 1.0 / 0.0
+    let nan = 0.0 / 0.0
+    out.push(test.is_true(test.equal_float(inf, inf, 0.0, "inf") == nil, "equal_float(inf, inf)"))
+    out.push(test.is_true(test.equal_float(-inf, -inf, 0.0, "-inf") == nil, "equal_float(-inf, -inf)"))
+    out.push(test.is_true(test.equal_float(nan, nan, 0.0, "nan") == nil, "a NaN, when a NaN was wanted"))
+    out.push(test.is_true(test.equal_float(nan, 1.0, inf, "nan") != nil, "a NaN is not within any tolerance of 1"))
+    out.push(test.is_true(test.equal_float(1.0, nan, inf, "nan") != nil, "nor 1 of a NaN"))
+    out.push(test.is_true(test.equal_float(inf, 1.0, 0.5, "inf") != nil, "an infinity is not near 1"))
+    out.push(test.is_true(test.equal_float(1.0, 1.25, 0.5, "near") == nil, "within the tolerance"))
+    out.push(test.is_true(test.equal_floats([1.0, inf, nan], [1.0000001, inf, nan], 0.001, "fs") == nil, "equal_floats"))
+    out.push(test.is_true(test.equal_floats([], [], 0.0, "fs") == nil, "equal_floats of none"))
+    out.push(test.is_true(test.equal_floats([1.0, 2.0], [1.0], 1.0, "fs") != nil, "equal_floats, a length differs"))
+    out.push(test.equal_str(
+            errors.message_or(test.equal_floats([1.0, 2.0], [1.0, 3.0], 0.5, "fs"), ""),
+            "fs: at 1, expected 3.0 ± 0.5, found 2.0",
+            "equal_floats names the first that differs",
+        ))
+    out.push(test.is_true(test.contains("no such file: a.txt", "no such file", "c") == nil, "contains"))
+    out.push(test.is_true(test.contains("anything", "", "c") == nil, "contains the empty string"))
+    out.push(test.equal_str(
+            errors.message_or(test.contains("ok", "error", "c"), ""),
+            "c: expected text containing \"error\", found \"ok\"",
+            "contains, when it does not",
+        ))
+    let found: Option<str> = "x"
+    let missing: Option<str> = nil
+    out.push(test.is_true(test.some(found, "s") == nil, "some"))
+    out.push(test.equal_str(errors.message_or(test.some(missing, "lookup"), ""), "lookup: expected a value, found nil", "some of nil"))
 
     // ---- buffer ----
     var b = buffer.f64(2)
@@ -252,6 +311,20 @@ fn checks() -> [error] {
     let edited = buffer.set(b, 0, 0, 9.0)
     out.push(test.equal_float(buffer.get(edited, 0, 0), 9.0, 0.0001, "set"))
     out.push(test.equal_float(buffer.get(b, 0, 0), 1.0, 0.0001, "a buffer is a value"))
+    // In and out of the flat layout in one go.
+    let built = buffer.from_records(3, [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])
+    out.push(test.equal_int(built.stride, 3, "from_records keeps the stride"))
+    out.push(test.equal_int(buffer.count(built), 2, "from_records count"))
+    out.push(test.equal_float(buffer.get(built, 1, 2), 6.0, 0.0, "from_records get"))
+    out.push(test.equal_int(buffer.count(buffer.from_records(4, [])), 0, "from_records of no rows"))
+    out.push(test.equal_int(buffer.from_records(4, []).stride, 4, "and the shape is still known"))
+    let rows = buffer.records(built)
+    out.push(test.equal_int(rows.len(), 2, "records"))
+    out.push(test.equal_floats(rows[1], [4.0, 5.0, 6.0], 0.0, "records keeps each record"))
+    out.push(test.equal_int(buffer.records(buffer.f64(2)).len(), 0, "records of an empty buffer"))
+    let tenfold = buffer.map_column(built, 1, |v: float| v * 10.0)
+    out.push(test.equal_floats(tenfold.values, [1.0, 20.0, 3.0, 4.0, 50.0, 6.0], 0.0, "map_column touches one field"))
+    out.push(test.equal_floats(built.values, [1.0, 2.0, 3.0, 4.0, 5.0, 6.0], 0.0, "map_column makes a new buffer"))
 
     return out
 }

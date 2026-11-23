@@ -1,0 +1,330 @@
+// std/math at the points people check: exact powers, special values, signed
+// zeros. `library_test.kite` holds the rest of the module's checks; this file
+// holds the ones that compare a float bit for bit with what IEEE 754 and C99's
+// Annex F say it is.
+
+use std/test
+use std/math
+
+fn inf() -> float {
+    return 1.0 / 0.0
+}
+
+fn nan() -> float {
+    return 0.0 / 0.0
+}
+
+/// The same float: equal, a NaN for a NaN, and a zero of the same sign.
+/// `test.equal_float` with a tolerance of zero answers a different question —
+/// `inf - inf` is a NaN, and -0.0 is within zero of 0.0.
+fn same(found: float, want: float, what: str) -> error {
+    if !(want >= want) {
+        if !(found >= found) {
+            return nil
+        }
+        return errors.new("\(what): expected NaN, found \(found)")
+    }
+    let equal = found <= want && found >= want
+    if equal && (want != 0.0 || (1.0 / found < 0.0) == (1.0 / want < 0.0)) {
+        return nil
+    }
+    return errors.new("\(what): expected \(want), found \(found)")
+}
+
+fn pow_checks() -> [error] {
+    var out: [error] = []
+    // Exact whenever the answer is a float.
+    out.push(same(math.pow(10.0, 15), 1000000000000000.0, "pow(10, 15)"))
+    out.push(same(math.pow(10.0, 22), 10000000000000000000000.0, "pow(10, 22)"))
+    out.push(same(math.pow(3.0, 33), 5559060566555523.0, "pow(3, 33)"))
+    out.push(same(math.pow(-2.0, 3), -8.0, "pow(-2, 3)"))
+    out.push(same(math.pow(-0.5, -3), -8.0, "pow(-0.5, -3)"))
+    // Correctly rounded where it is not: each is the exact power, rounded once.
+    out.push(same(math.pow(10.0, 23), 1e23, "pow(10, 23)"))
+    out.push(same(math.pow(10.0, -5), 0.00001, "pow(10, -5)"))
+    out.push(same(math.pow(0.1, 3), 0.0010000000000000002, "pow(0.1, 3)"))
+    out.push(same(math.pow(1.1, 7000), 5.607846372419733e289, "pow(1.1, 7000)"))
+    out.push(same(math.pow(0.9, 6000), 2.8513900904532174e-275, "pow(0.9, 6000)"))
+    out.push(same(math.pow(7.0, -380), 7.3e-322, "pow(7, -380), subnormal"))
+    out.push(same(math.pow(0.9, -7000), inf(), "pow(0.9, -7000) is past the largest float"))
+    // n repeated multiplications lost n units: this was 1.1051709272141408.
+    out.push(same(math.pow(1.0000000001, 1000000000), 1.105170927214347, "pow(1.0000000001, 1e9)"))
+    // Below the smallest normal float. These were 0.0: the positive power
+    // overflowed, and its reciprocal was taken as zero.
+    out.push(same(math.pow(2.0, -1030), 8.691694759794e-311, "pow(2, -1030)"))
+    out.push(same(math.pow(2.0, -1074), 5e-324, "pow(2, -1074)"))
+    out.push(same(math.pow(2.0, -1075), 0.0, "pow(2, -1075) rounds to zero"))
+    out.push(same(math.pow(0.5, 1074), 5e-324, "pow(0.5, 1074)"))
+    out.push(same(math.pow(2.0, 1024), inf(), "pow(2, 1024) overflows"))
+    out.push(same(math.pow(-2.0, 1025), -inf(), "and keeps an odd power's sign"))
+    // IEEE 754's pown.
+    out.push(same(math.pow(nan(), 0), 1.0, "anything to the zero is one"))
+    out.push(same(math.pow(nan(), 3), nan(), "a NaN to a power"))
+    out.push(same(math.pow(0.0, -1), inf(), "pow(0, -1)"))
+    out.push(same(math.pow(-0.0, -1), -inf(), "pow(-0, -1)"))
+    out.push(same(math.pow(-0.0, -2), inf(), "pow(-0, -2)"))
+    out.push(same(math.pow(-0.0, 3), -0.0, "pow(-0, 3)"))
+    out.push(same(math.pow(-0.0, 2), 0.0, "pow(-0, 2)"))
+    out.push(same(math.pow(-inf(), 3), -inf(), "pow(-inf, 3)"))
+    out.push(same(math.pow(-inf(), -3), -0.0, "pow(-inf, -3)"))
+    out.push(same(math.pow(-inf(), -2), 0.0, "pow(-inf, -2)"))
+    // The extreme exponents, which used to trap negating `min_int()`, or
+    // loop for as long as the exponent is large.
+    out.push(same(math.pow(2.0, math.min_int()), 0.0, "pow(2, min_int)"))
+    out.push(same(math.pow(0.5, math.min_int()), inf(), "pow(0.5, min_int)"))
+    out.push(same(math.pow(1.0, math.min_int()), 1.0, "pow(1, min_int)"))
+    out.push(same(math.pow(-1.0, math.max_int()), -1.0, "pow(-1, max_int)"))
+    return out
+}
+
+fn exp_checks() -> [error] {
+    var out: [error] = []
+    // Each the correctly rounded answer. exp(1) was a unit short of e, and
+    // powf(10, 2) was 99.99999999999997: one float's error in ln 10, times
+    // the exponent, handed to exp.
+    out.push(same(math.exp(1.0), math.e(), "exp(1) is e"))
+    out.push(same(math.exp(-1.2422637939453125), 0.28872985265215406, "exp(-1.24…)"))
+    out.push(same(math.exp(130.65435886383057), 5.526715274604418e56, "exp(130.65…)"))
+    out.push(same(math.exp(-740.0), 4.2e-322, "exp(-740), subnormal"))
+    out.push(same(math.exp(709.7), 1.6549840276802644e308, "exp(709.7)"))
+    out.push(same(math.exp(710.0), inf(), "exp(710) overflows"))
+    out.push(same(math.exp(inf()), inf(), "exp(inf)"))
+    out.push(same(math.exp(-inf()), 0.0, "exp(-inf)"))
+    out.push(same(math.exp(nan()), nan(), "exp(NaN)"))
+    out.push(same(math.ln(math.e()), 1.0, "ln(e)"))
+    out.push(same(math.ln(10.0), 2.302585092994046, "ln(10)"))
+    out.push(same(math.ln(1.4142), 0.3465640001880033, "ln near the top of the reduced range"))
+    out.push(same(math.ln(5e-324), -744.4400719213812, "ln of the smallest float"))
+    out.push(same(math.powf(10.0, 2.0), 100.0, "powf(10, 2)"))
+    out.push(same(math.powf(10.0, 15.0), 1000000000000000.0, "powf(10, 15)"))
+    out.push(same(math.powf(10.0, -2.0), 0.01, "powf(10, -2)"))
+    out.push(same(math.powf(-2.0, 3.0), -8.0, "powf(-2, 3) is pow's"))
+    out.push(same(math.powf(2.0, 0.5), 1.4142135623730951, "powf(2, 0.5)"))
+    out.push(same(math.powf(10.0, 2.5), 316.22776601683796, "powf(10, 2.5)"))
+    out.push(same(math.powf(3.0, -0.25), 0.7598356856515925, "powf(3, -0.25)"))
+    out.push(same(math.powf(1.006007009744644, 1804.771900177002), 49456.57850195142, "a large exponent"))
+    // C99's special values.
+    out.push(same(math.powf(0.0, 0.0), 1.0, "powf(0, 0)"))
+    out.push(same(math.powf(nan(), 0.0), 1.0, "powf(NaN, 0)"))
+    out.push(same(math.powf(1.0, nan()), 1.0, "powf(1, NaN)"))
+    out.push(same(math.powf(2.0, nan()), nan(), "powf(2, NaN)"))
+    out.push(same(math.powf(0.0, -0.5), inf(), "powf(0, -0.5)"))
+    out.push(same(math.powf(0.0, 0.5), 0.0, "powf(0, 0.5)"))
+    out.push(same(math.powf(-0.0, 3.0), -0.0, "powf(-0, 3)"))
+    out.push(same(math.powf(2.0, inf()), inf(), "powf(2, inf)"))
+    out.push(same(math.powf(0.5, inf()), 0.0, "powf(0.5, inf)"))
+    out.push(same(math.powf(2.0, -inf()), 0.0, "powf(2, -inf)"))
+    out.push(same(math.powf(-1.0, inf()), 1.0, "powf(-1, inf)"))
+    out.push(same(math.powf(inf(), 0.5), inf(), "powf(inf, 0.5)"))
+    out.push(same(math.powf(inf(), -0.5), 0.0, "powf(inf, -0.5)"))
+    out.push(same(math.powf(-2.0, 1e19), inf(), "powf(-2, 1e19), an even power past an int"))
+    out.push(same(math.powf(10.0, 400.5), inf(), "powf(10, 400.5) overflows"))
+    out.push(same(math.powf(-2.0, 0.5), 0.0, "a negative base to a fractional power answers zero"))
+    return out
+}
+
+fn edge_checks() -> [error] {
+    var out: [error] = []
+    // NaN in, NaN out, and the limits at infinity, as in libm. Each of these
+    // was a number: ln(inf) and cbrt(±inf) reached a series as inf / inf,
+    // and asin clamped a NaN into range, so a NaN came back an angle.
+    out.push(same(math.ln(inf()), inf(), "ln(inf)"))
+    out.push(same(math.ln(nan()), nan(), "ln(NaN)"))
+    out.push(same(math.cbrt(inf()), inf(), "cbrt(inf)"))
+    out.push(same(math.cbrt(-inf()), -inf(), "cbrt(-inf)"))
+    out.push(same(math.cbrt(nan()), nan(), "cbrt(NaN)"))
+    out.push(same(math.cbrt(-0.0), -0.0, "cbrt(-0)"))
+    out.push(same(math.asin(nan()), nan(), "asin(NaN)"))
+    out.push(same(math.acos(nan()), nan(), "acos(NaN)"))
+    out.push(same(math.asin(2.0), math.pi() / 2.0, "past one, asin answers for one"))
+    // Near ±1, 1 − x² was computed after x² had rounded: 960 units out.
+    out.push(test.is_true(math.abs(math.asin(0.9999999999) - 1.5707821846586878) < 0.0000000000000005, "asin near one, within two units"))
+    // atan2, C99's table: the sign of a zero decides the side of an axis.
+    out.push(same(math.atan2(-0.0, -1.0), -math.pi(), "atan2(-0, -1)"))
+    out.push(same(math.atan2(0.0, -1.0), math.pi(), "atan2(0, -1)"))
+    out.push(same(math.atan2(-0.0, 0.0), -0.0, "atan2(-0, 0)"))
+    out.push(same(math.atan2(0.0, -0.0), math.pi(), "atan2(0, -0)"))
+    out.push(same(math.atan2(-0.0, -0.0), -math.pi(), "atan2(-0, -0)"))
+    out.push(same(math.atan2(-1.0, 0.0), -math.pi() / 2.0, "atan2(-1, 0)"))
+    out.push(same(math.atan2(1.0, -0.0), math.pi() / 2.0, "atan2(1, -0)"))
+    out.push(same(math.atan2(inf(), inf()), 0.7853981633974483, "atan2(inf, inf)"))
+    out.push(same(math.atan2(-inf(), -inf()), -2.356194490192345, "atan2(-inf, -inf)"))
+    out.push(same(math.atan2(inf(), 3.0), math.pi() / 2.0, "atan2(inf, 3)"))
+    out.push(same(math.atan2(1.0, -inf()), math.pi(), "atan2(1, -inf)"))
+    out.push(same(math.atan2(-1.0, -inf()), -math.pi(), "atan2(-1, -inf)"))
+    out.push(same(math.atan2(-1.0, inf()), -0.0, "atan2(-1, inf)"))
+    out.push(same(math.atan2(nan(), 1.0), nan(), "atan2(NaN, 1)"))
+    out.push(same(math.atan2(1.0, nan()), nan(), "atan2(1, NaN)"))
+    out.push(same(math.atan2(1e-300, -1e300), math.pi(), "a quotient that underflows"))
+    out.push(test.is_true(math.abs(math.atan2(-3.0, -4.0) - -2.498091544796509) < 0.000000000000001, "the third quadrant"))
+    return out
+}
+
+fn sign_checks() -> [error] {
+    var out: [error] = []
+    // -0.0 is not below zero, so `x < 0.0` let it through abs unchanged, and
+    // the `int` cast that trunc ends in has no -0 to give back.
+    out.push(same(math.abs(-0.0), 0.0, "abs(-0)"))
+    out.push(same(math.abs(nan()), nan(), "abs(NaN)"))
+    out.push(same(math.abs(-inf()), inf(), "abs(-inf)"))
+    out.push(same(math.trunc(-0.5), -0.0, "trunc(-0.5)"))
+    out.push(same(math.trunc(-0.0), -0.0, "trunc(-0)"))
+    out.push(same(math.trunc(0.5), 0.0, "trunc(0.5)"))
+    out.push(same(math.round(-0.4), -0.0, "round(-0.4)"))
+    out.push(same(math.round(-0.49999999999999994), -0.0, "round just above minus a half"))
+    out.push(same(math.ceil(-0.5), -0.0, "ceil(-0.5)"))
+    out.push(same(math.floor(-0.0), -0.0, "floor(-0)"))
+    out.push(same(math.floor(0.5), 0.0, "floor(0.5)"))
+    out.push(same(math.floor(-0.5), -1.0, "floor(-0.5)"))
+    out.push(same(math.ceil(0.5), 1.0, "ceil(0.5)"))
+    // One NaN rule, whichever side the NaN is on: it is carried. min(nan, 1)
+    // was 1.0 and min(1, nan) a NaN; clamp turned a NaN into `low`.
+    out.push(same(math.min(nan(), 1.0), nan(), "min(NaN, 1)"))
+    out.push(same(math.min(1.0, nan()), nan(), "min(1, NaN)"))
+    out.push(same(math.max(nan(), 1.0), nan(), "max(NaN, 1)"))
+    out.push(same(math.max(1.0, nan()), nan(), "max(1, NaN)"))
+    out.push(same(math.clamp(nan(), 0.0, 1.0), nan(), "clamp(NaN, 0, 1)"))
+    out.push(same(math.min(0.0, -0.0), -0.0, "min(0, -0)"))
+    out.push(same(math.min(-0.0, 0.0), -0.0, "min(-0, 0)"))
+    out.push(same(math.max(-0.0, 0.0), 0.0, "max(-0, 0)"))
+    out.push(same(math.max(0.0, -0.0), 0.0, "max(0, -0)"))
+    out.push(same(math.min(2.0, 3.0), 2.0, "min"))
+    out.push(same(math.max(2.0, 3.0), 3.0, "max"))
+    out.push(same(math.min(-inf(), 3.0), -inf(), "min(-inf, 3)"))
+    out.push(same(math.clamp(-5.0, 0.0, 1.0), 0.0, "clamp below"))
+    out.push(same(math.hypot(inf(), nan()), inf(), "hypot(inf, NaN)"))
+    out.push(same(math.hypot(nan(), 1.0), nan(), "hypot(NaN, 1)"))
+    return out
+}
+
+/// Within `units` units in the last place of `want`.
+fn near(found: float, want: float, units: float, what: str) -> error {
+    if math.abs(found - want) <= math.abs(want) * 0.0000000000000002220446049250313 * units {
+        return nil
+    }
+    return errors.new("\(what): expected \(want), found \(found)")
+}
+
+fn addition_checks() -> [error] {
+    var out: [error] = []
+    // Naming the values a literal cannot write, and asking about them without
+    // float equality.
+    out.push(same(math.inf(), inf(), "inf()"))
+    out.push(same(math.nan(), nan(), "nan()"))
+    out.push(test.is_true(math.is_nan(nan()) && !math.is_nan(inf()) && !math.is_nan(0.0), "is_nan"))
+    out.push(test.is_true(math.is_inf(inf()) && math.is_inf(-inf()), "is_inf"))
+    out.push(test.is_true(!math.is_inf(nan()) && !math.is_inf(1.7976931348623157e308), "is_inf, of a NaN and the largest float"))
+    out.push(test.is_true(math.is_finite(-1.7976931348623157e308) && math.is_finite(-0.0), "is_finite"))
+    out.push(test.is_true(!math.is_finite(inf()) && !math.is_finite(nan()), "is_finite, of inf and NaN"))
+    out.push(same(math.copysign(3.0, -0.0), -3.0, "copysign(3, -0)"))
+    out.push(same(math.copysign(-3.0, 2.0), 3.0, "copysign(-3, 2)"))
+    out.push(same(math.copysign(0.0, -1.0), -0.0, "copysign(0, -1)"))
+    out.push(same(math.copysign(inf(), -1.0), -inf(), "copysign(inf, -1)"))
+    out.push(same(math.fract(2.75), 0.75, "fract(2.75)"))
+    out.push(same(math.fract(-1.5), -0.5, "fract(-1.5)"))
+    out.push(same(math.fract(-3.0), -0.0, "fract(-3)"))
+    out.push(same(math.fract(1e300), 0.0, "fract(1e300)"))
+    out.push(same(math.fract(-inf()), -0.0, "fract(-inf)"))
+    out.push(same(math.fract(nan()), nan(), "fract(NaN)"))
+
+    // Logarithms to other bases: an exact power is exact, and the rest is
+    // correctly rounded in practice — every one of 500 checked against a
+    // 240-bit reference.
+    out.push(same(math.log2(8.0), 3.0, "log2(8)"))
+    out.push(same(math.log2(5e-324), -1074.0, "log2 of the smallest float"))
+    out.push(same(math.log2(1.0), 0.0, "log2(1)"))
+    out.push(same(math.log2(10.0), 3.321928094887362, "log2(10)"))
+    out.push(same(math.log10(1000.0), 3.0, "log10(1000)"))
+    out.push(same(math.log10(1e-300), -300.0, "log10(1e-300)"))
+    out.push(same(math.log10(2.0), 0.3010299956639812, "log10(2)"))
+    out.push(same(math.log10(0.0), 0.0, "log10(0) answers zero, as ln does"))
+    out.push(same(math.log10(inf()), inf(), "log10(inf)"))
+    out.push(same(math.log2(nan()), nan(), "log2(NaN)"))
+    out.push(same(math.log(3.0, 81.0), 4.0, "log(3, 81)"))
+    out.push(same(math.log(2.0, 1024.0), 10.0, "log(2, 1024)"))
+    out.push(same(math.log(1.0, 5.0), 0.0, "log to base one"))
+    out.push(same(math.log(-2.0, 5.0), 0.0, "log to a negative base"))
+    out.push(same(math.log(nan(), 5.0), nan(), "log to a NaN base"))
+    out.push(same(math.exp2(10.0), 1024.0, "exp2(10)"))
+    out.push(same(math.exp2(-1074.0), 5e-324, "exp2(-1074)"))
+    out.push(same(math.exp2(0.5), 1.4142135623730951, "exp2(0.5)"))
+
+    // Hyperbolic functions, each within two units of libm.
+    out.push(same(math.sinh(0.0), 0.0, "sinh(0)"))
+    out.push(same(math.sinh(-0.0), -0.0, "sinh(-0)"))
+    out.push(same(math.sinh(-inf()), -inf(), "sinh(-inf)"))
+    out.push(near(math.sinh(0.00000001), 0.00000001, 1.0, "sinh(1e-8), where the difference of exponentials cancels"))
+    out.push(near(math.sinh(1.0), 1.1752011936438014, 2.0, "sinh(1)"))
+    out.push(near(math.sinh(-30.0), -5343237290762.231, 2.0, "sinh(-30)"))
+    out.push(near(math.sinh(710.0), 1.1169973830808557e308, 2.0, "sinh(710), finite"))
+    out.push(same(math.sinh(711.0), inf(), "sinh(711) overflows"))
+    out.push(same(math.cosh(0.0), 1.0, "cosh(0)"))
+    out.push(near(math.cosh(-1.0), 1.5430806348152437, 2.0, "cosh(-1)"))
+    out.push(near(math.cosh(710.0), 1.1169973830808557e308, 2.0, "cosh(710), finite"))
+    out.push(same(math.cosh(-inf()), inf(), "cosh(-inf)"))
+    out.push(same(math.tanh(-0.0), -0.0, "tanh(-0)"))
+    out.push(near(math.tanh(0.25), 0.24491866240370913, 2.0, "tanh(0.25)"))
+    out.push(near(math.tanh(-2.0), -0.9640275800758169, 2.0, "tanh(-2)"))
+    out.push(same(math.tanh(800.0), 1.0, "tanh(800)"))
+    out.push(same(math.tanh(-inf()), -1.0, "tanh(-inf)"))
+    out.push(same(math.tanh(nan()), nan(), "tanh(NaN)"))
+
+    // Integers. checked_ and wrapping_ for the other two operations that
+    // overflow, an integer power, the floored modulo and gcd.
+    out.push(test.is_true(math.checked_sub(5, 7) == -2, "checked_sub"))
+    out.push(test.is_true(math.checked_sub(math.min_int(), 1) == nil, "checked_sub below"))
+    out.push(test.is_true(math.checked_sub(0, math.min_int()) == nil, "checked_sub of the smallest int"))
+    out.push(test.is_true(math.checked_sub(-1, math.min_int()) == math.max_int(), "checked_sub to the largest"))
+    out.push(test.is_true(math.checked_mul(-3, 4) == -12, "checked_mul"))
+    out.push(test.is_true(math.checked_mul(math.min_int(), -1) == nil, "checked_mul(min, -1)"))
+    out.push(test.is_true(math.checked_mul(-1, math.min_int()) == nil, "checked_mul(-1, min)"))
+    out.push(test.is_true(math.checked_mul(math.min_int(), 1) == math.min_int(), "checked_mul(min, 1)"))
+    out.push(test.is_true(math.checked_mul(-4611686018427387904, 2) == math.min_int(), "checked_mul to the smallest"))
+    out.push(test.is_true(math.checked_mul(4611686018427387904, 2) == nil, "checked_mul past the largest"))
+    out.push(test.is_true(math.checked_mul(3037000499, 3037000499) == 9223372030926249001, "checked_mul just under"))
+    out.push(test.is_true(math.checked_mul(3037000500, 3037000500) == nil, "checked_mul just over"))
+    out.push(test.equal_int(math.wrapping_sub(math.min_int(), 1), math.max_int(), "wrapping_sub"))
+    out.push(test.equal_int(math.wrapping_sub(0, math.min_int()), math.min_int(), "wrapping_sub of the smallest int"))
+    out.push(test.equal_int(math.wrapping_sub(5, 7), -2, "wrapping_sub in range"))
+    out.push(test.equal_int(math.wrapping_mul(math.max_int(), 2), -2, "wrapping_mul"))
+    out.push(test.equal_int(math.wrapping_mul(math.min_int(), -1), math.min_int(), "wrapping_mul(min, -1)"))
+    out.push(test.equal_int(math.wrapping_mul(math.max_int(), math.max_int()), 1, "wrapping_mul(max, max)"))
+    out.push(test.equal_int(math.wrapping_mul(-6148914691236517205, 3), 1, "wrapping_mul, the inverse of 3"))
+    out.push(test.equal_int(math.wrapping_mul(4294967296, 4294967296), 0, "2³² · 2³² wraps to zero"))
+    out.push(test.is_true(math.ipow(3, 4) == 81, "ipow"))
+    out.push(test.is_true(math.ipow(-2, 63) == math.min_int(), "ipow to the smallest int"))
+    out.push(test.is_true(math.ipow(2, 63) == nil, "ipow past the largest"))
+    out.push(test.is_true(math.ipow(10, 18) == 1000000000000000000, "ipow(10, 18)"))
+    out.push(test.is_true(math.ipow(10, 19) == nil, "ipow(10, 19)"))
+    out.push(test.is_true(math.ipow(-1, math.max_int()) == -1, "ipow(-1, max_int)"))
+    out.push(test.is_true(math.ipow(0, 0) == 1, "ipow(0, 0)"))
+    out.push(test.is_true(math.ipow(2, -1) == nil, "ipow of a negative power"))
+    out.push(test.equal_int(math.mod_floor(-1, 5), 4, "mod_floor(-1, 5)"))
+    out.push(test.equal_int(math.mod_floor(7, -3), -2, "mod_floor(7, -3)"))
+    out.push(test.equal_int(math.mod_floor(-6, 3), 0, "mod_floor(-6, 3)"))
+    out.push(test.equal_int(math.mod_floor(math.min_int(), -1), 0, "mod_floor(min, -1)"))
+    out.push(test.equal_int(math.mod_floor(math.min_int(), math.max_int()), math.max_int() - 1, "mod_floor(min, max)"))
+    out.push(test.equal_int(math.gcd(12, -18), 6, "gcd"))
+    out.push(test.equal_int(math.gcd(0, 0), 0, "gcd(0, 0)"))
+    out.push(test.equal_int(math.gcd(0, -5), 5, "gcd(0, -5)"))
+    out.push(test.equal_int(math.gcd(math.min_int(), 6), 2, "gcd(min, 6)"))
+    out.push(test.equal_int(math.gcd(math.max_int(), math.min_int()), 1, "gcd(max, min)"))
+    return out
+}
+
+fn main() {
+    var results: [error] = []
+    results = concat(results, pow_checks())
+    results = concat(results, exp_checks())
+    results = concat(results, edge_checks())
+    results = concat(results, sign_checks())
+    results = concat(results, addition_checks())
+    var failed = 0
+    for e in results {
+        if e != nil {
+            io.print("FAILED \(e.message())")
+            failed += 1
+        }
+    }
+    io.print("math: \(results.len() - failed) passed, \(failed) failed")
+}

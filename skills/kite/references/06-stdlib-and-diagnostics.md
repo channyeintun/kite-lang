@@ -225,6 +225,12 @@ The `f` suffix is the float form: Kite has no overloading, so `min` is
 `sumf([float]) -> float`. `approx_eq(a, b, tolerance) -> bool` lives here, not
 in `std/math`.
 
+The float forms mind the edges as `std/math`'s do: `absf(-0.0)` is +0.0,
+`minf`/`maxf`/`clampf` carry a NaN whichever side it is on (and -0.0 is the
+smaller zero), and `approx_eq` holds for equal infinities at any tolerance and
+never for a NaN. `divides(x, 0)` answers rather than trapping: true only for
+`x == 0`. `abs(min_int)` has no answer and overflows (a trap in a debug build).
+
 ### Strings
 
 `contains` `starts_with` `ends_with` `split` `join` `replace` `words`
@@ -622,6 +628,10 @@ arrays. `buffer.F64` is a flat `[float]` with a `stride` written down beside it.
 `f64(stride)` `count(b)` `get(b, record, field)` `record(b, i)`
 `push(b, values)` `set(b, record, field, value)` `column(b, field)`
 `extent(b, field)`. `push` and `set` **return a new buffer** — bind the result.
+The shape is checked: `push` of anything but exactly `stride` numbers, a field
+outside `0..stride` or a record outside `0..count(b)` traps with a message
+naming the mistake (a ragged push used to be accepted and shift every record
+after it, and a field past the stride read the next record).
 
 ```kite
 use std/buffer
@@ -1254,9 +1264,27 @@ integers: `max_int()` `min_int()` `checked_add(a, b) -> Option<int>`
 
 `sqrt` is correctly rounded over the whole range; `trunc`, `floor`, `ceil` and
 `round` hand back a float that is already whole (anything from 2⁵²) rather than
-casting it through `int`. `sin`, `cos` and `tan` take whole quarter turns off
-an argument exactly however large it is, so `sin(1e300)` is right to a few
-units in the last place.
+casting it through `int`, and keep the sign of a zero (`round(-0.4)` is -0.0).
+`sin`, `cos` and `tan` take whole quarter turns off an argument exactly however
+large it is, so `sin(1e300)` is right to a few units in the last place.
+
+Accuracy, as the doc comments state it: `pow(base, n)` is by squaring in two
+floats and correctly rounded in practice, subnormal answers included
+(`pow(2.0, -1074)` is 5e-324); `exp` and `ln` are within one unit in the last
+place and almost always correctly rounded; `powf` hands a whole exponent to
+`pow`, so `powf(10.0, 2.0)` is exactly 100, and is within one unit otherwise.
+The inverse trigonometric functions are within a few units.
+
+Edges. A NaN in is a NaN out — except where C99 gives a number whatever the
+other argument (`pow(x, 0)` and `powf(x, 0.0)` are 1, `powf(1.0, y)` is 1,
+`hypot` with an infinite side is infinite) — and `min`, `max` and `clamp` carry
+one whichever side it is on (IEEE 754's `minimum`/`maximum`; -0.0 is the
+smaller zero). `exp` overflows to **infinity** past about 709.78, as IEEE 754
+has it; `pow`, `powf` and `atan2` follow C99's special values (`pow(0.0, -1)`
+is infinite, `powf(x, 0.0)` is 1 for every `x`, `atan2(-0.0, -1.0)` is -π).
+What a real function has no answer for answers a number rather than a NaN, by
+deliberate choice: `sqrt`, `ln` and `powf` of a negative base with a fractional
+exponent answer 0, and `asin`/`acos` past ±1 answer as at ±1.
 
 There is no `math.approx_eq`: the prelude's `approx_eq(a, b, tolerance)` is
 the one that exists, and it is what the float-equality warning suggests.
@@ -1475,7 +1503,9 @@ the same thing `vite-plugin-kite` does to build a page.
 `is_true(cond, what)` `is_false` `equal_int` `equal_str` `equal_bool`
 `equal_float(found, want, tolerance, what)` `equal_ints` `equal_strs`
 `failed(err, what)` `ok(err, what)` `fail(what)` — each returns `error`, so
-`check` makes a test read as a list of claims.
+`check` makes a test read as a list of claims. `equal_float` passes equal
+floats whatever the tolerance, infinities included, and a NaN when a NaN was
+wanted.
 
 ```kite
 use std/test

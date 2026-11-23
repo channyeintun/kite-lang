@@ -92,6 +92,47 @@ async fn sleeping_holder_checks() -> [error] {
     return out
 }
 
+/// Puts three values, sleeping before each, so the taker has to wait on a
+/// clock that only moves when every task is waiting.
+async fn slow_producer(var q: sync.Queue<str>) -> int {
+    for word in ["one", "two", "three"] {
+        await task.sleep(5)
+        sync.put(q, word)
+    }
+    return time.now()
+}
+
+async fn collector(var q: sync.Queue<str>, n: int) -> [str] {
+    var got: [str] = []
+    for i in 0..n {
+        got.push(await sync.take(q))
+    }
+    return got
+}
+
+async fn queue_checks() -> [error] {
+    var out: [error] = []
+    var q: sync.Queue<str> = sync.queue()
+    out.push(test.equal_int(sync.size(q), 0, "a fresh queue is empty"))
+    sync.put(q, "a")
+    sync.put(q, "b")
+    out.push(test.equal_int(sync.size(q), 2, "size counts what is waiting"))
+    out.push(test.equal_str(await sync.take(q), "a", "first in, first out"))
+    out.push(test.equal_str(await sync.take(q), "b", "and then the next"))
+    out.push(test.equal_int(sync.size(q), 0, "taking removes"))
+
+    // The taker starts first and waits; it sees every value, in order, as
+    // the sleeping producer puts them.
+    let start = time.now()
+    let taker = collector(q, 3)
+    let giver = slow_producer(q)
+    let (got, done) = await task.both(taker, giver)
+    out.push(test.equal_strs(got, ["one", "two", "three"], "values cross between tasks in order"))
+    out.push(test.equal_int(done - start, 15, "the waiting taker let the clock move"))
+    out.push(test.equal_int(sync.size(q), 0, "nothing is left over"))
+    return out
+}
+
 fn try_lock_checks() -> [error] {
     var out: [error] = []
     let m = sync.mutex(7)
@@ -144,6 +185,7 @@ async fn main() {
     results = concat(results, await race_checks())
     results = concat(results, await lock_checks())
     results = concat(results, await sleeping_holder_checks())
+    results = concat(results, await queue_checks())
     results = concat(results, try_lock_checks())
     results = concat(results, atomic_checks())
     var failed = 0
