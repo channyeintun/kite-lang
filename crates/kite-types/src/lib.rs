@@ -4365,6 +4365,11 @@ impl<'a> Checker<'a> {
                 });
                 if entries.is_empty() {
                     let Some((k, v)) = hint else {
+                        // An annotation that failed has its error already;
+                        // the map it was given is not a second one.
+                        if expected.is_some_and(|e| self.types.is_poisoned(e)) {
+                            return self.lit(ExprKind::Error, TyId::ERROR, *span);
+                        }
                         self.diags.push(
                             Diagnostic::error(codes::E0204, "cannot infer the map's types")
                                 .with_primary(*span, "an empty map has no entries to infer from")
@@ -8882,6 +8887,11 @@ impl<'a> Checker<'a> {
 
         if elems.is_empty() {
             let Some(elem) = hint else {
+                // An annotation that failed has its error already, as for a
+                // `nil` under it.
+                if expected.is_some_and(|e| self.types.is_poisoned(e)) {
+                    return self.lit(ExprKind::Error, TyId::ERROR, span);
+                }
                 self.diags.push(
                     Diagnostic::error(codes::E0204, "cannot infer the element type")
                         .with_primary(span, "an empty slice has no elements to infer from")
