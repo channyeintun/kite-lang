@@ -637,6 +637,7 @@ pub fn check_recording(
             taint: Vec::new(),
             guards: std::collections::HashMap::new(),
             narrowed: std::collections::HashMap::new(),
+            unit_variants: Default::default(),
             error_nonnil: std::collections::HashSet::new(),
             loops: Vec::new(),
             loop_edges: Vec::new(),
@@ -1177,6 +1178,13 @@ struct Checker<'a> {
     /// leave the IR describing a local as `T` that the backend allocated as
     /// `Option<T>`. The narrowed *use* carries an explicit `Unwrap` instead.
     narrowed: std::collections::HashMap<u32, TyId>,
+    /// The unit variants of each large enum a pattern has named, by name —
+    /// built on first use. A pattern's name is looked up among the variants
+    /// of the scrutinee's enum, and a scan of them for every arm made a
+    /// generated `match` over thousands of variants quadratic.
+    unit_variants: std::cell::RefCell<
+        std::collections::HashMap<kite_hir::EnumId, std::collections::HashMap<String, u32>>,
+    >,
     /// Error locals control flow has proved are not nil.
     ///
     /// `error` is nil-able, so `err.message()` has to reach a value that is
@@ -11213,12 +11221,24 @@ impl<'a> Checker<'a> {
         // scrutinee itself made `Slow` against an `Option<Pace>` a binding
         // whenever another enum also declared a `Slow`.
         let TyKind::Enum(eid) = *self.types.kind(self.types.present(scrut)) else { return None };
-        let vi = self
-            .types
-            .enum_def(eid)
-            .variants
-            .iter()
-            .position(|v| v.name == name && v.fields.is_empty())?;
+        let variants = &self.types.enum_def(eid).variants;
+        let vi = if variants.len() <= 32 {
+            variants.iter().position(|v| v.name == name && v.fields.is_empty())?
+        } else {
+            let mut index = self.unit_variants.borrow_mut();
+            let by_name = index.entry(eid).or_insert_with(|| {
+                // Reversed, so the first of two same-named variants wins, as
+                // the scan's `position` had it.
+                variants
+                    .iter()
+                    .enumerate()
+                    .rev()
+                    .filter(|(_, v)| v.fields.is_empty())
+                    .map(|(i, v)| (v.name.clone(), i as u32))
+                    .collect()
+            });
+            *by_name.get(name)? as usize
+        };
         // Patterns name the declaration, so a specialisation resolves back to
         // the template it came from.
         let template = self.types.enum_template_of(eid).unwrap_or(eid);
