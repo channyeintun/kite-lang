@@ -226,6 +226,32 @@ fn map_inserts_lookups_and_removals_are_constant_time() {
     agrees_within("map-ops", src, "6250025000 0 50000\n", Duration::from_secs(20), true);
 }
 
+/// `toml.parse` reads a document of many keys in linear time. Each plain
+/// `key = value` line went through a function that took the table, wrote the
+/// key into it and handed it back, and a map handed to a function is shared
+/// with the caller's, so every key copied the whole table: 30,000 keys took
+/// 32 s on the VM and natively and 6 s on Wasm, and these 40,000 about twice
+/// that. The section being read is held in a local now, and written in place.
+#[test]
+fn a_toml_document_of_many_keys_parses_in_linear_time() {
+    let src = r#"use std/toml
+
+fn main() {
+    var lines: [str] = ["first = 0", "[section.inner]"]
+    for i in 0..40000 {
+        lines.push("key\(i) = \"value \(i)\"")
+    }
+    let (doc, err) = toml.parse(join(lines, "\n"))
+    if err != nil {
+        io.print(err.message())
+        return
+    }
+    io.print("\(toml.text_at(doc, "section.inner.key39999", "?")) \(toml.at(doc, "first") == toml.Toml.Int(0))")
+}
+"#;
+    agrees_within("toml-keys", src, "value 39999 true\n", Duration::from_secs(20), true);
+}
+
 /// A map literal of two hundred thousand entries is built in linear time:
 /// each entry was looked for among those before it, so a literal of 40,000
 /// took seconds on every backend, and this one half a minute on the VM.

@@ -122,6 +122,15 @@ pub fn parse(input: str) -> (Toml, error) {
     // defined when it ends.
     var flags: { str: int } = { }
     var pending: [str] = []
+    // The current section's table while plain `key = value` lines are being
+    // written into it, held apart from `root` and put back before anything
+    // else reads `root`. A map is a value, so writing a key through `change`
+    // rebuilt every table on the way — the root's included — and a document
+    // of `n` keys cost `n²`: 32 s at 30,000 keys. A table held in a local is
+    // written in place.
+    var current: { str: Toml } = { }
+    var current_id = ""
+    var taken = false
     var at = 0
     for {
         at = skip_blank(input, at)
@@ -132,6 +141,10 @@ pub fn parse(input: str) -> (Toml, error) {
         if c == "[" {
             let (header, err) = parse_header(input, at)
             check err
+            if taken {
+                root = put_section(root, section, 0, current)
+                taken = false
+            }
             if header.path.len() > max_depth() {
                 return _, too_deep(at)
             }
@@ -168,6 +181,32 @@ pub fn parse(input: str) -> (Toml, error) {
         }
         let (step, value_err) = parse_value(input, skip_inline(input, eq + 1), full.len())
         check value_err
+        if key.path.len() == 1 {
+            // A plain key: the section's table is the only one it can change,
+            // and it may not be there already — `assignment_allowed`'s whole
+            // rule for one segment.
+            if !taken {
+                current = section_table(root, section)
+                current_id = section_id(root, section, flags)
+                taken = true
+            }
+            let name = key.path[0]
+            if current[name] != nil {
+                return _, errors.new("toml: `\(name)` is set twice")
+            }
+            current[name] = step.value
+            if is_closed_value(step.value) {
+                flags[current_id + "/\(name.len()):" + name] = closed()
+            }
+            let (after, line_err) = end_of_line(input, step.next)
+            check line_err
+            at = after
+            continue
+        }
+        if taken {
+            root = put_section(root, section, 0, current)
+            taken = false
+        }
         let where = spots(root, full, flags)
         let allowed = assignment_allowed(where, section.len(), flags)
         check allowed
@@ -187,7 +226,63 @@ pub fn parse(input: str) -> (Toml, error) {
         check line_err
         at = after
     }
+    if taken {
+        root = put_section(root, section, 0, current)
+    }
     return Toml.Table(root), nil
+}
+
+/// The table a section's plain keys go into: the one [`spots`] walks to,
+/// through the last element of an array of tables on the way.
+fn section_table(root: { str: Toml }, section: [str]) -> { str: Toml } {
+    var here = root
+    for segment in section {
+        let held = here[segment]
+        if held == nil {
+            return { }
+        }
+        let into = walk_into(held)
+        if into == nil {
+            return { }
+        }
+        here = into
+    }
+    return here
+}
+
+/// The id [`spots`] gives the table a section names, which a key in it
+/// extends: empty for the root.
+fn section_id(root: { str: Toml }, section: [str], flags: { str: int }) -> str {
+    if section.len() == 0 {
+        return ""
+    }
+    let where = spots(root, section, flags)
+    return where[where.len() - 1].inner
+}
+
+/// `here` with the section's table from `section[at]` on, taken out by
+/// [`section_table`], put back.
+fn put_section(here: { str: Toml }, section: [str], at: int, table: { str: Toml }) -> { str: Toml } {
+    if at == section.len() {
+        return table
+    }
+    var out = here
+    let key = section[at]
+    let held = out[key]
+    var inner: { str: Toml } = { }
+    if held != nil {
+        let into = walk_into(held)
+        if into != nil {
+            inner = into
+        }
+    }
+    let filled = put_section(inner, section, at + 1, table)
+    if held == nil {
+        out[key] = Toml.Table(filled)
+    } else {
+        out[key] = put_back(held, filled)
+    }
+    return out
 }
 
 /// A `[table]` or `[[array of tables]]` header, and which of the two it was.
