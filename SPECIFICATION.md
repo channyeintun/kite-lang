@@ -382,7 +382,8 @@ slice or map that one variable or one struct field alone holds goes straight
 into it, on every target. Reading a length, an element or a key does not
 change that, and nor does passing it to a function that keeps nothing of it —
 one that does not store, return or capture it or pass it on to something that
-might. A function value, a `dyn` method and the host are taken to keep what
+might, and, for a field, that runs nothing which writes through a field,
+prints, or calls a function value, a `dyn` method or the host. A function value, a `dyn` method and the host are taken to keep what
 they are given, and so is everything else not proved otherwise; after a call
 to one, the next write copies, once. A function that changes a slice or map it
 was given changes its own copy, so `m = f(m)` copies `m` on each call: build
