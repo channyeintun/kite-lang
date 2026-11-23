@@ -467,6 +467,11 @@ expression trees:
    program's own `pub` functions, a closure's lifted body or a vtable.
    Reachability is exact, because a call names its target by index. This is
    what keeps the prelude, which is in every program, out of a `hello world`.
+   Types are not pruned here: the arena keeps every declaration. The Wasm
+   backend declares only the structs and enums a local, a signature, a vtable
+   or a field of one of those can name, a dispatcher only for a trait
+   something implements, and an import's signature only beside the import —
+   so importing a module and calling nothing in it costs no bytes.
 3. **Equality specialisation** — `==` inside a generic function was checked as
    a structural comparison, because nothing was known about the operand. Once
    specialisation has made it concrete, a primitive gets the primitive's own
@@ -689,6 +694,20 @@ limit: the VM stages the first 64 items of a slice or map literal and adds
 each one after them to what it has built, as the other backends build theirs
 a window at a time. Staged whole, a literal of seventy thousand constants
 took a register per element, and the VM refused it.
+
+V8 has a limit no validator checks: the machine code it compiles one function
+to must fit in half of its code space, and past that it aborts the process
+rather than refuse the module. A literal of 120,000 strings, an allocation
+each, was such a function at 1.9 MB of Wasm. So a literal longer than one
+`array.new_fixed` chunk (4,096 elements) has each run of constants in a chunk
+built by a function of its own, which the literal's function calls, and each
+element that reads a local stored in place with `array.set`; identical runs
+are one function. No function holds more than one chunk of a literal's
+constants, however long it is. This bounds the literal, not the code around
+it: an element that is not a constant — a string in a `[Option<str>]`, which
+is wrapped first, a struct literal, an interpolation — is computed by a statement of the literal's
+function before the literal is built, and a hundred thousand such statements
+are still one function that V8 may fail to compile.
 
 Not every MIR local is a Wasm local. One that lives within a single block,
 written there before anything reads it, shares a Wasm local of its type with
