@@ -107,6 +107,10 @@ pub async fn sleep(ms: int) {
 }
 
 /// The task's result, or nil if it takes longer than `ms`.
+///
+/// Only lateness is nil. A task that finished in time gives a present
+/// optional whatever its result, a nil `error` included, so `r == nil` means
+/// the time ran out and the error inside is tested after it.
 pub async fn timeout<T>(work: Task<T>, ms: int) -> Option<T> {
     let deadline = time.now() + ms
     for {

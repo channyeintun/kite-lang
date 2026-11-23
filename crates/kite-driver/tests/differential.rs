@@ -6601,6 +6601,80 @@ pub async fn main() {
 "#,
         "false true\nfalse true true\n2 3\n",
     ),
+    // An `Option<error>` that holds a nil error is present: `task.timeout` of
+    // a task that finished in time has its result, whatever it is. The VM,
+    // which does not box an optional's payload, read every one of these as
+    // absent; the other two box it and did not. The last of `ys` is the
+    // documented case — an optional stored as nil is absent everywhere.
+    (
+        "an-optional-holding-a-nil-error-is-present",
+        r#"use std/task
+
+fn desc(o: Option<error>) -> str {
+  if o == nil {
+    return "absent"
+  }
+  if o == nil {
+    return "nil"
+  }
+  return o.message()
+}
+
+fn some<T>(x: T) -> Option<T> {
+  return x
+}
+
+struct Holder {
+  e: Option<error>
+}
+
+enum Slot {
+  Empty
+  Full(e: Option<error>)
+}
+
+async fn save(fail: bool, ms: int) -> error {
+  await task.sleep(ms)
+  if fail {
+    return errors.new("disk full")
+  }
+  return nil
+}
+
+async fn later(e: error) -> Option<error> {
+  task.yield()
+  return e
+}
+
+pub async fn main() {
+  let none: error = nil
+  io.print(desc(await task.timeout(save(false, 1), 50)))
+  io.print(desc(await task.timeout(save(true, 1), 50)))
+  io.print(desc(await task.timeout(save(false, 100), 5)))
+  io.print(desc(await later(none)))
+  let m: {str: error} = {"a": nil, "b": errors.new("b")}
+  io.print(desc(m["a"]) + " " + desc(m["b"]) + " " + desc(m["z"]))
+  let xs: [error] = [nil, errors.new("y")]
+  io.print(desc(xs.get(0)) + " " + desc(xs.get(1)) + " " + desc(xs.get(9)))
+  io.print(desc(find(xs, |e| e == nil)) + " " + desc(some(none)))
+  let h = Holder{ e: xs[0] }
+  let g = Holder{ e: nil }
+  io.print(desc(h.e) + " " + desc(g.e) + " \(h.e == g.e) \(h.e == xs.get(0))")
+  let s = Full(e: none)
+  match s {
+    Empty => io.print("empty"),
+    Full(e) => io.print(desc(e)),
+  }
+  let ys: [Option<error>] = [none, nil]
+  io.print(desc(ys[0]) + " " + desc(ys[1]) + " " + desc(ys.get(1)))
+  match xs.get(0) {
+    nil => io.print("absent"),
+    e => io.print("present \(e == nil)"),
+  }
+}
+"#,
+        "nil\ndisk full\nabsent\nnil\nnil b absent\nnil y absent\nnil nil\nnil absent false true\nnil\nnil absent absent\npresent true\n",
+    ),
 ];
 
 #[test]
