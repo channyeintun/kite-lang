@@ -3697,6 +3697,43 @@ pub fn jit_symbols() -> Vec<(&'static str, *const u8)> {
 mod tests {
     use super::*;
 
+    /// This runtime's `sched.rs` and the VM's are one text below their header
+    /// comments: the two must poll in the same order, and a change made to
+    /// one alone would reorder one backend's tasks and not the other's. The
+    /// first line that differs is named, in both files.
+    #[test]
+    fn the_scheduler_is_the_vms_word_for_word() {
+        use std::path::Path;
+        let here = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/sched.rs");
+        let vm = Path::new(env!("CARGO_MANIFEST_DIR")).join("../kite-vm/src/sched.rs");
+        let read = |p: &Path| std::fs::read_to_string(p).unwrap_or_else(|e| panic!("{}: {}", p.display(), e));
+        let (ours, theirs) = (read(&here), read(&vm));
+        // The header is the leading `//!` comment; each file says there why
+        // it is a copy, in its own words. Numbered from one, as an editor does.
+        let body = |text: &str| -> Vec<(usize, String)> {
+            text.lines()
+                .enumerate()
+                .skip_while(|(_, l)| l.starts_with("//!"))
+                .map(|(i, l)| (i + 1, l.to_string()))
+                .collect()
+        };
+        let (ours, theirs) = (body(&ours), body(&theirs));
+        for k in 0..ours.len().max(theirs.len()) {
+            let line = |b: &[(usize, String)]| match b.get(k) {
+                Some((n, l)) => format!("line {}: {:?}", n, l),
+                None => "the end of the file".to_string(),
+            };
+            let same = matches!((ours.get(k), theirs.get(k)), (Some((_, a)), Some((_, b))) if a == b);
+            assert!(
+                same,
+                "kite-rt's sched.rs and kite-vm's differ below their headers — change them together:\n  \
+                 kite-rt/src/sched.rs {}\n  kite-vm/src/sched.rs {}",
+                line(&ours),
+                line(&theirs),
+            );
+        }
+    }
+
     /// A full map grows to twice its room, always a power of two (an
     /// indexed map's bucket mask needs one), and always to more than it had.
     #[test]

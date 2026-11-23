@@ -10,12 +10,12 @@
 use crate::*;
 use kite_mir as mir;
 
-pub fn compile(program: &mir::Program) -> Chunk {
+pub fn compile(program: &mir::Program, types: &kite_hir::Types) -> Chunk {
     // A virtual call names its trait; the emitter needs a table index. Both
     // sides walk `program.vtables` in the same order, so position is the index.
     let traits: Vec<u32> = program.vtables.iter().map(|v| v.trait_id.0).collect();
     Chunk {
-        functions: program.fns.iter().map(|f| compile_fn(f, &traits)).collect(),
+        functions: program.fns.iter().map(|f| compile_fn(f, &traits, types)).collect(),
         externs: program
             .externs
             .iter()
@@ -118,7 +118,7 @@ fn widest_window(func: &mir::Function) -> usize {
         .unwrap_or(0)
 }
 
-fn compile_fn(func: &mir::Function, traits: &[u32]) -> FnProto {
+fn compile_fn(func: &mir::Function, traits: &[u32], types: &kite_hir::Types) -> FnProto {
     // Registers: one per MIR local, then a window wide enough for the largest
     // call in the body.
     let max_args = widest_window(func);
@@ -135,6 +135,7 @@ fn compile_fn(func: &mir::Function, traits: &[u32]) -> FnProto {
     let mut e = Emitter {
         func,
         traits,
+        types,
         code: Vec::new(),
         block_starts: vec![u32::MAX; func.blocks.len()],
         patches: Vec::new(),
@@ -165,6 +166,9 @@ struct Emitter<'a> {
     func: &'a mir::Function,
     /// Trait ids in table order, for turning a `TraitId` into a table index.
     traits: &'a [u32],
+    /// Asked only where an optional's payload is an `error`, the one payload
+    /// whose own value can be nil.
+    types: &'a kite_hir::Types,
     code: Vec<Op>,
     block_starts: Vec<u32>,
     patches: Vec<Patch>,
@@ -505,11 +509,22 @@ impl<'a> Emitter<'a> {
                 self.code.push(Op::ErrorAs { dst, obj, tag: *tag });
             }
             // The VM's values carry their own type, so an optional needs no
-            // box: wrapping and unwrapping are moves. Only Wasm, whose locals
-            // are typed, needs a representation change here.
-            mir::Rvalue::Wrap { value } | mir::Rvalue::Unwrap { value } => {
-                self.load_into(dst, value);
-            }
+            // box: wrapping and unwrapping are moves — except of an `error`,
+            // whose nil would otherwise read as an absent optional. A task
+            // that finished in time with a nil error is still a result
+            // `task.timeout` has, and the other two backends box it.
+            mir::Rvalue::Wrap { value } => match value {
+                mir::Operand::Local(l) if self.is_err(self.func.locals[l.index()].ty) => {
+                    self.code.push(Op::WrapErr { dst, src: reg(*l) });
+                }
+                _ => self.load_into(dst, value),
+            },
+            mir::Rvalue::Unwrap { value } => match value {
+                mir::Operand::Local(l) if self.is_err(self.func.locals[dst as usize].ty) => {
+                    self.code.push(Op::UnwrapErr { dst, src: reg(*l) });
+                }
+                _ => self.load_into(dst, value),
+            },
 
             mir::Rvalue::IsNil { value } => {
                 let obj = self.operand_reg(value, 0);
@@ -533,7 +548,8 @@ impl<'a> Emitter<'a> {
             mir::Rvalue::MapGet { base, key } => {
                 let obj = self.operand_reg(base, 0);
                 let k = self.operand_reg(key, 1);
-                self.code.push(Op::MapGet { dst, obj, key: k });
+                let err = self.payload_is_err(base);
+                self.code.push(Op::MapGet { dst, obj, key: k, err });
             }
             mir::Rvalue::MapLen { base } => {
                 let obj = self.operand_reg(base, 0);
@@ -597,7 +613,8 @@ impl<'a> Emitter<'a> {
             mir::Rvalue::SliceGet { base, index } => {
                 let obj = self.operand_reg(base, 0);
                 let idx = self.operand_reg(index, 1);
-                self.code.push(Op::SliceGet { dst, obj, index: idx });
+                let err = self.payload_is_err(base);
+                self.code.push(Op::SliceGet { dst, obj, index: idx, err });
             }
             mir::Rvalue::SliceRange { base, start, end } => {
                 let obj = self.operand_reg(base, 0);
@@ -613,6 +630,21 @@ impl<'a> Emitter<'a> {
         for (i, a) in args.iter().enumerate() {
             let slot = self.arg_base + i as Reg;
             self.load_into(slot, a);
+        }
+    }
+
+    fn is_err(&self, ty: kite_hir::TyId) -> bool {
+        matches!(self.types.kind(ty), kite_hir::TyKind::Err)
+    }
+
+    /// Whether the slice or map in `base` holds `error`s.
+    fn payload_is_err(&self, base: &mir::Operand) -> bool {
+        let mir::Operand::Local(l) = base else {
+            return false;
+        };
+        match self.types.kind(self.func.locals[l.index()].ty) {
+            kite_hir::TyKind::Slice(t) | kite_hir::TyKind::Map(_, t) => self.is_err(*t),
+            _ => false,
         }
     }
 
@@ -737,7 +769,7 @@ mod tests {
 
         let fits = mir::Program { fns: vec![function(1_000)], ..Default::default() };
         assert!(limits(&fits).is_empty());
-        let chunk = compile(&fits);
+        let chunk = compile(&fits, &kite_hir::Types::new());
         assert!(chunk.functions[0].frame_size <= MAX_REGISTERS);
     }
 }

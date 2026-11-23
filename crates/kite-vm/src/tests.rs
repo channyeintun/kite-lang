@@ -25,7 +25,7 @@ fn exec(src: &str) -> Result<String, Trap> {
 
     kite_hir::mono::monomorphise(&mut hir).expect("specialisation terminates");
     let mir = kite_mir::lower(&hir);
-    let chunk = kite_codegen_kbc::compile(&mir);
+    let chunk = kite_codegen_kbc::compile(&mir, &hir.types);
 
     let mut out = Vec::new();
     run(&chunk, &mut out)?;
@@ -50,7 +50,7 @@ fn exec_release(src: &str) -> Result<String, Trap> {
 
     kite_hir::mono::monomorphise(&mut hir).expect("specialisation terminates");
     let mir = kite_mir::lower(&hir);
-    let chunk = kite_codegen_kbc::compile(&mir);
+    let chunk = kite_codegen_kbc::compile(&mir, &hir.types);
 
     let mut out = Vec::new();
     run(&chunk, &mut out)?;
@@ -1826,7 +1826,7 @@ fn an_or_pattern_binds_through_the_alternative_that_matched() {
         vtables: Vec::new(),
     };
     let mir = kite_mir::lower(&program);
-    let chunk = kite_codegen_kbc::compile(&mir);
+    let chunk = kite_codegen_kbc::compile(&mir, &program.types);
     let mut out = Vec::new();
     run(&chunk, &mut out).expect("the program runs");
     assert_eq!(String::from_utf8(out).unwrap(), "7\n3\n0\n");
