@@ -2207,16 +2207,27 @@ impl<'a> Checker<'a> {
             // The same for `if x { c } else { d }`: each of `c` and `d` still
             // has its failure to answer for. With one source and no `nil`
             // branch it is a copy on every path, as `let e = c` is.
+            //
+            // A branch that is a binding holding no failure unread — checked
+            // already, or only ever `nil` — brings nothing, as `nil` does:
+            // `check c` then `let e = if x { c } else { nil }` holds no
+            // failure at all, and it used to make a new one nobody could
+            // owe but `e`.
             ExprKind::If { .. } => match self.only_from(value) {
                 Some((srcs, maybe_nil))
                     if srcs.iter().all(|&s| {
-                        s != local && before.get(s as usize) == Some(&Taint::Unchecked)
+                        s != local || before.get(s as usize) != Some(&Taint::Unchecked)
                     }) =>
                 {
-                    for &s in &srcs {
+                    let live: Vec<u32> = srcs
+                        .iter()
+                        .copied()
+                        .filter(|&s| before.get(s as usize) == Some(&Taint::Unchecked))
+                        .collect();
+                    for &s in &live {
                         self.keep_unread(s, before);
                     }
-                    if let ([src], false) = (srcs.as_slice(), maybe_nil) {
+                    if let ([src], [_], false) = (live.as_slice(), srcs.as_slice(), maybe_nil) {
                         self.note_copy(local, *src);
                         Taint::Unchecked
                     } else {
@@ -2231,6 +2242,14 @@ impl<'a> Checker<'a> {
         };
         self.taint[local as usize] = state;
         self.reset_parts(local, state);
+        // A copy of a tuple some of whose failures were already taken owes
+        // only the rest, as taking the tuple itself apart would: `t.0` then
+        // `let w = t` and `let (x, y) = w` owes `y`, not `x` again.
+        if let ExprKind::Local(src) = value.kind {
+            if state == Taint::Unchecked && src.0 != local {
+                self.inherit_parts(local, src.0, before);
+            }
+        }
     }
 
     /// The locals a value `if` yields on its branches that are not `nil`,
@@ -2274,6 +2293,10 @@ impl<'a> Checker<'a> {
 
     /// A tuple of failures was just bound: each element that can hold one is
     /// owed again, or settled with the whole. See [`Checker::parts`].
+    ///
+    /// An element that is itself a tuple of failures has parts of its own,
+    /// so `t.0.0` takes one failure of `t.0` and leaves `t.0.1` owed, as
+    /// binding the middle step, `let u = t.0`, does.
     fn reset_parts(&mut self, local: u32, state: Taint) {
         let TyKind::Tuple(elems) = self.types.kind(self.locals[local as usize].ty).clone() else {
             return;
@@ -2288,8 +2311,45 @@ impl<'a> Checker<'a> {
             }
             self.parts.insert(local, made);
         }
-        for &(_, part) in &self.parts[&local] {
+        for (_, part) in self.parts[&local].clone() {
             self.taint[part as usize] = state;
+            self.reset_parts(part, state);
+        }
+    }
+
+    /// Every part of a tuple local, its elements' parts included, at every
+    /// depth.
+    fn all_parts(&self, local: u32) -> Vec<u32> {
+        let mut out = Vec::new();
+        let mut todo = vec![local];
+        while let Some(at) = todo.pop() {
+            if let Some(parts) = self.parts.get(&at) {
+                for &(_, part) in parts {
+                    out.push(part);
+                    todo.push(part);
+                }
+            }
+        }
+        out
+    }
+
+    /// A tuple just bound from an element of another, `from`, owes only what
+    /// that element still owed (`before`): each part of `to` is settled where
+    /// the matching part of `from` was, at every depth.
+    fn inherit_parts(&mut self, to: u32, from: u32, before: &[Taint]) {
+        let (Some(dst), Some(src)) = (self.parts.get(&to).cloned(), self.parts.get(&from).cloned()) else {
+            return;
+        };
+        for (k, d) in dst {
+            let Some(&(_, s)) = src.iter().find(|&&(j, _)| j == k) else { continue };
+            if before.get(s as usize) != Some(&Taint::Unchecked) {
+                self.taint[d as usize] = Taint::Clean;
+                for sub in self.all_parts(d) {
+                    self.taint[sub as usize] = Taint::Clean;
+                }
+            } else {
+                self.inherit_parts(d, s, before);
+            }
         }
     }
 
@@ -2299,10 +2359,8 @@ impl<'a> Checker<'a> {
             if self.taint.get(i as usize) == Some(&Taint::Unchecked) {
                 self.taint[i as usize] = Taint::Clean;
             }
-            if let Some(parts) = self.parts.get(&i) {
-                for &(_, part) in parts {
-                    self.taint[part as usize] = Taint::Clean;
-                }
+            for part in self.all_parts(i) {
+                self.taint[part as usize] = Taint::Clean;
             }
         }
     }
@@ -2312,8 +2370,7 @@ impl<'a> Checker<'a> {
     /// element of a tuple of them still owed.
     fn keep_unread(&mut self, id: u32, before: &[Taint]) {
         for i in self.copies_of(id) {
-            let parts = self.parts.get(&i).map(|p| p.iter().map(|&(_, s)| s).collect::<Vec<_>>());
-            for j in std::iter::once(i).chain(parts.into_iter().flatten()) {
+            for j in std::iter::once(i).chain(self.all_parts(i)) {
                 if before.get(j as usize) == Some(&Taint::Unchecked) {
                     self.taint[j as usize] = Taint::Unchecked;
                 }
@@ -3389,6 +3446,27 @@ impl<'a> Checker<'a> {
                 self.copies.extend(inside);
                 self.restore_taint(taint);
             }
+            // No `break` reaches out of it, so no state does either: what is
+            // declared outside it is left only by the `return`s in the body,
+            // each of which answered for it on its own path. Taking the state
+            // it was entered in for what follows, as a loop with a header
+            // must, made `for { if err == nil { return } … }` look as if it
+            // fell out with `err` unread.
+            (ast::ForHeader::Loop, None) => {
+                let taint = (0..self.taint.len())
+                    .map(|i| {
+                        if self.declared_inside(i as u32, f.span) { self.taint[i] } else { Taint::Clean }
+                    })
+                    .collect();
+                let inside: Vec<(u32, u32)> = self
+                    .copies
+                    .iter()
+                    .copied()
+                    .filter(|p| self.declared_inside(p.0, f.span) && self.declared_inside(p.1, f.span))
+                    .collect();
+                self.copies = inside.into_iter().collect();
+                self.restore_taint(taint);
+            }
             (_, _) if !runs => {
                 let (taint, copies) = edges.head.unwrap_or(entry);
                 self.merge_loop_taint(&taint, &copies);
@@ -3987,6 +4065,13 @@ impl<'a> Checker<'a> {
         for id in self.nil_results(cond, in_then) {
             self.inspect(id);
         }
+        // What the condition proves about errors is read before it narrows
+        // anything. A test of an optional result that finds it present says
+        // the task came in time, not that the error it gave is a failure:
+        // read after the narrowing, `if r == nil { return }` let `r.message()`
+        // through on a nil error. Once `r` is narrowed, a later `r != nil`
+        // tests the error itself and proves it present.
+        let facts = self.error_facts(cond, in_then);
         if let Some((id, is_eq)) = narrowing {
             if is_eq != in_then {
                 if let TyKind::Optional(inner) = *self.types.kind(self.locals[id as usize].ty) {
@@ -3994,7 +4079,6 @@ impl<'a> Checker<'a> {
                 }
             }
         }
-        let facts = self.error_facts(cond, in_then);
         self.assume_error_facts(&facts);
     }
 
@@ -4312,6 +4396,28 @@ impl<'a> Checker<'a> {
                 let value = self.expr(subject, None);
                 if let (Some(id), Some(before)) = (held, before) {
                     self.keep_unread(id, &before);
+                }
+                // The same test of a result no binding holds leaves its
+                // failure where nothing can reach it again: the task came in
+                // time, and what it gave is gone. Only a fresh result is
+                // meant — a call or an `await`, or a value `if` or `match`
+                // that gives one — since a field, an entry or an element read
+                // this way is still where it was stored.
+                if held.is_none() && self.holder(value.ty) == Some(Holder::Maybe) && fresh_result(&value) {
+                    let then = match *self.types.kind(value.ty) {
+                        TyKind::Optional(TyId::ERR) => "test the error in it with `if r != nil { … }`",
+                        _ => "take the pair in it apart with `let (v, err) = r`",
+                    };
+                    self.diags.push(
+                        Diagnostic::error(codes::E0302, "error is never checked")
+                            .with_primary(value.span, "this nil test never looks at the failure it holds")
+                            .with_note(format!(
+                                "a nil test asks only whether a result is there; bind it, \
+                                 `let r = …`, and after `if r == nil {{ return … }}` {}",
+                                then
+                            ))
+                            .with_note("to throw it away on purpose, write `_ = …`"),
+                    );
                 }
                 if !matches!(self.types.kind(value.ty), TyKind::Optional(_))
                     && value.ty != TyId::ERR
@@ -8413,6 +8519,10 @@ impl<'a> Checker<'a> {
         // The tuple is held in a local of its own, so an initialiser with side
         // effects runs once however many elements are taken from it.
         let holder = hir::LocalId(self.synthetic_local("tuple", value.ty, span));
+        let source = match value.kind {
+            ExprKind::Local(src) => Some(src.0),
+            _ => None,
+        };
         let mut stmts = vec![hir::Stmt::Let {
             local: holder,
             init: Some(value),
@@ -8424,7 +8534,23 @@ impl<'a> Checker<'a> {
             self.locals[local as usize].ty = parts[i];
             self.init[local as usize] = Init::Assigned;
             self.forget_copies(local);
-            self.taint[local as usize] = if held[i] { Taint::Unchecked } else { Taint::Clean };
+            let state = if held[i] { Taint::Unchecked } else { Taint::Clean };
+            self.taint[local as usize] = state;
+            // An element that is a tuple of failures is followed by parts
+            // as any binding of one is, and an element of it already taken
+            // with `t.0.0` is not owed again: `let (u, n) = t` then `u.0`
+            // leaves `u.1` owed, and after `t.0.0` only `u.1` is.
+            self.reset_parts(local, state);
+            if let (true, Some(src)) = (held[i], source) {
+                let from = self
+                    .parts
+                    .get(&src)
+                    .and_then(|ps| ps.iter().find(|&&(j, _)| j as usize == i))
+                    .map(|&(_, part)| part);
+                if let Some(from) = from {
+                    self.inherit_parts(local, from, before);
+                }
+            }
             stmts.push(hir::Stmt::Let {
                 local: hir::LocalId(local),
                 init: Some(hir::Expr {
@@ -10054,19 +10180,28 @@ impl<'a> Checker<'a> {
             return;
         }
         let name = self.locals[id as usize].name.clone();
+        let mut d = Diagnostic::error(
+            codes::E0301,
+            format!("`{}` may be nil here, so it has no message", name),
+        )
+        .with_primary(span, "reading the message needs an error that is present")
+        .with_secondary(base.span(), format!("`{}` has not been proved non-nil", name))
+        .with_note(format!(
+            "test it first: `if {} != nil {{ … {}.message() … }}`, or leave early with \
+             `if {} == nil {{ return … }}`",
+            name, name, name
+        ));
+        // An optional result narrowed to its error: the test that narrowed
+        // it found the optional present, which is not the error being so.
+        if matches!(self.types.kind(self.locals[id as usize].ty), TyKind::Optional(_)) {
+            d = d.with_note(format!(
+                "`{}` is an optional result: the nil test that found it present says a \
+                 result is there, and the error it holds may still be nil",
+                name
+            ));
+        }
         self.diags.push(
-            Diagnostic::error(
-                codes::E0301,
-                format!("`{}` may be nil here, so it has no message", name),
-            )
-            .with_primary(span, "reading the message needs an error that is present")
-            .with_secondary(base.span(), format!("`{}` has not been proved non-nil", name))
-            .with_note(format!(
-                "test it first: `if {} != nil {{ … {}.message() … }}`, or leave early with \
-                 `if {} == nil {{ return … }}`",
-                name, name, name
-            ))
-            .with_note(
+            d.with_note(
                 "an `error` is either nil or a failure; there is no message on the nil side, \
                  and no zero value standing in for one",
             ),
@@ -12690,13 +12825,17 @@ impl<'a> Checker<'a> {
         // settled as it is taken, and the tuple once every one has been.
         // What is projected is followed through parentheses and through
         // projections of a tuple literal, so `(r, 1).0.1` takes `r.1`.
-        let owed = match projected_source(base) {
-            ast::Expr::Path(p) => match self.resolved.lookup_use(p.span) {
+        //
+        // A chain of them is followed down the binding's parts, so `t.0.0`
+        // takes one failure of `t.0` and leaves `t.0.1` owed — reading `t.0`
+        // on the way takes nothing by itself.
+        let owed = match projected_place(base) {
+            Some((at, path)) => match self.resolved.lookup_use(at) {
                 Some(Res::Local(id))
                     if self.taint.get(id as usize) == Some(&Taint::Unchecked)
                         && self.parts.contains_key(&id) =>
                 {
-                    Some((id, self.taint.clone()))
+                    Some((id, path, self.taint.clone()))
                 }
                 _ => None,
             },
@@ -12714,17 +12853,52 @@ impl<'a> Checker<'a> {
         } else if owed.is_none() {
             self.drop_untaken(&obj, name, &[]);
         }
-        if let Some((id, before)) = owed {
-            self.keep_unread(id, &before);
-            let index = name.name.parse::<u32>().ok();
-            let parts = self.parts[&id].clone();
-            for &(i, part) in &parts {
-                if Some(i) == index {
-                    self.taint[part as usize] = Taint::Clean;
+        if let Some((id, path, before)) = owed {
+            // The holders from the binding down to the tuple projected; a
+            // step whose element holds no failure has no part, and nothing
+            // under it can be taken.
+            let mut holders = vec![id];
+            for &step in &path {
+                let at = *holders.last().unwrap();
+                match self.parts.get(&at).and_then(|ps| ps.iter().find(|&&(i, _)| i == step)) {
+                    Some(&(_, part)) => holders.push(part),
+                    None => break,
                 }
             }
-            if parts.iter().all(|&(_, part)| self.taint[part as usize] != Taint::Unchecked) {
-                self.inspect(id);
+            let deepest = self.parts.get(holders.last().unwrap()).cloned();
+            // Only a projection of a tuple the parts follow puts back what
+            // reading its base marked. Where the chain ends at an element
+            // with no parts of its own — a pair, a struct, a step that holds
+            // no failure — reading the base took that element whole, as it
+            // always has: putting it back left `t.0` owed after `t.0.1` on a
+            // pair, which is refused as having no fields, and so made a
+            // second report for one mistake.
+            if let (true, Some(parts)) = (holders.len() == path.len() + 1, deepest) {
+                self.keep_unread(id, &before);
+                let index = name.name.parse::<u32>().ok();
+                for &(i, part) in &parts {
+                    if Some(i) == index {
+                        self.taint[part as usize] = Taint::Clean;
+                        for sub in self.all_parts(part) {
+                            self.taint[sub as usize] = Taint::Clean;
+                        }
+                    }
+                }
+                // Each holder is settled once every element of it has been
+                // taken, from the innermost out to the binding itself.
+                for &at in holders.iter().rev() {
+                    let settled = self.parts.get(&at).is_none_or(|ps| {
+                        ps.iter().all(|&(_, part)| self.taint[part as usize] != Taint::Unchecked)
+                    });
+                    if !settled {
+                        break;
+                    }
+                    if at == id {
+                        self.inspect(id);
+                    } else {
+                        self.taint[at as usize] = Taint::Clean;
+                    }
+                }
             }
         }
 
@@ -15986,6 +16160,41 @@ fn projected_source(e: &ast::Expr) -> &ast::Expr {
             _ => e,
         },
         _ => e,
+    }
+}
+
+/// Whether a value is a result made where it is written — a call or an
+/// `await`, or a value `if` or `match` one of whose branches is — rather
+/// than one read from where it is stored. A nil test of such a result is
+/// the only look anything gets at it.
+fn fresh_result(e: &hir::Expr) -> bool {
+    match &e.kind {
+        ExprKind::Call { .. }
+        | ExprKind::CallVirtual { .. }
+        | ExprKind::CallBuiltin { .. }
+        | ExprKind::CallExtern { .. }
+        | ExprKind::CallClosure { .. }
+        | ExprKind::Await { .. } => true,
+        ExprKind::If { then, else_, .. } => fresh_result(then) || fresh_result(else_),
+        ExprKind::Match { arms, .. } => arms.iter().any(|a| fresh_result(&a.body)),
+        _ => false,
+    }
+}
+
+/// The binding a projection's base reads, and the elements it projects on
+/// the way, outermost first: `t` is `t` and `[]`, `t.0` is `t` and `[0]`,
+/// `(t.1).0` is `t` and `[1, 0]`. `None` for a base that is not a binding
+/// projected by numbers.
+fn projected_place(e: &ast::Expr) -> Option<(Span, Vec<u32>)> {
+    match projected_source(e) {
+        ast::Expr::Path(p) => Some((p.span, Vec::new())),
+        ast::Expr::Field { base, name, .. } => {
+            let index = name.name.parse::<u32>().ok()?;
+            let (at, mut path) = projected_place(base)?;
+            path.push(index);
+            Some((at, path))
+        }
+        _ => None,
     }
 }
 

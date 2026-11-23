@@ -49,10 +49,37 @@ fn tested_in_the_condition() {
     }
 }
 
+// A binding that holds no failure unread brings none, as `nil` does: one
+// already checked, or one only ever given `nil`. Such an `if` used to make a
+// new obligation that only the new name could meet.
+fn over_a_checked_binding(x: bool) -> error {
+    let c = get()
+    check c
+    let e = if x { c } else { nil }
+    return nil
+}
+
+fn over_a_nil_binding(x: bool) {
+    var c: error = nil
+    let e = if x { c } else { nil }
+}
+
+// Beside one that does hold a failure, that one still answers for it.
+fn beside_an_unread_one(x: bool) -> error {
+    let c = get()
+    check c
+    let d = get()
+    let e = if x { c } else { d }
+    return nil //~ ERROR E0302
+}
+
 fn main() {
     nothing_inspected(true)
     only_the_new_name_tested(true)
     the_original_tested(true)
     a_copy_on_every_branch(true)
     tested_in_the_condition()
+    _ = over_a_checked_binding(true)
+    over_a_nil_binding(true)
+    _ = beside_an_unread_one(true)
 }
