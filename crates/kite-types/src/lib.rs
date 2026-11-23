@@ -8962,17 +8962,16 @@ impl<'a> Checker<'a> {
                     self.taint[i as usize] = Taint::Unchecked;
                 }
             }
-        } else if held && m.arms.iter().any(|a| matches!(a.pattern, ast::Pattern::Wildcard(_))) {
-            self.diags.push(
-                Diagnostic::error(codes::E0302, "error is never checked")
-                    .with_primary(scrutinee.span, "this `match` never looks at the failure it holds")
-                    .with_note(
-                        "`_` matches anything without testing it; match `nil` first, or bind \
-                         it and test it — `let err = …` then `if err != nil { … }`",
-                    )
-                    .with_note("to throw it away on purpose, write `_ = …`"),
-            );
         }
+        // A fresh failure reaching a `_` is dropped there — unless a guard
+        // ahead of it looked at the name an earlier arm gave it, as in `e if
+        // e != nil => …`, and so let through to the `_` only what it saw.
+        // Which guards look is known once the arms are checked.
+        let mut dropped_at = (source.is_none()
+            && held
+            && m.arms.iter().any(|a| matches!(a.pattern, ast::Pattern::Wildcard(_))))
+        .then_some(scrutinee.span);
+        let mut before_wildcard = true;
 
         if m.arms.is_empty() {
             self.diags.push(
@@ -9049,6 +9048,15 @@ impl<'a> Checker<'a> {
                 }
                 c
             });
+            if matches!(arm.pattern, ast::Pattern::Wildcard(_)) {
+                before_wildcard = false;
+            } else if let (true, Some(_), hir::Pattern::Binding { local, .. }) =
+                (before_wildcard, &guard, &pattern)
+            {
+                if self.taint[local.index()] != Taint::Unchecked {
+                    dropped_at = None;
+                }
+            }
 
             let want = expected.or(result_ty);
             let body = match &arm.body {
@@ -9107,6 +9115,17 @@ impl<'a> Checker<'a> {
                 body,
                 span: arm.span,
             });
+        }
+        if let Some(at) = dropped_at {
+            self.diags.push(
+                Diagnostic::error(codes::E0302, "error is never checked")
+                    .with_primary(at, "this `match` never looks at the failure it holds")
+                    .with_note(
+                        "`_` matches anything without testing it; bind it and test it — \
+                         `let err = …` then `if err != nil { … }`",
+                    )
+                    .with_note("to throw it away on purpose, write `_ = …`"),
+            );
         }
 
         // A binding one arm's pattern introduced is out of scope after the

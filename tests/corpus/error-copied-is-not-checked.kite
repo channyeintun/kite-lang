@@ -130,6 +130,22 @@ fn matched_and_tested(x: bool) {
     }
 }
 
+// A guard that looks at the name lets through to the `_` only what it saw.
+fn a_guard_tests_it() {
+    match touch(2) {
+        e if e != nil => io.print("failed"),
+        _ => io.print("fine"),
+    }
+}
+
+// One that does not look lets the failure through untested.
+fn a_guard_tests_something_else(x: bool) {
+    match touch(2) { //~ ERROR E0302
+        e if x => io.print(e != nil),
+        _ => io.print("dropped when x is false"),
+    }
+}
+
 fn a_tuple_literal_tested() {
     let (n, w) = (1, touch(1))
     if w != nil {
@@ -152,4 +168,6 @@ fn main() {
     _ = passed_on_through_copies()
     matched_and_tested(true)
     a_tuple_literal_tested()
+    a_guard_tests_it()
+    a_guard_tests_something_else(false)
 }
