@@ -2280,7 +2280,10 @@ impl<'a> FnResolver<'a> {
                 self.expr(rhs);
             }
             Expr::Call { callee, args, .. } => {
-                self.expr(callee);
+                match callee.as_ref() {
+                    Expr::Field { base, name, span } => self.field(base, name, *span, true),
+                    _ => self.expr(callee),
+                }
                 for a in args {
                     self.expr(a);
                 }
@@ -2290,17 +2293,7 @@ impl<'a> FnResolver<'a> {
             // associated function (`Rect.square`) — but only when its head is
             // not a local. Locals win, so a field named `print` on a value
             // called `io` still works.
-            Expr::Field { base, name, span } => {
-                if let Some(res) = self.try_dotted(base, name) {
-                    self.map.uses.insert(*span, res);
-                    return;
-                }
-                if let Some(d) = self.missing_member(base, name) {
-                    self.diags.push(d);
-                    return;
-                }
-                self.expr(base)
-            }
+            Expr::Field { base, name, span } => self.field(base, name, *span, false),
             Expr::Index { base, index, .. } => {
                 self.expr(base);
                 self.expr(index);
@@ -2372,8 +2365,27 @@ impl<'a> FnResolver<'a> {
         }
     }
 
+    /// `base.name`, `called` when it is the callee of a call.
+    fn field(&mut self, base: &Expr, name: &Ident, span: Span, called: bool) {
+        if let Some(res) = self.try_dotted(base, name) {
+            self.map.uses.insert(span, res);
+            return;
+        }
+        if let Some(d) = self.missing_member(base, name, called) {
+            self.diags.push(d);
+            return;
+        }
+        self.expr(base)
+    }
+
     /// The `E0111` for `m.name` where `m` is a module this one imported and
     /// `name` is nothing in it.
+    ///
+    /// **The near name is one that fits where it is written.** Every public
+    /// name was a candidate, so `m.outer()` was offered `Outer`, a trait, and
+    /// `json.encode(v)` the trait `Encode` — fixes that do not compile. A
+    /// call is offered functions; anything else functions, constants and the
+    /// types a path can go on through (`m.Shape.Circle`), never a trait.
     ///
     /// The path fell through to being read as a field of a value called `m`,
     /// so a misspelled member — `m.on()` for `m.one()` — said ``cannot find
@@ -2383,7 +2395,7 @@ impl<'a> FnResolver<'a> {
     ///
     /// The modules in scope without a `use` — `io.prnt` — are the same
     /// mistake, and said the same way when one of their builtins is near.
-    fn missing_member(&self, base: &Expr, name: &Ident) -> Option<Diagnostic> {
+    fn missing_member(&self, base: &Expr, name: &Ident, called: bool) -> Option<Diagnostic> {
         let Expr::Path(p) = base else { return None };
         if !p.is_simple() || self.lookup(&p.text()).is_some() {
             return None;
@@ -2400,8 +2412,12 @@ impl<'a> FnResolver<'a> {
         let mut names: Vec<&str> = Vec::new();
         if imported.is_some() {
             names.extend(self.map.fns.iter().filter(|f| f.is_pub).map(|f| f.name.as_str()));
-            names.extend(self.map.consts.iter().filter(|c| c.is_pub).map(|c| c.name.as_str()));
-            names.extend(self.map.types.iter().filter(|t| t.is_pub).map(|t| t.name.as_str()));
+            if !called {
+                let consts = self.map.consts.iter().filter(|c| c.is_pub);
+                names.extend(consts.map(|c| c.name.as_str()));
+                let types = self.map.types.iter().filter(|t| t.is_pub && t.kind != TypeKind::Trait);
+                names.extend(types.map(|t| t.name.as_str()));
+            }
         }
         if builtin {
             names.extend(BUILTIN_PATHS.iter().copied());

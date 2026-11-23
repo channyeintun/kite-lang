@@ -213,6 +213,26 @@ fn a_misspelled_member_is_not_reported_as_a_missing_module() {
 /// The same for a module in scope without a `use`: `io.prnt` said
 /// ``cannot find `io` ``. One whose member is not near a builtin — `text.trim`
 /// with no `use std/text` — is a missing `use`, and is not told it is a typo.
+/// The near name offered for a misspelt member fits where it is written: a
+/// call is offered a function, never a trait or a type it cannot call.
+#[test]
+fn a_misspelled_call_is_offered_only_a_function() {
+    let p = Project::new("misspelled-call");
+    p.file(
+        "m.kite",
+        "pub trait Outer {\n  fn out(self) -> int\n}\n\n\
+         pub fn other() -> int {\n  return 1\n}\n\n\
+         pub fn inner() -> int {\n  return 2\n}\n",
+    );
+    let main = p.file("main.kite", "use m\n\nfn main() {\n  io.print(m.outer())\n}\n");
+    let said = p.run(&main).expect_err("misspelt");
+    assert!(said.contains("cannot find `outer` in module `m`"), "{}", said);
+    assert!(!said.contains("`Outer`"), "a trait cannot be called: {}", said);
+    let main = p.file("near.kite", "use m\n\nfn main() {\n  io.print(m.innr())\n}\n");
+    let said = p.run(&main).expect_err("misspelt");
+    assert!(said.contains("a similar name is in `m`: `inner`"), "{}", said);
+}
+
 #[test]
 fn a_misspelled_type_is_not_reported_as_a_missing_module() {
     let p = Project::new("misspelled-type");
