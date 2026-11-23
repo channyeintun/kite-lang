@@ -1009,6 +1009,31 @@ fn a_missing_property_is_an_error_and_not_a_zero() {
     );
 }
 
+/// Calling a method that is not there names that method.
+///
+/// The engine's own message quotes the glue's source, `t[textOf(...)] is not a
+/// function`, and the name the program wrote appeared nowhere.
+#[test]
+fn a_missing_method_is_named_in_the_error() {
+    if !node_available() {
+        eprintln!("skipping: node is not on PATH");
+        return;
+    }
+    let src = "use std/js\n\n\
+        fn main() {\n\
+        \x20 let (_, err) = js.call0(js.global(\"probe\"), \"noSuchMethod\")\n\
+        \x20 if err != nil {\n    io.print(err.message())\n  }\n\
+        \x20 let (v, ok) = js.call1(js.global(\"probe\"), \"twice\", js.of_num(4.0))\n\
+        \x20 if ok == nil {\n    io.print(js.num_or(js.global(\"probe\"), \"count\", 0.0))\n  }\n\
+        }\n";
+    let out = run_runner_under_node("jsnomethod", src, JS_RUNNER, &[]);
+    assert!(
+        out.contains("`noSuchMethod` is not a function") && !out.contains("textOf"),
+        "{}",
+        out
+    );
+}
+
 /// Numbers cross as `f64`, and the limit that implies is refused rather than
 /// discovered as a value that came back different from the one that went out.
 #[test]
