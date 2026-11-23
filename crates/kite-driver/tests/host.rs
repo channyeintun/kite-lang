@@ -1920,6 +1920,32 @@ fn window_decodes_rounds_and_dates_as_documented() {
     );
 }
 
+/// `window.unescaped` decodes as `http.form_decoded` and `window.parameter`
+/// do: a bad escape stays and the rest is decoded, and a lone `%E9` is U+FFFD.
+///
+/// It called `decodeURIComponent`, which gave the whole text back undecoded for
+/// one bad escape (and for `%E9`), so one page read one text two ways.
+#[test]
+fn window_unescaped_decodes_as_the_server_does() {
+    if !node_available() {
+        eprintln!("skipping: node is not on PATH");
+        return;
+    }
+    let src = "use std/window\n\
+        use std/http\n\n\
+        fn main() {\n\
+        \x20 for s in [\"a+b%20c\", \"100%\", \"a%zz+b%41\", \"%E9\", \"%C3%A9\"] {\n\
+        \x20   io.print(\"\\(window.unescaped(s) == http.form_decoded(s)) [\\(window.unescaped(s))]\")\n\
+        \x20 }\n\
+        }\n";
+    let out = run_runner_under_node("window_unescaped", src, WINDOW_RUNNER, &[]);
+    assert_eq!(
+        out,
+        "true [a b c]\ntrue [100%]\ntrue [a%zz bA]\ntrue [\u{fffd}]\ntrue [\u{e9}]\n",
+        "{}",
+        out
+    );
+}
 
 // ---- the typed door --------------------------------------------------------
 
