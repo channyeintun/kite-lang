@@ -29,8 +29,14 @@
 //   the absence of a dictionary, and CB is not implemented because nothing
 //   can be embedded in a run of Kite text to break around. One tailoring
 //   of our own: an emoji skin tone attaches to whatever it follows, as a
-//   combining mark does, not only to an emoji base (LB30b), so a line never
-//   breaks inside what `clusters` calls one character. The rules later
+//   combining mark does, not only to an emoji base (LB30b), so a line does
+//   not break between a letter and its skin tone. The two annexes are still
+//   two: UAX #14 allows a few breaks inside what `clusters` calls one
+//   character — after a space or a line feed before a mark, between a
+//   Prepend character and an ideograph or emoji, before a spacing mark that
+//   follows a character of another script — and `break_opportunities`
+//   reports them. A letter and the marks and vowel signs of its own script
+//   are never parted. The rules later
 //   revisions added — LB15a–LB15d, LB20a, LB28a — are not here, and East
 //   Asian Width is read only where LB30 needs it; the section says which.
 // - `clusters` is UAX #29's extended grapheme clusters as of **Unicode
@@ -3632,12 +3638,12 @@ pub fn clusters(body: str) -> [str] {
 /// the rest, summed over the characters — less those a cluster draws into
 /// another. An emoji joined on by a zero-width joiner is drawn into the one
 /// before it, so a family is one wide glyph, not six; a Hangul jamo joined to
-/// an initial or a syllable is drawn into it, so a syllable written as jamo is
-/// the 2 of its initial; and a Prepend character is drawn on the character it
-/// is prepended to, which is as wide as the cluster is. Everything else in a
-/// cluster keeps the column a terminal gives it: each consonant of an Indic
-/// conjunct, so क्ष is 2, and a spacing vowel sign, so कि is 2 as well. A flag
-/// is 2.
+/// the jamo or syllable before it is drawn into that, so a syllable written
+/// as jamo is the 2 of its initial; and a Prepend character is drawn on the
+/// character it is prepended to, which is as wide as the cluster is.
+/// Everything else in a cluster keeps the column a terminal gives it: each
+/// consonant of an Indic conjunct, so क्ष is 2, and a spacing vowel sign, so
+/// कि is 2 as well. A flag is 2.
 ///
 /// The wide blocks are listed rather than read from the Unicode database,
 /// as `bidi_class`'s are: the ranges below are the East Asian Wide and
