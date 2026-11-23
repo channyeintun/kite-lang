@@ -222,7 +222,12 @@ mod tests {
             (
                 "extern fn read_text(path: int) -> str".to_string(),
                 "io.print(read_text(1))".to_string(),
-                "`fs.read` received a `not a str`",
+                "`fs.read_text` declares parameter 1 as int, and the host reads str",
+            ),
+            (
+                "extern fn temp_path(extra: int) -> str".to_string(),
+                "io.print(temp_path(42))".to_string(),
+                "`fs.temp_path` is declared with 1 parameter, and the host reads 0",
             ),
         ];
         for (declaration, call, message) in cases {
