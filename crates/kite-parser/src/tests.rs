@@ -1565,3 +1565,22 @@ fn a_statement_arm_is_fixed_by_the_block_it_was_written_as() {
     assert!(p.render().contains("`=> { break outer }`"), "{}", p.render());
     assert!(p.render().contains("`=> { return }`"), "{}", p.render());
 }
+
+/// A `use` path written from the file ends with its line, even when the line
+/// ends in a `/` and the lexer joins the next one on. `use ../one/` above
+/// `fn main` took `main` into the path and then read the body as
+/// declarations: an `expected a declaration` at its `}`, and a note quoting
+/// the next three lines as the path. It is one error, and `main` is declared.
+#[test]
+fn a_use_path_with_dots_ends_with_its_line() {
+    for src in [
+        "use ../one/\nfn main() {\n    io.print(1)\n}\n",
+        "use ./\n\nfn main() {\n    io.print(1)\n}\n",
+        "use ../one/a\nfn main() {\n    io.print(1)\n}\n",
+    ] {
+        let p = parse_src(src);
+        assert_eq!(p.codes(), vec!["E0100"], "{:?}\n{}", src, p.render());
+        assert!(!p.diags.iter().any(|d| d.notes.iter().any(|n| n.contains("main"))), "{}", p.render());
+        assert_eq!(p.fns().iter().map(|f| f.name.name.as_str()).collect::<Vec<_>>(), vec!["main"]);
+    }
+}

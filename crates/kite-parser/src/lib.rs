@@ -1441,14 +1441,26 @@ impl<'a> Parser<'a> {
         let lead = self.span();
         let lead_text = self.text(lead).to_string();
         let mut path = Vec::new();
-        while !matches!(self.peek(), T::Newline | T::Eof | T::As) {
+        // The path ends with its line, which is not always a line break
+        // token: after the `/` of `use ../one/` the lexer joins the next
+        // line on, and reading to a token took the next declaration's names
+        // into the path — and then its body was read as declarations.
+        let ends = |p: &Self| {
+            matches!(p.peek(), T::Newline | T::Eof) || p.starts_line(p.pos) || p.at(T::As)
+        };
+        self.bump(); // the lead
+        while !ends(self) {
             if self.at(T::Ident) {
                 path.push(self.ident()?);
             } else {
                 self.bump();
             }
         }
-        let alias = if self.eat(T::As) && self.at(T::Ident) { Some(self.ident()?) } else { None };
+        let alias = if !self.starts_line(self.pos) && self.eat(T::As) && self.at(T::Ident) {
+            Some(self.ident()?)
+        } else {
+            None
+        };
         let span = start.to(self.prev_span());
         let written = self.text(Span::new(self.file, lead.start, span.end)).to_string();
         let names: Vec<&str> = path.iter().map(|s| s.name.as_str()).collect();
@@ -1472,7 +1484,11 @@ impl<'a> Parser<'a> {
             ));
         }
         self.diags.push(d);
-        self.expect_terminator();
+        // At the next line's first token the line has ended, whether or not
+        // a line break token says so.
+        if !self.starts_line(self.pos) {
+            self.expect_terminator();
+        }
         (!path.is_empty()).then_some(Use { path, alias, span })
     }
 
