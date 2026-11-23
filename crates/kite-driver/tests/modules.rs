@@ -104,6 +104,40 @@ fn a_module_may_declare_a_type_of_the_same_name_as_the_program() {
     assert_eq!(p.run(&main).expect("compiles"), "here 0\n");
 }
 
+/// A bare unit pattern is read against the scrutinee's enum (§9.3), and a
+/// private enum's variants are as private as the enum, bare or qualified. The
+/// bare spelling matched `Draft` from outside while `state.Phase.Draft` was
+/// `E0401`; a public enum's bare unit variant still matches.
+#[test]
+fn a_private_enums_bare_unit_variant_cannot_be_matched_from_outside() {
+    let p = Project::new("bare-private-variant");
+    p.file(
+        "state.kite",
+        "enum Phase {\n  Draft\n  Live\n}\n\npub enum Open {\n  Yes\n  No\n}\n\n\
+         pub struct Doc {\n  phase: Phase\n}\n\n\
+         pub fn draft() -> Doc {\n  return Doc{ phase: Draft }\n}\n\n\
+         pub fn phase_of(d: Doc) -> Phase {\n  return d.phase\n}\n\n\
+         pub fn open() -> Open {\n  return Yes\n}\n",
+    );
+    let main = p.file(
+        "main.kite",
+        "use state\n\nfn main() {\n  match state.phase_of(state.draft()) {\n\
+         \x20   Draft => io.print(\"draft\"),\n    _ => io.print(\"other\"),\n  }\n}\n",
+    );
+    let said = p.run(&main).expect_err("`Phase` is private").replace('\\', "/");
+    assert!(said.contains("E0401"), "{}", said);
+    assert!(said.contains("`state.Phase` is private to module `state`"), "{}", said);
+    assert!(said.contains("main.kite:5:5"), "at the pattern: {}", said);
+    assert_eq!(said.matches("error[").count(), 1, "one cause, one error: {}", said);
+
+    let main = p.file(
+        "main.kite",
+        "use state\n\nfn main() {\n  match state.open() {\n\
+         \x20   Yes => io.print(\"yes\"),\n    No => io.print(\"no\"),\n  }\n}\n",
+    );
+    assert_eq!(p.run(&main).expect("a public enum's variant"), "yes\n");
+}
+
 #[test]
 fn an_unmarked_declaration_is_private_to_its_module() {
     let p = Project::new("private");

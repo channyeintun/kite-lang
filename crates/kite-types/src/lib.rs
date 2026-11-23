@@ -9812,6 +9812,7 @@ impl<'a> Checker<'a> {
             // it is one the reader can see.
             ast::Pattern::Binding(name) if self.unit_variant_of(scrut, &name.name).is_some() => {
                 let (ti, vi) = self.unit_variant_of(scrut, &name.name).expect("just checked");
+                self.check_bare_variant(ti, &name.name, name.span);
                 self.variant_pattern(ti, vi, None, scrut, name.span)
             }
 
@@ -10258,6 +10259,34 @@ impl<'a> Checker<'a> {
             }
             ast::Pattern::Error(_) => hir::Pattern::Wildcard,
         }
+    }
+
+    /// A bare unit pattern is read against the scrutinee's enum (§9.3), and
+    /// that enum may be another module's — but not a private one.
+    ///
+    /// The pattern found its variant by the scrutinee's type, and nothing
+    /// asked whether the asking module could see that type: a bare `Draft`
+    /// matched a variant of another module's private enum, which
+    /// `state.Phase.Draft` in the same place is `E0401` for. A variant is
+    /// exactly as visible as its enum. It is still taken as that variant after
+    /// the error, so the arms after it are not reported as unreachable behind
+    /// a catch-all.
+    fn check_bare_variant(&mut self, ti: u32, name: &str, span: Span) {
+        let decl = self.resolved.type_decl(ti);
+        let module = self.resolved.module_of_item(decl.decl_index).to_string();
+        if decl.is_pub || module == self.module || module == kite_resolve::PRELUDE {
+            return;
+        }
+        let (shown, enum_span) = (decl.name.trim_start_matches('@').to_string(), decl.span);
+        self.diags.push(
+            Diagnostic::error(codes::E0401, format!("`{}` is private to module `{}`", shown, module))
+                .with_primary(span, format!("`{}` is a variant of `{}`, not visible here", name, shown))
+                .with_secondary(enum_span, "this enum is not marked `pub`")
+                .with_note(
+                    "unmarked declarations are visible only within their own module, and an \
+                     enum's variants are exactly as visible as the enum",
+                ),
+        );
     }
 
     /// The declaration index and variant index of a unit variant with this

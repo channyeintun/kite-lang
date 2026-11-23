@@ -611,7 +611,9 @@ An alias is the same: after `use std/math as m`, `m.floor(1.5)` resolves and
 expression or a pattern with a payload — is one of the asking module's own
 enums' variants, or the prelude's. Another module's variants are written
 qualified, `shapes.Shape.Circle`, imported or not. (A bare *unit* variant in a
-`match` arm is still read against the scrutinee's own enum.)
+`match` arm is still read against the scrutinee's own enum — unless that enum
+is another module's private one, which is `E0401` however the variant is
+spelled.)
 
 ### Imports are always qualified
 
