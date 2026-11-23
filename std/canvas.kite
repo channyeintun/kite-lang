@@ -32,7 +32,6 @@
 //! to the boundary rather than to this file.
 
 use std/math
-use std/text as breaks
 
 // ---- shapes ---------------------------------------------------------------
 
@@ -110,21 +109,6 @@ pub fn line_height() -> float {
 /// half of [`width_of`], measured in the font currently selected.
 pub fn text_centered(cx: float, y: float, body: str, colour: int) {
     draw.text(cx - text.width(body) / 2.0, y, body, colour)
-}
-
-/// Text wrapped to `max_width` and drawn from `(x, y)`, one [`line_height`]
-/// apart. Answers the height it took, so the next thing can be placed below.
-///
-/// Lines are those `text.wrap` makes with [`width_of`] as the measure, so they
-/// agree with what is drawn.
-pub fn paragraph(x: float, y: float, max_width: float, body: str, colour: int) -> float {
-    let step = text.height()
-    var top = y
-    for line in breaks.wrap(body, max_width, |s: str| -> float { return text.width(s) }) {
-        draw.text(x, top, line, colour)
-        top += step
-    }
-    return top - y
 }
 
 // ---- colours --------------------------------------------------------------

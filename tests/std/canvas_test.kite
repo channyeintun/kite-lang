@@ -1,7 +1,7 @@
-// std/canvas's own tests: the colour arithmetic and the layout of text, which
-// are ordinary functions of numbers and need no surface to be checked. The
-// drawing itself is the host's; what these calls hand it is recorded by the
-// WasmGC runner and discarded by the others.
+// std/canvas's own tests: the colour arithmetic, which is an ordinary function
+// of numbers and needs no surface to be checked. The drawing itself is the
+// host's; what these calls hand it is recorded by the WasmGC runner and
+// discarded by the others.
 
 use std/test
 use std/canvas
@@ -16,15 +16,6 @@ fn checks() -> [error] {
     out.push(test.equal_int(canvas.mix(0x102030, 0x405060, -3.0), 0x102030, "below zero is held to zero"))
     out.push(test.equal_int(canvas.mix(0xFF0000, 0x0000FF, 0.25), 0xBF0040, "channels blend apart"))
 
-    canvas.font(16.0, 400)
-    // One line is one `line_height`, whatever the host measures text as.
-    let step = canvas.line_height()
-    let one = canvas.paragraph(0.0, 0.0, 10000.0, "fits on a line", 0x000000)
-    out.push(test.is_true(approx_eq(one, step, 0.001), "a short text is one line high"))
-    let wide = canvas.width_of("the quick brown fox jumps over the lazy dog")
-    let several = canvas.paragraph(0.0, 0.0, wide / 3.0, "the quick brown fox jumps over the lazy dog", 0x000000)
-    out.push(test.is_true(several >= step * 3.0, "a narrow column takes several lines"))
-    out.push(test.is_true(approx_eq(canvas.paragraph(0.0, 5.0, 100.0, "", 0x000000), 0.0, 0.001), "no text, no height"))
     canvas.text_centered(50.0, 0.0, "centred", 0xFFFFFF)
     return out
 }
