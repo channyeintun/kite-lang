@@ -25,6 +25,12 @@ pub fn lower(program: &hir::Program) -> Program {
         .collect();
     out.strings = strings.list;
     out.vtables = program.vtables.clone();
+    out.mutable_structs = (0..program.types.struct_count())
+        .map(|i| {
+            let def = program.types.struct_def(StructId(i as u32));
+            def.fields.iter().any(|f| f.mutable)
+        })
+        .collect();
     out
 }
 

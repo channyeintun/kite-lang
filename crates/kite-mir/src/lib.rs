@@ -74,6 +74,10 @@ pub struct Program {
     /// Non-empty means the program must not reach a backend; see
     /// [`internal_errors`].
     pub internal: Vec<Internal>,
+    /// Per struct id, whether the struct has a `var` field. Such a struct
+    /// can change while it is a map's key, so the runtimes' map indexes hash
+    /// it by its type rather than its fields; see `kite-vm`'s `map` module.
+    pub mutable_structs: Vec<bool>,
 }
 
 /// A host function's declared signature, in the encoding
