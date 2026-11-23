@@ -1171,6 +1171,27 @@ fn a_file_of_a_directory_module_cannot_import_its_sibling() {
     assert!(said.contains("E0404"), "{}", said);
     assert!(said.contains("lib/shape.kite` is already part of the module `lib`"), "{}", said);
     assert!(said.contains("lib/use_it.kite:1:1"), "at the `use`: {}", said);
+    assert!(said.contains("remove this `use`"), "{}", said);
+}
+
+/// A module inside a directory module, reaching one of that module's files
+/// by walking out, is not told to `use` the module that imports it — taking
+/// that advice was a cycle.
+#[test]
+fn a_nested_module_is_not_told_to_import_the_module_around_it() {
+    let p = Project::new("nested-member");
+    p.file(
+        "ui/view.kite",
+        "use widgets\n\npub struct View {\n  pub n: int\n}\n\n\
+         pub fn top() -> int {\n  return widgets.w().n\n}\n",
+    );
+    p.file("ui/widgets/w.kite", "use view\n\npub fn w() -> view.View {\n  return view.View{ n: 3 }\n}\n");
+    let main = p.file("main.kite", "use ui\n\nfn main() {\n  io.print(ui.top())\n}\n");
+    let said = p.run(&main).expect_err("one file, two modules");
+    assert!(said.contains("E0404"), "{}", said);
+    assert!(!said.contains("`use ui`"), "that would be a cycle: {}", said);
+    assert!(said.contains("cannot import `ui` back"), "{}", said);
+    assert!(said.contains("`ui` was loaded here"), "{}", said);
 }
 
 /// The same from outside, in either order: `use lib/shape` beside `use lib`.
@@ -1188,6 +1209,14 @@ fn a_file_of_a_directory_module_cannot_be_imported_on_its_own() {
         assert!(said.contains("E0404"), "{}", said);
         assert!(said.contains("is already"), "{}", said);
         assert!(said.contains("main.kite:2:1"), "at the second `use`: {}", said);
+        // And it points at the first one, and says which to change.
+        if uses.starts_with("use lib/shape") {
+            assert!(said.contains("`lib/shape` was imported on its own here"), "{}", said);
+            assert!(said.contains("remove the `use lib/shape`"), "{}", said);
+        } else {
+            assert!(said.contains("`lib` was loaded here"), "{}", said);
+            assert!(said.contains("remove this `use`: `use lib` reaches"), "{}", said);
+        }
     }
 }
 

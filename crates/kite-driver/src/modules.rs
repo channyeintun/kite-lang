@@ -673,7 +673,8 @@ pub struct Loader {
     /// or `use lib/shape` from outside — and was then compiled twice, as part
     /// of `lib` and as `lib/shape`, so one declaration became two types and
     /// `expected lib/shape.Pt, found lib.Pt` was the only sign of it.
-    files_of: HashMap<PathBuf, (String, bool)>,
+    /// The `use` that loaded it is kept for the diagnostic to point at.
+    files_of: HashMap<PathBuf, (String, bool, Span)>,
     /// The package each module found on a filesystem was loaded as part of —
     /// see [`Loader::another_package`] — with the `use` that loaded it.
     packages: HashMap<Origin, ((Option<PathBuf>, String), Span)>,
@@ -1084,7 +1085,7 @@ impl Loader {
             };
             let origin = found.origin(&self.files);
             if !self.seen.contains_key(&origin) {
-                if let Some(refusal) = self.already_a_member(&found, u.span) {
+                if let Some(refusal) = self.already_a_member(&found, &owner, u.span) {
                     diags.push(refusal);
                     self.unresolved.insert(failed);
                     continue;
@@ -1471,46 +1472,80 @@ impl Loader {
     /// The `E0404` for a module `found` some of whose files already belong
     /// to another: a file of a loaded directory module imported on its own,
     /// or a directory one of whose files is already a module by itself.
-    fn already_a_member(&self, found: &Found, span: Span) -> Option<Diagnostic> {
+    ///
+    /// `owner` is the module writing the `use`. **The note names a fix that
+    /// is one.** It said `elsewhere, use lib and write lib.…` whichever way
+    /// round the two `use`s came — to a `use lib` that already said exactly
+    /// that, the line to change being the `use lib/shape` before it, which
+    /// nothing pointed at — and offered `use ui` to a module inside `ui/`,
+    /// which `ui` imports, so taking the advice was a cycle.
+    fn already_a_member(&self, found: &Found, owner: &str, span: Span) -> Option<Diagnostic> {
         let Found::Path { at, is_dir, .. } = found else {
             return None;
         };
         let files = if *is_dir { self.files.kite_files(at) } else { vec![at.clone()] };
         for file in files {
-            let Some((other, other_is_dir)) = self.files_of.get(&self.files.canonical(&file))
+            let Some((other, other_is_dir, first)) =
+                self.files_of.get(&self.files.canonical(&file))
             else {
                 continue;
             };
-            let (directory, message, label) = if *other_is_dir {
-                (
-                    other.clone(),
-                    format!("`{}` is already part of the module `{}`", file.display(), other),
-                    "this file already belongs to the directory module",
+            let name = |identity: &str| identity.trim_start_matches('@').to_string();
+            let stem = file.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+            let mut d = if *other_is_dir {
+                let directory = name(other);
+                let d = Diagnostic::error(
+                    codes::E0404,
+                    format!("`{}` is already part of the module `{}`", file.display(), directory),
                 )
+                .with_primary(span, "this file already belongs to the directory module")
+                .with_secondary(*first, format!("`{}` was loaded here", directory));
+                let inside = format!("{}/", other);
+                if owner == other {
+                    d.with_note(format!(
+                        "a file of `{}` sees what its siblings declare unqualified — remove this \
+                         `use`",
+                        directory
+                    ))
+                } else if owner.starts_with(&inside) {
+                    d.with_note(format!(
+                        "this module is inside `{0}`, which imports it, so it cannot import `{0}` \
+                         back; move `{1}.kite` into a directory of its own, `{0}/{1}/`, and write \
+                         `use {1}` in both",
+                        directory, stem
+                    ))
+                } else {
+                    d.with_note(format!(
+                        "remove this `use`: `use {0}` reaches what `{1}.kite` declares, as `{0}.…`",
+                        directory, stem
+                    ))
+                }
             } else if *is_dir {
-                (
-                    found.identity(),
-                    format!("`{}` is already the module `{}`", file.display(), other),
-                    "this directory holds a file already imported on its own",
+                let directory = name(&found.identity());
+                Diagnostic::error(
+                    codes::E0404,
+                    format!("`{}` is already the module `{}`", file.display(), name(other)),
                 )
+                .with_primary(span, "this directory holds a file already imported on its own")
+                .with_secondary(*first, format!("`{}` was imported on its own here", name(other)))
+                .with_note(format!(
+                    "import the directory only: remove the `use {}` and reach what `{}.kite` \
+                     declares as `{}.…`",
+                    name(other),
+                    stem,
+                    directory
+                ))
             } else {
                 continue;
             };
-            return Some(
-                Diagnostic::error(codes::E0404, message)
-                    .with_primary(span, label)
-                .with_note(format!(
-                    "every `.kite` file in a module directory is part of that one module, so a \
-                     file of `{}` cannot also be a module of its own — its declarations would be \
-                     compiled twice, as two types",
-                    directory
-                ))
-                .with_note(format!(
-                    "inside `{0}` its declarations are in scope unqualified; elsewhere, `use {0}` \
-                     and write `{0}.…`",
-                    directory.trim_start_matches('@')
-                )),
-            );
+            let directory = if *other_is_dir { name(other) } else { name(&found.identity()) };
+            d = d.with_note(format!(
+                "every `.kite` file in a module directory is part of that one module, so a file \
+                 of `{}` cannot also be a module of its own — its declarations would be compiled \
+                 twice, as two types",
+                directory
+            ));
+            return Some(d);
         }
         None
     }
@@ -1547,7 +1582,7 @@ impl Loader {
             Found::Path { at, is_dir, package, prefix } => {
                 let paths = if is_dir { self.files.kite_files(&at) } else { vec![at.clone()] };
                 for path in &paths {
-                    let member = (identity.clone(), is_dir);
+                    let member = (identity.clone(), is_dir, span);
                     self.files_of.insert(self.files.canonical(path), member);
                 }
                 for path in paths {
