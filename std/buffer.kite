@@ -33,13 +33,22 @@ pub fn count(b: F64) -> int {
 // negative one, is a valid index into the *neighbouring* record, and a push
 // of the wrong length shifts every record after it: both were silent wrong
 // answers, and a trap that names the mistake is the better failure.
+//
+// Each check tests first and calls `require` only once it has failed: the
+// arguments of a call are worked out before it, so `require(ok, "\(…)")`
+// builds its message on every call, and inside `get` that made reading a
+// buffer ten times slower on the VM and thirty on native code.
 
 fn check_field(b: F64, field: int) {
-    require(field >= 0 && field < b.stride, "buffer: field \(field) is outside a record of \(b.stride)")
+    if field < 0 || field >= b.stride {
+        require(false, "buffer: field \(field) is outside a record of \(b.stride)")
+    }
 }
 
 fn check_record(b: F64, record: int) {
-    require(record >= 0 && record < count(b), "buffer: record \(record) is outside a buffer of \(count(b))")
+    if record < 0 || record >= count(b) {
+        require(false, "buffer: record \(record) is outside a buffer of \(count(b))")
+    }
 }
 
 /// One number of one record.
@@ -64,7 +73,9 @@ pub fn record(b: F64, index: int) -> [float] {
 ///
 /// `values` must be exactly one record, `stride` numbers long.
 pub fn push(b: F64, values: [float]) -> F64 {
-    require(values.len() == b.stride, "buffer: pushed \(values.len()) numbers into records of \(b.stride)")
+    if values.len() != b.stride {
+        require(false, "buffer: pushed \(values.len()) numbers into records of \(b.stride)")
+    }
     return F64{ values: concat(b.values, values), stride: b.stride }
 }
 
@@ -118,7 +129,9 @@ pub fn from_records(stride: int, rows: [[float]]) -> F64 {
     let shape = max(stride, 1)
     var values: [float] = []
     for row in rows {
-        require(row.len() == shape, "buffer: a row of \(row.len()) numbers in records of \(shape)")
+        if row.len() != shape {
+            require(false, "buffer: a row of \(row.len()) numbers in records of \(shape)")
+        }
         for v in row {
             values.push(v)
         }
