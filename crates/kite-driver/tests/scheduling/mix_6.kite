@@ -1,0 +1,94 @@
+use std/task
+use std/sync
+
+async fn leaf(id: int, n: int) -> int {
+    for i in 0..n {
+        io.print("leaf \(id) \(i) \(time.now())")
+        task.yield()
+    }
+    return id
+}
+
+async fn waiter(id: int, t: Task<int>) -> int {
+    io.print("w\(id) wait")
+    let v = await t
+    io.print("w\(id) got \(v) at \(time.now())")
+    return v + 1
+}
+
+async fn chain(id: int, d: int) -> int {
+    if d == 0 {
+        io.print("c\(id) bottom")
+        return 0
+    }
+    io.print("c\(id) down \(d)")
+    let v = await chain(id, d - 1)
+    io.print("c\(id) up \(d)")
+    return v + 1
+}
+
+async fn spawner(id: int, n: int) -> int {
+    var kids: [Task<int>] = []
+    for i in 0..n {
+        kids.push(leaf(id * 10 + i, i))
+        io.print("p\(id) spawned \(i)")
+        task.yield()
+    }
+    var s = 0
+    for k in kids {
+        s += await k
+        io.print("p\(id) collected \(s)")
+    }
+    return s
+}
+
+async fn allsum(id: int, xs: [Task<int>]) -> int {
+    let vs = await task.all(xs)
+    var s = 0
+    for v in vs {
+        s += v
+    }
+    io.print("a\(id) all \(s) at \(time.now())")
+    return s
+}
+
+async fn racer(id: int, xs: [Task<int>]) -> int {
+    let v = await task.race(xs)
+    io.print("r\(id) won \(v) at \(time.now())")
+    return v
+}
+
+async fn pair(id: int, a: Task<int>, b: Task<int>) -> int {
+    let (x, y) = await task.both(a, b)
+    io.print("b\(id) both \(x) \(y)")
+    return x + y
+}
+
+async fn twice(id: int, t: Task<int>) -> int {
+    let a = await t
+    task.yield()
+    let b = await t
+    io.print("d\(id) twice \(a) \(b)")
+    return a + b
+}
+
+pub async fn main() {
+    var ts: [Task<int>] = []
+    var m = sync.mutex(0)
+    var q: sync.Queue<int> = sync.queue()
+    ts.push(leaf(0, 5))
+    ts.push(twice(1, ts[0]))
+    ts.push(waiter(2, ts[1]))
+    ts.push(racer(3, [ts[1], ts[2]]))
+    ts.push(chain(4, 6))
+    ts.push(waiter(5, ts[2]))
+    io.print("main got \(await ts[1])")
+    ts.push(pair(6, ts[5], ts[3]))
+    ts.push(leaf(7, 0))
+    ts.push(allsum(8, [ts[1], ts[4]]))
+    ts.push(waiter(9, ts[0]))
+    ts.push(waiter(10, ts[1]))
+    ts.push(spawner(11, 3))
+    ts.push(leaf(12, 4))
+    io.print("main leaves at \(time.now())")
+}

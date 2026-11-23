@@ -69,6 +69,8 @@ const FIRST_LOCAL: u32 = 2;
 /// the finished task through these.
 pub const DONE: u32 = 0;
 pub const VALUE: u32 = 1;
+/// The task's number with the scheduler, which `task.spawn` answers.
+const ID: u32 = 2;
 
 /// How many MIR blocks one original block becomes, given `k` suspensions in
 /// it: a segment between each pair, plus a test, a suspend and a landing block
@@ -216,8 +218,8 @@ fn starter(
     locals.push(LocalDecl { ty: frame_ty, name: Some("frame".into()) });
     let poll = Local(locals.len() as u32);
     locals.push(LocalDecl { ty: poll_ty, name: Some("poll".into()) });
-    let unit = Local(locals.len() as u32);
-    locals.push(LocalDecl { ty: TyId::UNIT, name: None });
+    let id = Local(locals.len() as u32);
+    locals.push(LocalDecl { ty: TyId::INT, name: None });
 
     let value_ty = types.struct_def(task_struct).fields[VALUE as usize].ty;
     let mut stmts = vec![
@@ -227,7 +229,7 @@ fn starter(
             dst: task,
             value: Rvalue::StructNew {
                 struct_id: task_struct,
-                fields: vec![Operand::Bool(false), Operand::Default(value_ty)],
+                fields: vec![Operand::Bool(false), Operand::Default(value_ty), Operand::Int(0)],
             },
         },
     ];
@@ -254,12 +256,15 @@ fn starter(
         value: Rvalue::ClosureNew { func: resume_id, captures: vec![Operand::Local(frame)] },
     });
     stmts.push(Inst::Assign {
-        dst: unit,
+        dst: id,
         value: Rvalue::CallBuiltin {
             builtin: kite_hir::Builtin::TaskSpawn,
             args: vec![Operand::Local(poll)],
         },
     });
+    // Written before anything can await the task: nothing runs between here
+    // and the caller holding it.
+    stmts.push(Inst::SetField { base: Operand::Local(task), index: ID, value: Operand::Local(id) });
 
     Function {
         name: old.name.clone(),
@@ -476,18 +481,27 @@ impl Builder<'_> {
                             else_: suspend,
                         },
                     };
-                    // Waiting on a task is waiting for *something to finish*,
-                    // which is what parking says. Without it an awaiting task
-                    // is runnable on every sweep and achieves nothing, and a
-                    // scheduler cannot tell that from progress — so a program
-                    // whose only other task is sleeping would spin instead of
-                    // letting the clock move.
+                    // Waiting on a task is waiting for *that task to finish*,
+                    // which is what parking on it says. Without it an awaiting
+                    // task is runnable on every sweep and achieves nothing,
+                    // and a scheduler cannot tell that from progress — so a
+                    // program whose only other task is sleeping would spin
+                    // instead of letting the clock move. And naming the task
+                    // is what lets the scheduler leave this one alone until
+                    // then: a plain park is woken by every completion, so a
+                    // chain of a thousand awaits re-polled every link each
+                    // time the innermost finished.
+                    let awaited = self.temp(TyId::INT);
+                    suspend_stmts.push(Inst::Assign {
+                        dst: awaited,
+                        value: Rvalue::FieldGet { base: t.clone(), index: ID },
+                    });
                     let parked = self.temp(TyId::UNIT);
                     suspend_stmts.push(Inst::Assign {
                         dst: parked,
                         value: Rvalue::CallBuiltin {
-                            builtin: kite_hir::Builtin::TaskPark,
-                            args: Vec::new(),
+                            builtin: kite_hir::Builtin::TaskParkOn,
+                            args: vec![Operand::Local(awaited)],
                         },
                     });
                     self.blocks[suspend.index()] = BasicBlock {

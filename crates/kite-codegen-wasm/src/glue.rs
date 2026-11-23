@@ -1112,16 +1112,31 @@ function imports() {{
       // the host cannot look inside: it is handed back through the module's
       // own `$kite.poll` export, which is the only thing that can enter it.
       task_spawn: (poll) => {{
-        TASKS.push({{ poll, wakeAt: null, parked: false, waitingOnHost: false }});
+        const task = {{
+          id: nextTask++,
+          poll,
+          wakeAt: null,
+          parked: false,
+          awaiting: null,
+          waitingOnHost: false,
+        }};
+        TASKS.set(task.id, task);
+        // Later in spawn order than every other task, so a pass that is
+        // running reaches it before it ends.
+        (pass !== null ? pass : ready).push(task);
         // A task started from inside an event handler has nothing else to
         // notice it. Does nothing in the batch driver, which is already looping.
         wake();
+        return BigInt(task.id);
       }},
       task_wake_at: (ms) => {{
         wakeRequest = Number(ms);
       }},
       task_park: () => {{
         parkRequest = true;
+      }},
+      task_park_on: (id) => {{
+        parkOnRequest = Number(id);
       }},
       task_wait_host: () => {{
         hostWaitRequest = true;
@@ -1199,11 +1214,172 @@ function imports() {{
 // was true of the old design and is not true of a resident program. A `sleep`
 // that returns immediately is hidden control flow by this language's own
 // definition.
-const TASKS = [];
+//
+// A pass polls only the tasks that could run. One waiting on something is
+// filed under what it waits on, and a task awaiting another wakes when *that*
+// one finishes. Every completion used to wake every parked task, so a chain
+// of awaits ten thousand deep re-polled every link each time the innermost
+// finished, to no effect: the polls this leaves out are the ones that found
+// the awaited task unfinished, and they ran no code of the program. The ones
+// that would have found it finished still happen, at the same place: an
+// awaiter wakes at the end of the pass its task finished in, and in a pass
+// that follows one in which anything finished — an *armed* pass — one later
+// in spawn order than its task runs in that same pass, as the old rule's
+// poll at its place would have. `task.park()` and every deadline are still
+// woken by any completion. The VM's `sched.rs` is the same bookkeeping, and
+// says it at more length.
+const TASKS = new Map(); // every live task, by number, in spawn order
+let nextTask = 0;
+let ready = []; // the next pass's tasks: in spawn order, none waiting on anything
+let woken = []; // made runnable since, in any order; joined into `ready` before a pass
+let pass = null; // the list the running pass walks, and where it is in it
+let passAt = 0;
+const parkedTasks = new Set();
+const hostTasks = new Set();
+const timedTasks = new Set();
+const awaiters = new Map(); // a task's number -> the tasks awaiting it
+let armed = false; // whether anything finished in the last pass
 let clock = 0;
 let wakeRequest = null;
 let parkRequest = false;
+let parkOnRequest = null;
 let hostWaitRequest = false;
+
+const runnable = (t) => !t.parked && t.awaiting === null && !t.waitingOnHost;
+
+/// `t` can run again. A pass that has not reached it yet still will — the
+/// order is the spawn order whenever a task wakes — and otherwise the next
+/// one will.
+function release(t) {{
+  if (!runnable(t)) return;
+  if (pass !== null && t.id > pass[passAt].id) {{
+    let lo = passAt + 1;
+    let hi = pass.length;
+    while (lo < hi) {{
+      const mid = (lo + hi) >> 1;
+      if (pass[mid].id < t.id) lo = mid + 1;
+      else hi = mid;
+    }}
+    pass.splice(lo, 0, t);
+  }} else {{
+    woken.push(t);
+  }}
+}}
+
+/// Forget every task: the program is over, or a new one is starting.
+function clearTasks() {{
+  TASKS.clear();
+  ready = [];
+  woken = [];
+  if (pass !== null) pass.length = 0;
+  pass = null;
+  parkedTasks.clear();
+  hostTasks.clear();
+  timedTasks.clear();
+  awaiters.clear();
+  armed = false;
+}}
+
+/// One pass over the tasks that could run, in spawn order, on the clock
+/// reading `at`. Both drivers make their passes here, so a program polls in
+/// the same order whichever of them runs it.
+function sweep(exports, at) {{
+  if (woken.length > 0) {{
+    woken.sort((a, b) => a.id - b.id);
+    const joined = [];
+    let i = 0;
+    for (const t of woken) {{
+      while (i < ready.length && ready[i].id < t.id) joined.push(ready[i++]);
+      joined.push(t);
+    }}
+    while (i < ready.length) joined.push(ready[i++]);
+    ready = joined;
+    woken = [];
+  }}
+  let polled = false;
+  let completed = false;
+  const finished = [];
+  const list = ready;
+  pass = list;
+  ready = [];
+  for (passAt = 0; passAt < list.length; passAt++) {{
+    const task = list[passAt];
+    if (task.wakeAt !== null && task.wakeAt > at) {{
+      ready.push(task);
+      continue;
+    }}
+    polled = true;
+    task.wakeAt = null;
+    timedTasks.delete(task);
+    wakeRequest = null;
+    parkRequest = false;
+    parkOnRequest = null;
+    hostWaitRequest = false;
+    const done = poll(exports, task);
+    // A handler that trapped during the poll has ended the program.
+    if (halted !== null) return {{ polled, completed: false }};
+    if (done) {{
+      TASKS.delete(task.id);
+      const waiting = awaiters.get(task.id);
+      if (waiting !== undefined) {{
+        awaiters.delete(task.id);
+        for (const w of waiting) {{
+          if (armed && w.id > task.id) {{
+            w.awaiting = null;
+            release(w);
+          }} else {{
+            finished.push(w);
+          }}
+        }}
+      }}
+      completed = true;
+      continue;
+    }}
+    task.wakeAt = wakeRequest;
+    task.parked = parkRequest;
+    task.waitingOnHost = hostWaitRequest;
+    // Awaiting a task that is not live is waiting on nothing that will ever
+    // say so; it is the plain park it used to be.
+    if (parkOnRequest !== null && TASKS.has(parkOnRequest)) {{
+      task.awaiting = parkOnRequest;
+      const list = awaiters.get(parkOnRequest);
+      if (list === undefined) awaiters.set(parkOnRequest, [task]);
+      else list.push(task);
+    }} else if (parkOnRequest !== null) {{
+      task.parked = true;
+    }}
+    if (task.wakeAt !== null) timedTasks.add(task);
+    if (task.parked) parkedTasks.add(task);
+    if (task.waitingOnHost) hostTasks.add(task);
+    if (runnable(task)) ready.push(task);
+  }}
+  pass = null;
+  armed = completed;
+  // A task finishing is what its awaiters and any parked task are waiting
+  // for, and may be what a sleeping one wanted too — so each of those gets
+  // another look.
+  if (completed) {{
+    for (const t of finished) {{
+      t.awaiting = null;
+      release(t);
+    }}
+    for (const t of parkedTasks) {{
+      t.parked = false;
+      release(t);
+    }}
+    parkedTasks.clear();
+    for (const t of timedTasks) t.wakeAt = null;
+    timedTasks.clear();
+  }}
+  return {{ polled, completed }};
+}}
+
+/// The earliest deadline any task has.
+function nextDeadline() {{
+  let best = null;
+  for (const t of timedTasks) if (best === null || t.wakeAt < best) best = t.wakeAt;
+  return best;
+}}
 
 let realClock = false;
 const millis = () =>
@@ -1247,7 +1423,7 @@ function halt(e) {{
     e = trap;
   }}
   if (halted === null) halted = e;
-  TASKS.length = 0;
+  clearTasks();
   if (timer !== null) {{
     clearTimeout(timer);
     timer = null;
@@ -1270,47 +1446,10 @@ let driveWake = null;
 
 export async function drive(exports) {{
   useExports(exports);
-  while (TASKS.length > 0) {{
-    let polled = false;
-    let completed = false;
-    for (let i = 0; i < TASKS.length; ) {{
-      const task = TASKS[i];
-      if (task.parked || task.waitingOnHost || (task.wakeAt !== null && task.wakeAt > clock)) {{
-        i += 1;
-        continue;
-      }}
-      polled = true;
-      task.wakeAt = null;
-      wakeRequest = null;
-      parkRequest = false;
-      hostWaitRequest = false;
-      const done = poll(exports, task);
-      if (TASKS[i] === task) {{
-        task.wakeAt = wakeRequest;
-        task.parked = parkRequest;
-        task.waitingOnHost = hostWaitRequest;
-      }}
-      if (done) {{
-        TASKS.splice(i, 1);
-        completed = true;
-      }} else {{
-        i += 1;
-      }}
-    }}
-    // A task finishing is what a parked task is waiting for, and may be what a
-    // sleeping one wanted too — so a completion wakes everything and lets each
-    // decide for itself.
-    if (completed) {{
-      for (const t of TASKS) {{
-        t.parked = false;
-        t.wakeAt = null;
-      }}
-    }}
+  while (TASKS.size > 0) {{
+    const {{ polled }} = sweep(exports, clock);
     if (!polled) {{
-      const next = TASKS.reduce(
-        (best, t) => (t.wakeAt !== null && (best === null || t.wakeAt < best) ? t.wakeAt : best),
-        null,
-      );
+      const next = nextDeadline();
       // Everything is waiting, and something is waiting on the host — a
       // fetch, a request to a server, a socket. Only the event loop can
       // change that, so it is handed back until the host calls `wake` or the
@@ -1324,7 +1463,7 @@ export async function drive(exports) {{
       // waited on the host no other task's sleep or timeout ever came due —
       // `task.timeout(http.get(slow), 100)` waited out the three-second
       // server, and a task that slept before closing a server never woke.
-      if (TASKS.some((t) => t.waitingOnHost)) {{
+      if (hostTasks.size > 0) {{
         const started = millis();
         const delay = next === null ? null : Math.max(0, next - clock);
         let timed = null;
@@ -1344,7 +1483,7 @@ export async function drive(exports) {{
       // a deadline: jump to it. A program that only sleeps costs no real time
       // and interleaves exactly as it does on the bytecode VM.
       if (next === null || next <= clock) {{
-        throw new Error(TASKS.length + ' task(s) can never make progress');
+        throw new Error(TASKS.size + ' task(s) can never make progress');
       }}
       clock = next;
     }}
@@ -1369,47 +1508,10 @@ let pumping = false;
 let pumpAgain = false;
 let timer = null;
 
-/// One pass over the task list.
-///
-/// Shares its shape with `drive`'s inner loop deliberately: the two must poll
-/// in the same order, or a program would interleave differently depending on
-/// which driver ran it and the test mode would stop predicting the real one.
+/// One pass over the task list, on the real clock: `drive`'s pass, through
+/// the same `sweep`, so the two cannot poll in different orders.
 function step(exports) {{
-  const at = now();
-  let completed = false;
-  for (let i = 0; i < TASKS.length; ) {{
-    const task = TASKS[i];
-    if (task.parked || task.waitingOnHost || (task.wakeAt !== null && task.wakeAt > at)) {{
-      i += 1;
-      continue;
-    }}
-    task.wakeAt = null;
-    wakeRequest = null;
-    parkRequest = false;
-    hostWaitRequest = false;
-    const done = poll(exports, task);
-    // A handler firing during the poll can splice this task out from under us,
-    // which is why the slot is checked before it is written back.
-    if (TASKS[i] === task) {{
-      task.wakeAt = wakeRequest;
-      task.parked = parkRequest;
-      task.waitingOnHost = hostWaitRequest;
-    }}
-    if (done) {{
-      TASKS.splice(i, 1);
-      completed = true;
-    }} else {{
-      i += 1;
-    }}
-  }}
-  // A task finishing is what a parked task is waiting for, and may be what a
-  // sleeping one wanted too.
-  if (completed) {{
-    for (const t of TASKS) {{
-      t.parked = false;
-      t.wakeAt = null;
-    }}
-  }}
+  sweep(exports, now());
 }}
 
 /// When to come back, and nothing sooner.
@@ -1424,14 +1526,16 @@ function schedule() {{
     timer = null;
   }}
   let soonest = null;
-  for (const t of TASKS) {{
-    if (t.parked || t.waitingOnHost) continue;
+  for (const t of ready.concat(woken)) {{
     if (t.wakeAt === null) {{
       soonest = 0;
       break;
     }}
     if (soonest === null || t.wakeAt < soonest) soonest = t.wakeAt;
   }}
+  // An armed pass can run an awaiter whose task finishes in it, so it is
+  // made at once, as it was when a completion woke every awaiter.
+  if (armed && awaiters.size > 0) soonest = 0;
   if (soonest === null) return;
   const delay = soonest === 0 ? 0 : Math.max(0, soonest - now());
   timer = setTimeout(() => {{
@@ -1481,7 +1585,11 @@ export function wake() {{
   // `step` skips a task carrying the flag and `schedule` gives it no deadline,
   // so nothing ever polls it again. The request completes, the response is
   // sitting in `REQUESTS`, and the program never looks.
-  for (const t of TASKS) t.waitingOnHost = false;
+  for (const t of hostTasks) {{
+    t.waitingOnHost = false;
+    release(t);
+  }}
+  hostTasks.clear();
   // The batch driver is not resident: it is inside `drive`, possibly waiting
   // for exactly this.
   if (residentExports === null) {{
@@ -1589,7 +1697,7 @@ export async function instantiate(source) {{
   // what it left in the task list is not this program's work.
   if (halted !== null) {{
     halted = null;
-    TASKS.length = 0;
+    clearTasks();
   }}
 {compile_step}
   // Before anything in the module can run. A driver sets this too, and used to

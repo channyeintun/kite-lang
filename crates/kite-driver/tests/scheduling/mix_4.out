@@ -1,0 +1,37 @@
+main done 14
+leaf 0 0 0
+leaf 1 0 0
+w3 wait
+s5 start 0
+s6 start 0
+c11 down 2
+s12 start 0
+c13 down 4
+c11 down 1
+c13 down 3
+c11 bottom
+c13 down 2
+c13 down 1
+c13 bottom
+leaf 0 1 0
+leaf 1 1 0
+l4 locked 0
+d8 twice 7 7
+c11 up 1
+c13 up 1
+leaf 0 2 0
+leaf 1 2 0
+c11 up 2
+c13 up 2
+c13 up 3
+l4 unlocking
+c13 up 4
+t9 in time 4 at 0
+z2 bottom 3
+z2 up 1
+z2 up 2
+w3 got 2 at 3
+s12 done 10
+s5 done 20
+s6 done 20
+a10 all 20 at 20

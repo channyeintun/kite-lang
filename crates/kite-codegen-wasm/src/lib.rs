@@ -80,7 +80,7 @@ const EXTERN_REF_NULL: ValType = ValType::Ref(RefType {
 /// String operations do not live here: they operate directly on Kite's GC
 /// arrays. Only formatting, I/O, drawing, and the bounded conversion bridge
 /// cross into JavaScript.
-const IMPORTS: [(&str, &[ValType], &[ValType]); 31] = [
+const IMPORTS: [(&str, &[ValType], &[ValType]); 32] = [
     ("print_int", &[ValType::I64], &[]),
     ("print_float", &[ValType::F64], &[]),
     ("print_bool", &[ValType::I32], &[]),
@@ -122,7 +122,9 @@ const IMPORTS: [(&str, &[ValType], &[ValType]); 31] = [
     // mutable state and Kite has none. What crosses is a closure the host
     // cannot look inside: it hands the reference back through `$kite.poll`,
     // which is the module's own trampoline.
-    ("task_spawn", &[ANY_REF], &[]),
+    // A task's number comes back: the order it was spawned in, which an
+    // `await` that has to wait names with `task_park_on`.
+    ("task_spawn", &[ANY_REF], &[ValType::I64]),
     ("task_wake_at", &[ValType::I64], &[]),
     ("task_park", &[], &[]),
     ("task_wait_host", &[], &[]),
@@ -231,6 +233,9 @@ const IMPORTS: [(&str, &[ValType], &[ValType]); 31] = [
         &[ValType::I32, ValType::I32, ValType::I32],
         &[EXTERN_REF_NULL],
     ),
+    // Last so that adding it moved no index: `task_park`, naming the one task
+    // whose finishing is worth a poll.
+    ("task_park_on", &[ValType::I64], &[]),
 ];
 
 /// How many scalars one `array.new_fixed` in a string literal may carry.
@@ -374,6 +379,7 @@ fn used_imports(program: &mir::Program, types: &Types) -> Hosts {
                         Builtin::JsFunc => mark(host::JS_FUNC),
                         Builtin::TaskWakeAt => mark(host::TASK_WAKE_AT),
                         Builtin::TaskPark => mark(host::TASK_PARK),
+                        Builtin::TaskParkOn => mark(host::TASK_PARK_ON),
                         Builtin::TaskWaitHost => mark(host::TASK_WAIT_HOST),
                         Builtin::TimeNow => mark(host::TIME_NOW),
                         // `ref.eq` is an instruction, so identity costs no
@@ -457,6 +463,7 @@ mod host {
     pub const TEXT_LEN: u32 = 28;
     pub const TEXT_FILL: u32 = 29;
     pub const TEXT_PUSH: u32 = 30;
+    pub const TASK_PARK_ON: u32 = 31;
 }
 
 pub struct WasmModule {
@@ -3251,6 +3258,8 @@ impl<'a> Emitter<'a> {
                         | Builtin::IoReadLine
                         | Builtin::TimeNow
                         | Builtin::PtrSame
+                        // …and spawning a task returns its number.
+                        | Builtin::TaskSpawn
                         // …and handing a closure over returns the function the
                         // host wrapped it in. Left off this list once already,
                         // with exactly the symptom the note above describes:
@@ -4094,6 +4103,12 @@ impl<'a> Emitter<'a> {
             }
             Builtin::TaskPark => {
                 func.instruction(&Instruction::Call(self.hosts.at(host::TASK_PARK)));
+            }
+            Builtin::TaskParkOn => {
+                for a in args {
+                    self.operand(func, a);
+                }
+                func.instruction(&Instruction::Call(self.hosts.at(host::TASK_PARK_ON)));
             }
             Builtin::TaskWaitHost => {
                 func.instruction(&Instruction::Call(self.hosts.at(host::TASK_WAIT_HOST)));

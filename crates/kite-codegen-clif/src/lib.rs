@@ -202,9 +202,10 @@ const RUNTIME: &[(&str, &[Type], Option<Type>)] = &[
     ("kite_rt_text_height", &[], Some(F64)),
     ("kite_rt_require", &[I8, I64], None),
     ("kite_rt_call_extern", &[I64, I64], Some(I64)),
-    ("kite_rt_task_spawn", &[I64], None),
+    ("kite_rt_task_spawn", &[I64], Some(I64)),
     ("kite_rt_task_wake_at", &[I64], None),
     ("kite_rt_task_park", &[], None),
+    ("kite_rt_task_park_on", &[I64], None),
     ("kite_rt_task_wait_host", &[], None),
     ("kite_rt_time_now", &[], Some(I64)),
     ("kite_rt_drive", &[], None),
@@ -2106,8 +2107,8 @@ impl<'a, 'b, M: Module> FnLower<'a, 'b, M> {
             Builtin::JsFunc => unreachable!("js.func on a target with no host"),
             Builtin::TaskSpawn => {
                 let v = self.operand(&args[0]);
-                self.call_rt("kite_rt_task_spawn", &[v]);
-                self.def_zero(dst);
+                let r = self.call_rt("kite_rt_task_spawn", &[v]).unwrap();
+                self.def(dst, r);
             }
             Builtin::TaskWakeAt => {
                 let v = self.operand(&args[0]);
@@ -2116,6 +2117,11 @@ impl<'a, 'b, M: Module> FnLower<'a, 'b, M> {
             }
             Builtin::TaskPark => {
                 self.call_rt("kite_rt_task_park", &[]);
+                self.def_zero(dst);
+            }
+            Builtin::TaskParkOn => {
+                let v = self.operand(&args[0]);
+                self.call_rt("kite_rt_task_park_on", &[v]);
                 self.def_zero(dst);
             }
             Builtin::TaskWaitHost => {

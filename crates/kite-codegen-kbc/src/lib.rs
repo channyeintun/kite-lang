@@ -25,13 +25,16 @@ pub enum Native {
     IoPrint,
     IoError,
     IoReadLine,
-    /// Hand the scheduler a task's resume closure. The state-machine
-    /// transform emits this; no program writes it.
+    /// Hand the scheduler a task's resume closure, and answer its number.
+    /// The state-machine transform emits this; no program writes it.
     TaskSpawn,
     /// Ask the scheduler not to poll the running task before a deadline.
     TaskWakeAt,
     /// Ask not to be polled again until some other task finishes.
     TaskPark,
+    /// Ask not to be polled again until the numbered task finishes: an
+    /// `await` that has to wait. The transform emits this; no program does.
+    TaskParkOn,
     /// Ask not to be polled again until the host has had a turn.
     TaskWaitHost,
     /// Milliseconds since the program started.
@@ -90,6 +93,7 @@ impl Native {
             Builtin::JsFunc => Native::JsFunc,
             Builtin::TaskWakeAt => Native::TaskWakeAt,
             Builtin::TaskPark => Native::TaskPark,
+            Builtin::TaskParkOn => Native::TaskParkOn,
             Builtin::TaskWaitHost => Native::TaskWaitHost,
             Builtin::TimeNow => Native::TimeNow,
             Builtin::PtrSame => Native::PtrSame,
@@ -119,6 +123,7 @@ impl Native {
             Native::TaskSpawn => "task.spawn",
             Native::TaskWakeAt => "task.wake_at",
             Native::TaskPark => "task.park",
+            Native::TaskParkOn => "task.park_on",
             Native::TaskWaitHost => "task.wait_host",
             Native::TimeNow => "time.now",
             Native::PtrSame => "ptr.same",

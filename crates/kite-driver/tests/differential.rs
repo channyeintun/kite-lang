@@ -4440,6 +4440,56 @@ fn slices_agree_natively_with_a_page_of_nursery() {
     assert!(collections > 100, "only {} collections: the nursery did not fill", collections);
 }
 
+/// Programs whose output is the scheduler's interleaving, pinned to what it
+/// printed before an `await` parked on the task it awaits.
+///
+/// The interleaving is spawn-order sweeps, and it is observable: these print
+/// from tasks that yield, sleep, time out, race, lock, queue, await one
+/// another in chains and fans and spawn more tasks as they finish. Every
+/// completion used to wake every awaiting task, and a scheduler that wakes
+/// only the awaiters of what finished must still poll each of them exactly
+/// where the old one would have found its task finished — one way of getting
+/// that wrong reordered all three backends alike, which agreement cannot
+/// catch and these do. The `.out` files were written by the scheduler before
+/// that change. Natively they run again under a collector made to run
+/// constantly, because the scheduler holds every suspended task's closure.
+#[test]
+fn the_scheduling_order_is_unchanged() {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/scheduling");
+    let root = std::env::temp_dir().join(format!("kite-scheduling-{}", std::process::id()));
+    let mut names: Vec<String> = std::fs::read_dir(&dir)
+        .expect("tests/scheduling")
+        .filter_map(|e| {
+            let name = e.ok()?.file_name().into_string().ok()?;
+            Some(name.strip_suffix(".kite")?.to_string())
+        })
+        .collect();
+    names.sort();
+    assert!(names.len() >= 7, "only {} scheduling programs", names.len());
+    let mut wrong = Vec::new();
+    for name in &names {
+        let src = std::fs::read_to_string(dir.join(format!("{}.kite", name))).expect("read program");
+        let want = std::fs::read_to_string(dir.join(format!("{}.out", name))).expect("read output");
+        let mut got = vec![("the VM", run_on_vm(name, &src))];
+        if native_available() {
+            got.push(("natively", run_on_native(name, &src)));
+            got.push(("natively with a page of nursery", run_on_native_with(name, &src, PAGE_OF_NURSERY).0));
+        }
+        if node_available() {
+            let work = root.join(name);
+            std::fs::create_dir_all(&work).expect("create work directory");
+            got.push(("on wasm", run_on_wasm(name, &src, &work)));
+        }
+        for (backend, out) in got {
+            if out != want {
+                wrong.push(format!("{} {}:\n  want: {:?}\n  got:  {:?}", name, backend, want, out));
+            }
+        }
+    }
+    let _ = std::fs::remove_dir_all(&root);
+    assert!(wrong.is_empty(), "{}", wrong.join("\n\n"));
+}
+
 /// Literals longer than one `array.new_fixed` may be. V8 refuses more than
 /// 10,000 operands to one when the module is *instantiated*, after the
 /// validator has passed it, so a 10,001-element slice or map literal built a

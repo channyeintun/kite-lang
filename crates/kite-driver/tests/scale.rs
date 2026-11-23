@@ -327,3 +327,22 @@ fn a_slice_or_a_map_grown_across_suspensions_is_written_in_place() {
                 \x20   m.remove(i)\n    task.yield()\n  }\n  io.print(\"\\(m.len()) \\(or_else(m[49999], -1))\")\n}\n";
     agrees_within("map-across-yield", maps, "25000 49999\n", Duration::from_secs(20), false);
 }
+
+/// A deep chain of awaits — a recursive `async fn`, the shape of a recursive
+/// walk — is linear on all three backends. An `await` that had to wait parked
+/// with no target, and every task finishing woke every parked task, so each
+/// link of the chain finishing re-polled all the links still waiting above it:
+/// twenty thousand deep took 84 s on the VM, 15 s natively and 7 s on Wasm,
+/// released. An `await` parks on the task it awaits now, and a sweep walks
+/// only the tasks that could run. Beside it, tasks each awaiting the one
+/// spawned before them, which the scheduler finishes in one sweep.
+#[test]
+fn a_deep_chain_of_awaits_is_linear() {
+    let down = "async fn down(n: int) -> int {\n  if n == 0 {\n    task.yield()\n    return 0\n  }\n\
+                \x20 return 1 + await down(n - 1)\n}\n\n\
+                async fn after(t: Task<int>) -> int {\n  return 1 + await t\n}\n\n\
+                pub async fn main() {\n  io.print(await down(40000))\n\
+                \x20 var t = down(0)\n  for i in 0..40000 {\n    t = after(t)\n  }\n\
+                \x20 io.print(await t)\n}\n";
+    agrees_within("await-chain", down, "40000\n40000\n", Duration::from_secs(20), true);
+}

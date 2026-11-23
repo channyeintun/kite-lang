@@ -489,6 +489,15 @@ impl Types {
                             is_pub: false,
                             span,
                         },
+                        // The task's number with the scheduler, which an
+                        // `await` that has to wait parks on.
+                        FieldDef {
+                            name: "$id".into(),
+                            ty: TyId::INT,
+                            mutable: true,
+                            is_pub: false,
+                            span,
+                        },
                     ],
                 );
                 id

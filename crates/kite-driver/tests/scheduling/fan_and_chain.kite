@@ -1,0 +1,72 @@
+use std/task
+
+async fn work(id: int, n: int) -> int {
+    for i in 0..n {
+        io.print("work \(id) step \(i) at \(time.now())")
+        task.yield()
+    }
+    io.print("work \(id) done")
+    return id
+}
+
+async fn watch(id: int, t: Task<int>) -> int {
+    io.print("watch \(id) start")
+    let v = await t
+    io.print("watch \(id) saw \(v)")
+    return v * 10
+}
+
+async fn spawn_on_finish(t: Task<int>) -> int {
+    let v = await t
+    io.print("sof got \(v)")
+    let a = work(100, 1)
+    let b = watch(101, a)
+    let c = watch(102, b)
+    io.print("sof spawned")
+    return await c
+}
+
+async fn deep(n: int, tag: str) -> int {
+    if n == 0 {
+        io.print("\(tag) bottom")
+        task.yield()
+        return 0
+    }
+    let v = await deep(n - 1, tag)
+    if n % 3 == 0 {
+        io.print("\(tag) up \(n)")
+    }
+    return v + 1
+}
+
+async fn nap(id: int, ms: int, t: Task<int>) -> int {
+    await task.sleep(ms)
+    io.print("nap \(id) woke at \(time.now())")
+    let v = await t
+    io.print("nap \(id) saw \(v) at \(time.now())")
+    return v
+}
+
+pub async fn main() {
+    let a = work(1, 3)
+    let w_early = watch(2, a)
+    let b = work(3, 1)
+    let w_late = watch(4, b)
+    let s = spawn_on_finish(b)
+    let d1 = deep(7, "x")
+    let d2 = deep(5, "y")
+    let w0 = watch(5, d1)
+    let n1 = nap(6, 2, d1)
+    let n2 = nap(7, 0, work(8, 4))
+    io.print("main waits")
+    io.print("main \(await w_late) \(await w_early) \(await s) \(await w0) \(await d2)")
+    let t = task.timeout(deep(6, "t"), 3)
+    let r = task.race([deep(4, "r1"), work(9, 2)])
+    io.print("race \(await r)")
+    io.print("timeout \(or_else(await t, -1))")
+    io.print("naps \(await n1) \(await n2)")
+    let (p, q) = await task.both(deep(3, "p"), watch(10, work(11, 2)))
+    io.print("both \(p) \(q)")
+    let all = await task.all([deep(2, "a0"), work(12, 1), watch(13, deep(1, "a2"))])
+    io.print("all \(all.len()) \(all[0]) \(all[1]) \(all[2])")
+}

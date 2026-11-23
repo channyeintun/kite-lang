@@ -496,8 +496,11 @@ nothing yet needs more. Lowering does three things beyond building the graph:
   fields everywhere; which ones are actually live across a suspension is not
   computed. A spill is a move: a slice or map the body writes into takes its
   owned flag into the frame and back (`Rvalue::Owned`, `Rvalue::Unspill`), so
-  a `push` after an `await` still goes straight into the slice. After this, no
-  backend knows `async` exists.
+  a `push` after an `await` still goes straight into the slice. An `await`
+  that has to wait parks on the awaited task's number, which `task.spawn`
+  answered and the task keeps in a field, so the scheduler need not poll the
+  awaiting task again until that one finishes. After this, no backend knows
+  `async` exists.
 - **Long literals** — a slice or map literal is evaluated item by item into
   temporaries and then built, which for one of twenty thousand computed
   elements was twenty thousand temporaries, all live at once: past every

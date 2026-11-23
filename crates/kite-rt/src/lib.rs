@@ -80,6 +80,8 @@ pub mod kind {
     pub const REF: u8 = 4;
 }
 
+mod sched;
+
 /// What a heap object is. Stored in the low byte of the first header word.
 mod obj {
     pub const STR: u8 = 1;
@@ -261,16 +263,6 @@ pub extern "C" fn kite_rt_run(program: extern "C" fn() -> i32) -> i32 {
 // Runtime state
 // ---------------------------------------------------------------------------
 
-/// One live task, mirroring the VM's `Scheduled` field for field.
-struct Scheduled {
-    /// The resume closure, as a heap reference. A root: the scheduler may be
-    /// the only thing keeping a suspended task's frame alive.
-    poll: u64,
-    wake_at: Option<i64>,
-    parked: bool,
-    waiting_on_host: bool,
-}
-
 #[derive(Default)]
 struct Shapes {
     /// Per struct id: one kind byte per field.
@@ -344,10 +336,15 @@ struct Rt {
     char_marks: Vec<(u64, Vec<u32>)>,
 
     // ---- the scheduler -------------------------------------------------
-    tasks: Vec<Scheduled>,
+    /// The live tasks. Each one's resume closure is a heap reference and a
+    /// root: the scheduler may be the only thing keeping a suspended task's
+    /// frame alive. A task's number is a plain integer, so what an `await`
+    /// parks on is no reference at all, and nothing new needs tracing.
+    tasks: sched::Tasks<u64>,
     clock: i64,
     wake_request: Option<i64>,
     park_request: bool,
+    park_on_request: Option<u64>,
     host_wait_request: bool,
 
     // ---- output --------------------------------------------------------
@@ -526,10 +523,11 @@ pub extern "C" fn kite_rt_startup() {
             shapes: Shapes::default(),
             strings: Vec::new(),
             char_marks: Vec::new(),
-            tasks: Vec::new(),
+            tasks: sched::Tasks::default(),
             clock: 0,
             wake_request: None,
             park_request: false,
+            park_on_request: None,
             host_wait_request: false,
             capture,
         }));
@@ -1127,9 +1125,8 @@ fn collect_minor() {
     for s in extra {
         evac_slot(s, &mut queue);
     }
-    for i in 0..rt().tasks.len() {
-        let s = &mut rt().tasks[i].poll as *mut u64;
-        evac_slot(s, &mut queue);
+    for s in rt().tasks.polls_mut() {
+        evac_slot(s as *mut u64, &mut queue);
     }
     // The remembered set: old objects that had a reference stored into them
     // may be the only path to a nursery object.
@@ -1179,9 +1176,8 @@ fn collect_major() {
     for s in extra {
         mark_slot(s, &mut stack);
     }
-    for i in 0..rt().tasks.len() {
-        let s = &mut rt().tasks[i].poll as *mut u64;
-        mark_slot(s, &mut stack);
+    for s in rt().tasks.polls_mut() {
+        mark_slot(s as *mut u64, &mut stack);
     }
     // String constants are reachable from compiled code by index, which no
     // heap trace can see; the table itself is a root.
@@ -3430,13 +3426,8 @@ pub extern "C" fn kite_rt_call_extern(index: u64, argc: u64) -> u64 {
 // ---------------------------------------------------------------------------
 
 #[no_mangle]
-pub extern "C" fn kite_rt_task_spawn(poll: u64) {
-    rt().tasks.push(Scheduled {
-        poll,
-        wake_at: None,
-        parked: false,
-        waiting_on_host: false,
-    });
+pub extern "C" fn kite_rt_task_spawn(poll: u64) -> i64 {
+    rt().tasks.spawn(poll) as i64
 }
 
 /// A hint, not a promise: the code that asked re-checks the clock.
@@ -3448,6 +3439,12 @@ pub extern "C" fn kite_rt_task_wake_at(ms: i64) {
 #[no_mangle]
 pub extern "C" fn kite_rt_task_park() {
     rt().park_request = true;
+}
+
+/// An `await` that has to wait: not worth polling until task `id` finishes.
+#[no_mangle]
+pub extern "C" fn kite_rt_task_park_on(id: i64) {
+    rt().park_on_request = Some(id as u64);
 }
 
 #[no_mangle]
@@ -3480,45 +3477,41 @@ pub extern "C" fn kite_rt_drive() {
     while !rt().tasks.is_empty() {
         let mut polled = false;
         let mut completed = false;
-        let mut i = 0;
-        while i < rt().tasks.len() {
-            {
-                let t = &rt().tasks[i];
-                if t.parked || t.waiting_on_host || t.wake_at.is_some_and(|w| w > rt().clock) {
-                    i += 1;
-                    continue;
-                }
+        let mut awaiters = Vec::new();
+        let mut cursor = 0;
+        while let Some(id) = rt().tasks.next_ready(cursor) {
+            cursor = id + 1;
+            let Some(t) = rt().tasks.get_mut(id) else { continue };
+            if t.wake_at.is_some_and(|w| w > rt().clock) {
+                continue;
             }
+            // Read afresh for each poll: a collection during the last one may
+            // have moved the closure, and the scheduler's slot is what it
+            // updated.
+            let poll = t.poll;
             polled = true;
-            rt().tasks[i].wake_at = None;
+            rt().tasks.start(id);
             rt().wake_request = None;
             rt().park_request = false;
+            rt().park_on_request = None;
             rt().host_wait_request = false;
-            let poll = rt().tasks[i].poll;
             let done = poll_task(poll);
-            if i < rt().tasks.len() {
-                let wake = rt().wake_request.take();
-                let parked = std::mem::take(&mut rt().park_request);
-                let hosted = std::mem::take(&mut rt().host_wait_request);
-                let t = &mut rt().tasks[i];
-                t.wake_at = wake;
-                t.parked = parked;
-                t.waiting_on_host = hosted;
-            }
+            let asked = sched::Requests {
+                wake_at: rt().wake_request.take(),
+                park: std::mem::take(&mut rt().park_request),
+                park_on: rt().park_on_request.take(),
+                host: std::mem::take(&mut rt().host_wait_request),
+            };
             if done {
-                rt().tasks.remove(i);
+                awaiters.extend(rt().tasks.finish(id));
                 completed = true;
             } else {
-                i += 1;
+                rt().tasks.file(id, asked);
             }
         }
-        // A completion wakes everything and lets each task decide for itself.
-        if completed {
-            for t in rt().tasks.iter_mut() {
-                t.parked = false;
-                t.wake_at = None;
-            }
-        }
+        // A completion wakes what awaited it, every parked task and every
+        // sleeping one, and lets each decide for itself.
+        rt().tasks.swept(completed, awaiters);
         if !polled {
             // Everything is waiting. The VM gives its host a turn first; the
             // host here, like the one `kite-driver` gives the VM, answers
@@ -3526,12 +3519,10 @@ pub extern "C" fn kite_rt_drive() {
             // outstanding — its turn is always "nothing happened", and the
             // clock is the only thing that can move. If nothing is waiting on
             // that either, nothing will ever happen.
-            match rt().tasks.iter().filter_map(|t| t.wake_at).min() {
+            match rt().tasks.next_deadline() {
                 Some(next) if next > rt().clock => {
                     rt().clock = next;
-                    for t in rt().tasks.iter_mut() {
-                        t.waiting_on_host = false;
-                    }
+                    rt().tasks.host_turned();
                 }
                 _ => {
                     let waiting = rt().tasks.len();
@@ -3680,6 +3671,7 @@ pub fn jit_symbols() -> Vec<(&'static str, *const u8)> {
         kite_rt_task_spawn,
         kite_rt_task_wake_at,
         kite_rt_task_park,
+        kite_rt_task_park_on,
         kite_rt_task_wait_host,
         kite_rt_time_now,
         kite_rt_drive,

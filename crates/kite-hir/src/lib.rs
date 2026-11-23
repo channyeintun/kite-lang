@@ -618,8 +618,10 @@ pub enum Builtin {
     /// layout needs that is neither a rectangle nor a run of text.
     DrawClip,
     DrawUnclip,
-    /// `task.spawn(poll)` — hand a task's resume closure to the scheduler.
-    /// Emitted by the state-machine transform; no program writes it.
+    /// `task.spawn(poll)` — hand a task's resume closure to the scheduler,
+    /// and answer the task's number: the order it was spawned in, which is
+    /// the order the scheduler polls in. Emitted by the state-machine
+    /// transform; no program writes it.
     TaskSpawn,
     /// `js.func(handler)` — hand a Kite closure to the host as something it can
     /// call. See `BuiltinFn::JsFunc`.
@@ -630,6 +632,11 @@ pub enum Builtin {
     TaskWakeAt,
     /// `task.park()` — suspend until some other task finishes.
     TaskPark,
+    /// `task.park_on(n)` — suspend until task number `n` finishes: what an
+    /// `await` of an unfinished task says, so a scheduler need not poll the
+    /// awaiting task again until then. Emitted by the state-machine
+    /// transform; no program writes it.
+    TaskParkOn,
     /// `task.wait_host()` — suspend until the host has had a turn.
     TaskWaitHost,
     /// `time.now()` — milliseconds since the program started.
@@ -668,6 +675,7 @@ impl Builtin {
             Builtin::JsFunc => "js.func",
             Builtin::TaskWakeAt => "task.wake_at",
             Builtin::TaskPark => "task.park",
+            Builtin::TaskParkOn => "task.park_on",
             Builtin::TaskWaitHost => "task.wait_host",
             Builtin::TimeNow => "time.now",
             Builtin::PtrSame => "ptr.same",

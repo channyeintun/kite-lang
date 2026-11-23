@@ -1,0 +1,122 @@
+use std/task
+
+async fn leaf(id: int, n: int) -> int {
+    for i in 0..n {
+        io.print("leaf \(id) \(i) \(time.now())")
+        task.yield()
+    }
+    return id
+}
+
+async fn sleeper(id: int, ms: int) -> int {
+    io.print("s\(id) start \(time.now())")
+    await task.sleep(ms)
+    io.print("s\(id) done \(time.now())")
+    return id
+}
+
+async fn waiter(id: int, t: Task<int>) -> int {
+    io.print("w\(id) wait")
+    let v = await t
+    io.print("w\(id) got \(v) at \(time.now())")
+    return v + 1
+}
+
+async fn chain(id: int, d: int) -> int {
+    if d == 0 {
+        io.print("c\(id) bottom")
+        return 0
+    }
+    io.print("c\(id) down \(d)")
+    let v = await chain(id, d - 1)
+    io.print("c\(id) up \(d)")
+    return v + 1
+}
+
+async fn sleepy_chain(id: int, d: int) -> int {
+    if d == 0 {
+        await task.sleep(3)
+        io.print("z\(id) bottom \(time.now())")
+        return 0
+    }
+    let v = await sleepy_chain(id, d - 1)
+    io.print("z\(id) up \(d)")
+    task.yield()
+    return v + 1
+}
+
+async fn spawner(id: int, n: int) -> int {
+    var kids: [Task<int>] = []
+    for i in 0..n {
+        kids.push(leaf(id * 10 + i, i))
+        io.print("p\(id) spawned \(i)")
+        task.yield()
+    }
+    var s = 0
+    for k in kids {
+        s += await k
+        io.print("p\(id) collected \(s)")
+    }
+    return s
+}
+
+async fn allsum(id: int, xs: [Task<int>]) -> int {
+    let vs = await task.all(xs)
+    var s = 0
+    for v in vs {
+        s += v
+    }
+    io.print("a\(id) all \(s) at \(time.now())")
+    return s
+}
+
+async fn racer(id: int, xs: [Task<int>]) -> int {
+    let v = await task.race(xs)
+    io.print("r\(id) won \(v) at \(time.now())")
+    return v
+}
+
+async fn timer(id: int, t: Task<int>, ms: int) -> int {
+    let v = await task.timeout(t, ms)
+    if v == nil {
+        io.print("t\(id) timed out at \(time.now())")
+        return -1
+    }
+    io.print("t\(id) in time \(v) at \(time.now())")
+    return v
+}
+
+async fn pair(id: int, a: Task<int>, b: Task<int>) -> int {
+    let (x, y) = await task.both(a, b)
+    io.print("b\(id) both \(x) \(y)")
+    return x + y
+}
+
+async fn twice(id: int, t: Task<int>) -> int {
+    let a = await t
+    task.yield()
+    let b = await t
+    io.print("d\(id) twice \(a) \(b)")
+    return a + b
+}
+
+pub async fn main() {
+    var ts: [Task<int>] = []
+    ts.push(leaf(0, 1))
+    task.yield()
+    io.print("main yielded \(time.now())")
+    ts.push(sleepy_chain(1, 4))
+    ts.push(sleeper(2, 10))
+    ts.push(waiter(3, ts[0]))
+    ts.push(leaf(4, 4))
+    ts.push(chain(5, 1))
+    ts.push(twice(6, ts[1]))
+    task.yield()
+    io.print("main yielded \(time.now())")
+    ts.push(timer(7, ts[3], 8))
+    ts.push(allsum(8, [ts[5]]))
+    ts.push(spawner(9, 0))
+    ts.push(racer(10, [ts[0], ts[2]]))
+    ts.push(pair(11, ts[1], ts[1]))
+    io.print("main leaves at \(time.now())")
+}

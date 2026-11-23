@@ -16,8 +16,10 @@ use std::io::Write;
 use std::rc::Rc;
 
 mod map;
+mod sched;
 pub use map::MapValue;
 use map::Keys;
+use sched::{Requests, Tasks};
 
 /// The maximum call depth before the VM reports a trap.
 ///
@@ -663,10 +665,11 @@ pub fn run_with_host<'a>(
         out,
         regs: Vec::new(),
         frames: Vec::new(),
-        tasks: Vec::new(),
+        tasks: Tasks::default(),
         clock: 0,
         wake_request: None,
         park_request: false,
+        park_on_request: None,
         host_wait_request: false,
         floor: 0,
         result: Value::Unit,
@@ -708,10 +711,11 @@ pub fn run_function(chunk: &Chunk, name: &str, out: &mut dyn Write) -> Result<Va
         out,
         regs: Vec::new(),
         frames: Vec::new(),
-        tasks: Vec::new(),
+        tasks: Tasks::default(),
         clock: 0,
         wake_request: None,
         park_request: false,
+        park_on_request: None,
         host_wait_request: false,
         floor: 0,
         result: Value::Unit,
@@ -737,7 +741,7 @@ struct Vm<'a> {
     /// Tasks that have been started and not yet finished, in the order they
     /// were spawned. A task is a closure the scheduler polls; the state
     /// machine behind it is ordinary compiled code.
-    tasks: Vec<Scheduled>,
+    tasks: Tasks<Value>,
     /// A **virtual** clock, in milliseconds. Nothing here waits on wall time:
     /// when every task is blocked on a deadline, the clock jumps to the
     /// earliest one. That makes `sleep` free in tests and, more importantly,
@@ -749,6 +753,9 @@ struct Vm<'a> {
     /// Set by `task.park`: this task is waiting for some other one to finish,
     /// and there is no deadline that would make polling it worthwhile.
     park_request: bool,
+    /// Set by an `await` that has to wait: the number of the task it waits
+    /// for, so nothing need poll this one again until that one finishes.
+    park_on_request: Option<u64>,
     /// Set by `task.wait_host`: this task is waiting on the host — a fetch, a
     /// file, something outside the program entirely.
     host_wait_request: bool,
@@ -870,17 +877,6 @@ fn type_name_of(code: u8) -> &'static str {
         b'u' => "()",
         _ => "reference",
     }
-}
-
-/// One live task: how to resume it, and when it is worth trying again.
-struct Scheduled {
-    poll: Value,
-    /// The earliest clock reading at which polling could achieve anything.
-    wake_at: Option<i64>,
-    /// Waiting on another task rather than on the clock.
-    parked: bool,
-    /// Waiting on the host rather than on anything in the program.
-    waiting_on_host: bool,
 }
 
 /// Read two register operands and apply `$f`, or trap on type confusion.
@@ -1807,68 +1803,60 @@ impl<'a> Vm<'a> {
         while !self.tasks.is_empty() {
             let mut polled = false;
             let mut completed = false;
-            let mut i = 0;
-            while i < self.tasks.len() {
-                if self.tasks[i].parked
-                    || self.tasks[i].waiting_on_host
-                    || self.tasks[i].wake_at.is_some_and(|w| w > self.clock)
-                {
-                    i += 1;
+            let mut awaiters = Vec::new();
+            // Only the tasks that could run, in spawn order; one spawned
+            // during the sweep is later than all of them, so it is reached.
+            let mut cursor = 0;
+            while let Some(id) = self.tasks.next_ready(cursor) {
+                cursor = id + 1;
+                let Some(t) = self.tasks.get_mut(id) else { continue };
+                if t.wake_at.is_some_and(|w| w > self.clock) {
                     continue;
                 }
+                let poll = t.poll.clone();
                 polled = true;
-                self.tasks[i].wake_at = None;
+                self.tasks.start(id);
                 self.wake_request = None;
                 self.park_request = false;
+                self.park_on_request = None;
                 self.host_wait_request = false;
-                let poll = self.tasks[i].poll.clone();
                 let done = self.poll_task(poll)?;
-                if i < self.tasks.len() {
-                    self.tasks[i].wake_at = self.wake_request.take();
-                    self.tasks[i].parked = std::mem::take(&mut self.park_request);
-                    self.tasks[i].waiting_on_host =
-                        std::mem::take(&mut self.host_wait_request);
-                }
+                let asked = Requests {
+                    wake_at: self.wake_request.take(),
+                    park: std::mem::take(&mut self.park_request),
+                    park_on: self.park_on_request.take(),
+                    host: std::mem::take(&mut self.host_wait_request),
+                };
                 if done {
-                    self.tasks.remove(i);
+                    awaiters.extend(self.tasks.finish(id));
                     completed = true;
                 } else {
-                    i += 1;
+                    self.tasks.file(id, asked);
                 }
             }
-            // A task finishing is what a parked task is waiting for, and may
-            // be what a sleeping one wanted too — so a completion wakes
-            // everything and lets each decide for itself.
-            if completed {
-                for t in 0..self.tasks.len() {
-                    self.tasks[t].parked = false;
-                    self.tasks[t].wake_at = None;
-                }
-            }
+            // A task finishing is what its awaiters and any parked task are
+            // waiting for, and may be what a sleeping one wanted too — so
+            // each of those gets another look. See `sched`.
+            self.tasks.swept(completed, awaiters);
             if !polled {
                 // Everything is waiting. Give the host its turn first — a
                 // fetch or a file is something only it can finish — then the
                 // clock; and if nothing is waiting on either, nothing will
                 // ever happen.
-                let on_host = self.tasks.iter().any(|t| t.waiting_on_host);
-                if on_host {
+                if self.tasks.any_on_host() {
                     let progressed = match self.host.as_mut() {
                         Some(h) => h.wait()?,
                         None => false,
                     };
                     if progressed {
-                        for t in 0..self.tasks.len() {
-                            self.tasks[t].waiting_on_host = false;
-                        }
+                        self.tasks.host_turned();
                         continue;
                     }
                 }
-                match self.tasks.iter().filter_map(|t| t.wake_at).min() {
+                match self.tasks.next_deadline() {
                     Some(next) if next > self.clock => {
                         self.clock = next;
-                        for t in 0..self.tasks.len() {
-                            self.tasks[t].waiting_on_host = false;
-                        }
+                        self.tasks.host_turned();
                     }
                     _ => return Err(Trap::Deadlock { waiting: self.tasks.len() }),
                 }
@@ -2096,13 +2084,7 @@ impl<'a> Vm<'a> {
             // compiler wrote. The scheduler owns it from here.
             Native::TaskSpawn => {
                 let poll = self.regs[base + arg_base as usize].clone();
-                self.tasks.push(Scheduled {
-                    poll,
-                    wake_at: None,
-                    parked: false,
-                    waiting_on_host: false,
-                });
-                Ok(Value::Unit)
+                Ok(Value::Int(self.tasks.spawn(poll) as i64))
             }
             Native::TaskWakeAt => {
                 let Value::Int(ms) = self.regs[base + arg_base as usize] else {
@@ -2119,6 +2101,13 @@ impl<'a> Vm<'a> {
             }
             Native::TaskPark => {
                 self.park_request = true;
+                Ok(Value::Unit)
+            }
+            Native::TaskParkOn => {
+                let Value::Int(id) = self.regs[base + arg_base as usize] else {
+                    return Err(Trap::TypeConfusion { op: "task.park_on", found: "not an int" });
+                };
+                self.park_on_request = Some(id as u64);
                 Ok(Value::Unit)
             }
             Native::TaskWaitHost => {
