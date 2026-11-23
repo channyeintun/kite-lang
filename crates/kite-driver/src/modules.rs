@@ -223,6 +223,9 @@ impl Files {
     /// What a path is, where the filesystem can say: two spellings of one
     /// directory are one module, not two.
     fn canonical(&self, path: &Path) -> PathBuf {
+        // The empty path is the current directory, as a root spelled
+        // relative to it is (see [`Loader::rooted`]).
+        let path = if path.as_os_str().is_empty() { Path::new(".") } else { path };
         match self {
             Files::Disk => std::fs::canonicalize(path).unwrap_or_else(|_| normalise(path)),
             Files::Memory(_) => normalise(path),
@@ -954,16 +957,39 @@ impl Loader {
     /// the `config/` beside `ui/` that `kitec run main.kite` reaches from the
     /// same file, and named every module from `ui/`. Measured from the
     /// manifest, a module is found, and named, the same whichever file of the
-    /// package is the entry. Both are spelled from the top, since a module
-    /// identity is a path below the root and a root above a relative `dir`
-    /// cannot be spelled relative to it.
+    /// package is the entry.
+    ///
+    /// **Spelled as `dir` was.** A module's identity is its path below the
+    /// root, so the two must be spelled alike — and they were both spelled
+    /// from the top, which put every imported module's file in a diagnostic
+    /// as an absolute path. A relative `dir` gives a relative root: `src`
+    /// gives the empty path (the current directory), and `.` inside `src/`
+    /// gives `..`, with `dir` respelled below it as `../src`.
     fn rooted(&self, dir: &Path, package: &Package) -> Option<(PathBuf, PathBuf)> {
         let manifest = package.manifest.as_ref()?;
         let whole = self.files.absolute(dir);
         if whole == *manifest || !whole.starts_with(manifest) {
             return None;
         }
-        Some((whole, manifest.clone()))
+        if dir.is_absolute() {
+            return Some((whole, manifest.clone()));
+        }
+        let below = whole.strip_prefix(manifest).ok()?.to_path_buf();
+        let depth = below.components().count();
+        let written = normalise(dir);
+        let mut root = written.clone();
+        for _ in 0..depth {
+            match root.components().next_back() {
+                Some(Component::Normal(_)) => {
+                    root.pop();
+                }
+                _ => {
+                    root = (0..depth).fold(written, |up, _| up.join(".."));
+                    break;
+                }
+            }
+        }
+        Some((root.join(&below), root))
     }
 
     /// The manifest `package`'s dependencies were to come from, when it was
