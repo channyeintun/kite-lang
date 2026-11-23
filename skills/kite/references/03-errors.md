@@ -415,8 +415,9 @@ shapes `task.both`, `task.all` and `task.timeout` answer with. Bound to one name
 it is Unchecked (`rs.len()` does not count as reading it); taking it apart, or
 walking it with `for`, hands each failure to the name it lands in. `r.0` takes
 one element of a tuple and leaves the others owed — the tuple is settled once
-each has been taken, and taking it apart afterwards binds only the failures not
-yet taken. A projection of a tuple nobody holds, `(f(1), f(2)).0` or `pair().0`,
+each has been taken, and taking it apart (or copying it) afterwards owes only
+the failures not yet taken. `t.0.0` goes a level down: it leaves `t.0.1` owed, as
+`let u = t.0` then `u.0` does. A projection of a tuple nobody holds, `(f(1), f(2)).0` or `pair().0`,
 throws the other elements away on the spot, so each failure among them is
 `E0302` there; bind the tuple and take it apart, with `_` for one you mean to
 drop. `rs[0]` on a slice, though, counts as reading the whole slice, since a
@@ -465,7 +466,11 @@ async fn main() {
 Testing a `task.timeout` result against `nil` only asks whether the work came in
 time. Where it did, what it gave is still unread: after
 `if r == nil { return }`, `r` is the `error` (or the pair) and has to be tested
-(or taken apart) in turn:
+(or taken apart) in turn. That second test is the one that proves the error
+present: a task that came in time with a `nil` error gives a present optional,
+so `r.message()` straight after `if r == nil { return }`, or inside
+`if r != nil { … }` on the optional, is `E0301`. The same goes for an
+`Option<error>` from anywhere else — `m[k]` on a map of errors, `xs.get(i)`. In full:
 
 ```kite
 use std/task
@@ -486,9 +491,16 @@ async fn main() {
 }
 ```
 
+So bind the result first: `if await task.timeout(save(), 100) == nil { … }`
+tests a result nothing holds, and the failure in it is lost — `E0302` at the
+`await`.
+
 The same holds however the failure got into a single binding — `var e = f()`,
 `let e = await f()`, `let e = if c { f() } else { g() }`, `let (n, e) = (1,
-f())`: the binding has to be looked at. Only `nil` starts out Checked.
+f())`: the binding has to be looked at. Only `nil` starts out Checked — and a
+value `if` whose branches are bindings and `nil`: `let e = if x { c } else
+{ nil }` holds `c`'s failure or nothing, so `c` answers for it, and once `c` is
+checked, `e` holds nothing at all.
 
 **Copying an error is not looking at it.** `let e = err` gives the failure a
 second name, and one of the two has to be inspected — either will do. A
@@ -575,7 +587,8 @@ fn main() {
 Test it inside the body before the next write — `if e != nil { break }` — or
 keep the error inside the loop. A `for { }` is left only by `break`, so the
 retry loop `for { if err == nil { break } … err = attempt() }` needs nothing
-after it.
+after it; written with `return` in place of `break` and no `break` at all,
+nothing follows the loop, so only the `return`s have to answer for `err`.
 
 ## `check`
 

@@ -1,0 +1,112 @@
+// A present optional does not prove the error inside it. A task that came
+// in time with a nil `error` gives a present optional, so the test that finds
+// `r` there says a result is there, not that it is a failure; the message is
+// read only where the error itself has been tested. Reading it straight after
+// the nil test printed an empty line on the VM and native and trapped on Wasm.
+
+use std/task
+
+async fn fine() -> error {
+    return nil
+}
+
+struct Held {
+    o: Option<error>
+}
+
+fn first(xs: [error]) -> Option<error> {
+    return xs.get(0)
+}
+
+async fn after_leaving_early() {
+    let r = await task.timeout(fine(), 100)
+    if r == nil {
+        return
+    }
+    io.print(r.message()) //~ ERROR E0301
+}
+
+async fn inside_the_present_side() {
+    let r = await task.timeout(fine(), 100)
+    if r != nil {
+        io.print(r.message()) //~ ERROR E0301
+    }
+}
+
+async fn as_a_value_if() {
+    let r = await task.timeout(fine(), 100)
+    let text = if r != nil { r.message() } else { "late" } //~ ERROR E0301
+    io.print(text)
+}
+
+// Every other way to hold an `Option<error>` is the same.
+fn from_a_map(m: { str: error }) {
+    let r = m["a"]
+    if r == nil {
+        return
+    }
+    io.print(r.message()) //~ ERROR E0301
+}
+
+fn from_a_slice(xs: [error]) {
+    let r = xs.get(0)
+    if r != nil {
+        io.print(r.message()) //~ ERROR E0301
+    }
+}
+
+fn from_a_field(h: Held) {
+    let r = h.o
+    if r == nil {
+        return
+    }
+    io.print(r.message()) //~ ERROR E0301
+}
+
+fn from_a_call(xs: [error]) {
+    let r = first(xs)
+    if r == nil {
+        return
+    }
+    io.print(r.message()) //~ ERROR E0301
+}
+
+fn from_a_match(xs: [error]) {
+    match xs.get(0) {
+        nil => io.print("none"),
+        e => io.print(e.message()), //~ ERROR E0301
+    }
+}
+
+// Tested in turn, the error is proved present.
+async fn the_error_tested_too() {
+    let r = await task.timeout(fine(), 100)
+    if r == nil {
+        return
+    }
+    if r != nil {
+        io.print(r.message())
+    }
+}
+
+fn tested_in_an_else(xs: [error]) {
+    let r = xs.get(0)
+    if r == nil {
+        io.print("none")
+    } else if r != nil {
+        io.print(r.message())
+    }
+}
+
+async fn main() {
+    await after_leaving_early()
+    await inside_the_present_side()
+    await as_a_value_if()
+    from_a_map({ "a": nil })
+    from_a_slice([nil])
+    from_a_field(Held{ o: nil })
+    from_a_call([nil])
+    from_a_match([nil])
+    await the_error_tested_too()
+    tested_in_an_else([nil])
+}

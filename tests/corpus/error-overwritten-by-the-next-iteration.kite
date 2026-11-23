@@ -164,6 +164,43 @@ fn left_by_an_untested_break() {
     }
 }
 
+// With no `break` at all nothing follows a `for { }`: its only ways out are
+// the `return`s in its body, and each answers for what it leaves behind.
+fn retried_until_a_return() -> error {
+    var n = 1
+    var err = touch(n)
+    for {
+        if err == nil {
+            return nil
+        }
+        n += 1
+        err = touch(n)
+    }
+}
+
+fn returned_where_it_failed() {
+    let err = touch(1)
+    for {
+        if err != nil {
+            io.print(err.message())
+            return
+        }
+    }
+}
+
+// A `return` that tests nothing still leaves the failure behind.
+fn left_by_an_untested_return(stop: bool) {
+    let err = touch(1)
+    for {
+        if stop {
+            return //~ ERROR E0302
+        }
+        if err == nil {
+            return
+        }
+    }
+}
+
 fn main() {
     a_copy_left_by_a_break([1])
     until_the_test_passes()
@@ -177,4 +214,7 @@ fn main() {
     _ = retried()
     until_it_works()
     _ = checked_in_an_inner_loop([1])
+    _ = retried_until_a_return()
+    returned_where_it_failed()
+    left_by_an_untested_return(true)
 }
