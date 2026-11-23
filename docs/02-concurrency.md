@@ -77,8 +77,11 @@ let ta = fetch_user(1)          // queued, not yet run
 let tb = fetch_user(2)          // queued, not yet run
 let (ra, rb) = await task.both(ta, tb)
 let (a, ea) = ra
-check ea
 let (b, eb) = rb
+if ea != nil {
+    _ = eb                      // both arrive together; report the first
+    return _, ea
+}
 check eb
 ```
 

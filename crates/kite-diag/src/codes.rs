@@ -357,8 +357,12 @@ codes! {
         "An `error` binding went out of scope without being inspected, or was \
          written over while it still held a failure nobody had looked at: \
          `var e = f()` then `e = nil` drops `f`'s failure as surely as leaving \
-         the block does. Silently dropping errors is the single most common \
-         source of production failures in languages that permit it.\n\n\
+         the block does. Copying it is not inspecting it: after `let e = err` \
+         either name may be inspected, but one of them must be. The `Task` \
+         of an `async fn` that answers with an error is held to the same \
+         rule: it has to be awaited, returned or passed on. Silently \
+         dropping errors is the single most common source of production \
+         failures in languages that permit it.\n\n\
          To propagate, write `check`. To handle it where it happened, test \
          `err != nil`.";
 

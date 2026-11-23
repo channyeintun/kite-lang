@@ -1,0 +1,79 @@
+// Calling an `async fn` queues its body and hands back a `Task`, so a task
+// whose result holds a failure is a failure on its way. Left as a statement,
+// or bound and never awaited, it ran, failed, and nobody heard (R6, R7): the
+// rule was written for `error` and `(T, error)`, and a `Task` of one was
+// neither. Awaiting it, returning it or handing it on reads it, and `_ = …`
+// throws it away on purpose.
+
+use std/task
+
+async fn save() -> error {
+    return errors.new("disk full")
+}
+
+async fn load(n: int) -> (int, error) {
+    if n == 2 {
+        return _, errors.new("two failed")
+    }
+    return n * 10, nil
+}
+
+async fn tick() {
+    io.print("tick")
+}
+
+async fn left_as_statements() {
+    save() //~ ERROR E0302
+    load(1) //~ ERROR E0302
+    tick()
+}
+
+async fn bound_and_never_awaited() {
+    let pending = save() //~ ERROR E0302
+    io.print("saved")
+}
+
+async fn awaited() -> error {
+    let pending = save()
+    let err = await pending
+    check err
+    let (v, e) = await load(1)
+    check e
+    io.print(v)
+    return nil
+}
+
+async fn handed_on() -> error {
+    let a = load(1)
+    let b = load(2)
+    let (ra, rb) = await task.both(a, b)
+    let (x, ex) = ra
+    if ex != nil {
+        _ = rb
+        return ex
+    }
+    let (y, ey) = rb
+    check ey
+    io.print(x + y)
+    return nil
+}
+
+fn returned() -> Task<error> {
+    return save()
+}
+
+async fn on_purpose() {
+    _ = save()
+}
+
+async fn main() {
+    await left_as_statements()
+    await bound_and_never_awaited()
+    let e1 = await awaited()
+    let e2 = await handed_on()
+    let e3 = await returned()
+    if e1 != nil || e2 != nil || e3 != nil {
+        io.print("failed")
+    }
+    await on_purpose()
+}

@@ -617,10 +617,12 @@ pub fn check_recording(
             narrowed: std::collections::HashMap::new(),
             error_nonnil: std::collections::HashSet::new(),
             loops: Vec::new(),
+            loop_edges: Vec::new(),
             loop_writes: Vec::new(),
             closure_sig: None,
             closure_ret_unknown: None,
             reported_unchecked: std::collections::HashSet::new(),
+            copies: std::collections::BTreeSet::new(),
             defers: None,
             release,
             solved: &mut *solved,
@@ -1148,6 +1150,9 @@ struct Checker<'a> {
     /// their labels. A closure starts with none: a loop around the place it
     /// is written is not one its body runs in.
     loops: Vec<(Span, Option<String>)>,
+    /// Beside each of `loops`, the error states its body hands back to its
+    /// top and out past its end, for the loop to join.
+    loop_edges: Vec<LoopEdges>,
     /// While a loop's body is checked on trial to learn which narrowings
     /// survive it: per such loop, innermost last, every local a write in the
     /// body may have made nil.
@@ -1163,6 +1168,13 @@ struct Checker<'a> {
     /// it left scope on one path is not reported again where the function
     /// ends.
     reported_unchecked: std::collections::HashSet<u32>,
+    /// Pairs of locals holding one and the same unchecked failure, because
+    /// one was made a copy of the other: `let e = err`, `e = err`, or a
+    /// `match err { x => … }` arm. A copy is not an inspection, so the
+    /// failure still has to be looked at — but through either name, so
+    /// inspecting one inspects both, and one left behind while the other is
+    /// still in scope has dropped nothing. Each pair is written lowest first.
+    copies: std::collections::BTreeSet<(u32, u32)>,
 }
 
 /// Whether a local certainly holds a value at this point.
@@ -1206,7 +1218,8 @@ impl Init {
 /// failure path is the zero value and flows onward looking valid.
 ///
 /// The lattice has height two and merges at branch joins, exactly like the
-/// definite-assignment analysis it sits beside.
+/// definite-assignment analysis it sits beside — and at a loop's top, which
+/// is a join too, so a loop is checked until its top stops changing.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Taint {
     /// An ordinary local. Nothing to prove.
@@ -1250,6 +1263,42 @@ struct FlowState {
     taint: Vec<Taint>,
     narrowed: std::collections::HashMap<u32, TyId>,
     error_nonnil: std::collections::HashSet<u32>,
+    copies: std::collections::BTreeSet<(u32, u32)>,
+}
+
+/// What holds a failure, which is what a diagnostic about dropping it says.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Holder {
+    /// An `error`.
+    Error,
+    /// A whole `(T, error)`.
+    Pair,
+    /// The `Task` of a call to an `async fn` whose result holds one.
+    Task,
+    /// A tuple or a slice with one or more of these in it.
+    Many,
+    /// An optional one: what `task.timeout` answers with.
+    Maybe,
+}
+
+/// An error state: the taint, and which locals are copies of which.
+type ErrorState = (Vec<Taint>, std::collections::BTreeSet<(u32, u32)>);
+
+/// The error states a loop's body hands on other than by falling into what
+/// follows it: back to its start, from its end and every `continue`, and out
+/// past it, from every `break`. Each is the join of all that arrive.
+///
+/// A loop is checked until what comes back to the start of its body says
+/// nothing new; `carried` is what earlier rounds found coming back, `start`
+/// the state the body began in with that joined in, and `head` the state
+/// the loop is left in when its header finds nothing more to do.
+#[derive(Default)]
+struct LoopEdges {
+    carried: Option<ErrorState>,
+    start: Option<ErrorState>,
+    head: Option<ErrorState>,
+    back: Option<ErrorState>,
+    exit: Option<ErrorState>,
 }
 
 /// What a trial check may change, kept to be put back.
@@ -1275,22 +1324,30 @@ struct Enclosing {
     taint: Vec<Taint>,
     narrowed: std::collections::HashMap<u32, TyId>,
     error_nonnil: std::collections::HashSet<u32>,
+    copies: std::collections::BTreeSet<(u32, u32)>,
     defers: Option<u32>,
     loops: Vec<(Span, Option<String>)>,
+    loop_edges: Vec<LoopEdges>,
     sig: Option<Signature>,
     ret_unknown: Option<Span>,
 }
 
-/// Whether an `error` or `(T, error)` value put into a binding may be a
-/// failure nobody has looked at yet.
+/// The copies that still hold where control arrives from either of two
+/// paths, each given as its copies and its taint.
 ///
-/// Everything may, except `nil` — a deliberate absence, with nothing in it to
-/// drop — and a read of another binding, which carries its own obligation and
-/// had it discharged by being read. Asking the question the other way round,
-/// "is this a call", let a failure through whenever the call was wrapped:
-/// `await f()`, `if c { f() } else { g() }`.
-fn produces_failure(kind: &ExprKind) -> bool {
-    !matches!(kind, ExprKind::Nil | ExprKind::Local(_) | ExprKind::Error)
+/// Two names hold one failure after the join only if inspecting either
+/// inspects the other on both ways in: they were copies on that path, or
+/// neither held anything unchecked there, so there was nothing to inspect.
+fn join_copies(
+    a: (&std::collections::BTreeSet<(u32, u32)>, &[Taint]),
+    b: (&std::collections::BTreeSet<(u32, u32)>, &[Taint]),
+) -> std::collections::BTreeSet<(u32, u32)> {
+    let holds = |(copies, taint): (&std::collections::BTreeSet<(u32, u32)>, &[Taint]),
+                 pair: &(u32, u32)| {
+        copies.contains(pair)
+            || [pair.0, pair.1].iter().all(|i| taint.get(*i as usize) != Some(&Taint::Unchecked))
+    };
+    a.0.union(b.0).filter(|pair| holds(a, pair) && holds(b, pair)).copied().collect()
 }
 
 impl Flow {
@@ -1462,7 +1519,30 @@ impl<'a> Checker<'a> {
             .filter(|(id, ty)| self.narrowed.get(id) == Some(ty))
             .collect();
         self.error_nonnil = entry_nonnil.intersection(&self.error_nonnil).copied().collect();
+        self.copies_leave(b.span);
         (out, flow)
+    }
+
+    /// The end of a block the copies declared in it do not outlive. A copy
+    /// whose failure a name outside the block still holds unchecked has
+    /// dropped nothing by going, and is let go here: left behind, it would
+    /// outlast the join after a branch, where the path that skipped the
+    /// branch knows nothing of it and so cannot say both names hold one
+    /// failure.
+    fn copies_leave(&mut self, region: Span) {
+        if self.copies.is_empty() {
+            return;
+        }
+        for i in 0..self.taint.len() {
+            let id = i as u32;
+            if self.taint[i] == Taint::Unchecked
+                && self.declared_inside(id, region)
+                && self.carried_elsewhere(id, |j| self.declared_inside(j, region))
+            {
+                self.taint[i] = Taint::Clean;
+                self.forget_copies(id);
+            }
+        }
     }
 
     fn stmt(&mut self, s: &ast::Stmt, sig: &Signature) -> Option<(hir::Stmt, Flow)> {
@@ -1483,6 +1563,7 @@ impl<'a> Checker<'a> {
             }
 
             ast::Stmt::Break { label, span } => {
+                self.note_loop_edge(label.as_ref().map(|l| l.name.as_str()), false);
                 self.leave_loop(label.as_ref().map(|l| l.name.as_str()), *span, "break");
                 Some((
                     hir::Stmt::Break { label: label.as_ref().map(|l| l.name.clone()), span: *span },
@@ -1490,6 +1571,7 @@ impl<'a> Checker<'a> {
                 ))
             }
             ast::Stmt::Continue { label, span } => {
+                self.note_loop_edge(label.as_ref().map(|l| l.name.as_str()), true);
                 self.leave_loop(label.as_ref().map(|l| l.name.as_str()), *span, "continue");
                 Some((
                     hir::Stmt::Continue {
@@ -1549,6 +1631,7 @@ impl<'a> Checker<'a> {
         let local_id = self.resolved.lookup_binding(name.span)?;
         let annotated = l.ty.as_ref().map(|t| self.resolve_type(t));
 
+        let before = self.taint.clone();
         let init = l.init.as_ref().map(|e| {
             let v = self.expr(e, annotated);
             self.coerce(v, annotated)
@@ -1606,18 +1689,22 @@ impl<'a> Checker<'a> {
         // test it" — for the half of the rule that was enforced.
         //
         // `let e: error = nil` is not marked: it is a deliberate absence and
-        // there is nothing there to drop. Nor is a copy of another binding.
-        // Reading the binding anywhere clears the mark, because reading an
-        // error is inspecting it.
+        // there is nothing there to drop. A copy of another binding holds
+        // that binding's failure, if it held one unchecked. Reading the
+        // binding anywhere else clears the mark, because reading an error is
+        // inspecting it.
         //
         // A whole `(T, error)` bound to one name is the same hole one level
         // up: `let p = load()` never destructures, so R1 never marks an error
         // and the failure inside `p` went out of scope in silence. Taking it
         // apart later, or returning it, reads it and clears the mark.
-        self.taint[local_id as usize] = match &init {
-            Some(i) if self.may_hold_failure(ty) && produces_failure(&i.kind) => Taint::Unchecked,
-            _ => Taint::Clean,
-        };
+        self.forget_copies(local_id);
+        self.taint[local_id as usize] = Taint::Clean;
+        if let Some(i) = &init {
+            if self.may_hold_failure(ty) {
+                self.bind_failure(local_id, i, &before);
+            }
+        }
         let _ = sig;
         Some((
             hir::Stmt::Let { local: hir::LocalId(local_id), init, span: l.span },
@@ -1628,6 +1715,7 @@ impl<'a> Checker<'a> {
     fn var_stmt(&mut self, v: &ast::VarStmt, _sig: &Signature) -> Option<(hir::Stmt, Flow)> {
         let local_id = self.resolved.lookup_binding(v.name.span)?;
         let annotated = v.ty.as_ref().map(|t| self.resolve_type(t));
+        let before = self.taint.clone();
         let init = self.expr(&v.init, annotated);
         let init = self.coerce(init, annotated);
 
@@ -1647,12 +1735,11 @@ impl<'a> Checker<'a> {
         // The same obligation a `let` takes on: `var e = f()` holds a failure
         // just as surely, and being able to reassign it later does not mean
         // anybody looked at this one.
-        self.taint[local_id as usize] =
-            if self.may_hold_failure(ty) && produces_failure(&init.kind) {
-                Taint::Unchecked
-            } else {
-                Taint::Clean
-            };
+        self.forget_copies(local_id);
+        self.taint[local_id as usize] = Taint::Clean;
+        if self.may_hold_failure(ty) {
+            self.bind_failure(local_id, &init, &before);
+        }
 
         Some((
             hir::Stmt::Let { local: hir::LocalId(local_id), init: Some(init), span: v.span },
@@ -1746,6 +1833,7 @@ impl<'a> Checker<'a> {
         // against the state before it: `let x: int` then `x = x + 1` reads an
         // `x` that has no value yet.
         let before = self.init[slot];
+        let taint_before = self.taint.clone();
         let value = self.expr(&a.value, Some(local_ty));
         let (value, written) = match a.op.to_binary() {
             None => {
@@ -1818,7 +1906,8 @@ impl<'a> Checker<'a> {
         // Writing a new failure into an error binding is a new obligation,
         // as binding one is (R7): `var e: error = nil` then `e = f()`, or a
         // `let e: error` assigned in a branch, dropped `f`'s failure unseen.
-        // `nil` and a copy of another binding stay checked, as in a `let`.
+        // `nil` stays checked, and a copy of another binding holds that
+        // binding's failure, as in a `let`.
         //
         // That is the state of the value written, and says nothing about the
         // one it replaces. A failure nobody has looked at is dropped by being
@@ -1826,15 +1915,17 @@ impl<'a> Checker<'a> {
         // then `e = nil` lost `f`'s failure unseen. The right-hand side was
         // checked first, so `e = errors.wrap(e, "…")` has read the old value
         // and is not reported.
+        // A copy of the failure still unchecked under another name has not
+        // been dropped: that name carries it.
         if !compound && self.may_hold_failure(local_ty) {
             if self.taint[slot] == Taint::Unchecked
                 && !self.locals[slot].synthetic
+                && !self.carried_elsewhere(local_id, |_| false)
                 && self.reported_unchecked.insert(local_id)
             {
                 self.overwritten_unchecked(&name, decl_span, a.span, local_ty);
             }
-            self.taint[slot] =
-                if produces_failure(&value.kind) { Taint::Unchecked } else { Taint::Clean };
+            self.bind_failure(local_id, &value, &taint_before);
         }
 
         // A write replaces the value every earlier test was about. `x != nil`
@@ -1862,7 +1953,161 @@ impl<'a> Checker<'a> {
     /// Whether a binding of this type carries the obligation to be checked:
     /// an `error`, or a whole `(T, error)`.
     fn may_hold_failure(&self, ty: TyId) -> bool {
-        ty == TyId::ERR || self.types.fallible_value(ty).is_some()
+        self.holder(ty).is_some()
+    }
+
+    /// What holds the failure in a value of this type, if anything can.
+    ///
+    /// A `Task` of one is a failure not yet arrived. Calling an `async fn`
+    /// queues its body and hands back the task, so `save()` on its own line
+    /// — where `save` is `async` and answers with an `error` — ran, failed,
+    /// and was never heard of: R6 saw a `Task<error>`, not an `error`, and a
+    /// task bound and never awaited went the same way. Awaiting the task,
+    /// returning it or passing it on reads it; `_ = save()` is the
+    /// deliberate drop.
+    fn holder(&self, ty: TyId) -> Option<Holder> {
+        if ty == TyId::ERR {
+            return Some(Holder::Error);
+        }
+        if self.types.fallible_value(ty).is_some() {
+            return Some(Holder::Pair);
+        }
+        if let Some(inner) = self.types.task_payload(ty) {
+            return self.may_hold_failure(inner).then_some(Holder::Task);
+        }
+        // Binding everything under one name is not a way out (R7), and nor is
+        // binding a tuple or a slice of everything: `let r = await
+        // task.both(a, b)` and `let rs = await task.all(ts)` each hold
+        // failures nobody has looked at, and they are the shapes §12
+        // recommends. Each is watched as a whole pair is.
+        if let TyKind::Tuple(parts) = self.types.kind(ty) {
+            if parts.iter().any(|p| self.may_hold_failure(*p)) {
+                return Some(Holder::Many);
+            }
+        }
+        // `let r = await task.timeout(save(), 100)` holds `save`'s failure
+        // whenever it came in time, which is the one container §12 answers
+        // with that a tuple or a slice does not cover.
+        if let TyKind::Optional(inner) = *self.types.kind(ty) {
+            return self.may_hold_failure(inner).then_some(Holder::Maybe);
+        }
+        match self.types.slice_elem(ty) {
+            Some(elem) if self.may_hold_failure(elem) => Some(Holder::Many),
+            _ => None,
+        }
+    }
+
+    /// Whether a value put somewhere new brings an unchecked failure with it,
+    /// given the taint from before it was evaluated.
+    ///
+    /// A new failure does — anything but `nil` may be one, a deliberate
+    /// absence with nothing in it to drop — and so does a read of a binding
+    /// that held one unchecked, since reading it to put it somewhere else
+    /// hands the failure on rather than looking at it. A tuple or slice
+    /// literal brings what its elements bring: `(1, f())` holds `f`'s
+    /// failure, and `[]` holds none. Asking the question the other way
+    /// round, "is this a call", let a failure through whenever the call was
+    /// wrapped: `await f()`, `if c { f() } else { g() }`.
+    fn holds_obligation(&self, e: &hir::Expr, before: &[Taint]) -> bool {
+        match &e.kind {
+            ExprKind::Nil | ExprKind::Error => false,
+            ExprKind::Local(id) => before.get(id.index()) == Some(&Taint::Unchecked),
+            ExprKind::TupleNew { elems } | ExprKind::SliceNew { elems } => elems
+                .iter()
+                .any(|x| self.may_hold_failure(x.ty) && self.holds_obligation(x, before)),
+            _ => true,
+        }
+    }
+
+    /// Set the state of a binding a value that may hold a failure was just
+    /// put into, by `let`, `var` or a write; `before` is the taint from
+    /// before the value was evaluated.
+    ///
+    /// **A copy is not an inspection** (R7). Reading `err` to bind it as `e`
+    /// used to count as looking at it, so `let e = err` and nothing else
+    /// dropped the failure with no diagnostic. A copy of a binding holding an
+    /// unchecked failure now holds the same one: both names stay Unchecked,
+    /// and inspecting either inspects both ([`Self::inspect`]).
+    fn bind_failure(&mut self, local: u32, value: &hir::Expr, before: &[Taint]) {
+        // Whatever the binding was a copy of before, it holds this now.
+        self.forget_copies(local);
+        let state = match value.kind {
+            ExprKind::Local(src) if src.0 != local && self.holds_obligation(value, before) => {
+                for i in self.copies_of(src.0) {
+                    if before.get(i as usize) == Some(&Taint::Unchecked) {
+                        self.taint[i as usize] = Taint::Unchecked;
+                    }
+                }
+                self.note_copy(local, src.0);
+                Taint::Unchecked
+            }
+            _ if self.holds_obligation(value, before) => Taint::Unchecked,
+            _ => Taint::Clean,
+        };
+        self.taint[local as usize] = state;
+    }
+
+    /// Inspect the failure a local holds, under every name it has.
+    fn inspect(&mut self, id: u32) {
+        for i in self.copies_of(id) {
+            if self.taint.get(i as usize) == Some(&Taint::Unchecked) {
+                self.taint[i as usize] = Taint::Clean;
+            }
+        }
+    }
+
+    /// A local and every local holding the same failure as it, itself first.
+    fn copies_of(&self, id: u32) -> Vec<u32> {
+        let mut group = vec![id];
+        let mut i = 0;
+        while i < group.len() {
+            let x = group[i];
+            for &(a, b) in &self.copies {
+                let other = if a == x {
+                    b
+                } else if b == x {
+                    a
+                } else {
+                    continue;
+                };
+                if !group.contains(&other) {
+                    group.push(other);
+                }
+            }
+            i += 1;
+        }
+        group
+    }
+
+    /// Whether another name than `id` holds `id`'s failure unchecked and
+    /// stays in scope past what `leaves` says is going out.
+    fn carried_elsewhere(&self, id: u32, leaves: impl Fn(u32) -> bool) -> bool {
+        self.copies_of(id)
+            .into_iter()
+            .skip(1)
+            .any(|j| self.taint.get(j as usize) == Some(&Taint::Unchecked) && !leaves(j))
+    }
+
+    fn note_copy(&mut self, a: u32, b: u32) {
+        if a != b {
+            self.copies.insert((a.min(b), a.max(b)));
+        }
+    }
+
+    /// A local is about to hold something else: it is no longer a copy of
+    /// anything. What it was a copy of, and what was a copy of it, still
+    /// hold one failure between them.
+    fn forget_copies(&mut self, id: u32) {
+        let others: Vec<u32> = self.copies_of(id).into_iter().skip(1).collect();
+        if others.is_empty() {
+            return;
+        }
+        self.copies.retain(|&(a, b)| a != id && b != id);
+        if others.len() > 1 {
+            for &x in &others[1..] {
+                self.note_copy(others[0], x);
+            }
+        }
     }
 
     /// A second write to an immutable binding.
@@ -2426,23 +2671,21 @@ impl<'a> Checker<'a> {
     fn if_stmt(&mut self, i: &ast::IfStmt, sig: &Signature) -> Option<(hir::Stmt, Flow)> {
         // `if err != nil { … }` is the explicit form of a check. Recognising it
         // here is what lets a hand-written test clean the value it guards.
-        let tested = self.error_tested_by(&i.cond);
+        let tested = self.error_facts(&i.cond, true);
         // `if x == nil { … } else { … }` narrows `x` in whichever branch it
         // cannot be nil. Kite has no `?` sigil of any kind: an inline `if`
         // does the same work, in the open.
         let narrowing = self.nil_test(&i.cond);
         let cond = self.condition(&i.cond);
-        if let Some((id, _)) = tested {
-            if self.taint[id as usize] == Taint::Unchecked {
-                self.taint[id as usize] = Taint::Clean;
-            }
+        for (id, _) in tested {
+            self.inspect(id);
         }
 
         // Each branch is checked from the same entry state, and the states are
         // merged at the join. A branch that diverges contributes nothing to the
         // join, because control never arrives from it.
         let entry = self.flow_state();
-        self.enter_branch(narrowing, tested, true);
+        self.enter_branch(narrowing, &i.cond, true);
         let (then, then_flow) = self.block(&i.then, sig);
         if then_flow == Flow::Diverges {
             self.report_unchecked_errors(Some(i.then.span));
@@ -2455,7 +2698,7 @@ impl<'a> Checker<'a> {
         // it arrives knowing the condition was false. An `else if` starts from
         // that knowledge too, so `if x == nil { … } else if c { … }` has `x`
         // narrowed in the second test's branches.
-        self.enter_branch(narrowing, tested, false);
+        self.enter_branch(narrowing, &i.cond, false);
         let (else_, else_flow) = match i.else_.as_deref() {
             None => (None, Flow::Falls),
             Some(ast::ElseBranch::Block(b)) => {
@@ -2501,6 +2744,7 @@ impl<'a> Checker<'a> {
 
     fn for_stmt(&mut self, f: &ast::ForStmt, sig: &Signature) -> Option<(hir::Stmt, Flow)> {
         self.loops.push((f.span, f.label.as_ref().map(|l| l.name.clone())));
+        self.loop_edges.push(LoopEdges::default());
 
         // A loop body may run zero times, so nothing it assigns can be assumed
         // assigned afterwards, and it may run more than once, so a write in it
@@ -2510,7 +2754,6 @@ impl<'a> Checker<'a> {
         // body that never runs proves nothing, so the state after the loop is
         // the entry state joined with whatever the body left. Without this, a
         // `for false { check err }` makes the value it guards readable.
-        let entry_taint = self.taint.clone();
         // The body is checked once, but runs again from its own end: a local
         // it assigns may hold, on the second pass, whatever the first pass
         // put there. So nothing proved about such a local before the loop is
@@ -2566,7 +2809,41 @@ impl<'a> Checker<'a> {
         let entry_narrowed = self.narrowed.clone();
         let entry_nonnil = self.error_nonnil.clone();
 
-        let (result, runs) = self.loop_parts(f, sig);
+        // **The body runs again from its own end**, and from every
+        // `continue`, so the state it starts in is not only the one the loop
+        // was entered in. A failure the body leaves unchecked in a binding
+        // declared outside it is still there when the next iteration writes
+        // over it: `var e: error = nil` then `for … { e = f(i) }` dropped
+        // every failure but the last, unseen, because the write was checked
+        // against the state before the first iteration alone. So the body is
+        // checked, and if what flows back to its start says more than the
+        // state it was checked from, it is checked again with that joined in
+        // — after the header, which runs once, for a walk; before the
+        // condition, which runs every time, for a `for cond` — and what the
+        // earlier check reported is thrown away with it. Each round makes
+        // some state worse, and none can get worse than Tainted, so this
+        // ends; a body that hands nothing new back — almost every one — is
+        // checked once.
+        let depth = self.loops.len() - 1;
+        let entry: ErrorState = (self.taint.clone(), self.copies.clone());
+        let mut carried: Option<ErrorState> = None;
+        let mut round = 0;
+        let (result, runs, edges) = loop {
+            round += 1;
+            let defers = self.defers;
+            let trial = self.begin_trial();
+            self.loop_edges[depth] = LoopEdges { carried: carried.take(), ..LoopEdges::default() };
+            let (result, runs) = self.loop_parts(f, sig);
+            let edges = std::mem::take(&mut self.loop_edges[depth]);
+            let Some(next) = self.carry(f.span, &edges, round) else {
+                self.keep_trial(trial);
+                break (result, runs, edges);
+            };
+            self.end_trial(trial);
+            self.defers = defers;
+            carried = Some(next);
+        };
+        self.loop_edges.pop();
 
         self.loops.pop();
         let merged: Vec<Init> = self
@@ -2582,8 +2859,46 @@ impl<'a> Checker<'a> {
         // testing what it walks on every turn — and without it the path that
         // runs the body zero times, which does not exist, made the walk's
         // subject look unread.
-        if !runs {
-            self.merge_loop_taint(&entry_taint);
+        //
+        // Otherwise control also leaves where the header finds nothing more
+        // to do — before the first iteration, or after any — and from every
+        // `break`.
+        //
+        // A `for cond` loop's condition runs before every iteration and once
+        // more after the last, so what reaches it from the body's end and
+        // every `continue` is already in the state it was left in, and the
+        // body's end is not itself a way out: `for err != nil { err = g() }`
+        // leaves only once `err` has been tested. Of the body's end only what
+        // it declared is kept, to be reported where the function ends.
+        match (&f.header, edges.head) {
+            (ast::ForHeader::While(_), Some((mut taint, copies))) if !runs => {
+                taint.resize(self.taint.len(), Taint::Clean);
+                for (i, t) in taint.iter_mut().enumerate() {
+                    if self.declared_inside(i as u32, f.span) {
+                        *t = self.taint[i];
+                    }
+                }
+                let inside: Vec<(u32, u32)> = self
+                    .copies
+                    .iter()
+                    .copied()
+                    .filter(|p| self.declared_inside(p.0, f.span) && self.declared_inside(p.1, f.span))
+                    .collect();
+                self.copies = copies;
+                self.copies.extend(inside);
+                self.restore_taint(taint);
+            }
+            (_, head) if !runs => {
+                let (taint, copies) = head.unwrap_or(entry);
+                self.merge_loop_taint(&taint, &copies);
+                if let Some((taint, copies)) = edges.back {
+                    self.merge_loop_taint(&taint, &copies);
+                }
+            }
+            _ => {}
+        }
+        if let Some((taint, copies)) = edges.exit {
+            self.merge_loop_taint(&taint, &copies);
         }
         // What the body proved is not known after it, which may be after zero
         // runs of it; what it disproved was removed before it started.
@@ -2622,6 +2937,7 @@ impl<'a> Checker<'a> {
                 let ast::Expr::Range { start, end, inclusive, .. } = iter else {
                     // Iterating a slice. The `Iterate` trait generalises this
                     // later; slices are the case that matters now.
+                    let before = self.taint.clone();
                     let seq = self.expr(iter, None);
                     let Some(elem) = self.types.slice_elem(seq.ty) else {
                         if !self.types.is_poisoned(seq.ty) {
@@ -2645,8 +2961,18 @@ impl<'a> Checker<'a> {
                     };
                     self.locals[local_id as usize].ty = elem;
                     self.init[local_id as usize] = Init::Assigned;
+                    // Walking a slice of failures hands each one to the loop's
+                    // binding, which has to look at it, as taking a pair apart
+                    // hands its error to the name it binds (R1).
+                    self.forget_copies(local_id);
+                    self.taint[local_id as usize] =
+                        if self.may_hold_failure(elem) && self.holds_obligation(&seq, &before) {
+                            Taint::Unchecked
+                        } else {
+                            Taint::Clean
+                        };
 
-                    let (body, _) = self.block(&f.body, sig);
+                    let body = self.loop_body(&f.body, sig);
                     let stmt = hir::Stmt::ForSlice {
                         var: hir::LocalId(local_id),
                         slice: seq,
@@ -2674,7 +3000,7 @@ impl<'a> Checker<'a> {
                 // The loop itself supplies the counter's value.
                 self.init[local_id as usize] = Init::Assigned;
 
-                let (body, _) = self.block(&f.body, sig);
+                let body = self.loop_body(&f.body, sig);
                 let stmt = hir::Stmt::ForRange {
                     var: hir::LocalId(local_id),
                     start: start_e,
@@ -2687,12 +3013,14 @@ impl<'a> Checker<'a> {
                 (Some(stmt), runs && !jumps)
             }
             ast::ForHeader::While(c) => {
+                self.loop_start();
                 let cond = self.condition(c);
-                let (body, _) = self.block(&f.body, sig);
+                self.loop_head();
+                let body = self.loop_body(&f.body, sig);
                 (Some(hir::Stmt::While { cond, body, label, span: f.span }), false)
             }
             ast::ForHeader::Loop => {
-                let (body, _) = self.block(&f.body, sig);
+                let body = self.loop_body(&f.body, sig);
                 (Some(hir::Stmt::Loop { body, label, span: f.span }), false)
             }
         }
@@ -2712,6 +3040,7 @@ impl<'a> Checker<'a> {
         let ast::Binding::Tuple { elems, span } = binding else {
             return None;
         };
+        let before = self.taint.clone();
         let map = self.expr(iter, None);
 
         // A slice of two-element tuples destructures the same way a map does,
@@ -2721,7 +3050,8 @@ impl<'a> Checker<'a> {
         if let Some(elem) = self.types.slice_elem(map.ty) {
             if let TyKind::Tuple(parts) = self.types.kind(elem).clone() {
                 if parts.len() == 2 {
-                    return self.for_tuple_slice(f, elems, *span, map, elem, &parts, sig);
+                    let held = self.holds_obligation(&map, &before);
+                    return self.for_tuple_slice(f, elems, *span, map, elem, &parts, held, sig);
                 }
             }
         }
@@ -2793,7 +3123,7 @@ impl<'a> Checker<'a> {
                 span: n.span,
             });
         }
-        let (body, _) = self.block(&f.body, sig);
+        let body = self.loop_body(&f.body, sig);
         body_stmts.extend(body.stmts);
 
         let whole = |kind| hir::Expr { kind, ty: TyId::INT, span: *span };
@@ -2848,6 +3178,7 @@ impl<'a> Checker<'a> {
         seq: hir::Expr,
         elem_ty: TyId,
         parts: &[TyId],
+        held: bool,
         sig: &Signature,
     ) -> Option<(hir::Stmt, Flow)> {
         if elems.len() != 2 {
@@ -2872,7 +3203,12 @@ impl<'a> Checker<'a> {
             let Some(local) = self.resolved.lookup_binding(name.span) else { continue };
             self.locals[local as usize].ty = parts[i];
             self.init[local as usize] = Init::Assigned;
-            self.taint[local as usize] = Taint::Clean;
+            self.forget_copies(local);
+            self.taint[local as usize] = if held && self.may_hold_failure(parts[i]) {
+                Taint::Unchecked
+            } else {
+                Taint::Clean
+            };
             body_stmts.push(hir::Stmt::Let {
                 local: hir::LocalId(local),
                 init: Some(hir::Expr {
@@ -2891,7 +3227,7 @@ impl<'a> Checker<'a> {
             });
         }
 
-        let (body, _) = self.block(&f.body, sig);
+        let body = self.loop_body(&f.body, sig);
         body_stmts.extend(body.stmts);
 
         Some((
@@ -2927,9 +3263,153 @@ impl<'a> Checker<'a> {
 
     /// Leave a loop: join what the body left with the state it was entered in,
     /// because control also reaches here having run the body zero times.
-    fn merge_loop_taint(&mut self, entry: &[Taint]) {
+    fn merge_loop_taint(
+        &mut self,
+        entry: &[Taint],
+        entry_copies: &std::collections::BTreeSet<(u32, u32)>,
+    ) {
+        self.copies = join_copies((entry_copies, entry), (&self.copies, &self.taint));
         let merged = self.join_taint(entry, &self.taint);
         self.restore_taint(merged);
+    }
+
+    /// A loop body, noting the state its end hands back to its start. A
+    /// header that runs once — a walk, or none at all — has run by now; a
+    /// condition, which runs every time, has noted both itself.
+    fn loop_body(&mut self, b: &ast::Block, sig: &Signature) -> hir::Block {
+        if self.loop_edges.last().is_some_and(|e| e.start.is_none()) {
+            self.loop_head();
+            self.loop_start();
+        }
+        let (body, flow) = self.block(b, sig);
+        if flow == Flow::Falls {
+            if let Some(edges) = self.loop_edges.len().checked_sub(1) {
+                self.join_loop_edge(edges, true);
+            }
+        }
+        body
+    }
+
+    /// A `break` or `continue`: what it hands to the loop it names.
+    fn note_loop_edge(&mut self, label: Option<&str>, back: bool) {
+        let index = match label {
+            None => self.loops.len().checked_sub(1),
+            Some(l) => self.loops.iter().rposition(|(_, n)| n.as_deref() == Some(l)),
+        };
+        if let Some(i) = index {
+            self.join_loop_edge(i, back);
+        }
+    }
+
+    /// What a `break` or `continue`, or the body's end, hands on: what is
+    /// declared inside the loop is not, since it goes out of scope on the
+    /// way. An unchecked failure there was reported as it left — unless a
+    /// copy of it outside the loop still holds it, and that copy is what
+    /// is handed on. Handing on the name inside as well made a copy taken
+    /// in the body and left by `break` look dropped after the loop.
+    fn join_loop_edge(&mut self, index: usize, back: bool) {
+        let Some(&(region, _)) = self.loops.get(index) else { return };
+        let (taint, copies) = self.state_outside(region);
+        let Some(edges) = self.loop_edges.get_mut(index) else { return };
+        let slot = if back { &mut edges.back } else { &mut edges.exit };
+        let acc = slot.take();
+        let here = match acc {
+            None => (taint, copies),
+            Some((was, was_copies)) => (
+                self.join_taint(&was, &taint),
+                join_copies((&was_copies, &was), (&copies, &taint)),
+            ),
+        };
+        let edges = &mut self.loop_edges[index];
+        *if back { &mut edges.back } else { &mut edges.exit } = Some(here);
+    }
+
+    /// What the next round of a loop's check has to carry to the start of
+    /// its body, if what came back says more than the body began with. Only
+    /// what is declared outside the loop is carried: everything inside it is
+    /// declared afresh on each iteration.
+    fn carry(&self, region: Span, edges: &LoopEdges, round: usize) -> Option<ErrorState> {
+        let (Some(start), Some(back)) = (&edges.start, &edges.back) else {
+            return None;
+        };
+        let outside = |i: u32| !self.declared_inside(i, region);
+        let n = start.0.len().min(self.locals.len());
+        let mut changed = (0..n).any(|i| {
+            outside(i as u32) && start.0[i].merge(back.0.get(i).copied().unwrap_or(Taint::Clean)) != start.0[i]
+        });
+        let pairs = |c: &std::collections::BTreeSet<(u32, u32)>| -> std::collections::BTreeSet<(u32, u32)> {
+            c.iter().copied().filter(|p| outside(p.0) && outside(p.1)).collect()
+        };
+        // Copies only ever narrow the report, so past a few rounds they are
+        // given up rather than followed, and only the taint, which can only
+        // get worse, is left to settle.
+        let follow_copies = round < 4;
+        if follow_copies {
+            changed |= pairs(&join_copies((&start.1, &start.0), (&back.1, &back.0))) != pairs(&start.1);
+        }
+        if !changed {
+            return None;
+        }
+        let mut taint: Vec<Taint> = vec![Taint::Clean; n];
+        let prior = edges.carried.as_ref();
+        for (i, t) in taint.iter_mut().enumerate() {
+            if outside(i as u32) {
+                let was = prior.and_then(|c| c.0.get(i).copied()).unwrap_or(Taint::Clean);
+                *t = was.merge(back.0.get(i).copied().unwrap_or(Taint::Clean));
+            }
+        }
+        let copies = if !follow_copies {
+            std::collections::BTreeSet::new()
+        } else {
+            match prior {
+                Some((pt, pc)) => pairs(&join_copies((pc, pt), (&back.1, &back.0))),
+                None => pairs(&back.1),
+            }
+        };
+        Some((taint, copies))
+    }
+
+    /// The start of a loop's body: join in what earlier rounds found
+    /// coming back to it, and note the state it begins in.
+    fn loop_start(&mut self) {
+        let Some(edges) = self.loop_edges.last() else { return };
+        if let Some((taint, copies)) = &edges.carried {
+            self.copies = join_copies((&self.copies, &self.taint), (copies, taint));
+            let merged = self.join_taint(&self.taint, taint);
+            self.restore_taint(merged);
+        }
+        let here = (self.taint.clone(), self.copies.clone());
+        if let Some(edges) = self.loop_edges.last_mut() {
+            edges.start = Some(here);
+        }
+    }
+
+    /// Where the loop is left when its header finds nothing more to do. What
+    /// the header binds for the body is not bound on that way out.
+    fn loop_head(&mut self) {
+        let Some(&(region, _)) = self.loops.last() else { return };
+        let head = self.state_outside(region);
+        if let Some(edges) = self.loop_edges.last_mut() {
+            edges.head = Some(head);
+        }
+    }
+
+    /// The error state as it is for what is declared outside `region`, with
+    /// everything declared inside it Clean and in no copy.
+    fn state_outside(&self, region: Span) -> ErrorState {
+        let mut taint = self.taint.clone();
+        for (i, t) in taint.iter_mut().enumerate() {
+            if self.declared_inside(i as u32, region) {
+                *t = Taint::Clean;
+            }
+        }
+        let copies = self
+            .copies
+            .iter()
+            .copied()
+            .filter(|p| !self.declared_inside(p.0, region) && !self.declared_inside(p.1, region))
+            .collect();
+        (taint, copies)
     }
 
     /// Join two taint states at a point where control arrives from either.
@@ -2981,12 +3461,7 @@ impl<'a> Checker<'a> {
     /// nil` proves the error present in the *then*, `err == nil` in the
     /// *else*. The branch's state is thrown away or joined at the end, so
     /// nothing here has to be undone.
-    fn enter_branch(
-        &mut self,
-        narrowing: Option<(u32, bool)>,
-        tested: Option<(u32, bool)>,
-        in_then: bool,
-    ) {
+    fn enter_branch(&mut self, narrowing: Option<(u32, bool)>, cond: &ast::Expr, in_then: bool) {
         if let Some((id, is_eq)) = narrowing {
             if is_eq != in_then {
                 if let TyKind::Optional(inner) = *self.types.kind(self.locals[id as usize].ty) {
@@ -2994,14 +3469,8 @@ impl<'a> Checker<'a> {
                 }
             }
         }
-        if let Some((id, is_eq)) = tested {
-            if is_eq != in_then {
-                self.error_nonnil.insert(id);
-            }
-        }
-        let mut taint = std::mem::take(&mut self.taint);
-        self.clean_guarded(&mut taint, tested, in_then);
-        self.taint = taint;
+        let facts = self.error_facts(cond, in_then);
+        self.assume_error_facts(&facts);
     }
 
     /// Start checking something only to learn its type.
@@ -3051,6 +3520,14 @@ impl<'a> Checker<'a> {
         self.facts.bound_calls.truncate(t.facts[1]);
     }
 
+    /// Keep what a trial check did after all, because it was the real one.
+    fn keep_trial(&mut self, t: Trial) {
+        let made = std::mem::replace(self.diags, t.diags).take();
+        for d in made {
+            self.diags.push(d);
+        }
+    }
+
     /// Everything the flow analysis knows at this point.
     fn flow_state(&self) -> FlowState {
         FlowState {
@@ -3058,6 +3535,7 @@ impl<'a> Checker<'a> {
             taint: self.taint.clone(),
             narrowed: self.narrowed.clone(),
             error_nonnil: self.error_nonnil.clone(),
+            copies: self.copies.clone(),
         }
     }
 
@@ -3066,6 +3544,7 @@ impl<'a> Checker<'a> {
         self.restore_taint(state.taint);
         self.narrowed = state.narrowed;
         self.error_nonnil = state.error_nonnil;
+        self.copies = state.copies;
     }
 
     /// The state at a point control reaches from either of two others: what
@@ -3089,6 +3568,7 @@ impl<'a> Checker<'a> {
                 .map(|(id, ty)| (*id, *ty))
                 .collect(),
             error_nonnil: a.error_nonnil.intersection(&b.error_nonnil).copied().collect(),
+            copies: join_copies((&a.copies, &a.taint), (&b.copies, &b.taint)),
         }
     }
 
@@ -3120,15 +3600,51 @@ impl<'a> Checker<'a> {
         }
     }
 
-    /// Clean the value an error guards, on the branch where the error is nil.
-    fn clean_guarded(&self, taint: &mut [Taint], tested: Option<(u32, bool)>, in_then: bool) {
-        let Some((id, is_eq)) = tested else { return };
-        // `err == nil` proves it in the then-branch; `err != nil` in the else.
-        if is_eq != in_then {
-            return;
+    /// What a condition proves about error locals when it comes out
+    /// `truth`: each error it pins down, and whether it is then nil.
+    ///
+    /// A single test, `err == nil` or `err != nil`, says something either
+    /// way. The connectives say exactly what logic says and nothing more:
+    /// `a && b` true means both are, and false means nothing about either;
+    /// `a || b` false means neither is, and true means nothing; `!a` swaps
+    /// the two. So `if err == nil && v > 0 { … }` reads `v` in its body, and
+    /// `if err != nil || w < 0 { return }` leaves `w` readable after it —
+    /// the Go-shaped guards that were refused as reading a tainted value.
+    fn error_facts(&self, cond: &ast::Expr, truth: bool) -> Vec<(u32, bool)> {
+        match cond {
+            ast::Expr::Paren { inner, .. } => self.error_facts(inner, truth),
+            ast::Expr::Unary { op: ast::UnaryOp::Not, operand, .. } => {
+                self.error_facts(operand, !truth)
+            }
+            ast::Expr::Binary { op: ast::BinaryOp::And, lhs, rhs, .. } if truth => {
+                let mut facts = self.error_facts(lhs, true);
+                facts.extend(self.error_facts(rhs, true));
+                facts
+            }
+            ast::Expr::Binary { op: ast::BinaryOp::Or, lhs, rhs, .. } if !truth => {
+                let mut facts = self.error_facts(lhs, false);
+                facts.extend(self.error_facts(rhs, false));
+                facts
+            }
+            _ => match self.error_tested_by(cond) {
+                Some((id, is_eq)) => vec![(id, is_eq == truth)],
+                None => Vec::new(),
+            },
         }
-        if let Some(&guarded) = self.guards.get(&id) {
-            taint[guarded as usize] = Taint::Clean;
+    }
+
+    /// Hold what a condition proved about error locals, on the side of it
+    /// being entered: a value is clean where its error is nil (R4), and an
+    /// error has a message where it is not.
+    fn assume_error_facts(&mut self, facts: &[(u32, bool)]) {
+        for &(id, nil) in facts {
+            if nil {
+                if let Some(&guarded) = self.guards.get(&id) {
+                    self.taint[guarded as usize] = Taint::Clean;
+                }
+            } else {
+                self.error_nonnil.insert(id);
+            }
         }
     }
 
@@ -3255,7 +3771,29 @@ impl<'a> Checker<'a> {
             ast::Expr::Binary { op, lhs, rhs, span } => {
                 if let Some(hop) = short_circuit(*op) {
                     let l = self.expr(lhs, Some(TyId::BOOL));
+                    // The right operand runs only when the left one came out
+                    // `true` for `&&`, `false` for `||`, so it is checked
+                    // knowing so — `err == nil && v > 0` reads `v` where
+                    // `err` is nil. What that knowledge lent it is taken back
+                    // afterwards, since control may have skipped it: a value
+                    // it cleaned is as clean as it was before, joined, and an
+                    // error it proved present is not known to be.
+                    let facts = self.error_facts(lhs, *op == ast::BinaryOp::And);
+                    let lent: Vec<(u32, Taint)> = facts
+                        .iter()
+                        .filter(|(_, nil)| *nil)
+                        .filter_map(|(id, _)| self.guards.get(id).copied())
+                        .map(|v| (v, self.taint[v as usize]))
+                        .collect();
+                    let nonnil = self.error_nonnil.clone();
+                    self.assume_error_facts(&facts);
                     let r = self.expr(rhs, Some(TyId::BOOL));
+                    for (v, was) in lent {
+                        self.taint[v as usize] = was.merge(self.taint[v as usize]);
+                    }
+                    if !facts.is_empty() {
+                        self.error_nonnil = nonnil.intersection(&self.error_nonnil).copied().collect();
+                    }
                     for side in [&l, &r] {
                         if !self.types.satisfies(side.ty, TyId::BOOL) && !self.types.is_poisoned(side.ty) {
                             self.diags.push(
@@ -3613,8 +4151,10 @@ impl<'a> Checker<'a> {
             taint: self.taint.clone(),
             narrowed: self.narrowed.clone(),
             error_nonnil: self.error_nonnil.clone(),
+            copies: self.copies.clone(),
             defers: self.defers.take(),
             loops: std::mem::take(&mut self.loops),
+            loop_edges: std::mem::take(&mut self.loop_edges),
             sig: self.closure_sig.replace(sig.clone()),
             ret_unknown: std::mem::replace(
                 &mut self.closure_ret_unknown,
@@ -3665,17 +4205,16 @@ impl<'a> Checker<'a> {
         // Reading an error is inspecting it, and a closure that reads one has
         // been handed it. The closure may run later or not at all, but that
         // is the same as passing it to a function: somebody is responsible.
-        let mut taint = outer.taint;
+        self.restore_taint(outer.taint);
+        self.copies = outer.copies;
         for id in &captures {
-            if taint.get(*id as usize) == Some(&Taint::Unchecked) {
-                taint[*id as usize] = Taint::Clean;
-            }
+            self.inspect(*id);
         }
-        self.restore_taint(taint);
         self.narrowed = outer.narrowed;
         self.error_nonnil = outer.error_nonnil;
         self.defers = outer.defers;
         self.loops = outer.loops;
+        self.loop_edges = outer.loop_edges;
         self.closure_sig = outer.sig;
         self.closure_ret_unknown = outer.ret_unknown;
         // A capture of a capture: what an inner closure took from outside the
@@ -3920,9 +4459,7 @@ impl<'a> Checker<'a> {
                 // `log(err)`, `test.failed(err, …)` — is a way of handling a
                 // failure, and E0302 exists to catch the error nobody looked
                 // at, not the error somebody passed on.
-                if self.taint[id as usize] == Taint::Unchecked {
-                    self.taint[id as usize] = Taint::Clean;
-                }
+                self.inspect(id);
                 if self.init[id as usize] != Init::Assigned {
                     let local = &self.locals[id as usize];
                     let (name, decl) = (local.name.clone(), local.span);
@@ -5279,7 +5816,25 @@ impl<'a> Checker<'a> {
         span: Span,
         expected: Option<TyId>,
     ) -> hir::Expr {
+        // `rs.len()` counts the failures in a slice of them without looking
+        // at any, so it is not the read that inspects them.
+        let counted: Option<Vec<(u32, Taint)>> = match base {
+            ast::Expr::Path(p) if name.name == "len" => match self.resolved.lookup_use(p.span) {
+                Some(Res::Local(id)) => Some(
+                    self.copies_of(id).into_iter().map(|j| (j, self.taint[j as usize])).collect(),
+                ),
+                _ => None,
+            },
+            _ => None,
+        };
         let receiver = self.expr(base, None);
+        if let Some(states) = counted {
+            if self.types.slice_elem(receiver.ty).is_some() && self.may_hold_failure(receiver.ty) {
+                for (j, t) in states {
+                    self.taint[j as usize] = t;
+                }
+            }
+        }
         if self.types.is_poisoned(receiver.ty) {
             return self.lit(ExprKind::Error, TyId::ERROR, span);
         }
@@ -6648,6 +7203,7 @@ impl<'a> Checker<'a> {
         elems: &[ast::BindElem],
         value: hir::Expr,
         span: Span,
+        before: &[Taint],
     ) -> Option<(hir::Stmt, Flow)> {
         let TyKind::Tuple(parts) = self.types.kind(value.ty).clone() else {
             return None;
@@ -6669,6 +7225,22 @@ impl<'a> Checker<'a> {
             return None;
         }
 
+        // An element that may hold a failure is a binding of one, as a
+        // destructured error is (R1): `let (n, err) = (1, f())` and
+        // `let (a, b) = await task.both(x, y)` each bind failures nobody has
+        // looked at, and marking none of them let every one go unread. What
+        // each element brings is what it was built from, for a tuple literal,
+        // and for a read of a binding whatever that binding held unchecked.
+        let held: Vec<bool> = (0..parts.len())
+            .map(|i| {
+                self.may_hold_failure(parts[i])
+                    && match &value.kind {
+                        ExprKind::TupleNew { elems } => self.holds_obligation(&elems[i], before),
+                        _ => self.holds_obligation(&value, before),
+                    }
+            })
+            .collect();
+
         // The tuple is held in a local of its own, so an initialiser with side
         // effects runs once however many elements are taken from it.
         let holder = hir::LocalId(self.synthetic_local("tuple", value.ty, span));
@@ -6682,7 +7254,8 @@ impl<'a> Checker<'a> {
             let Some(local) = self.resolved.lookup_binding(name.span) else { continue };
             self.locals[local as usize].ty = parts[i];
             self.init[local as usize] = Init::Assigned;
-            self.taint[local as usize] = Taint::Clean;
+            self.forget_copies(local);
+            self.taint[local as usize] = if held[i] { Taint::Unchecked } else { Taint::Clean };
             stmts.push(hir::Stmt::Let {
                 local: hir::LocalId(local),
                 init: Some(hir::Expr {
@@ -6715,10 +7288,11 @@ impl<'a> Checker<'a> {
         // first — once, for both paths: checking it again on the second
         // reported every mistake in it twice.
         let annotated = l.ty.as_ref().map(|t| self.resolve_type(t));
+        let before = self.taint.clone();
         let checked = l.init.as_ref().map(|init| self.expr(init, annotated));
         let checked = match checked {
             Some(value) if matches!(self.types.kind(value.ty), TyKind::Tuple(_)) => {
-                return self.let_tuple(elems, value, span);
+                return self.let_tuple(elems, value, span, &before);
             }
             // A value that is already an error — most often what the parser
             // could not read — has been reported. Each name is still bound,
@@ -6826,6 +7400,7 @@ impl<'a> Checker<'a> {
         if let Some(e) = error_local {
             self.locals[e as usize].ty = TyId::ERR;
             self.init[e as usize] = Init::Assigned;
+            self.forget_copies(e);
             self.taint[e as usize] = Taint::Unchecked;
             let pair_ty = self.types.fallible_of(inner);
             stmts.push(hir::Stmt::Let {
@@ -6916,22 +7491,40 @@ impl<'a> Checker<'a> {
     ///
     /// [§7.3]: ../../../SPECIFICATION.md#73-correlated-results-and-taint-analysis
     fn dropped_error(&mut self, expr: &hir::Expr) {
-        let pair = self.types.fallible_value(expr.ty).is_some();
-        if expr.ty != TyId::ERR && !pair {
+        let Some(holder) = self.holder(expr.ty) else {
             return;
-        }
-        let what = if pair {
-            "this call returns a value and an error, and both are thrown away"
-        } else {
-            "this call returns an error, and it is thrown away"
+        };
+        let (what, fix) = match holder {
+            Holder::Error => (
+                "this call returns an error, and it is thrown away",
+                "write `check` to propagate it, or bind it and test it — \
+                 `let err = …` then `if err != nil { … }`",
+            ),
+            Holder::Pair => (
+                "this call returns a value and an error, and both are thrown away",
+                "write `check` to propagate it, or bind it and test it — \
+                 `let err = …` then `if err != nil { … }`",
+            ),
+            Holder::Many => (
+                "this call returns errors, and they are thrown away",
+                "bind the result and take it apart — `let (a, b) = …`, or `for r in …` \
+                 for a slice — and check each error in it",
+            ),
+            Holder::Maybe => (
+                "this call may return an error, and it is thrown away",
+                "bind it and test it — `let r = …` then `if r != nil { … }` — and \
+                 check the error it holds",
+            ),
+            Holder::Task => (
+                "this call starts a task whose error nobody will see",
+                "`await` it and check what it gives, or bind the task and hand it to \
+                 something that will, such as `task.all`",
+            ),
         };
         self.diags.push(
             Diagnostic::error(codes::E0302, "error is never checked")
                 .with_primary(expr.span, what)
-                .with_note(
-                    "write `check` to propagate it, or bind it and test it — \
-                     `let err = …` then `if err != nil { … }`",
-                )
+                .with_note(fix)
                 .with_note("to throw it away on purpose, write `_ = …`"),
         );
     }
@@ -7060,9 +7653,7 @@ impl<'a> Checker<'a> {
                 let Some(Res::Local(id)) = self.resolved.lookup_use(p.span) else {
                     return;
                 };
-                if self.taint[id as usize] == Taint::Unchecked {
-                    self.taint[id as usize] = Taint::Clean;
-                }
+                self.inspect(id);
                 if let Some(&guarded) = self.guards.get(&id) {
                     self.taint[guarded as usize] = Taint::Clean;
                 }
@@ -7104,6 +7695,10 @@ impl<'a> Checker<'a> {
                 Some(Res::Local(id)) => self.locals[id as usize].ty == TyId::ERR,
                 _ => false,
             },
+            // A wrapper of a wrapper is nil exactly when the innermost error
+            // is, so `check errors.wrap(errors.wrap(err, "a"), "b")` speaks
+            // for `err` as the single wrap does.
+            ast::Expr::Call { callee, .. } => self.preserves_nil(callee),
             _ => false,
         }
     }
@@ -7139,19 +7734,37 @@ impl<'a> Checker<'a> {
     /// through may check them, and it was the early exits that dropped an
     /// error bound above them in silence.
     fn report_unchecked_errors_at(&mut self, region: Option<Span>, exit: Option<(Span, &str)>) {
-        let mut pending: Vec<(String, Span, bool)> = Vec::new();
-        for (i, state) in self.taint.iter().enumerate() {
-            if *state == Taint::Unchecked
-                && !self.locals[i].synthetic
-                && region.is_none_or(|r| self.declared_inside(i as u32, r))
-                && self.reported_unchecked.insert(i as u32)
+        let mut pending: Vec<(String, Span, Holder)> = Vec::new();
+        let leaves = |s: &Self, j: u32| region.is_none_or(|r| s.declared_inside(j, r));
+        for i in 0..self.taint.len() {
+            let id = i as u32;
+            if self.taint[i] != Taint::Unchecked
+                || self.locals[i].synthetic
+                || !leaves(self, id)
+                || self.reported_unchecked.contains(&id)
             {
+                continue;
+            }
+            // A copy leaving while the name it copies stays has dropped
+            // nothing; and a failure under several names leaving together is
+            // one failure, reported once, under the first of them.
+            if self.carried_elsewhere(id, |j| leaves(self, j)) {
+                continue;
+            }
+            let group: Vec<u32> = self
+                .copies_of(id)
+                .into_iter()
+                .filter(|j| self.taint.get(*j as usize) == Some(&Taint::Unchecked))
+                .collect();
+            let first = !group.iter().any(|j| self.reported_unchecked.contains(j));
+            self.reported_unchecked.extend(group);
+            if first {
                 let local = &self.locals[i];
-                let pair = self.types.fallible_value(local.ty).is_some();
-                pending.push((local.name.clone(), local.span, pair));
+                let holder = self.holder(local.ty).unwrap_or(Holder::Error);
+                pending.push((local.name.clone(), local.span, holder));
             }
         }
-        for (name, span, pair) in pending {
+        for (name, span, holder) in pending {
             let d = match exit {
                 Some((at, how)) => Diagnostic::error(
                     codes::E0302,
@@ -7161,27 +7774,44 @@ impl<'a> Checker<'a> {
                 .with_secondary(span, "bound here"),
                 None => {
                     let d = Diagnostic::error(codes::E0302, format!("`{}` is never checked", name));
-                    if pair {
-                        d.with_primary(span, "the error in this result goes out of scope uninspected")
-                    } else {
-                        d.with_primary(span, "this error goes out of scope uninspected")
-                    }
+                    d.with_primary(
+                        span,
+                        match holder {
+                            Holder::Error => "this error goes out of scope uninspected",
+                            Holder::Pair => "the error in this result goes out of scope uninspected",
+                            Holder::Task => "this task's error is never awaited",
+                            Holder::Many => "the errors this holds go out of scope uninspected",
+                            Holder::Maybe => "the error this may hold goes out of scope uninspected",
+                        },
+                    )
                 }
             };
             let d = d.with_note(
                 "silently dropping errors is the single most common source of \
                  production failures in languages that permit it",
             );
-            let d = if pair {
-                d.with_note(
-                    "take the result apart where it is bound — `let (value, err) = …` — \
-                     and then check `err`",
-                )
-            } else {
-                d.with_note(
+            let d = match holder {
+                Holder::Error => d.with_note(
                     "to propagate, write `check` on its own line; to handle it here, \
                      test `err != nil`",
-                )
+                ),
+                Holder::Pair => d.with_note(
+                    "take the result apart where it is bound — `let (value, err) = …` — \
+                     and then check `err`",
+                ),
+                Holder::Task => d.with_note(format!(
+                    "await it where what it gives can be checked — `let err = await {}`, \
+                     or `let (value, err) = await {}` — or hand it to something that will",
+                    name, name
+                )),
+                Holder::Many => d.with_note(
+                    "take it apart — `let (a, b) = …`, or `for r in …` for a slice — and \
+                     check each error in it",
+                ),
+                Holder::Maybe => d.with_note(format!(
+                    "test `{} != nil` and check the error it holds",
+                    name
+                )),
             };
             self.diags.push(d);
         }
@@ -7190,7 +7820,7 @@ impl<'a> Checker<'a> {
     /// An error binding written over while it still held a failure nobody
     /// had looked at: the write is where that failure is dropped (R3).
     fn overwritten_unchecked(&mut self, name: &str, decl: Span, at: Span, ty: TyId) {
-        let pair = self.types.fallible_value(ty).is_some();
+        let holder = self.holder(ty).unwrap_or(Holder::Error);
         let d = Diagnostic::error(
             codes::E0302,
             format!("`{}` is overwritten before it is checked", name),
@@ -7201,17 +7831,27 @@ impl<'a> Checker<'a> {
             "silently dropping errors is the single most common source of \
              production failures in languages that permit it",
         );
-        let d = if pair {
-            d.with_note(
+        let d = match holder {
+            Holder::Pair => d.with_note(
                 "take the result apart before writing over it — `let (value, err) = …` — \
                  and check `err`",
-            )
-        } else {
-            d.with_note(format!(
+            ),
+            Holder::Task => d.with_note(format!(
+                "await it and check what it gives before the write — `let err = await {}`",
+                name
+            )),
+            Holder::Many => d.with_note(
+                "take it apart before writing over it, and check each error in it",
+            ),
+            Holder::Maybe => d.with_note(format!(
+                "test `{} != nil` before the write, and check the error it holds",
+                name
+            )),
+            Holder::Error => d.with_note(format!(
                 "test `{} != nil` or `check {}` before the write; to pass it on instead, \
                  write `{} = errors.wrap({}, \"…\")`",
                 name, name, name, name
-            ))
+            )),
         };
         self.diags.push(d);
     }
@@ -8055,9 +8695,20 @@ impl<'a> Checker<'a> {
                     return Some(self.lit(ExprKind::Error, TyId::ERROR, span));
                 }
                 let mut stmts = Vec::new();
+                let holds = self.may_hold_failure(seq.ty);
                 let place = self.container_place(base, seq, "pushed to", None, &mut stmts, span)?;
+                let before = self.taint.clone();
                 let v = self.expr(&args[0], Some(elem));
                 let v = self.accept(v, elem, None);
+                // A failure pushed onto a slice of them is one more for the
+                // binding to answer for: `errs.push(f())` and nothing after
+                // it dropped `f`'s failure as surely as `let e = f()` would.
+                if let (true, Some(id)) = (holds, place.binding()) {
+                    if self.holds_obligation(&v, &before) {
+                        self.forget_copies(id);
+                        self.taint[id as usize] = Taint::Unchecked;
+                    }
+                }
                 // `push` is a statement, not an expression; the checker returns
                 // unit and MIR emits the mutation.
                 let push = match place.binding() {
@@ -8309,8 +8960,40 @@ impl<'a> Checker<'a> {
         m: &ast::MatchExpr,
         expected: Option<TyId>,
     ) -> (hir::Expr, Flow) {
+        let before = self.taint.clone();
         let scrutinee = self.expr(&m.scrutinee, None);
         let scrut_ty = scrutinee.ty;
+
+        // **A match that tests nothing inspects nothing.** Reading the
+        // scrutinee is not looking at a failure when every arm is `_` or a
+        // bare name: `match p { _ => … }` matches without asking what `p`
+        // holds, and `match f() { e => … }` only gives the failure a new
+        // name. So the failure stays where it was — a binding scrutinee keeps
+        // it, an arm's name holds it as a copy — and a new failure with only
+        // `_` to receive it is dropped right there, as by a bare call (R6).
+        let tests_nothing = self.may_hold_failure(scrut_ty)
+            && m.arms.iter().all(|a| self.binds_whole(&a.pattern, scrut_ty));
+        let held = tests_nothing && self.holds_obligation(&scrutinee, &before);
+        let source = match scrutinee.kind {
+            ExprKind::Local(id) if held => Some(id.0),
+            _ => None,
+        };
+        if let Some(src) = source {
+            for i in self.copies_of(src) {
+                if before.get(i as usize) == Some(&Taint::Unchecked) {
+                    self.taint[i as usize] = Taint::Unchecked;
+                }
+            }
+        }
+        // A fresh failure reaching a `_` is dropped there — unless a guard
+        // ahead of it looked at the name an earlier arm gave it, as in `e if
+        // e != nil => …`, and so let through to the `_` only what it saw.
+        // Which guards look is known once the arms are checked.
+        let mut dropped_at = (source.is_none()
+            && held
+            && m.arms.iter().any(|a| matches!(a.pattern, ast::Pattern::Wildcard(_))))
+        .then_some(scrutinee.span);
+        let mut before_wildcard = true;
 
         if m.arms.is_empty() {
             self.diags.push(
@@ -8356,6 +9039,13 @@ impl<'a> Checker<'a> {
                 _ => scrut_ty,
             };
             let pattern = self.pattern_with(&arm.pattern, scrut_ty, bind_ty);
+            if let (true, hir::Pattern::Binding { local, .. }) = (held, &pattern) {
+                self.forget_copies(local.0);
+                self.taint[local.index()] = Taint::Unchecked;
+                if let Some(src) = source {
+                    self.note_copy(local.0, src);
+                }
+            }
             // Refused here or by the resolver, which reports a variant that
             // does not exist before any of this runs.
             let region = arm.pattern.span();
@@ -8380,6 +9070,15 @@ impl<'a> Checker<'a> {
                 }
                 c
             });
+            if matches!(arm.pattern, ast::Pattern::Wildcard(_)) {
+                before_wildcard = false;
+            } else if let (true, Some(_), hir::Pattern::Binding { local, .. }) =
+                (before_wildcard, &guard, &pattern)
+            {
+                if self.taint[local.index()] != Taint::Unchecked {
+                    dropped_at = None;
+                }
+            }
 
             let want = expected.or(result_ty);
             let body = match &arm.body {
@@ -8391,6 +9090,8 @@ impl<'a> Checker<'a> {
             // and `other => nil` are arms of one `Option<str>` match rather
             // than a type error about two arms disagreeing.
             let body = self.coerce(body, want);
+            // What the pattern bound goes out of scope with the arm.
+            self.copies_leave(arm.span);
 
             // An arm that diverges contributes nothing to the join: control
             // never arrives at the join from it. What it declared goes out of
@@ -8437,6 +9138,17 @@ impl<'a> Checker<'a> {
                 span: arm.span,
             });
         }
+        if let Some(at) = dropped_at {
+            self.diags.push(
+                Diagnostic::error(codes::E0302, "error is never checked")
+                    .with_primary(at, "this `match` never looks at the failure it holds")
+                    .with_note(
+                        "`_` matches anything without testing it; bind it and test it — \
+                         `let err = …` then `if err != nil { … }`",
+                    )
+                    .with_note("to throw it away on purpose, write `_ = …`"),
+            );
+        }
 
         // A binding one arm's pattern introduced is out of scope after the
         // match, so what the join says about it is never asked.
@@ -8475,6 +9187,19 @@ impl<'a> Checker<'a> {
             span: m.span,
         };
         (expr, flow)
+    }
+
+    /// Whether a pattern matches the whole scrutinee without testing it: `_`,
+    /// or a name that is not one of the scrutinee's unit variants.
+    fn binds_whole(&self, p: &ast::Pattern, scrut: TyId) -> bool {
+        match p {
+            ast::Pattern::Wildcard(_) => true,
+            ast::Pattern::Binding(name) => {
+                self.unit_variant_of(scrut, &name.name).is_none()
+                    && self.resolved.lookup_binding(name.span).is_some()
+            }
+            _ => false,
+        }
     }
 
     /// A block arm.
@@ -10224,14 +10949,13 @@ impl<'a> Checker<'a> {
         // of an error cleans the value it guards in the branch where it is
         // nil, which is §7.5's own `if err != nil { 8080 } else { port }`.
         let narrowing = self.nil_test(cond);
-        let tested = self.error_tested_by(cond);
         let c = self.condition(cond);
 
         // The branches are alternatives, joined afterwards, exactly as the
         // statement form's are: a branch is one expression, but a `match` in
         // it can hold statements, and what they do happens on one side only.
         let entry = self.flow_state();
-        self.enter_branch(narrowing, tested, true);
+        self.enter_branch(narrowing, cond, true);
         // The type the context wants steers both branches, as it does a
         // `let`'s initialiser — `let x: Option<int> = if c { 5 } else { nil }`
         // has no other place to learn what the `nil` is. Failing that, the
@@ -10241,7 +10965,7 @@ impl<'a> Checker<'a> {
         let then_exit = self.flow_state();
         self.set_flow_state(entry);
 
-        self.enter_branch(narrowing, tested, false);
+        self.enter_branch(narrowing, cond, false);
         let want = expected.or((!self.types.is_poisoned(t.ty)).then_some(t.ty));
         let e = match else_ {
             ast::ElseBranch::Block(b) => self.block_value(b, want),

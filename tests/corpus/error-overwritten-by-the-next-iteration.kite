@@ -1,0 +1,152 @@
+// A loop body runs again from its own end and from every `continue`, so a
+// failure it leaves unchecked in a binding declared outside it is still there
+// when the next iteration writes over it (R3). The write used to be checked
+// only against the state before the first iteration, so every failure but the
+// last was dropped unseen. And a `break` hands its state to what follows the
+// loop: a failure it carries out has to be checked there.
+
+use std/errors
+
+fn touch(i: int) -> error {
+    if i == 1 {
+        return errors.new("boom at \(i)")
+    }
+    return nil
+}
+
+fn every_iteration() {
+    var e: error = nil
+    for i in 0..3 {
+        e = touch(i) //~ ERROR E0302
+    }
+    if e != nil {
+        io.print(e.message())
+    }
+}
+
+fn a_while_loop() {
+    var e: error = nil
+    var i = 0
+    for i < 3 {
+        e = touch(i) //~ ERROR E0302
+        i += 1
+    }
+    if e != nil {
+        io.print(e.message())
+    }
+}
+
+// The iteration that skipped the test went back to the top with its failure.
+fn after_a_continue() {
+    var e: error = nil
+    for i in 0..3 {
+        e = touch(i) //~ ERROR E0302
+        if i == 0 {
+            continue
+        }
+        if e != nil {
+            io.print(e.message())
+        }
+    }
+}
+
+fn out_through_a_break(xs: [int]) {
+    var e: error = nil //~ ERROR E0302
+    for x in xs {
+        e = touch(x)
+        if x > 5 {
+            break
+        }
+        if e != nil {
+            io.print(e.message())
+        }
+    }
+}
+
+// Tested before the next write, or before each way out: nothing is dropped.
+fn tested_at_the_top(xs: [int]) -> error {
+    var err: error = nil
+    for x in xs {
+        if err != nil {
+            break
+        }
+        err = touch(x)
+    }
+    return err
+}
+
+fn retried() -> error {
+    var last: error = nil
+    for attempt in 0..3 {
+        last = touch(attempt)
+        if last == nil {
+            return nil
+        }
+    }
+    return last
+}
+
+fn until_it_works() {
+    var e: error = nil
+    for {
+        e = touch(1)
+        if e == nil {
+            break
+        }
+        io.print(e.message())
+    }
+}
+
+fn checked_in_an_inner_loop(xs: [int]) -> error {
+    var e: error = nil
+    for x in xs {
+        for y in xs {
+            e = touch(x + y)
+            check e
+        }
+    }
+    return nil
+}
+
+// What the body declares goes out of scope at a `break` or `continue`, and
+// is not handed on: a copy taken in the body, of a failure still held
+// outside, has dropped nothing by leaving.
+fn a_copy_left_by_a_break(xs: [int]) {
+    let c = touch(1)
+    for x in xs {
+        let e = c
+        if x > 0 {
+            break
+        }
+        if x < 0 {
+            continue
+        }
+    }
+    if c != nil {
+        io.print(c.message())
+    }
+}
+
+// A condition runs once more after the last iteration, so it is the only
+// way out of a `for cond`: a failure it tests is tested on the way out.
+fn until_the_test_passes() {
+    var err = touch(1)
+    var n = 1
+    for err != nil {
+        n += 1
+        err = touch(n)
+    }
+}
+
+fn main() {
+    a_copy_left_by_a_break([1])
+    until_the_test_passes()
+    every_iteration()
+    a_while_loop()
+    after_a_continue()
+    out_through_a_break([1])
+    _ = tested_at_the_top([1])
+    _ = retried()
+    until_it_works()
+    _ = checked_in_an_inner_loop([1])
+}

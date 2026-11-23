@@ -991,7 +991,10 @@ The rules:
 > `e = g()` drops `f`'s failure, and is `E0302` at the write.
 >
 > **R4.** On any path where the compiler proves `e == nil`, `e` becomes Checked
-> and `v` becomes Clean.
+> and `v` becomes Clean. A condition proves what logic says it does: `e ==
+> nil` and `!(e != nil)` when they hold, either side of an `&&` that held
+> (the right side included, which runs only then), and either side of an
+> `||` that did not.
 >
 > **R5.** On any path where `e != nil`, `e` becomes Checked and `v` remains
 > Tainted permanently. The value slot on an error path holds no value at all —
@@ -999,16 +1002,29 @@ The rules:
 >
 > **R6.** A call left as a bare statement, whose type is `error` or `(T,
 > error)`, is a compile error (`E0302`). Binding nothing is not a way out of
-> binding an error.
+> binding an error. Nor is not awaiting one: a call to an `async fn` whose
+> result is either yields the `Task` of a failure on its way, and the `Task`
+> is held to the same rules as what it will give — left as a statement it is
+> `E0302`, and bound to a name it is Unchecked until it is awaited, returned
+> or passed on.
 >
 > **R7.** An `error`, or a whole `(T, error)`, bound to a single name makes
 > that binding Unchecked — by `let` or by `var`, whether it came straight from
 > a call or through `await`, a branch of a value `if`, or anything else that
 > can hold a new failure. Assigning one to an existing binding, `e = f()`,
-> does the same. Only `nil` and a copy of another binding, which
-> carries its own obligation, leave it Checked. Reading it — testing it,
-> checking it, returning it, taking it apart — inspects it, and R3 applies
-> otherwise. Binding everything under one name is not a way out either.
+> does the same. Only `nil` leaves it Checked. A copy of another binding
+> — `let e = err`, `e = err`, a `match err { x => … }` arm — holds that
+> binding's failure: the two names share one obligation, met by inspecting
+> either. Reading it — testing it, checking it, returning it, taking it
+> apart, passing it on — inspects it, and R3 applies otherwise; copying it
+> is not reading it, and nor is a `match` whose every arm is `_` or a bare
+> name. Binding everything under one name is not a way out either, and nor
+> is a tuple literal: `let (n, e) = (1, f())` makes `e` Unchecked. The same
+> holds one level further out: a tuple, a slice or an optional with one of
+> these in it — what `task.both`, `task.all` and `task.timeout` answer
+> with — is Unchecked when bound, taking it apart or walking it with `for`
+> hands each failure in it to the name it is bound to, and counting it with
+> `len` is not reading it.
 
 R1–R5 are about bindings, and R6 and R7 close the shapes they leave open: a
 call written as a statement makes no binding, so nothing in R1–R5 ever sees it,
@@ -1016,6 +1032,14 @@ and `dom.set_text(e, "hi")` would drop its failure in silence. That is
 [§7.1](#71-the-problem-being-solved)'s first flaw arriving through the one door
 the analysis did not watch, and it is the ordinary shape on the web, where
 nearly every `std/dom` function answers with a bare `error`.
+
+The analysis follows bindings, and what is bound to them. A failure stored
+into a struct field — by a literal, `Held{ e: f() }`, or by a write — or into
+a map entry or a slice element by index is handed on to that value, exactly
+as passing it to a call is, and is not followed there; read back out into a
+binding, `let e = h.e`, it is an obligation again. A slice of failures is a
+binding like any other, so `errs.push(f())` adds `f`'s failure to what `errs`
+answers for.
 
 To drop one deliberately, say so:
 
@@ -1030,8 +1054,15 @@ somebody decided, on a line a reader can see and `grep` can find.
 
 The analysis is a standard forward dataflow pass over the control-flow graph,
 run after type checking. It is not a borrow checker; it has no notion of
-ownership, aliasing, or lifetimes, and it terminates in a single pass because the
-lattice has height two.
+ownership or lifetimes, and knows of aliasing only that a plain copy of an
+error names the same failure (R7). A loop body is entered both from before the
+loop and from its own end and every `continue`, so the state at its top is the
+join of all of them, and a failure one iteration leaves unchecked is still
+there when the next writes over it: `var e: error = nil` then
+`for i in 0..3 { e = f(i) }` is `E0302` at the write. A body whose end changes
+nothing is checked once; one that does is checked again from the join, which
+ends because the lattice has height two and a state can only get worse. What
+follows a loop is reached from its top and from every `break`.
 
 In practice:
 
@@ -1703,10 +1734,19 @@ let ta = fetch_user(1)
 let tb = fetch_user(2)
 let (ra, rb) = await task.both(ta, tb)
 let (a, ea) = ra
-check ea
 let (b, eb) = rb
+if ea != nil {
+    _ = eb          // the first failure is the one reported
+    return _, ea
+}
 check eb
 ```
+
+Both results arrive together, so both errors are in scope together, and a way
+out taken for one leaves the other behind ([§7.3](#73-correlated-results-and-taint-analysis)
+R3): checking `ea` with `check` while `rb` is still unread drops `rb`'s
+failure, and is `E0302`. `task.all` answers with a slice of results, and
+walking it hands each one to the loop's binding to be checked.
 
 `task.all([...])`, `task.race([...])`, and `task.timeout(t, ms)` cover the
 remaining combinators. There is no channel type; a `Task<T>` *is* the

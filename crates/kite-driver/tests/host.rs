@@ -160,7 +160,9 @@ process.exit(0);
 }
 
 /// Three requests started together take as long as the slowest, and a 404 is a
-/// response rather than an error.
+/// response rather than an error. Leaving on one failure drops the tasks not
+/// yet awaited, which is said with `_ =`: a task of a failure left unread is
+/// `E0302` as the failure is.
 #[test]
 fn http_fetches_concurrently() {
     if !node_available() {
@@ -175,9 +177,16 @@ fn http_fetches_concurrently() {
          \x20 let b = http.get(\"data:text/plain,second\")\n\
          \x20 let c = http.get(\"data:text/plain,third\")\n\
          \x20 let (ra, ea) = await a\n\
-         \x20 if ea != nil { return }\n\
+         \x20 if ea != nil {\n\
+         \x20   _ = b\n\
+         \x20   _ = c\n\
+         \x20   return\n\
+         \x20 }\n\
          \x20 let (rb, eb) = await b\n\
-         \x20 if eb != nil { return }\n\
+         \x20 if eb != nil {\n\
+         \x20   _ = c\n\
+         \x20   return\n\
+         \x20 }\n\
          \x20 let (rc, ec) = await c\n\
          \x20 if ec != nil { return }\n\
          \x20 io.print(\"\\(ra.status) \\(ra.body)\")\n\

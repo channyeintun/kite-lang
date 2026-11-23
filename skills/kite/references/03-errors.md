@@ -221,10 +221,10 @@ aliasing, no lifetimes.
 | R1 | after `let (v, e) = f()`, `e` is **Unchecked** and `v` is **Tainted** |
 | R2 | reading a Tainted binding is `E0301` |
 | R3 | an Unchecked binding going out of scope is `E0302` — at the end of its block, on the path of every `return`, `check`, `break` or `continue` that leaves it behind, and at a write over it (`e = nil`, `e = other`, `e = g()`) |
-| R4 | on a path where `e == nil` is proved, `e` becomes Checked and `v` Clean |
+| R4 | on a path where `e == nil` is proved, `e` becomes Checked and `v` Clean — by `e == nil` or `!(e != nil)`, by either side of an `&&` that held, by either side of an `||` that failed, and past `check errors.wrap(…)`, nested or not. An error test crosses `&&` and `\|\|`, so `if err == nil && v > 0 { … }` and `if err != nil \|\| v < 0 { return }` both read `v` cleanly (an optional's narrowing does not) |
 | R5 | on a path where `e != nil`, `e` becomes Checked and `v` stays Tainted **permanently** |
-| R6 | a bare-statement call whose type is `error` or `(T, error)` is `E0302` |
-| R7 | an `error` or a whole `(T, error)` bound to one name — `let` or `var`, from a call, `await`, a value `if`, or assigned later with `e = f()` — is **Unchecked**; only `nil` and a copy of another binding are not |
+| R6 | a bare-statement call whose type is `error` or `(T, error)` is `E0302` — and so is the `Task` of one: an `async fn` answering with an error, called and never awaited |
+| R7 | an `error` or a whole `(T, error)` bound to one name — `let` or `var`, from a call, `await`, a value `if`, a tuple literal, or assigned later with `e = f()` — is **Unchecked**; only `nil` is not. A copy of another binding (`let e = err`) shares that binding's obligation: inspect either name |
 
 R2 in practice:
 
@@ -400,9 +400,78 @@ Taking it apart, `let (v, err) = p`, re-enters the normal rules, and returning
 it passes it on; either clears the mark. `p` itself has no fields (`E0200`) and
 no methods (`E0205`), so destructure where you bind.
 
+**What the analysis does not follow:** a failure stored into a struct field
+(`Held{ e: f() }`, `h.e = f()`), a map entry, or a slice element by index is
+handed on to that value, like an argument, and nothing reports it if the value
+is never read. `errs.push(f())` *is* followed: a slice of errors is a binding.
+
+**A tuple, slice or optional of results is watched the same way** — the
+shapes `task.both`, `task.all` and `task.timeout` answer with. Bound to one name it is Unchecked
+(`rs.len()` does not count as reading it); taking it apart, or walking it with
+`for`, hands each failure to the name it lands in. Both results of
+`task.both` arrive together, so deal with both before any exit — a `check` on
+the first leaves the second behind:
+
+```kite
+use std/task
+
+async fn load(n: int) -> (int, error) {
+    if n == 2 {
+        return _, errors.new("two failed")
+    }
+    return n * 10, nil
+}
+
+async fn sum() -> (int, error) {
+    let (ra, rb) = await task.both(load(1), load(2))
+    let (a, ea) = ra
+    let (b, eb) = rb
+    if ea != nil {
+        _ = eb
+        return _, ea
+    }
+    check eb
+    var total = a + b
+    for r in await task.all([load(3), load(4)]) {
+        let (n, err) = r
+        check err
+        total += n
+    }
+    return total, nil
+}
+
+async fn main() {
+    let (n, err) = await sum()
+    if err != nil {
+        io.print(err.message())
+        return
+    }
+    io.print(n)
+}
+```
+
 The same holds however the failure got into a single binding — `var e = f()`,
-`let e = await f()`, `let e = if c { f() } else { g() }`: the binding has to be
-looked at. Only `nil` and a copy of another binding start out Checked.
+`let e = await f()`, `let e = if c { f() } else { g() }`, `let (n, e) = (1,
+f())`: the binding has to be looked at. Only `nil` starts out Checked.
+
+**Copying an error is not looking at it.** `let e = err` gives the failure a
+second name, and one of the two has to be inspected — either will do. A
+`match` whose every arm is `_` or a bare name tests nothing either; `match f()
+{ _ => … }` is `E0302` at the scrutinee:
+
+```kite fails
+fn touch() -> error {
+    return errors.new("no")
+}
+
+fn main() {
+    let c = touch() //~ E0302
+    let e = c
+    match touch() { //~ E0302
+        _ => io.print("nothing tested"),
+    }
+}
+```
 
 Writing over a binding that still holds an unchecked failure drops that
 failure, so it is `E0302` at the write, whatever is written:
@@ -421,6 +490,33 @@ fn main() {
 
 Test it first, or pass it on with `e = errors.wrap(e, "…")`, which reads the
 old value and so carries its obligation into the new one.
+
+**A loop's next iteration is a write too.** The body runs again from its end
+and from every `continue`, so a failure left unchecked in a binding declared
+outside the loop is written over by the next pass, and a `break` carries it out
+to the code after the loop:
+
+```kite fails
+fn f(i: int) -> error {
+    if i == 1 {
+        return errors.new("boom")
+    }
+    return nil
+}
+
+fn main() {
+    var e: error = nil
+    for i in 0..3 {
+        e = f(i) //~ E0302
+    }
+    if e != nil {
+        io.print(e.message())
+    }
+}
+```
+
+Test it inside the body before the next write — `if e != nil { break }` — or
+keep the error inside the loop.
 
 ## `check`
 

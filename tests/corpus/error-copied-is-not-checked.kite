@@ -1,0 +1,173 @@
+// Copying a failure is not looking at it (R7). A copy holds the failure of
+// the binding it copies, so one of the two names has to be inspected, and
+// either will do. A `match` whose every arm is `_` or a bare name tests
+// nothing, and a tuple literal hands its elements' failures to whatever takes
+// it apart. Each of these used to compile, and the failure was lost.
+
+use std/errors
+
+fn touch(n: int) -> error {
+    if n > 0 {
+        return errors.new("boom \(n)")
+    }
+    return nil
+}
+
+fn get() -> (int, error) {
+    return 1, nil
+}
+
+fn a_copy() {
+    let c = touch(1) //~ ERROR E0302
+    let e = c
+}
+
+fn a_chain() {
+    let c = touch(1) //~ ERROR E0302
+    let e = c
+    let f = e
+}
+
+fn a_destructured_error() {
+    let (v, err) = get() //~ ERROR E0302
+    let renamed = err
+}
+
+// Only the path that went through the write made the copy: on the other one,
+// `c` is unchecked whatever happens to `e`.
+fn copied_on_one_branch(x: bool) {
+    let c = touch(1) //~ ERROR E0302
+    var e: error = nil
+    if x {
+        e = c
+    }
+    if e != nil {
+        io.print(e.message())
+    }
+}
+
+// The copy is written over, so the original is all that carries the failure.
+fn a_copy_written_over() {
+    let c = touch(1) //~ ERROR E0302
+    var e = c
+    e = nil
+}
+
+fn a_wildcard_match() {
+    let p = get() //~ ERROR E0302
+    match p {
+        _ => io.print("nothing reported"),
+    }
+    match touch(1) { //~ ERROR E0302
+        _ => io.print("nor here"),
+    }
+}
+
+fn a_name_in_a_match() {
+    match get() {
+        p => io.print("bound, and never looked at"), //~ ERROR E0302
+    }
+}
+
+fn a_tuple_literal() {
+    let (n, w) = (1, touch(1)) //~ ERROR E0302
+    io.print(n)
+}
+
+// Inspecting either name inspects the failure.
+fn checked_through_the_copy() {
+    let c = touch(1)
+    let e = c
+    if e != nil {
+        io.print(e.message())
+    }
+}
+
+fn checked_through_the_original() {
+    let c = touch(1)
+    let e = c
+    if c != nil {
+        io.print(c.message())
+    }
+}
+
+// A copy made in a branch is gone after it; the original is still there to
+// check.
+fn copied_inside_a_branch(x: bool) {
+    let c = touch(1)
+    if x {
+        let e = c
+        io.print("copied")
+    }
+    if c != nil {
+        io.print(c.message())
+    }
+}
+
+fn passed_on_through_copies() -> error {
+    let c = touch(1)
+    var last: error = nil
+    last = c
+    let again = last
+    return again
+}
+
+fn matched_and_tested(x: bool) {
+    let p = touch(2)
+    match p {
+        a if x => io.print("one"),
+        b => io.print("two"),
+    }
+    if p != nil {
+        io.print(p.message())
+    }
+    match touch(2) {
+        e => {
+            if e != nil {
+                io.print(e.message())
+            }
+        }
+    }
+}
+
+// A guard that looks at the name lets through to the `_` only what it saw.
+fn a_guard_tests_it() {
+    match touch(2) {
+        e if e != nil => io.print("failed"),
+        _ => io.print("fine"),
+    }
+}
+
+// One that does not look lets the failure through untested.
+fn a_guard_tests_something_else(x: bool) {
+    match touch(2) { //~ ERROR E0302
+        e if x => io.print(e != nil),
+        _ => io.print("dropped when x is false"),
+    }
+}
+
+fn a_tuple_literal_tested() {
+    let (n, w) = (1, touch(1))
+    if w != nil {
+        io.print(n)
+    }
+}
+
+fn main() {
+    a_copy()
+    a_chain()
+    a_destructured_error()
+    copied_on_one_branch(true)
+    a_copy_written_over()
+    a_wildcard_match()
+    a_name_in_a_match()
+    a_tuple_literal()
+    checked_through_the_copy()
+    checked_through_the_original()
+    copied_inside_a_branch(true)
+    _ = passed_on_through_copies()
+    matched_and_tested(true)
+    a_tuple_literal_tested()
+    a_guard_tests_it()
+    a_guard_tests_something_else(false)
+}

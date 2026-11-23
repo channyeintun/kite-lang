@@ -2,7 +2,8 @@
 // path, whatever the path that falls through goes on to do with it (R3). Only
 // an error bound inside the branch that left used to be reported. A new
 // failure written into an error binding is an obligation too (R7), and a
-// copy of another binding is not.
+// copy of another binding holds that binding's: copying it is not looking at
+// it, so neither name being inspected drops it.
 
 fn f(n: int) -> error {
     if n > 0 {
@@ -89,9 +90,9 @@ fn written_later() {
 }
 
 fn copied() {
-    let e = f(1)
+    let e = f(1) //~ ERROR E0302
     let again = e
-    io.print("inspected by the copy")
+    io.print("copied, and never looked at")
 }
 
 fn main() {

@@ -1,0 +1,88 @@
+// A condition proves about an error what logic says it does (R4): either side
+// of an `&&` that held — the right side too, which runs only then — either
+// side of an `||` that failed, and the operand of a `!` the other way round.
+// The Go-shaped guards below were refused as reading a tainted value. What a
+// connective does not prove is still refused, and once.
+
+use std/errors
+
+fn f(n: int) -> (int, error) {
+    if n > 0 {
+        return _, errors.new("x")
+    }
+    return 5, nil
+}
+
+fn and_held() {
+    let (v, err) = f(0)
+    if err == nil && v > 0 {
+        io.print(v)
+    }
+}
+
+fn or_failed() {
+    let (w, err) = f(0)
+    if err != nil || w < 0 {
+        return
+    }
+    io.print(w)
+}
+
+fn negated() {
+    let (v, err) = f(0)
+    if !(err != nil) {
+        io.print(v)
+    }
+}
+
+fn present_on_the_right() {
+    let (v, err) = f(1)
+    if err != nil && err.message() == "x" {
+        return
+    }
+    if err == nil {
+        io.print(v)
+    }
+}
+
+fn wrapped_twice() -> (int, error) {
+    let (v, err) = f(0)
+    check errors.wrap(errors.wrap(err, "inner"), "outer")
+    return v, nil
+}
+
+fn or_held(c: bool) {
+    let (v, err) = f(0)
+    if err == nil || v > 0 { //~ ERROR E0301
+        io.print(v)
+    }
+}
+
+fn and_failed(c: bool) {
+    let (v, err) = f(0)
+    if err == nil && c {
+        io.print("both")
+    }
+    io.print(v) //~ ERROR E0301
+}
+
+fn negated_the_wrong_way() {
+    let (v, err) = f(0)
+    if !(err == nil) {
+        io.print(v) //~ ERROR E0301
+    }
+}
+
+fn main() {
+    and_held()
+    or_failed()
+    negated()
+    present_on_the_right()
+    let (n, e) = wrapped_twice()
+    if e == nil {
+        io.print(n)
+    }
+    or_held(true)
+    and_failed(true)
+    negated_the_wrong_way()
+}
