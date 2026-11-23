@@ -2237,6 +2237,29 @@ fn a_missing_member_names_its_module_as_the_use_writes_it() {
     assert!(!said.contains("src/money"), "{}", said);
 }
 
+/// E0404's note names the module that holds a spelling as its `use` wrote it
+/// (`lib/util`), not by its identity below `kite.toml` (`src/lib/util`); and
+/// the fix it names compiles.
+#[test]
+fn a_spelling_taken_is_named_as_its_use_wrote_it() {
+    let p = Project::new("spelling-taken-as-written");
+    p.file("kite.toml", "[package]\nname = \"app\"\nversion = \"0.1.0\"\n");
+    p.file("src/util.kite", "pub fn twice(n: int) -> int {\n  return n * 2\n}\n");
+    p.file("src/lib/util.kite", "pub fn twice(n: int) -> int {\n  return n + n\n}\n");
+    let main = p.file(
+        "src/three.kite",
+        "use lib/util\nuse util\n\nfn main() {\n  io.print(util.twice(1))\n}\n",
+    );
+    let said = p.run(&main).expect_err("one spelling, two modules");
+    assert!(said.contains("`util` is `lib/util` in this module"), "{}", said);
+    assert!(!said.contains("src/lib/util"), "{}", said);
+    let main = p.file(
+        "src/three.kite",
+        "use lib/util as lu\nuse util\n\nfn main() {\n  io.print(util.twice(1) + lu.twice(2))\n}\n",
+    );
+    assert_eq!(p.run(&main).expect("each its own name"), "6\n");
+}
+
 /// A block string that never closes reads the rest of the file as its text, so
 /// a `\(a)` after it is some later line and not a hole its author wrote. It
 /// named the very binding being defined, and was `cannot find `a`` as a second

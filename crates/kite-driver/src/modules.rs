@@ -651,6 +651,11 @@ pub struct Loader {
     /// trusted it. A spelling is a convenience for the file that writes it and
     /// has no business being visible outside the module that does.
     pub aliases: HashMap<(String, String), String>,
+    /// The path the `use` that claimed each spelling in `aliases` wrote,
+    /// keyed the same way: `lib/util` where the identity is `src/lib/util`,
+    /// measured from the `kite.toml` above. A note naming the module that
+    /// holds a spelling names it as the reader wrote it.
+    written: HashMap<(String, String), String>,
     /// Spellings, keyed as `aliases` are, whose `use` was reported and loaded
     /// nothing — so what they qualify is not reported again.
     pub unresolved: std::collections::HashSet<(String, String)>,
@@ -1297,12 +1302,9 @@ impl Loader {
             // `use utils` claims the spelling `utils` in this module, and it
             // has to, or a later `use dep/utils` would take the spelling from
             // under it and every `utils.…` above would quietly change meaning.
-            if let Some(first) = self
-                .aliases
-                .get(&(owner.clone(), spelling.clone()))
-                .filter(|first| **first != identity)
-                .cloned()
-            {
+            let key = (owner.clone(), spelling.clone());
+            if let Some(first) = self.aliases.get(&key).filter(|first| **first != identity).cloned() {
+                let first = self.written.get(&key).cloned().unwrap_or(first);
                 diags.push(
                     Diagnostic::error(
                         codes::E0404,
@@ -1350,6 +1352,7 @@ impl Loader {
                 }
             }
             self.aliases.insert((owner.clone(), spelling.clone()), identity.clone());
+            self.written.insert((owner.clone(), spelling.clone()), segments.join("/"));
 
             if let Some(at) = stack.iter().position(|frame| frame.origin == origin) {
                 diags.push(cycle(stack, at, &identity, u.span, sources));
@@ -1359,6 +1362,7 @@ impl Loader {
                 // of a name it declares `pub`. Reported once, as the cycle.
                 if stack[at].identity.is_empty() {
                     self.aliases.remove(&(owner.clone(), spelling.clone()));
+                    self.written.remove(&(owner.clone(), spelling.clone()));
                     self.unresolved.insert(failed);
                 }
                 continue;
