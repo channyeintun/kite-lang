@@ -657,11 +657,23 @@ from an expression body's own type. A block body with none of these returns
 `()` — except where it is passed to a generic function's parameter whose result
 is a type parameter nothing else fixes, as `run<T>(g: fn() -> T)` or `map`'s
 `U`, or given to such a field of a generic struct's literal, as
-`Job{ run: || { … } }` for `struct Job<T> { run: fn() -> (T, error) }`. Then its `return` statements say what it returns: `run(|| { return 6 })`
+`Job{ run: || { … } }` for `struct Job<T> { run: fn() -> (T, error) }`.
+Then its `return` statements say what it returns: `run(|| { return 6 })`
 makes `T` an `int`, and where `fn() -> (T, error)` is wanted (or a `return`
 gives a pair or `_, err`) the closure is fallible, so `retry(|| { … return n,
 nil })` solves `T` from `n`. `-> (T, error)` written on a closure is the
 fallible form wherever it stands, exactly as on a named function.
+
+What another argument fixes counts wherever that argument is written. A
+closure literal that needs a type only another argument can give — a
+parameter it does not annotate, or the value of a fallible result when no
+`return` in its block gives one — is typed after the call's other arguments,
+so `r(|| { return _, errors.new("no") }, 6)` against
+`r<T>(g: fn() -> (T, error), x: T)` takes `T` from the `6`, and
+`apply(|n| n + 1, 41)` against `apply<T>(f: fn(T) -> T, x: T)` takes `n`'s
+type from the `41`. Such closures are typed in written order among
+themselves; a generic struct literal's fields are treated the same way. Only
+the checking moves: the arguments are still evaluated in the order written.
 
 **Closures capture by value, taken when the closure is made.** Because `let`
 bindings are immutable, the vast majority of captures are trivially safe: the

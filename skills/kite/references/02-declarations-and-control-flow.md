@@ -418,7 +418,11 @@ whose result nothing has fixed yet: against
 `n, nil` or `_, err` makes it fallible for `fn() -> (T, error)`. Parameter types come from
 the context the closure is used in, so `apply(|x| x * 2, 21)` infers `x` from `apply`'s
 signature — through an `Option<fn(int) -> int>` too; where there is no context, annotate
-them.
+them. The argument that fixes them may come after the closure: against
+`ap<T>(f: fn(T) -> T, x: T)`, `ap(|n| n + 1, 41)` types `n` from the `41`, and
+`r(|| { return _, errors.new("no") }, 6)` against `r<T>(g: fn() -> (T, error), x: T)`
+takes `T` from the `6` — the checker types such a closure after the other arguments (the
+call still evaluates them in the order written).
 
 ```kite
 fn apply(f: fn(int) -> int, x: int) -> int {

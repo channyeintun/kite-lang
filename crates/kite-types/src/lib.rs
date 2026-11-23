@@ -5337,70 +5337,138 @@ impl<'a> Checker<'a> {
         let crosses = generics
             .iter()
             .any(|g| g.bounds.iter().any(|b| self.is_share_bound(*b)));
-        let mut hargs = Vec::with_capacity(args.len());
+        // A closure literal that waits on what a later argument fixes is
+        // typed after the arguments that are not: `r(|| { return _, err }, 6)`
+        // against `r<T>(g: fn() -> (T, error), x: T)` learns `T` from the `6`,
+        // as §4.5 says a closure learns only what nothing else fixes. Such
+        // closures keep their written order among themselves. This is the
+        // order of checking only — the call still evaluates its arguments as
+        // written, and diagnostics are put in source order afterwards.
+        let mut hargs: Vec<Option<hir::Expr>> = Vec::with_capacity(args.len());
+        let mut waiting = Vec::new();
         for (i, a) in args.iter().enumerate() {
-            let declared = sig_params.get(i).copied();
-            // An argument is checked against the parameter type only once that
-            // type is fully known; until then it is checked on its own and used
-            // to fill parameters in.
-            // A hint stands in for a parameter nothing has settled yet, so an
-            // argument is typed by it without the parameter being fixed.
-            let want = if hints.iter().any(Option::is_some) {
-                let hinted: Vec<Option<TyId>> = subst
-                    .iter()
-                    .zip(hints.iter().chain(std::iter::repeat(&None)))
-                    .map(|(s, h)| s.or(*h))
-                    .collect();
-                declared.and_then(|d| self.apply_subst_opt(d, &hinted))
-            } else {
-                declared.and_then(|d| self.apply_subst_opt(d, subst))
-            };
-            // A closure for a function type not settled whole is told what of
-            // it is: each parameter the other arguments fixed, and whether the
-            // result is still the callee's to learn — which the closure's
-            // type then solves, as any other argument's does.
-            if want.is_none() && matches!(a, ast::Expr::Closure { .. }) {
-                if let Some(TyKind::Fn { params, ret }) = declared.map(|d| self.types.kind(d).clone()) {
-                    let params = params.iter().map(|p| self.apply_subst_opt(*p, subst)).collect();
-                    let fallible = self.types.fallible_value(ret).is_some();
-                    let ret = self.apply_subst_opt(ret, subst);
-                    self.closure_context = Some(ClosureContext { params, ret, fallible });
-                }
+            // What a hint stands in for counts as fixed, as it does for the
+            // argument's own wanted type.
+            let known: Vec<Option<TyId>> =
+                subst.iter().zip(hints.iter().chain(std::iter::repeat(&None))).map(|(s, h)| s.or(*h)).collect();
+            if self.closure_waits(a, sig_params.get(i).copied(), &known) {
+                waiting.push(i);
+                hargs.push(None);
+                continue;
             }
-            let e = self.expr(a, want);
-            self.closure_context = None;
-            let e = self.coerce(e, want);
-            let e = match declared {
-                Some(d) => {
-                    // A conflict is its own diagnostic, naming both sides;
-                    // a mismatch reported on top of it would say the same
-                    // thing again, less clearly.
-                    let before = self.diags.error_count();
-                    self.unify(d, e.ty, generics, subst, e.span);
-                    if self.diags.error_count() != before {
-                        e
-                    } else {
-                        // Converted again now the parameter is known: `get(7,
-                        // 3)` against `x: Option<T>` only learns that the
-                        // `7` must be wrapped once `T` is `int`, which is
-                        // after it was checked.
-                        let expected = self.apply_subst(d, subst);
-                        self.accept(e, expected, decl_span)
-                    }
-                }
-                None => e,
-            };
-            if crosses && declared.is_some_and(|d| matches!(self.types.kind(d), TyKind::Fn { .. })) {
-                self.require_share_captures(&e);
-            }
-            hargs.push(e);
+            let e = self.check_arg(a, sig_params.get(i).copied(), generics, subst, hints, decl_span, crosses);
+            hargs.push(Some(e));
         }
+        for i in waiting {
+            let e = self.check_arg(&args[i], sig_params.get(i).copied(), generics, subst, hints, decl_span, crosses);
+            hargs[i] = Some(e);
+        }
+        let hargs: Vec<hir::Expr> = hargs.into_iter().flatten().collect();
         for (slot, hint) in subst.iter_mut().zip(hints) {
             if slot.is_none() {
                 *slot = *hint;
             }
         }
         hargs
+    }
+
+    /// One argument of `check_args`, against its parameter's type as far as
+    /// `subst` has fixed it, solving what it can of the rest.
+    #[allow(clippy::too_many_arguments)]
+    fn check_arg(
+        &mut self,
+        a: &ast::Expr,
+        declared: Option<TyId>,
+        generics: &[GenericDef],
+        subst: &mut Vec<Option<TyId>>,
+        hints: &[Option<TyId>],
+        decl_span: Option<Span>,
+        crosses: bool,
+    ) -> hir::Expr {
+        // An argument is checked against the parameter type only once that
+        // type is fully known; until then it is checked on its own and used
+        // to fill parameters in.
+        // A hint stands in for a parameter nothing has settled yet, so an
+        // argument is typed by it without the parameter being fixed.
+        let want = if hints.iter().any(Option::is_some) {
+            let hinted: Vec<Option<TyId>> = subst
+                .iter()
+                .zip(hints.iter().chain(std::iter::repeat(&None)))
+                .map(|(s, h)| s.or(*h))
+                .collect();
+            declared.and_then(|d| self.apply_subst_opt(d, &hinted))
+        } else {
+            declared.and_then(|d| self.apply_subst_opt(d, subst))
+        };
+        // A closure for a function type not settled whole is told what of
+        // it is: each parameter the other arguments fixed, and whether the
+        // result is still the callee's to learn — which the closure's
+        // type then solves, as any other argument's does.
+        if want.is_none() && matches!(a, ast::Expr::Closure { .. }) {
+            if let Some(TyKind::Fn { params, ret }) = declared.map(|d| self.types.kind(d).clone()) {
+                let params = params.iter().map(|p| self.apply_subst_opt(*p, subst)).collect();
+                let fallible = self.types.fallible_value(ret).is_some();
+                let ret = self.apply_subst_opt(ret, subst);
+                self.closure_context = Some(ClosureContext { params, ret, fallible });
+            }
+        }
+        let e = self.expr(a, want);
+        self.closure_context = None;
+        let e = self.coerce(e, want);
+        let e = match declared {
+            Some(d) => {
+                // A conflict is its own diagnostic, naming both sides;
+                // a mismatch reported on top of it would say the same
+                // thing again, less clearly.
+                let before = self.diags.error_count();
+                self.unify(d, e.ty, generics, subst, e.span);
+                if self.diags.error_count() != before {
+                    e
+                } else {
+                    // Converted again now the parameter is known: `get(7,
+                    // 3)` against `x: Option<T>` only learns that the
+                    // `7` must be wrapped once `T` is `int`, which is
+                    // after it was checked.
+                    let expected = self.apply_subst(d, subst);
+                    self.accept(e, expected, decl_span)
+                }
+            }
+            None => e,
+        };
+        if crosses && declared.is_some_and(|d| matches!(self.types.kind(d), TyKind::Fn { .. })) {
+            self.require_share_captures(&e);
+        }
+        e
+    }
+
+    /// Whether a closure literal passed where `declared` is wanted needs
+    /// something only another argument can fix, so is better typed after
+    /// the rest: a parameter it does not annotate and nothing has fixed yet,
+    /// or the value of a fallible result nothing has fixed and its block
+    /// body cannot say, because no `return` in it gives one. Typed where it
+    /// stands, each of those is an error (E0211, E0209) whatever follows, so
+    /// typing it later changes nothing that compiled. A closure that can say
+    /// its own type — `|| 1`, `|| { return 6 }`, a `()` block — is typed
+    /// where it stands, so that what it fixes is known to the arguments
+    /// after it, as it always was.
+    fn closure_waits(&mut self, a: &ast::Expr, declared: Option<TyId>, known: &[Option<TyId>]) -> bool {
+        let ast::Expr::Closure { params, ret, body, .. } = a else { return false };
+        let Some(d) = declared else { return false };
+        if self.apply_subst_opt(d, known).is_some() {
+            return false;
+        }
+        let TyKind::Fn { params: wanted, ret: wanted_ret } = self.types.kind(d).clone() else {
+            return false;
+        };
+        let param_waits = params.iter().enumerate().any(|(i, p)| {
+            p.ty.is_none() && wanted.get(i).is_none_or(|w| self.apply_subst_opt(*w, known).is_none())
+        });
+        let ret_waits = ret.is_none()
+            && self.apply_subst_opt(wanted_ret, known).is_none()
+            && matches!(&**body, ast::ClosureBody::Block(b)
+                if (self.types.fallible_value(wanted_ret).is_some() || block_returns_pair(b))
+                    && !block_returns_value(b));
+        param_waits || ret_waits
     }
 
     /// A function handed to another task takes its captures with it, so each
@@ -7922,12 +7990,23 @@ impl<'a> Checker<'a> {
         // pin. (An empty `[]` or a `nil` is poison too, but there the missing
         // pin is the cause, and E0209's note is the fix.)
         let mut poisoned = Vec::new();
-        for init in &lit.fields {
+        // A closure field that waits on what a later field fixes is tried
+        // after the fields that do not, as a call's argument is:
+        // `Job{ run: || { return _, err }, seed: 6 }` learns `T` from `seed`.
+        // The real check below still goes in written order.
+        let mut queue: Vec<(&ast::FieldInit, bool)> = lit.fields.iter().map(|f| (f, true)).collect();
+        let mut next = 0;
+        while let Some(&(init, may_wait)) = queue.get(next) {
+            next += 1;
             let Some(declared) =
                 self.types.struct_def(template).field(&init.name.name).map(|(_, f)| f.ty)
             else {
                 continue;
             };
+            if may_wait && self.closure_waits(&init.value, Some(declared), &subst) {
+                queue.push((init, false));
+                continue;
+            }
             self.field_closure_context(init, declared, &subst);
             let v = self.expr(&init.value, None);
             self.closure_context = None;
@@ -15232,6 +15311,24 @@ fn breaks_out(block: &ast::Block, label: Option<&str>) -> bool {
         }
     }
     in_block(block, label, false)
+}
+
+/// Whether a block body has a `return` that gives a value — `return v` or
+/// `return v, err` — anywhere outside the closures nested in it: what a
+/// closure whose result is learned from its `return`s learns it from.
+fn block_returns_value(b: &ast::Block) -> bool {
+    let mut value = false;
+    for s in &b.stmts {
+        visit_stmts(s, false, &mut |s| {
+            if let ast::Stmt::Return(r) = s {
+                value |= matches!(
+                    r.value,
+                    Some(ast::ReturnValue::Single(_)) | Some(ast::ReturnValue::Pair { .. })
+                );
+            }
+        });
+    }
+    value
 }
 
 /// Whether a block body returns a pair, or `_, err`, anywhere outside the
