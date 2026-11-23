@@ -39,7 +39,9 @@
 // a decision about `std/time`'s surface rather than about parsing, and it is
 // left undone rather than half-done. A date in a document parses as the
 // string it was written as, which is lossless and honest, and is stated here
-// so nobody discovers it from a wrong answer.
+// so nobody discovers it from a wrong answer. `emit` writes a string that
+// reads as a date back without its quotes, so a date survives a round trip as
+// a date — which means a *quoted* string of the same shape comes back bare.
 
 use std/errors
 use std/math
@@ -929,9 +931,32 @@ fn put_back(held: Toml, inner: { str: Toml }) -> Toml {
 ///
 /// `toml.at(doc, "package.name")` rather than three lookups and two matches,
 /// because reading a configuration file is the thing this module is for.
+///
+/// The path is split on every dot, so a key that has a dot *in* it —
+/// `"a.b" = 1` — cannot be named this way: `at(doc, "a.b")` looks for the key
+/// `b` of the table `a`. [`at_path`] takes the segments already split.
 pub fn at(doc: Toml, path: str) -> Option<Toml> {
+    return at_path(doc, split_dots(path))
+}
+
+/// The value at a path given as its segments, or nil.
+///
+/// Where [`at`] splits one string on its dots, this takes each key whole, so
+/// a quoted key containing a dot is reachable: for `"a.b" = 1`, the path is
+/// `["a.b"]`. An empty path is the document itself.
+///
+/// ```kite
+/// let (doc, err) = parse("\"a.b\" = 1\n[t]\nx = 2\n")
+/// if err != nil {
+///     return
+/// }
+/// assert(at_path(doc, ["a.b"]) == Toml.Int(1), "a key with a dot in it")
+/// assert(at_path(doc, ["t", "x"]) == Toml.Int(2), "a nested one")
+/// assert(at(doc, "a.b") == nil, "which at cannot reach")
+/// ```
+pub fn at_path(doc: Toml, path: [str]) -> Option<Toml> {
     var here = doc
-    for segment in split_dots(path) {
+    for segment in path {
         let table = as_table(here)
         let next = table[segment]
         if next == nil {
@@ -1115,10 +1140,26 @@ fn emit_value(value: Toml) -> str {
         Bool(b) => if b { "true" } else { "false" }
         Int(n) => "\(n)"
         Float(f) => "\(f)"
-        Text(s) => emit_string(s)
+        Text(s) => emit_text(s)
         Array(items) => emit_array(items)
         Table(t) => emit_inline(t)
     }
+}
+
+/// A string, or — when it reads as one of TOML's date and time forms — that
+/// date written bare.
+///
+/// `parse` keeps a date as the text it was written as, because `Toml` has no
+/// date type, so a date and a quoted string that looks like one are the same
+/// value here. Writing the quotes on every one turned `when = 1979-05-27`
+/// into `when = "1979-05-27"` on the way through, which every other TOML
+/// reader sees as a different type. So the form that reads as a date is
+/// written as one, and a string that happens to look like a date is the cost.
+fn emit_text(s: str) -> str {
+    if is_date_time(s) {
+        return s
+    }
+    return emit_string(s)
 }
 
 fn emit_array(items: [Toml]) -> str {
@@ -1316,22 +1357,6 @@ fn without(body: str, drop: str) -> str {
     return join(out, "")
 }
 
-/// Whether a bare word is a date or a time rather than a number.
-///
-/// A `:` anywhere is enough: no integer or float in TOML contains one. A `-`
-/// after the first character usually means a date too — but not when what
-/// precedes it is `e` or `E`, because that is a float's exponent sign.
-///
-/// Without that exception this claimed every negative exponent: `1e-5` was
-/// returned as the *text* `1e-5`, so `float_at` handed back its fallback and
-/// a configuration file's number silently stopped being one. It went unseen
-/// because it fails quietly and because nothing tested it — every exponent in
-/// the suite was positive. It also hid a second bug behind it, since an
-/// exponent that never reached the number reader could not overflow it.
-///
-/// The exception cannot let a date through: a date is digits, `-`, `.`, `:`,
-/// `+`, and `T`/`Z` in either case, so no `-` in one is ever preceded by an
-/// `e`. `1979-05-27` is still a date; `1e-5` is a float.
 /// Whether a word is one of TOML's four date and time forms: a date
 /// `1979-05-27`, a time `07:32:00` with an optional fraction of a second, the
 /// two joined by `T` or a space, and that with `Z` or an offset `-07:00`.
@@ -1433,6 +1458,22 @@ fn two_digits(body: str, at: int) -> int {
     return tens * 10 + ones
 }
 
+/// Whether a bare word is a date or a time rather than a number.
+///
+/// A `:` anywhere is enough: no integer or float in TOML contains one. A `-`
+/// after the first character usually means a date too — but not when what
+/// precedes it is `e` or `E`, because that is a float's exponent sign.
+///
+/// Without that exception this claimed every negative exponent: `1e-5` was
+/// returned as the *text* `1e-5`, so `float_at` handed back its fallback and
+/// a configuration file's number silently stopped being one. It went unseen
+/// because it fails quietly and because nothing tested it — every exponent in
+/// the suite was positive. It also hid a second bug behind it, since an
+/// exponent that never reached the number reader could not overflow it.
+///
+/// The exception cannot let a date through: a date is digits, `-`, `.`, `:`,
+/// `+`, and `T`/`Z` in either case, so no `-` in one is ever preceded by an
+/// `e`. `1979-05-27` is still a date; `1e-5` is a float.
 fn looks_like_date(body: str) -> bool {
     for i in 0..body.len() {
         let c = body.slice(i, i + 1)
