@@ -1406,7 +1406,8 @@ catch-all. A guarded arm counts towards nothing, since its guard may fail.
 An arm no value can reach — everything it matches is taken by an unguarded arm
 above it — is a warning (`E0116`). The usual cause is a name meant as a variant
 that is not one: `Dir` where the enum says `Directory` is a binding, which takes
-every value.
+every value. A literal or a range inside a range above it is one too — `5` or
+`5..=7` after `1..=9` — and so is a range that matches nothing, such as `9..=4`.
 
 An arm is an expression or a block. A block arm **runs for its effects**: it
 produces a value only when it is a single expression (which may be an `if` or a

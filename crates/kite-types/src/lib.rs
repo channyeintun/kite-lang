@@ -10176,8 +10176,11 @@ impl<'a> Checker<'a> {
                     (Some(x), Some(y)) => {
                         if x > y {
                             self.diags.push(
-                                Diagnostic::warning(codes::E0210, "this range is empty")
-                                    .with_primary(*span, format!("{}..{} matches nothing", x, y)),
+                                // An arm no value can reach, which is what
+                                // E0116 is; E0210 is a match missing values.
+                                Diagnostic::warning(codes::E0116, "this range is empty")
+                                    .with_primary(*span, format!("{}{}{} matches nothing", x, if *inclusive { "..=" } else { ".." }, y))
+                                    .with_note("a range runs from its smaller end to its larger"),
                             );
                         }
                         hir::Pattern::IntRange { start: x, end: y, inclusive: *inclusive }

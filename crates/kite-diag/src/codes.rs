@@ -168,7 +168,9 @@ codes! {
          above it. The commonest cause is a name meant as a variant that is not \
          one — `Dir` where the enum says `Directory` — which is a binding: it \
          matches everything, and every arm after it is dead. A guarded arm \
-         shadows nothing, because its guard may fail.";
+         shadows nothing, because its guard may fail. A literal or a range \
+         inside a range above it (`5` after `1..=9`) is dead the same way, \
+         and so is a range whose ends are the wrong way round, `9..=4`.";
 
     E0117 = "E0117", "statement has no effect",
         "A closure written as a statement is built and thrown away. Nothing \

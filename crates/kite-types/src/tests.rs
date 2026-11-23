@@ -1078,6 +1078,27 @@ fn an_arm_after_a_misspelt_variant_is_unreachable() {
     assert!(c.render().contains("did you mean `Directory`?"), "{}", c.render());
 }
 
+/// A literal or a range inside a range above it reaches nothing, and is
+/// E0116 like any arm no value can reach; so is an empty range, which was
+/// E0210, the code for a match missing values.
+#[test]
+fn an_arm_inside_a_range_above_and_an_empty_range_are_unreachable() {
+    let c = ok("fn f(n: int) -> str {\n  return match n {\n\
+                \x20   1..=9 => \"small\",\n    5 => \"five\",\n    5..=7 => \"dead\",\n\
+                \x20   9..=4 => \"reversed\",\n    3..=12 => \"overlaps\",\n    _ => \"big\",\n  }\n}\n\
+                fn main() {\n  io.print(f(5))\n}\n");
+    let mut lines: Vec<u32> = c
+        .diags
+        .iter()
+        .filter(|d| d.code == Some(codes::E0116))
+        .filter_map(|d| d.primary_span())
+        .map(|s| c.sources.file(s.file).line_col(s.start).line)
+        .collect();
+    lines.sort();
+    assert_eq!(lines, vec![4, 5, 6], "{}", c.render());
+    assert!(!c.has("E0210"), "{}", c.render());
+}
+
 /// Matches exhaustive only through their nested patterns.
 #[test]
 fn nested_patterns_make_a_match_exhaustive() {

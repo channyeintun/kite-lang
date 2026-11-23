@@ -24,9 +24,10 @@
 //!
 //! Numbers and strings have no finite set of constructors. Their literals are
 //! compared exactly, and a column of them is never complete, so it needs a
-//! catch-all — conservative in the one direction that matters: a range
-//! overlapping a literal is not used to call either unreachable, and nothing
-//! is ever called exhaustive that is not.
+//! catch-all — conservative in the one direction that matters: a range that
+//! holds the whole of a later literal or range makes that one unreachable, but
+//! one that only overlaps it does not, and nothing is ever called exhaustive
+//! that is not.
 
 use kite_hir::{Pattern, TyId, TyKind, Types};
 
@@ -197,12 +198,15 @@ fn push_expanded(row: Row, out: &mut Vec<Row>) {
 }
 
 /// The rows a value built by `ctor` can reach, with the constructor's fields
-/// in place of the first column. A catch-all reaches them all.
+/// in place of the first column. A catch-all reaches them all, and so does an
+/// integer range holding every value `ctor` stands for: after `1..=9`, a `5`
+/// or a `5..=7` reaches nothing new.
 fn specialise(rows: &[Row], ctor: &Ctor, arity: usize) -> Vec<Row> {
     let mut out = Vec::new();
     for r in expand(rows) {
         let fields: Vec<Pat> = match &r[0] {
             Pat::Any => vec![Pat::Any; arity],
+            Pat::Ctor(c, _) if covers(c, ctor) => Vec::new(),
             Pat::Ctor(c, subs) if c == ctor => {
                 let mut subs = subs.clone();
                 subs.resize(arity, Pat::Any);
@@ -215,6 +219,29 @@ fn specialise(rows: &[Row], ctor: &Ctor, arity: usize) -> Vec<Row> {
         out.push(next);
     }
     out
+}
+
+/// The integers a literal or a range pattern matches, as an inclusive pair;
+/// `None` for anything else, and for a range that matches nothing.
+fn int_span(c: &Ctor) -> Option<(i64, i64)> {
+    let (lo, hi) = match c {
+        Ctor::Lit(Lit::Int(v)) => (*v, *v),
+        Ctor::Lit(Lit::Range(a, b, true)) => (*a, *b),
+        Ctor::Lit(Lit::Range(a, b, false)) => (*a, b.checked_sub(1)?),
+        _ => return None,
+    };
+    (lo <= hi).then_some((lo, hi))
+}
+
+/// Whether an integer pattern `row` matches every integer `q` does. Only one
+/// covering the whole of `q` counts; one that overlaps part of it is left
+/// out, which can only keep an arm reachable, never call one dead that is
+/// not.
+fn covers(row: &Ctor, q: &Ctor) -> bool {
+    match (int_span(row), int_span(q)) {
+        (Some((a, b)), Some((x, y))) => a <= x && y <= b,
+        _ => false,
+    }
 }
 
 /// The rows whose first column matches anything, without that column: what
@@ -825,10 +852,10 @@ mod tests {
         assert!(unreachable_arms(ty, &arms, &types).is_empty());
     }
 
-    /// Literals compare exactly, and nothing about a range overlapping one is
-    /// used to call either unreachable.
+    /// Literals compare exactly, and a range above one holding every value it
+    /// matches makes it unreachable — a literal, or a range inside it.
     #[test]
-    fn literals_are_unreachable_only_when_repeated() {
+    fn literals_and_ranges_are_unreachable_inside_a_range_above() {
         let types = Types::new();
         let ps = [Pattern::Int(1), Pattern::Int(2), Pattern::Int(1), any()];
         assert_eq!(unreachable(TyId::INT, &ps, &types), vec![2]);
@@ -836,6 +863,28 @@ mod tests {
         let ps = [
             Pattern::IntRange { start: 0, end: 9, inclusive: true },
             Pattern::Int(5),
+            Pattern::IntRange { start: 5, end: 7, inclusive: true },
+            Pattern::IntRange { start: 3, end: 10, inclusive: false },
+            Pattern::Int(9),
+            Pattern::Int(12),
+            Pattern::IntRange { start: 12, end: 12, inclusive: true },
+            any(),
+        ];
+        assert_eq!(unreachable(TyId::INT, &ps, &types), vec![1, 2, 3, 4, 6]);
+    }
+
+    /// A range that only overlaps a later arm leaves it reachable, and so does
+    /// a later range that only the union of several arms above would cover —
+    /// the cautious answer, never a false warning.
+    #[test]
+    fn a_partly_covered_arm_stays_reachable() {
+        let types = Types::new();
+        let ps = [
+            Pattern::IntRange { start: 0, end: 5, inclusive: true },
+            Pattern::IntRange { start: 3, end: 8, inclusive: true },
+            Pattern::Int(10),
+            Pattern::IntRange { start: 0, end: 10, inclusive: false },
+            Pattern::IntRange { start: 9, end: 10, inclusive: true },
             any(),
         ];
         assert!(unreachable(TyId::INT, &ps, &types).is_empty());

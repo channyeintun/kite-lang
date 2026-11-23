@@ -977,6 +977,10 @@ fn main() {
 }
 ```
 
+An arm inside a range above it — `5` or `5..=7` after `4..=9` — can never run, and is the
+`E0116` warning, as is a range with its ends reversed (`9..=4`). A range that only overlaps
+a later arm leaves it alone.
+
 Patterns also cover `nil`, tuples, and struct fields with `..` for the rest:
 
 ```kite
