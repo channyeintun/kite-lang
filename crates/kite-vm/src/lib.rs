@@ -2089,6 +2089,10 @@ impl<'a> Vm<'a> {
                 Ok(Value::Unit)
             }
 
+            // There is no JavaScript here to hand the closure to, and running
+            // it instead would be running code the program meant for later.
+            Native::JsFunc => Err(Trap::NoHostFunction { name: "js.func".to_string() }),
+
             // A task's resume closure, handed over by the state machine the
             // compiler wrote. The scheduler owns it from here.
             Native::TaskSpawn => {

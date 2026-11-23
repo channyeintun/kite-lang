@@ -40,6 +40,9 @@ pub enum Native {
     PtrSame,
     /// Trap when a claim is false.
     Require,
+    /// Hand a closure to JavaScript. The bytecode target has none, so the VM
+    /// traps here, before the closure has run.
+    JsFunc,
     DrawRect,
     DrawRRect,
     DrawFont,
@@ -77,9 +80,14 @@ impl Native {
             Builtin::DrawClip => Native::DrawClip,
             Builtin::DrawUnclip => Native::DrawUnclip,
             Builtin::TaskSpawn => Native::TaskSpawn,
-            // The bytecode target has no host to hand a closure to. `JsValue`
-            // is refused before lowering ever reaches here.
-            Builtin::JsFunc => Native::TaskSpawn,
+            // The bytecode target has no host to hand a closure to. `--emit
+            // kbc` refuses a `JsValue` before lowering reaches here, but
+            // `kitec run` lowers after a check, which accepts a web program;
+            // so the call is its own native, which traps the way any host
+            // call does on a VM with no host. It was `TaskSpawn` once, which
+            // ran the closure as a task and then trapped saying a task had
+            // been handed a `()`.
+            Builtin::JsFunc => Native::JsFunc,
             Builtin::TaskWakeAt => Native::TaskWakeAt,
             Builtin::TaskPark => Native::TaskPark,
             Builtin::TaskWaitHost => Native::TaskWaitHost,
@@ -115,6 +123,7 @@ impl Native {
             Native::TimeNow => "time.now",
             Native::PtrSame => "ptr.same",
             Native::Require => "require",
+            Native::JsFunc => "js.func",
         }
     }
 }
