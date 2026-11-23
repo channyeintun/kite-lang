@@ -1071,18 +1071,27 @@ fn mapped(text: str, from: str, to: str) -> str {
     return out
 }
 
-/// `text` at least `width` long, padded on the left with `with`. Numbers in a
-/// column need this often enough to belong here rather than in `std/fmt`,
-/// which is about laying out a whole line.
+/// `text` padded on the left with `with` until it is `width` long. A filler
+/// longer than one character is repeated and cut at the width, as
+/// JavaScript's `padStart` does, so the result is exactly `width` long — never
+/// more — and `text` is returned as it is when it is already that long or the
+/// filler is empty. Numbers in a column need this often enough to belong here
+/// rather than in `std/fmt`, which is about laying out a whole line.
+///
+/// ```kite
+/// assert(pad_start("7", 3, "0") == "007", "a character")
+/// assert(pad_start("7", 4, "ab") == "aba7", "a filler is cut at the width")
+/// ```
 pub fn pad_start(text: str, width: int, with: str) -> str {
-    if with.len() == 0 {
+    let need = width - text.len()
+    if with.len() == 0 || need <= 0 {
         return text
     }
-    var out = text
-    for out.len() < width {
-        out = with + out
+    var pad = with
+    for pad.len() < need {
+        pad = pad + with
     }
-    return out
+    return pad.slice(0, need) + text
 }
 
 // ---- ordering ---------------------------------------------------------------

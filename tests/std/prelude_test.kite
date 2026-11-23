@@ -170,6 +170,9 @@ fn checks() -> [error] {
     out.push(test.is_true(equal_ignoring_case("Content-Type", "content-type"), "header names"))
     out.push(test.equal_str(pad_start("7", 3, "0"), "007", "pad_start"))
     out.push(test.equal_str(pad_start("1234", 3, "0"), "1234", "pad_start leaves longer text"))
+    out.push(test.equal_str(pad_start("7", 4, "ab"), "aba7", "a long filler is cut at the width"))
+    out.push(test.equal_str(pad_start("7", 6, "ab"), "ababa7", "and repeated to reach it"))
+    out.push(test.equal_str(pad_start("7", 4, ""), "7", "an empty filler pads nothing"))
 
     // ---- numbers ----
     out.push(test.equal_int(abs(-3), 3, "abs"))
