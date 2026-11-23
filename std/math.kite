@@ -181,19 +181,141 @@ fn nearest_root(m: float, guess: float) -> float {
 }
 
 /// `base` raised to a whole power. Negative powers give the reciprocal.
+///
+/// ```kite
+/// assert(pow(10.0, 15) == 1000000000000000.0, "an exact power is exact")
+/// assert(pow(2.0, -1074) == 5e-324, "down to the smallest float")
+/// assert(pow(0.0, -1) > max_float(), "zero to a negative power is infinite")
+/// ```
+///
+/// By squaring, so `pow(x, 1000000000)` is thirty multiplications rather than
+/// a billion, and each one is carried in two floats — Dekker's product, as in
+/// [`product_error`] — with the power of two kept aside as an `int`. Squaring
+/// in one float does not help accuracy, whatever its reputation: the
+/// relative error doubles with every squaring, so it grows with the exponent
+/// just as repeated multiplication's does, and `pow(1.0000000001, 1000000000)`
+/// was wrong in the eighth digit. In two floats the same growth starts from
+/// 2⁻¹⁰⁴, and keeping the power of two aside means nothing overflows or
+/// underflows on the way, so a power of two below the smallest normal float
+/// survives to be the answer.
+///
+/// The answer is within one unit in the last place, and is the correctly
+/// rounded one unless the exact value lies within about `|exponent| · 2⁻⁵²`
+/// units of a halfway point — for every exponent below 2³⁰, that is never in
+/// practice. An answer in the subnormal range, below 2⁻¹⁰²², is rounded twice.
+///
+/// Special values are IEEE 754's `pown`: anything to the power zero is 1,
+/// NaN included; a zero to a negative power is an infinity, signed when the
+/// power is odd; and an odd power keeps the base's sign, zeros and
+/// infinities included.
 pub fn pow(base: float, exponent: int) -> float {
-    if exponent < 0 {
-        let positive = pow(base, 0 - exponent)
-        if positive == 0.0 {
-            return 0.0
-        }
-        return 1.0 / positive
+    if exponent == 0 {
+        return 1.0
     }
-    var out = 1.0
-    for i in 0..exponent {
-        out = out * base
+    let odd = exponent % 2 != 0
+    let size = abs(base)
+    // A zero, an infinity or a NaN: no arithmetic, only the sign to settle.
+    if base == 0.0 || !(size < size * 2.0) {
+        if !(size >= 0.0) {
+            return base
+        }
+        let magnitude = if (base == 0.0) == (exponent > 0) { 0.0 } else { 1.0 / 0.0 }
+        if odd && (base < 0.0 || 1.0 / base < 0.0) {
+            return -magnitude
+        }
+        return magnitude
+    }
+    // `size` is `m · 2ᵉ` with `m` in [1, 2), found by halving and doubling,
+    // both of which are exact.
+    var m = size
+    var e = 0
+    for m >= 4294967296.0 {
+        m = m / 4294967296.0
+        e += 32
+    }
+    for m < 0.00000000023283064365386963 {
+        m = m * 4294967296.0
+        e -= 32
+    }
+    for m >= 2.0 {
+        m = m / 2.0
+        e += 1
+    }
+    for m < 1.0 {
+        m = m * 2.0
+        e -= 1
+    }
+    var acc = Wide{ high: 1.0, low: 0.0, twos: 0 }
+    var square = Wide{ high: m, low: 0.0, twos: e }
+    // The bits of the exponent's magnitude, read by `%` and `/`, which both
+    // truncate, so a negative exponent yields them without being negated —
+    // negating `min_int()` is an overflow.
+    var n = exponent
+    for n != 0 {
+        if n % 2 != 0 {
+            acc = wide_times(acc, square)
+        }
+        n = n / 2
+        if n != 0 {
+            // Every power of the base has its exponent on the same side of
+            // zero, so once the square's is past any float's, so is the
+            // answer's, and squaring on would overflow `twos`.
+            if square.twos > 2200 || square.twos < -2200 {
+                acc = Wide{ high: 1.0, low: 0.0, twos: if square.twos > 0 { 5000 } else { -5000 } }
+                break
+            }
+            square = wide_times(square, square)
+        }
+    }
+    var out = 0.0
+    if exponent > 0 {
+        out = scaled(acc.high, acc.twos)
+    } else {
+        // The reciprocal of `high + low`, corrected by one Newton step: the
+        // residual `1 − r · high` is found exactly, by Dekker's product, and
+        // `low` is folded into it.
+        let r = 1.0 / acc.high
+        let p = r * acc.high
+        let residual = ((1.0 - p) - product_error(r, acc.high, p)) - r * acc.low
+        out = scaled(r + r * residual, 0 - acc.twos)
+    }
+    if odd && base < 0.0 {
+        return -out
     }
     return out
+}
+
+/// A positive number as `(high + low) · 2^twos`, with `high` near [1, 2) and
+/// `low` below half a unit in its last place: about 106 bits, and an exponent
+/// no float could hold.
+struct Wide {
+    high: float
+    low: float
+    twos: int
+}
+
+/// The product of two wide numbers, renormalised so `high` is in [1, 2).
+fn wide_times(a: Wide, b: Wide) -> Wide {
+    let p = a.high * b.high
+    let lost = product_error(a.high, b.high, p) + (a.high * b.low + a.low * b.high)
+    var high = p + lost
+    var low = lost - (high - p)
+    var twos = a.twos + b.twos
+    if high >= 2.0 {
+        high = high / 2.0
+        low = low / 2.0
+        twos += 1
+    } else if high < 1.0 {
+        high = high * 2.0
+        low = low * 2.0
+        twos -= 1
+    }
+    return Wide{ high: high, low: low, twos: twos }
+}
+
+/// The largest finite float.
+fn max_float() -> float {
+    return 1.7976931348623157e308
 }
 
 // ---- integer overflow ------------------------------------------------------
@@ -376,21 +498,45 @@ pub fn exp(x: float) -> float {
 /// the product is. So the power is applied in pieces, each of them exact, and
 /// only the last multiplication rounds. `exp(709.7)` used to saturate and
 /// `exp(-740)` to answer zero.
+///
+/// [`pow`] ends here too, so the powers of two are built by [`two_to`]
+/// rather than by `pow`.
 fn scaled(x: float, k: int) -> float {
     var out = x
     var left = k
     for left > 1000 {
-        out = out * pow(2.0, 1000)
+        out = out * two_to(1000)
         left -= 1000
     }
     for left < -1000 {
-        out = out * pow(0.5, 1000)
+        out = out * two_to(-1000)
         left += 1000
     }
-    if left >= 0 {
-        return out * pow(2.0, left)
+    return out * two_to(left)
+}
+
+/// 2ᵏ for `k` in [-1000, 1000], where every one is a normal float and every
+/// step below is exact.
+fn two_to(k: int) -> float {
+    var out = 1.0
+    var left = k
+    for left >= 32 {
+        out = out * 4294967296.0
+        left -= 32
     }
-    return out * pow(0.5, 0 - left)
+    for left <= -32 {
+        out = out / 4294967296.0
+        left += 32
+    }
+    for left > 0 {
+        out = out * 2.0
+        left -= 1
+    }
+    for left < 0 {
+        out = out / 2.0
+        left += 1
+    }
+    return out
 }
 
 /// The natural logarithm. Zero and negatives have none; both answer zero,

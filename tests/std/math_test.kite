@@ -1,0 +1,91 @@
+// std/math at the points people check: exact powers, special values, signed
+// zeros. `library_test.kite` holds the rest of the module's checks; this file
+// holds the ones that compare a float bit for bit with what IEEE 754 and C99's
+// Annex F say it is.
+
+use std/test
+use std/math
+
+fn inf() -> float {
+    return 1.0 / 0.0
+}
+
+fn nan() -> float {
+    return 0.0 / 0.0
+}
+
+/// The same float: equal, a NaN for a NaN, and a zero of the same sign.
+/// `test.equal_float` with a tolerance of zero answers a different question —
+/// `inf - inf` is a NaN, and -0.0 is within zero of 0.0.
+fn same(found: float, want: float, what: str) -> error {
+    if !(want >= want) {
+        if !(found >= found) {
+            return nil
+        }
+        return errors.new("\(what): expected NaN, found \(found)")
+    }
+    let equal = found <= want && found >= want
+    if equal && (want != 0.0 || (1.0 / found < 0.0) == (1.0 / want < 0.0)) {
+        return nil
+    }
+    return errors.new("\(what): expected \(want), found \(found)")
+}
+
+fn pow_checks() -> [error] {
+    var out: [error] = []
+    // Exact whenever the answer is a float.
+    out.push(same(math.pow(10.0, 15), 1000000000000000.0, "pow(10, 15)"))
+    out.push(same(math.pow(10.0, 22), 10000000000000000000000.0, "pow(10, 22)"))
+    out.push(same(math.pow(3.0, 33), 5559060566555523.0, "pow(3, 33)"))
+    out.push(same(math.pow(-2.0, 3), -8.0, "pow(-2, 3)"))
+    out.push(same(math.pow(-0.5, -3), -8.0, "pow(-0.5, -3)"))
+    // Correctly rounded where it is not: each is the exact power, rounded once.
+    out.push(same(math.pow(10.0, 23), 1e23, "pow(10, 23)"))
+    out.push(same(math.pow(10.0, -5), 0.00001, "pow(10, -5)"))
+    out.push(same(math.pow(0.1, 3), 0.0010000000000000002, "pow(0.1, 3)"))
+    out.push(same(math.pow(1.1, 7000), 5.607846372419733e289, "pow(1.1, 7000)"))
+    out.push(same(math.pow(0.9, 6000), 2.8513900904532174e-275, "pow(0.9, 6000)"))
+    out.push(same(math.pow(7.0, -380), 7.3e-322, "pow(7, -380), subnormal"))
+    out.push(same(math.pow(0.9, -7000), inf(), "pow(0.9, -7000) is past the largest float"))
+    // n repeated multiplications lost n units: this was 1.1051709272141408.
+    out.push(same(math.pow(1.0000000001, 1000000000), 1.105170927214347, "pow(1.0000000001, 1e9)"))
+    // Below the smallest normal float. These were 0.0: the positive power
+    // overflowed, and its reciprocal was taken as zero.
+    out.push(same(math.pow(2.0, -1030), 8.691694759794e-311, "pow(2, -1030)"))
+    out.push(same(math.pow(2.0, -1074), 5e-324, "pow(2, -1074)"))
+    out.push(same(math.pow(2.0, -1075), 0.0, "pow(2, -1075) rounds to zero"))
+    out.push(same(math.pow(0.5, 1074), 5e-324, "pow(0.5, 1074)"))
+    out.push(same(math.pow(2.0, 1024), inf(), "pow(2, 1024) overflows"))
+    out.push(same(math.pow(-2.0, 1025), -inf(), "and keeps an odd power's sign"))
+    // IEEE 754's pown.
+    out.push(same(math.pow(nan(), 0), 1.0, "anything to the zero is one"))
+    out.push(same(math.pow(nan(), 3), nan(), "a NaN to a power"))
+    out.push(same(math.pow(0.0, -1), inf(), "pow(0, -1)"))
+    out.push(same(math.pow(-0.0, -1), -inf(), "pow(-0, -1)"))
+    out.push(same(math.pow(-0.0, -2), inf(), "pow(-0, -2)"))
+    out.push(same(math.pow(-0.0, 3), -0.0, "pow(-0, 3)"))
+    out.push(same(math.pow(-0.0, 2), 0.0, "pow(-0, 2)"))
+    out.push(same(math.pow(-inf(), 3), -inf(), "pow(-inf, 3)"))
+    out.push(same(math.pow(-inf(), -3), -0.0, "pow(-inf, -3)"))
+    out.push(same(math.pow(-inf(), -2), 0.0, "pow(-inf, -2)"))
+    // The extreme exponents, which used to trap negating `min_int()`, or
+    // loop for as long as the exponent is large.
+    out.push(same(math.pow(2.0, math.min_int()), 0.0, "pow(2, min_int)"))
+    out.push(same(math.pow(0.5, math.min_int()), inf(), "pow(0.5, min_int)"))
+    out.push(same(math.pow(1.0, math.min_int()), 1.0, "pow(1, min_int)"))
+    out.push(same(math.pow(-1.0, math.max_int()), -1.0, "pow(-1, max_int)"))
+    return out
+}
+
+fn main() {
+    var results: [error] = []
+    results = concat(results, pow_checks())
+    var failed = 0
+    for e in results {
+        if e != nil {
+            io.print("FAILED \(e.message())")
+            failed += 1
+        }
+    }
+    io.print("math: \(results.len() - failed) passed, \(failed) failed")
+}
