@@ -365,6 +365,10 @@ pub fn escaping_operands(stmt: &mir::Inst) -> Vec<&mir::Operand> {
         | R::SliceGet { .. }
         | R::SliceRange { .. }
         | R::Await { .. }
-        | R::Yield => Vec::new(),
+        | R::Yield
+        // A flag, and a frame's field read back: neither keeps the frame,
+        // and the flag is a bool.
+        | R::Owned { .. }
+        | R::Unspill { .. } => Vec::new(),
     }
 }

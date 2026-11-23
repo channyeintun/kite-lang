@@ -2743,9 +2743,9 @@ fn appended<T>(xs: [T], v: T) -> [T] {
     return ys
 }
 
-// Every local is spilled into the task's frame at a suspension and read back
-// after it, so after `yield` the slice is one read out of the frame, which the
-// first push must copy rather than write into.
+// Every local is moved into the task's frame at a suspension and back out
+// after it, its owned flag with it — and `seen` shares the slice, so the first
+// push after `yield` must copy rather than write into it.
 async fn gather(n: int) -> [int] {
     var xs: [int] = []
     for i in 0..n {
@@ -2941,6 +2941,93 @@ fn main() {
     io.print("\(both.len()) \(both.code_at(300)) \(both.slice(299, 302))")
     let cut = mixed.slice(1, 200) + ascii.slice(0, 64)
     io.print("\(cut.len()) \(cut.code_at(198)) \(cut.code_at(199)) \(digest(cut))")
+}
+"#,
+    ),
+    // A suspension moves every local into the task's frame and back out, and
+    // a slice or map brings its owned flag with it: the frame held a second
+    // reference to every resumed slice, so each `push` after an `await` or a
+    // `yield` copied the whole of it, and accumulating across suspensions was
+    // quadratic on every backend. What shares the slice before the
+    // suspension — `kept`, `snap`, `mk` — still does after it, and the first
+    // write copies.
+    (
+        "slices-and-maps-move-across-a-suspension",
+        r#"fn show(xs: [int]) -> str {
+    return "[" + join_ints(xs, ",") + "]"
+}
+
+fn showm(m: { str: int }) -> str {
+    var out = "{"
+    for k in m.keys() {
+        out = out + k + "=\(or_else(m[k], 0));"
+    }
+    return out + "}"
+}
+
+async fn one(i: int) -> int {
+    task.yield()
+    return i
+}
+
+async fn grow(var xs: [int]) -> [int] {
+    xs.push(await one(9))
+    return xs
+}
+
+pub async fn main() {
+    var xs: [int] = [1, 2]
+    let kept = xs
+    task.yield()
+    xs.push(3)
+    task.yield()
+    let after = xs
+    xs.push(await one(4))
+    xs[0] = 10
+    io.print("\(show(kept)) \(show(after)) \(show(xs))")
+    var m: { str: int } = { "a": 1 }
+    let mk = m
+    task.yield()
+    m["b"] = 2
+    let mk2 = m
+    task.yield()
+    m.remove("a")
+    io.print("\(showm(mk)) \(showm(mk2)) \(showm(m))")
+    var ys: [int] = []
+    for i in 0..5 {
+        ys.push(await one(i))
+        if i == 2 {
+            let snap = ys
+            task.yield()
+            ys.push(100)
+            io.print("\(show(snap)) \(show(ys))")
+        }
+    }
+    let base: [int] = [7]
+    let g = await grow(base)
+    io.print("\(show(base)) \(show(g))")
+    var s = "a"
+    for i in 0..3 {
+        s = s + "b"
+        task.yield()
+    }
+    io.print(s)
+    // Enough pushes and writes across suspensions to grow many times and to
+    // fill a small nursery, each written in place.
+    var big: [str] = []
+    var counts: { int: int } = { }
+    for i in 0..3000 {
+        big.push("item \(i)")
+        counts[i % 17] = or_else(counts[i % 17], 0) + 1
+        if i % 3 == 0 {
+            task.yield()
+        } else {
+            big[i - 1] = big[i - 1] + "!"
+            let got = await one(i)
+            counts[got % 5] = or_else(counts[got % 5], 0) + 1
+        }
+    }
+    io.print("\(big.len()) \(big[0]) \(big[1]) \(big[2999]) \(counts.len()) \(or_else(counts[3], 0))")
 }
 "#,
     ),
@@ -4338,6 +4425,7 @@ fn slices_agree_natively_with_a_page_of_nursery() {
         "slices-grow-in-place-natively",
         "strings-index-by-character",
         "maps-are-indexed-and-keep-their-order",
+        "slices-and-maps-move-across-a-suspension",
     ] {
         let (_, src) = WASM_TARGET
             .iter()

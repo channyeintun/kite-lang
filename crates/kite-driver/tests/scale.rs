@@ -305,3 +305,25 @@ fn main() {
 "#;
     agrees_within("map-deep-keys", src, "199990000 20000\n", Duration::from_secs(20), false);
 }
+
+/// A slice or a map grown across suspensions is written in place, as it is
+/// outside `async`. The task's frame kept its own reference to every local it
+/// had spilled, so each one came back from a suspension looking shared and
+/// its next write copied it whole: a hundred thousand pushes, each after a
+/// `yield`, took about twenty seconds on the VM and eight on Wasm, released,
+/// and `out.push(await t)` — `task.all` — cost the same. A suspension moves
+/// the locals into the frame and back out now, owned flags and all. Maps are
+/// timed without Wasm, as the map test above is.
+#[test]
+fn a_slice_or_a_map_grown_across_suspensions_is_written_in_place() {
+    let slices = "async fn one(i: int) -> int {\n  return i\n}\n\n\
+                  pub async fn main() {\n  var out: [int] = []\n  for i in 0..100000 {\n\
+                  \x20   out.push(i)\n    task.yield()\n  }\n  var got: [int] = []\n\
+                  \x20 for i in 0..100000 {\n    got.push(await one(i))\n    got[i] = got[i] + 1\n  }\n\
+                  \x20 io.print(\"\\(out.len()) \\(out[99999]) \\(got.len()) \\(got[99999])\")\n}\n";
+    agrees_within("push-across-yield", slices, "100000 99999 100000 100000\n", Duration::from_secs(20), true);
+    let maps = "pub async fn main() {\n  var m: {int: int} = {}\n  for i in 0..50000 {\n\
+                \x20   m[i] = i\n    task.yield()\n  }\n  for i in 0..25000 {\n\
+                \x20   m.remove(i)\n    task.yield()\n  }\n  io.print(\"\\(m.len()) \\(or_else(m[49999], -1))\")\n}\n";
+    agrees_within("map-across-yield", maps, "25000 49999\n", Duration::from_secs(20), false);
+}

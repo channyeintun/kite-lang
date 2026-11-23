@@ -247,6 +247,18 @@ impl<'a> Emitter<'a> {
             // embedder that skipped the question gets a trap here, not a
             // compiler that panics.
             mir::Rvalue::Await { .. } | mir::Rvalue::Yield => self.code.push(Op::Unreachable),
+            // The VM's sharing is `Rc`'s count, so it keeps no flag: the answer
+            // is never read here except by `Unspill`, which ignores it.
+            mir::Rvalue::Owned { .. } => self.code.push(Op::LoadBool { dst, value: false }),
+            // Read the field and empty it, so the local is the one count left
+            // and its next `push` goes straight in. Nothing reads the field
+            // again before the next spill writes it.
+            mir::Rvalue::Unspill { base, index, .. } => {
+                let obj = self.operand_reg(base, 0);
+                self.code.push(Op::GetField { dst, obj, index: *index as u16 });
+                let empty = self.operand_reg(&mir::Operand::Unit, 1);
+                self.code.push(Op::SetField { obj, index: *index as u16, src: empty });
+            }
             mir::Rvalue::Use(o) => self.load_into(dst, o),
 
             mir::Rvalue::Binary { op, lhs, rhs } => {

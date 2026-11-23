@@ -2758,8 +2758,14 @@ impl<'a> Emitter<'a> {
                     func.instruction(&Instruction::LocalSet(self.slots[dst.index()]));
                 }
                 // A slice made here is the destination's alone; one read from
-                // anywhere else may be shared with where it came from.
+                // anywhere else may be shared with where it came from — unless
+                // it is a spilled local coming back, which brings its flag.
                 if let Some(&flag) = self.owned.get(&dst.0) {
+                    if let mir::Rvalue::Unspill { owned, .. } = value {
+                        self.operand(func, owned);
+                        func.instruction(&Instruction::LocalSet(flag));
+                        return;
+                    }
                     let fresh = matches!(
                         value,
                         mir::Rvalue::SliceNew { .. }
@@ -3268,7 +3274,10 @@ impl<'a> Emitter<'a> {
                 return true;
             }
 
-            mir::Rvalue::FieldGet { base, index } => {
+            // The frame keeps a resumed local's reference until the next
+            // spill overwrites it, which costs nothing here: there is no
+            // count for a second holder to spoil. `stmt` sets the flag.
+            mir::Rvalue::FieldGet { base, index } | mir::Rvalue::Unspill { base, index, .. } => {
                 let Some((record, shift)) = self.record_of(base) else {
                     func.instruction(&Instruction::Unreachable);
                     return true;
@@ -3838,6 +3847,17 @@ impl<'a> Emitter<'a> {
             mir::Rvalue::Await { .. } | mir::Rvalue::Yield => {
                 func.instruction(&Instruction::Unreachable);
                 return false;
+            }
+            mir::Rvalue::Owned { value } => {
+                match value {
+                    mir::Operand::Local(l) if self.owned.contains_key(&l.0) => {
+                        func.instruction(&Instruction::LocalGet(self.owned[&l.0]));
+                    }
+                    _ => {
+                        func.instruction(&Instruction::I32Const(0));
+                    }
+                }
+                return true;
             } // Every MIR rvalue is handled: there is deliberately no catch-all
               // here, so adding one to MIR fails to compile rather than silently
               // producing a module that traps.

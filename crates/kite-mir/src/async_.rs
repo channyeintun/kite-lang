@@ -22,6 +22,15 @@
 //! live across a given suspension is a dataflow question worth answering
 //! later; answering it wrongly is a miscompile, and this cannot be wrong.
 //!
+//! A spill is a *move*, not a copy: the poll that spilled a local returns, so
+//! the frame is left the one holder, and the reload hands it back. That
+//! matters for a slice or map the body writes into, because a write goes
+//! straight into one only while nothing else can see it. So such a local's
+//! owned flag is spilled beside it, and comes back with it
+//! ([`Rvalue::Owned`], [`Rvalue::Unspill`]). Without that, a loop that
+//! pushes across an `await` or a `yield` copied the whole slice on every
+//! push: the resumed local always looked shared with its own frame.
+//!
 //! The [stack-switching proposal](https://github.com/WebAssembly/stack-switching)
 //! would let a suspension keep a real stack and delete all of this. Kite's
 //! semantics are compatible with either lowering, so adopting it later is a
@@ -86,7 +95,8 @@ fn build(func: &mut Function, resume_id: FnId, types: &mut Types) -> Function {
     let span = func.span;
     let task_struct = types.task_of(func.ret, span);
     let task_ty = types.struct_ty(task_struct);
-    let frame_struct = declare_frame(func, task_ty, types);
+    let flagged = written(func);
+    let frame_struct = declare_frame(func, &flagged, task_ty, types);
     let frame_ty = types.struct_ty(frame_struct);
     let poll_ty = types.fn_of(Vec::new(), TyId::BOOL);
 
@@ -97,6 +107,7 @@ fn build(func: &mut Function, resume_id: FnId, types: &mut Types) -> Function {
         format!("{}$resume", func.name),
         body,
         &body_locals,
+        &flagged,
         frame_ty,
         frame_struct,
         task_ty,
@@ -108,6 +119,7 @@ fn build(func: &mut Function, resume_id: FnId, types: &mut Types) -> Function {
         func,
         resume_id,
         &body_locals,
+        flagged.len(),
         frame_struct,
         task_struct,
         frame_ty,
@@ -119,8 +131,33 @@ fn build(func: &mut Function, resume_id: FnId, types: &mut Types) -> Function {
     resume
 }
 
+/// The locals the body writes into in place — pushes onto, assigns an element
+/// or a key of, removes a key from: the ones a backend keeps an owned flag
+/// for, and so the ones whose flag the frame keeps too. The same rule as the
+/// native backend's `slices::written`.
+fn written(func: &Function) -> Vec<usize> {
+    let mut out: Vec<usize> = Vec::new();
+    for b in &func.blocks {
+        for s in &b.stmts {
+            let target = match s {
+                Inst::SlicePush { local, .. }
+                | Inst::MapSet { local, .. }
+                | Inst::MapRemove { local, .. }
+                | Inst::SetIndex { base: Operand::Local(local), .. } => local.index(),
+                _ => continue,
+            };
+            if !out.contains(&target) {
+                out.push(target);
+            }
+        }
+    }
+    out
+}
+
 /// The frame: where the state machine keeps everything across a suspension.
-fn declare_frame(func: &Function, task_ty: TyId, types: &mut Types) -> StructId {
+/// After the locals comes one `bool` per flagged local, in `flagged`'s order:
+/// its owned flag as it was spilled.
+fn declare_frame(func: &Function, flagged: &[usize], task_ty: TyId, types: &mut Types) -> StructId {
     let span = func.span;
     let id = types.declare_struct(format!("{}$frame", func.name), false, span);
     let mut fields = vec![
@@ -131,6 +168,15 @@ fn declare_frame(func: &Function, task_ty: TyId, types: &mut Types) -> StructId 
         fields.push(FieldDef {
             name: format!("${}", i),
             ty: l.ty,
+            mutable: true,
+            is_pub: false,
+            span,
+        });
+    }
+    for l in flagged {
+        fields.push(FieldDef {
+            name: format!("$owned{}", l),
+            ty: TyId::BOOL,
             mutable: true,
             is_pub: false,
             span,
@@ -150,6 +196,7 @@ fn starter(
     old: &Function,
     resume_id: FnId,
     body_locals: &[LocalDecl],
+    flag_count: usize,
     frame_struct: StructId,
     task_struct: StructId,
     frame_ty: TyId,
@@ -193,6 +240,8 @@ fn starter(
             Operand::Default(l.ty)
         });
     }
+    // A parameter's slice is the caller's too, so no flag starts set.
+    frame_init.extend(std::iter::repeat_n(Operand::Bool(false), flag_count));
     stmts.push(Inst::Assign {
         dst: frame,
         value: Rvalue::StructNew { struct_id: frame_struct, fields: frame_init },
@@ -234,6 +283,7 @@ fn resume_function(
     name: String,
     body: Vec<BasicBlock>,
     body_locals: &[LocalDecl],
+    flagged: &[usize],
     frame_ty: TyId,
     frame_struct: StructId,
     task_ty: TyId,
@@ -247,6 +297,8 @@ fn resume_function(
     let local_count = body_locals.len();
     let task = Local(locals.len() as u32);
     locals.push(LocalDecl { ty: task_ty, name: Some("task".into()) });
+    let owned = Local(locals.len() as u32);
+    locals.push(LocalDecl { ty: TyId::BOOL, name: None });
     let value_ty = types
         .task_payload(task_ty)
         .expect("a resume function's task type is a task");
@@ -267,6 +319,8 @@ fn resume_function(
         locals,
         starts,
         local_count,
+        flagged: flagged.to_vec(),
+        owned,
         task,
         resume_points: Vec::new(),
         value_ty,
@@ -297,6 +351,11 @@ struct Builder<'a> {
     starts: Vec<u32>,
     /// How many locals came from the original body.
     local_count: usize,
+    /// The original locals whose owned flag the frame keeps, by index; the
+    /// `j`th one's flag is field `FIRST_LOCAL + local_count + j`.
+    flagged: Vec<usize>,
+    /// Where a flag passes through between the frame and its local.
+    owned: Local,
     task: Local,
     /// The landing block for each state, in state order. State 0 is the entry.
     resume_points: Vec<BlockId>,
@@ -311,8 +370,25 @@ impl Builder<'_> {
         Operand::Local(Local(0))
     }
 
-    /// Copy every local into the frame, immediately before a suspension.
+    fn flag_field(&self, j: usize) -> u32 {
+        FIRST_LOCAL + (self.local_count + j) as u32
+    }
+
+    /// Move every local into the frame, immediately before a suspension. The
+    /// flags go first: storing a local is a read that could keep it, so a
+    /// backend clears its flag there.
     fn spill(&self, stmts: &mut Vec<Inst>) {
+        for (j, &i) in self.flagged.iter().enumerate() {
+            stmts.push(Inst::Assign {
+                dst: self.owned,
+                value: Rvalue::Owned { value: Operand::Local(Local(i as u32 + 1)) },
+            });
+            stmts.push(Inst::SetField {
+                base: self.frame(),
+                index: self.flag_field(j),
+                value: Operand::Local(self.owned),
+            });
+        }
         for i in 0..self.local_count {
             stmts.push(Inst::SetField {
                 base: self.frame(),
@@ -322,12 +398,22 @@ impl Builder<'_> {
         }
     }
 
+    /// Move every local back out, once per poll, on entry. A flagged local
+    /// takes its flag back with it, and the frame may be left without it.
     fn reload(&self, stmts: &mut Vec<Inst>) {
         for i in 0..self.local_count {
-            stmts.push(Inst::Assign {
-                dst: Local(i as u32 + 1),
-                value: Rvalue::FieldGet { base: self.frame(), index: FIRST_LOCAL + i as u32 },
-            });
+            let index = FIRST_LOCAL + i as u32;
+            let value = match self.flagged.iter().position(|&l| l == i) {
+                Some(j) => {
+                    stmts.push(Inst::Assign {
+                        dst: self.owned,
+                        value: Rvalue::FieldGet { base: self.frame(), index: self.flag_field(j) },
+                    });
+                    Rvalue::Unspill { base: self.frame(), index, owned: Operand::Local(self.owned) }
+                }
+                None => Rvalue::FieldGet { base: self.frame(), index },
+            };
+            stmts.push(Inst::Assign { dst: Local(i as u32 + 1), value });
         }
     }
 
@@ -408,10 +494,10 @@ impl Builder<'_> {
                         stmts: suspend_stmts,
                         term: Terminator::Return(Some(Operand::Bool(false))),
                     };
-                    let mut land = Vec::new();
-                    self.reload(&mut land);
+                    // The entry has already reloaded every local: a landing
+                    // is reached only from the dispatch that follows it.
                     self.blocks[landing.index()] =
-                        BasicBlock { stmts: land, term: Terminator::Goto(test) };
+                        BasicBlock { stmts: Vec::new(), term: Terminator::Goto(test) };
                     // The value is taken in the segment that follows, on the
                     // one path that proved the task has one.
                     if let Some(d) = dst {
@@ -437,10 +523,8 @@ impl Builder<'_> {
                         BasicBlock { stmts: Vec::new(), term: Terminator::Unreachable };
                     self.blocks[suspend.index()] =
                         BasicBlock { stmts: Vec::new(), term: Terminator::Unreachable };
-                    let mut land = Vec::new();
-                    self.reload(&mut land);
                     self.blocks[landing.index()] =
-                        BasicBlock { stmts: land, term: Terminator::Goto(next) };
+                        BasicBlock { stmts: Vec::new(), term: Terminator::Goto(next) };
                 }
             }
             segment += 1;
@@ -606,6 +690,11 @@ impl Builder<'_> {
                 // Both are replaced above rather than shifted.
                 Rvalue::Await { task } => Rvalue::Await { task: shift(task) },
                 Rvalue::Yield => Rvalue::Yield,
+                // Made by this pass, after the shift.
+                Rvalue::Owned { value } => Rvalue::Owned { value: shift(value) },
+                Rvalue::Unspill { base, index, owned } => {
+                    Rvalue::Unspill { base: shift(base), index, owned: shift(owned) }
+                }
             }
         };
         match inst {
@@ -654,8 +743,9 @@ impl Builder<'_> {
             dst: state,
             value: Rvalue::FieldGet { base: self.frame(), index: STATE },
         }];
-        // The entry reloads too: on the first poll the parameters are in the
-        // frame and nowhere else.
+        // The entry is the one place that reloads: on the first poll the
+        // parameters are in the frame and nowhere else, and on every later
+        // one each landing is reached from here.
         self.reload(&mut stmts);
 
         // Assembled backwards, so each test's else-branch is the chain built
