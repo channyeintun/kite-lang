@@ -587,6 +587,12 @@ impl Formatter<'_> {
         if kind == T::RBrace && prev == T::DotDot {
             return true;
         }
+        // `use ../one/a` does not parse (a path is a name, not written from
+        // the file), and is laid out from its tokens: as written, not glued
+        // into `use../ one / a`.
+        if prev == T::Use {
+            return true;
+        }
         if matches!(kind, T::Comma | T::Colon | T::Dot | T::DotDot | T::DotDotEq) {
             return false;
         }

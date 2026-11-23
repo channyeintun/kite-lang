@@ -120,10 +120,10 @@ fn string_end(bytes: &[u8], at: usize) -> Option<usize> {
         match (bytes[i], bytes.get(i + 1)) {
             (b'"', _) if !block => return Some(i),
             (b'\\', Some(b'(')) => i = matching_paren(bytes, i + 1)? + 1,
-            // The lexer ends a block string at the first `"""` after
-            // anything but a hole, an escaped `\\` included, so this does.
-            (b'\\', Some(b'\\')) => i += 2,
-            (b'\\', _) if !block => i += 2,
+            // The lexer ends a block string at the first `"""` that is not
+            // in a hole and does not begin with an escaped `\"`, and steps
+            // over an escaped `\\` whole, so this does.
+            (b'\\', Some(_)) => i += 2,
             _ => i += 1,
         }
     }
@@ -313,6 +313,14 @@ struct Parser<'a> {
     /// Whether a ceiling has already been reported, so one pathological file
     /// yields one diagnostic rather than one per level on the way out.
     depth_reported: bool,
+    /// Where the string literals the lexer reported unterminated start (its
+    /// `E0001`), and whether one of them is a block string, which read the
+    /// rest of the file as its text. Both are the lexer's knowledge, not a
+    /// guess from the text: what such a string swallowed — a `)` at the end
+    /// of its line, every closer to the end of the file — is that one
+    /// mistake, and the parser does not report it missing a second time.
+    unterminated: std::rc::Rc<[u32]>,
+    swallowed_the_rest: bool,
 }
 
 /// How deep recursive descent may go before it gives up.
@@ -384,7 +392,22 @@ impl<'a> Parser<'a> {
         let breaks = src.bytes().enumerate().filter(|(_, b)| *b == b'\n');
         let line_starts: Vec<u32> =
             std::iter::once(0).chain(breaks.map(|(i, _)| i as u32 + 1)).collect();
-        Parser::with_lines(file, src, tokens, diags, line_starts.into())
+        let mut unterminated = Vec::new();
+        let mut swallowed_the_rest = false;
+        for d in diags.iter().filter(|d| d.code == Some(codes::E0001)) {
+            let Some(at) = d.labels.first().map(|l| l.span).filter(|s| s.file == file) else {
+                continue;
+            };
+            let rest = &src.as_bytes()[(at.start as usize).min(src.len())..];
+            if rest.starts_with(b"\"") {
+                unterminated.push(at.start);
+                swallowed_the_rest |= rest.starts_with(b"\"\"\"");
+            }
+        }
+        let mut parser = Parser::with_lines(file, src, tokens, diags, line_starts.into());
+        parser.unterminated = unterminated.into();
+        parser.swallowed_the_rest = swallowed_the_rest;
+        parser
     }
 
     /// A parser over `tokens`, sharing a table of where the file's lines
@@ -422,6 +445,8 @@ impl<'a> Parser<'a> {
             depth: 0,
             chain: 0,
             depth_reported: false,
+            unterminated: std::rc::Rc::from([]),
+            swallowed_the_rest: false,
         }
     }
 
@@ -716,6 +741,12 @@ impl<'a> Parser<'a> {
         self.panicking = true;
         self.last_error_at = Some(self.pos);
         let found = self.peek();
+        // What an unterminated string swallowed is missing because of it:
+        // the `)` its line ended with, or — for a block string — everything
+        // to the end of the file. The lexer has reported that string.
+        if (found == T::Eof && self.swallowed_the_rest) || self.after_unterminated_string() {
+            return;
+        }
         let span = if found == T::Newline || found == T::Eof {
             // Point at the end of the previous token rather than at an
             // invisible one, so the caret lands where the fix goes.
@@ -1097,13 +1128,13 @@ impl<'a> Parser<'a> {
         true
     }
 
-    /// Whether the last token of the file is a `"""` string with no closing
-    /// delimiter — one that ran to the end of the file.
-    fn ends_in_an_open_block_string(&self) -> bool {
-        let last = self.tokens.iter().rev().find(|t| !matches!(t.kind, T::Newline | T::Eof));
-        let Some(last) = last.filter(|t| t.kind == T::Str) else { return false };
-        let text = &self.src[last.span.start as usize..last.span.end as usize];
-        text.starts_with("\"\"\"") && !(text.len() >= 6 && text.ends_with("\"\"\""))
+    /// Whether the token just consumed is a string literal the lexer
+    /// reported unterminated.
+    fn after_unterminated_string(&self) -> bool {
+        self.pos > 0
+            && self.split.is_none()
+            && self.tokens[self.pos - 1].kind == T::Str
+            && self.unterminated.contains(&self.tokens[self.pos - 1].span.start)
     }
 
     /// Report that `open` was never closed, and start unwinding.
@@ -1134,7 +1165,7 @@ impl<'a> Parser<'a> {
         // A block string that is never closed read the rest of the file, the
         // closing braces with it, and the lexer has said so. The braces are
         // that one mistake, not a second.
-        if declaration.is_none() && !self.in_hole && self.ends_in_an_open_block_string() {
+        if declaration.is_none() && !self.in_hole && self.swallowed_the_rest {
             return;
         }
         let mut d = Diagnostic::error(codes::E0101, "unclosed delimiter").with_primary(
@@ -1224,6 +1255,7 @@ impl<'a> Parser<'a> {
             self.note_unparsed(before, reported);
         }
 
+        let mut first_declaration = None;
         while !self.at_end() {
             self.skip_newlines();
             if self.at_end() {
@@ -1237,6 +1269,16 @@ impl<'a> Parser<'a> {
             self.refused_to_close = false;
             self.panicking = false;
             let before = self.pos;
+            if self.at(T::Use) || self.at_pub_use() {
+                let reported = self.diags.len();
+                if let Some(u) = self.parse_late_use(first_declaration) {
+                    file.uses.push(u);
+                }
+                self.skip_newlines();
+                self.note_unparsed(before, reported);
+                continue;
+            }
+            first_declaration.get_or_insert(self.span());
             let saved = self.checkpoint();
             let mut item = self.parse_item();
             if std::mem::take(&mut self.rewind) {
@@ -1342,9 +1384,42 @@ impl<'a> Parser<'a> {
         u
     }
 
+    /// A `use` below a declaration. The imports of a file come first
+    /// (§13.1), so it is refused — once, at the `use`, where it was two
+    /// `expected a declaration` errors, one for each word — and then
+    /// recorded as the import it is, so the names it brings in are not
+    /// reported missing as well. A late `pub use` has one error too: the
+    /// `pub` one, which says both things.
+    fn parse_late_use(&mut self, first: Option<Span>) -> Option<Use> {
+        let at = self.span();
+        let is_pub = self.at_pub_use();
+        let reported = self.diags.len();
+        let u = self.parse_maybe_pub_use();
+        let first = first.unwrap_or(at);
+        if is_pub {
+            if let Some(d) = self.diags.get_mut(reported) {
+                d.notes.push("a `use` also goes above the file's declarations".to_string());
+            }
+        } else if self.diags.len() == reported {
+            self.diags.push(
+                Diagnostic::error(codes::E0100, "a `use` goes above the file's declarations")
+                    .with_primary(at, "this `use` follows a declaration")
+                    .with_secondary(first, "the first declaration is here")
+                    .with_note(
+                        "a file's imports come before anything it declares; move this line \
+                         above the first declaration",
+                    ),
+            );
+        }
+        u
+    }
+
     fn parse_use(&mut self) -> Option<Use> {
         let start = self.span();
         self.bump(); // `use`
+        if matches!(self.peek(), T::DotDot | T::Dot | T::Slash) {
+            return self.relative_use(start);
+        }
         let mut path = vec![self.ident()?];
         while self.eat(T::Slash) {
             path.push(self.ident()?);
@@ -1353,6 +1428,68 @@ impl<'a> Parser<'a> {
         let span = start.to(self.prev_span());
         self.expect_terminator();
         Some(Use { path, alias, span })
+    }
+
+    /// `use ../one/a`, `use ./a` or `use /a`: a path written from this file.
+    /// A `use` path is a name, looked for beside the module and then in each
+    /// directory around it up to the package's root (§13.1), so the `..` is
+    /// what goes. Refused once at the lead, and recorded as the path without
+    /// it — what the note says to write — so the names it brings in are not
+    /// reported missing too. It was two errors for the one `..`, and then a
+    /// third for the module.
+    fn relative_use(&mut self, start: Span) -> Option<Use> {
+        let lead = self.span();
+        let lead_text = self.text(lead).to_string();
+        let mut path = Vec::new();
+        // The path ends with its line, which is not always a line break
+        // token: after the `/` of `use ../one/` the lexer joins the next
+        // line on, and reading to a token took the next declaration's names
+        // into the path — and then its body was read as declarations.
+        let ends = |p: &Self| {
+            matches!(p.peek(), T::Newline | T::Eof) || p.starts_line(p.pos) || p.at(T::As)
+        };
+        self.bump(); // the lead
+        while !ends(self) {
+            if self.at(T::Ident) {
+                path.push(self.ident()?);
+            } else {
+                self.bump();
+            }
+        }
+        let alias = if !self.starts_line(self.pos) && self.eat(T::As) && self.at(T::Ident) {
+            Some(self.ident()?)
+        } else {
+            None
+        };
+        let span = start.to(self.prev_span());
+        let written = self.text(Span::new(self.file, lead.start, span.end)).to_string();
+        let names: Vec<&str> = path.iter().map(|s| s.name.as_str()).collect();
+        let mut d = Diagnostic::error(
+            codes::E0100,
+            format!("a `use` path does not start with `{}`", lead_text),
+        )
+        .with_primary(lead, "a path is not written from this file");
+        if names.is_empty() {
+            d = d.with_note(
+                "a `use` path is the module's name, looked for beside this module and then in \
+                 each directory around it, up to the package's root",
+            );
+        } else {
+            d = d.with_note(format!(
+                "a `use` path is looked for beside this module and then in each directory around \
+                 it, up to the package's root, so `{}` is written `use {}`; a module outside the \
+                 package cannot be imported",
+                written.split(" as ").next().unwrap_or(&written).trim(),
+                names.join("/"),
+            ));
+        }
+        self.diags.push(d);
+        // At the next line's first token the line has ended, whether or not
+        // a line break token says so.
+        if !self.starts_line(self.pos) {
+            self.expect_terminator();
+        }
+        (!path.is_empty()).then_some(Use { path, alias, span })
     }
 
     fn parse_item(&mut self) -> Option<Item> {
@@ -1364,12 +1501,6 @@ impl<'a> Parser<'a> {
         // amount of Kite could say instead — which is the bar an attribute has
         // to clear.
         let attribute = if self.at(T::At) { Some(self.parse_attribute()?) } else { None };
-        if attribute.is_none() && self.at_pub_use() {
-            // Below the declarations: refused as one, and the rest of the
-            // line read, so it is not reported again a word at a time.
-            self.parse_maybe_pub_use()?;
-            return Some(Item::Error(start));
-        }
         let is_pub = self.eat(T::Pub);
         let async_at = self.span();
         let is_async = self.eat(T::Async);
@@ -1389,7 +1520,14 @@ impl<'a> Parser<'a> {
                             ),
                     );
                 }
-                return self.parse_extern(is_pub, host, start).map(Item::Extern);
+                let mut decl = self.parse_extern(is_pub, host, start)?;
+                // What the call gives back is unknown — a task, or what the
+                // task holds — so it is left unknown, and an `await` of it
+                // is not refused a second time for being an `int`.
+                if is_async {
+                    decl.ret = Some(RetType::Simple(Type::Error(async_at)));
+                }
+                return Some(Item::Extern(decl));
             }
             Some(Attribute::Derive(names)) => names,
             None => Vec::new(),
@@ -1536,40 +1674,84 @@ impl<'a> Parser<'a> {
             self.expect_terminator();
             return;
         }
+        let comma_at = self.pos;
         let comma = self.bump().span;
         if self.unwinding || self.panicking {
             return;
         }
         // Deleting the comma is the whole fix only where a line break or the
-        // closing brace already follows it.
+        // closing brace already follows it. Between two members on one line
+        // the comma and the space after it become the line break, with the
+        // indentation the first of them stands at — removing it alone left
+        // `x: int y: int`, which is a different error, and `kitec fix`
+        // stopped with one left.
         let removable = self.at(T::RBrace) || self.starts_line(self.pos);
+        let edit = if removable {
+            Edit { span: comma, replacement: String::new() }
+        } else {
+            let next = self.span().start;
+            Edit {
+                span: Span::new(self.file, comma.start, next),
+                replacement: format!("\n{}", self.member_indent(comma_at)),
+            }
+        };
+        let message = |removed_only: bool, many: bool| match (removed_only, many) {
+            (true, false) => "remove the comma",
+            (true, true) => "remove the commas",
+            (false, _) => "put each one on a line of its own",
+        };
         if let Some(first) = *commas {
             // One report per declaration, but every comma in it is fixed:
             // `kitec fix` removed one per run and said "applied 1 fix" until
             // the third. The later commas join the first one's fix. The index
             // is checked, since a pass that backtracks truncates the bag.
             if let Some(d) = self.diags.get_mut(first).filter(|d| d.code == Some(codes::E0100)) {
-                match d.fixes.first_mut() {
-                    Some(fix) => {
-                        if removable {
-                            fix.message = "remove the commas".to_string();
-                            fix.edits.push(Edit { span: comma, replacement: String::new() });
-                        }
-                    }
-                    None if removable => d.fixes.push(Fix::replace("remove the comma", comma, "")),
-                    None => {}
+                if let Some(fix) = d.fixes.first_mut() {
+                    fix.edits.push(edit);
+                    let removed_only = fix.edits.iter().all(|e| e.replacement.is_empty());
+                    fix.message = message(removed_only, true).to_string();
                 }
             }
             return;
         }
         *commas = Some(self.diags.len());
-        let mut d = Diagnostic::error(codes::E0100, format!("{} are not separated by commas", what))
-            .with_primary(comma, "remove this comma")
-            .with_note("each one goes on a line of its own, and the line break is the separator");
-        if removable {
-            d = d.with_fix(Fix::replace("remove the comma", comma, ""));
-        }
+        let label = if removable { "remove this comma" } else { "put what follows on a line of its own" };
+        let d = Diagnostic::error(codes::E0100, format!("{} are not separated by commas", what))
+            .with_primary(comma, label)
+            .with_note("each one goes on a line of its own, and the line break is the separator")
+            .with_fix(Fix { message: message(removable, false).to_string(), edits: vec![edit] });
         self.diags.push(d);
+    }
+
+    /// The indentation a member written after the `,` at token `comma` goes
+    /// on its own line with: the column of the first member on that line —
+    /// just after the `{` when the declaration opens on it, so that
+    /// `struct P { x: int, y: int }` puts `y` under `x` — and otherwise the
+    /// line's own indentation, as written.
+    ///
+    /// Found by tokens, not by looking for a `{` in the line's text: a
+    /// member's own type may hold one, `m: {str: int}`, and its brace is not
+    /// where the members start.
+    fn member_indent(&self, comma: usize) -> String {
+        let mut depth = 0u32;
+        let mut first = comma;
+        for i in (0..comma).rev() {
+            match self.tokens[i].kind {
+                T::RBrace | T::RParen | T::RBracket => depth += 1,
+                T::LBrace | T::LParen | T::LBracket if depth == 0 => break,
+                T::LBrace | T::LParen | T::LBracket => depth -= 1,
+                _ => {}
+            }
+            first = i;
+            if depth == 0 && self.starts_line(i) {
+                break;
+            }
+        }
+        let start = (self.tokens[first].span.start as usize).min(self.src.len());
+        self.src[self.line_start(start)..start]
+            .chars()
+            .map(|c| if c == '\t' { '\t' } else { ' ' })
+            .collect()
     }
 
     /// A declaration written where only the members of something else can
@@ -1607,6 +1789,9 @@ impl<'a> Parser<'a> {
             if self.at(T::RBrace) || self.at_end() || self.left_open(&open) {
                 break;
             }
+            if self.at(T::Pub) && self.peek_at(1) == T::Ident {
+                self.refuse_pub_on_variant(&name, is_pub, "a variant");
+            }
             if self.declaration_starts_line() {
                 self.misplaced_declaration(
                     "a variant",
@@ -1616,7 +1801,7 @@ impl<'a> Parser<'a> {
             }
             self.member(&mut open);
             let before = self.pos;
-            match self.parse_variant(&mut commas) {
+            match self.parse_variant(&mut commas, &name, is_pub) {
                 Some(v) => variants.push(v),
                 None => self.skip_rest(before, Resume::Line),
             }
@@ -1628,7 +1813,45 @@ impl<'a> Parser<'a> {
         Some(EnumDecl { is_pub, name, generics, variants, derives, span: start.to(end) })
     }
 
-    fn parse_variant(&mut self, commas: &mut Option<usize>) -> Option<VariantDecl> {
+    /// `pub` before a variant, or before a field of its payload: refused
+    /// once, with the reason (§4.3), and then read past, so the variant is
+    /// still declared and nothing that uses it is reported as well. It was
+    /// `expected a variant, found pub`, which says what was not written
+    /// rather than why this cannot be.
+    fn refuse_pub_on_variant(&mut self, enum_name: &Ident, enum_is_pub: bool, what: &str) {
+        let at = self.span();
+        let next = self.tokens.get(self.pos + 1).map_or(at, |t| t.span);
+        let note = if enum_is_pub {
+            format!("`{}` is `pub`, so its variants are visible wherever it is", enum_name.name)
+        } else {
+            format!("to make the variants visible outside this module, mark `{}` `pub`", enum_name.name)
+        };
+        self.diags.push(
+            Diagnostic::error(codes::E0100, format!("{} cannot be marked `pub`", what))
+                .with_primary(
+                    at,
+                    if what == "a variant" {
+                        "a variant is exactly as visible as its enum"
+                    } else {
+                        "a variant's fields are exactly as visible as its enum"
+                    },
+                )
+                .with_note(note)
+                .with_fix(Fix::replace(
+                    "remove `pub`",
+                    Span::new(self.file, at.start, next.start),
+                    "",
+                )),
+        );
+        self.bump();
+    }
+
+    fn parse_variant(
+        &mut self,
+        commas: &mut Option<usize>,
+        enum_name: &Ident,
+        enum_is_pub: bool,
+    ) -> Option<VariantDecl> {
         let start = self.span();
         let name = self.ident()?;
 
@@ -1636,11 +1859,16 @@ impl<'a> Parser<'a> {
             self.bump();
             self.skip_newlines();
             // `Circle(radius: float)` is named; `Number(float)` positional.
-            // One token of lookahead past the first name decides.
-            let named = self.at(T::Ident) && self.peek_at(1) == T::Colon;
+            // One token of lookahead past the first name decides — past a
+            // `pub`, which is refused.
+            let skip = (self.at(T::Pub) && self.peek_at(1) == T::Ident) as usize;
+            let named = self.peek_at(skip) == T::Ident && self.peek_at(skip + 1) == T::Colon;
             let payload = if named {
                 let mut fields = Vec::new();
                 while !self.at(T::RParen) && !self.at_end() {
+                    if self.at(T::Pub) {
+                        self.refuse_pub_on_variant(enum_name, enum_is_pub, "a variant's field");
+                    }
                     let f_start = self.span();
                     let f_name = self.ident()?;
                     self.expect(T::Colon)?;
@@ -1662,6 +1890,9 @@ impl<'a> Parser<'a> {
             } else {
                 let mut tys = Vec::new();
                 while !self.at(T::RParen) && !self.at_end() {
+                    if self.at(T::Pub) {
+                        self.refuse_pub_on_variant(enum_name, enum_is_pub, "a variant's field");
+                    }
                     tys.push(self.parse_type()?);
                     self.skip_newlines();
                     if !self.eat(T::Comma) {
@@ -1772,8 +2003,18 @@ impl<'a> Parser<'a> {
         } else {
             None
         };
+        // `self a: int` lacks the same comma `a: int b: int` does, and as
+        // certainly: it is supplied, with the fix, and the method is kept —
+        // dropping it made every call of it E0205 as well.
         if self_param.is_some() && !self.at(T::RParen) {
-            self.expect(T::Comma)?;
+            self.skip_newlines();
+            let another = (self.at(T::Ident) && self.peek_at(1) == T::Colon)
+                || (self.at(T::Var) && self.peek_at(1) == T::Ident);
+            if another {
+                self.missing_comma("parameters", true, None);
+            } else if !self.at(T::RParen) {
+                self.expect(T::Comma)?;
+            }
         }
 
         let params = self.parse_params(true)?;
@@ -2202,8 +2443,16 @@ impl<'a> Parser<'a> {
     /// `>` of a type that was never being written. A name after `as` is only
     /// a name; anything else is parsed as a type as usual and left to the
     /// type checker to refuse.
+    ///
+    /// Except where the `<` can only be a type's: `as Option<int>` with
+    /// nothing after its `>` but the end of the line or of a bracket. As
+    /// comparisons that is `a < b >` with no right operand, never a program,
+    /// and it was reported as one — "comparison operators cannot be
+    /// chained", or a missing expression on the next line. Read as the type
+    /// it is, the cast gets the checker's error: `as` converts only between
+    /// `int` and `float`.
     fn parse_cast_target(&mut self) -> Option<Type> {
-        if !self.at(T::Ident) || self.text_at(self.pos) == "dyn" {
+        if !self.at(T::Ident) || self.text_at(self.pos) == "dyn" || self.type_args_end_the_cast() {
             return self.parse_type();
         }
         let start = self.span();
@@ -2213,6 +2462,48 @@ impl<'a> Parser<'a> {
             segments.push(self.ident()?);
         }
         Some(Type::Path(TypePath { segments, args: Vec::new(), span: start.to(self.prev_span()) }))
+    }
+
+    /// Whether the name after `as` is followed by `<`, tokens that can spell
+    /// a type, and the `>` that closes them, and then nothing but a line
+    /// break, a `,` or a closing bracket. Anything else — `as int < n`,
+    /// `as int < a && b > c`, `as int < n >> 1` — stays a comparison.
+    fn type_args_end_the_cast(&self) -> bool {
+        let kind = |i: usize| self.tokens.get(i).map_or(T::Eof, |t| t.kind);
+        let mut i = self.pos + 1;
+        while kind(i) == T::Dot && kind(i + 1) == T::Ident {
+            i += 2;
+        }
+        if kind(i) != T::Lt {
+            return false;
+        }
+        let (mut angles, mut brackets) = (0u32, 0u32);
+        loop {
+            match kind(i) {
+                T::Lt => angles += 1,
+                // `>>` closes two lists, never more than are open: one too
+                // many is the shift in `as int < n >> 1`.
+                k @ (T::Gt | T::Shr) => {
+                    let n = if k == T::Shr { 2 } else { 1 };
+                    if n > angles {
+                        return false;
+                    }
+                    angles -= n;
+                    if angles == 0 {
+                        return brackets == 0
+                            && matches!(
+                                kind(i + 1),
+                                T::Newline | T::Eof | T::RParen | T::RBracket | T::RBrace | T::Comma
+                            );
+                    }
+                }
+                T::LParen | T::LBracket | T::LBrace => brackets += 1,
+                T::RParen | T::RBracket | T::RBrace if brackets > 0 => brackets -= 1,
+                T::Ident | T::Dot | T::Comma | T::Colon | T::Fn | T::Arrow => {}
+                _ => return false,
+            }
+            i += 1;
+        }
     }
 
     // ---- blocks and statements -------------------------------------------
@@ -3411,6 +3702,12 @@ impl<'a> Parser<'a> {
             }
             let open_paren = i + 1;
             let Some(close) = matching_paren(bytes, open_paren) else {
+                // A string that never closed — this one, or one in the hole
+                // — took the `)` with it, and the lexer has reported it.
+                let inside = span.start..span.end;
+                if self.unterminated.iter().any(|at| inside.contains(at)) {
+                    return Some(parts);
+                }
                 self.diags.push(
                     kite_diag::Diagnostic::error(
                         kite_diag::codes::E0100,
@@ -3597,6 +3894,8 @@ impl<'a> Parser<'a> {
         sub.depth = self.depth;
         sub.chain = self.chain;
         sub.depth_reported = self.depth_reported;
+        sub.unterminated = self.unterminated.clone();
+        sub.swallowed_the_rest = self.swallowed_the_rest;
         let span = Span::new(self.file, start as u32, end as u32);
         let expr = match sub.parse_expr() {
             Some(e) => e,
@@ -3868,9 +4167,14 @@ impl<'a> Parser<'a> {
                     None
                 };
                 params.push(ClosureParam { name, ty });
-                if !self.eat(T::Comma) {
+                if self.eat(T::Comma) {
+                    continue;
+                }
+                // Between `|x: int` and `y` nothing but a comma can stand.
+                if !self.at(T::Ident) {
                     break;
                 }
+                self.missing_comma("parameters", true, None);
             }
             self.expect(T::Pipe)?;
         }

@@ -1,0 +1,15 @@
+// A file's imports come first (§13.1). A `use` below a declaration is one
+// error at the `use`, and the import is still made, so `math.abs` below is
+// not reported unknown as well. It was an `expected a declaration` for each
+// word, then an E0111 at every use of the name.
+
+fn helper() -> int {
+    return 1
+}
+
+use std/math //~ ERROR E0100
+pub use std/text as t //~ ERROR E0100
+
+fn main() {
+    io.print(math.abs(-2.0) + helper() as float + t.cell_width("ab") as float)
+}

@@ -436,6 +436,18 @@ fn an_out_of_range_integer_is_reported() {
     assert!(c.has("E0004"), "{}", c.render());
 }
 
+/// A literal the lexer refused (`0x`, `0b102`, `0o8`) is not reported again
+/// as out of range: only a literal of valid digits can overflow.
+#[test]
+fn only_a_literal_of_valid_digits_is_out_of_range() {
+    for text in ["99999999999999999999", "0x1FFFFFFFFFFFFFFFFF", "0b1_0000000000000000000000000000000000000000000000000000000000000000"] {
+        assert!(int_overflows(text), "{} should overflow", text);
+    }
+    for text in ["0x", "0b102", "0o8", "0xFG", "42"] {
+        assert!(!int_overflows(text), "{} is not an overflow", text);
+    }
+}
+
 #[test]
 fn string_escapes_are_decoded() {
     let c = ok_body("  let s = \"a\\nb\\tc\\u{41}\"");
@@ -451,6 +463,21 @@ fn string_escapes_are_decoded() {
 fn an_invalid_escape_is_reported() {
     let c = body("  let s = \"a\\qb\"");
     assert!(c.has("E0003"), "{}", c.render());
+}
+
+/// E0003 underlines the escape, not the literal it is in — in a `"` string,
+/// after a hole, in a block string whose indentation comes off, and in a
+/// module constant.
+#[test]
+fn an_invalid_escape_is_underlined_where_it_is_written() {
+    let c = run("let K = \"k \\n \\y\"\nfn main() {\n  let n = 1\n  let a = \"a long prefix \\q and more\"\n  let b = \"\\u{110000} x\"\n  let c = \"\"\"\n    ok \\t\n      then \\z\n    \"\"\"\n  let d = \"x \\(n) é\\w\"\n  let e = \"\\u{41\"\n  io.print(\"\\(K)\\(a)\\(b)\\(c)\\(d)\\(e)\")\n}\n");
+    let spans: Vec<&str> = c
+        .diags
+        .iter()
+        .filter(|d| d.code.map(|c| c.0) == Some("E0003"))
+        .map(|d| c.sources.span_text(d.labels[0].span))
+        .collect();
+    assert_eq!(spans, vec!["\\y", "\\q", "\\u{110000}", "\\z", "\\w", "\\u{"], "{}", c.render());
 }
 
 // ---- cascade suppression --------------------------------------------------
