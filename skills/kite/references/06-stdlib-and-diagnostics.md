@@ -1493,8 +1493,7 @@ entry file's text, and a module's are never read at all.
 
 ```
 $ kitec test proj/src/main.kite          # main calls money.test_double()
-no tests in `proj/src/main.kite`
-note: a test is a `fn test_…() -> (int, error)`, or a ```kite fence in a doc comment
+no tests in `proj/src/main.kite`: a test is a `fn test_…()` taking no arguments, or a ```kite fence in a doc comment
 ```
 
 Pointing `kitec test` at the module file instead recompiles that file alone, so
