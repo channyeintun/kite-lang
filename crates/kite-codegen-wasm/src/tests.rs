@@ -984,9 +984,8 @@ fn error_handling_is_no_longer_an_unsupported_construct() {
 
 // ---- maps -----------------------------------------------------------------
 
-/// A map is a record holding parallel key and value arrays. Lookup is a linear
-/// scan, which is what makes insertion order and first-match-wins obviously
-/// right; a hash index is an optimisation for later.
+/// A map is a record holding parallel key and value arrays in insertion
+/// order, with a hash index beside them once it is not small. See `maps`.
 #[test]
 fn map_reads_validate() {
     valid(
@@ -1000,8 +999,9 @@ fn maps_with_integer_keys_validate() {
     valid("fn main() {\n  let m = {1: \"one\"}\n  let v = m[1]\n  io.print(if v == nil { \"?\" } else { v })\n}\n");
 }
 
-/// A map write builds new arrays and rebinds, which is what gives maps value
-/// semantics. One code path covers replacing a key and appending one.
+/// A map write goes through the map type's `set` helper, which copies a map
+/// the local does not own, and that is what gives maps value semantics. One
+/// code path covers replacing a key and appending one.
 #[test]
 fn map_writes_validate() {
     valid(
@@ -1205,8 +1205,9 @@ fn a_map_write_is_a_call_not_a_loop_in_its_caller() {
 
 /// Constant keys are collapsed as the literal is compiled, at any length and
 /// repeated or not, so no run-time pass is emitted for them; a key read from
-/// a local gets one. The check gave up past 4,096 keys and ran the quadratic
-/// pass on a table of distinct names.
+/// a local gets one — `dedup`, and the helpers it writes the entries with.
+/// The check gave up past 4,096 keys and ran the quadratic pass on a table
+/// of distinct names.
 #[test]
 fn constant_keys_are_collapsed_as_the_literal_is_compiled() {
     let functions = |last: &str| {
@@ -1227,7 +1228,7 @@ fn constant_keys_are_collapsed_as_the_literal_is_compiled() {
     };
     let distinct = functions("\"s5000\": 9");
     assert_eq!(functions("\"s0\": 9"), distinct);
-    assert_eq!(functions("k: 9"), distinct + 1);
+    assert!(functions("k: 9") > distinct);
 }
 
 /// The size of every function body in `bytes`, in order.

@@ -158,6 +158,8 @@ pub struct EqBuilder<'a> {
     /// The comparison's function index.
     pub base: u32,
     pub fns: &'a [EqFn],
+    /// For a map that can have holes, the helper that closes them up.
+    pub maps: &'a maps::MapHelpers,
 }
 
 // Parameters and fixed locals of the comparison.
@@ -498,13 +500,32 @@ impl Case<'_, '_> {
     /// of what a Kite map is — iteration, `keys()` and a derived `hash()` all
     /// observe it — so two maps that differ in it are different values. The
     /// other two backends compare their entry vectors the same way.
+    ///
+    /// A map that can have holes has them closed up first, which changes
+    /// nothing either map's holders can see; then every slot below `len` is
+    /// an entry, in order. See `maps`.
     fn map_body(&self, f: &mut Function, ty: TyId) {
         let Some(ml) = self.layout().map_layout(ty) else {
             f.instruction(&Instruction::Unreachable);
             return;
         };
+        if let Some(pack) = self.builder.maps.pack(ty) {
+            for side in [A, B] {
+                f.instruction(&Instruction::LocalGet(side));
+                f.instruction(&Instruction::RefCastNonNull(HeapType::Concrete(ml.record)));
+                f.instruction(&Instruction::Call(pack));
+            }
+        }
+        let len = |f: &mut Function, side: u32| {
+            f.instruction(&Instruction::LocalGet(side));
+            f.instruction(&Instruction::RefCastNonNull(HeapType::Concrete(ml.record)));
+            f.instruction(&Instruction::StructGet {
+                struct_type_index: ml.record,
+                field_index: maps::LEN,
+            });
+        };
         // Keys in the first two registers, values in the next two.
-        for (field, first) in [(0, self.regs), (1, self.regs + 2)] {
+        for (field, first) in [(maps::KEYS, self.regs), (maps::VALUES, self.regs + 2)] {
             for (side, reg) in [(A, first), (B, first + 1)] {
                 f.instruction(&Instruction::LocalGet(side));
                 f.instruction(&Instruction::RefCastNonNull(HeapType::Concrete(ml.record)));
@@ -515,11 +536,9 @@ impl Case<'_, '_> {
                 f.instruction(&Instruction::LocalSet(reg));
             }
         }
-        f.instruction(&Instruction::LocalGet(self.regs));
-        f.instruction(&Instruction::ArrayLen);
+        len(f, A);
         f.instruction(&Instruction::LocalTee(N));
-        f.instruction(&Instruction::LocalGet(self.regs + 1));
-        f.instruction(&Instruction::ArrayLen);
+        len(f, B);
         f.instruction(&Instruction::I32Ne);
         differ(f);
         self.each(f, |case, f| {

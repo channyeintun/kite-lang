@@ -192,7 +192,8 @@ fn a_long_input_read_between_its_long_pieces_stays_linear() {
 /// inserted and then read back took half a minute on each. Here 100,000
 /// `int` keys are inserted out of order, read back, missed, and removed from
 /// the front — the removal that moved every later entry down — beside
-/// 50,000 `str` keys.
+/// 50,000 `str` keys. On Wasm, where every write also copied the map, this
+/// did not finish in a minute; it takes about a tenth of a second now.
 #[test]
 fn map_inserts_lookups_and_removals_are_constant_time() {
     let src = r#"fn main() {
@@ -222,7 +223,7 @@ fn map_inserts_lookups_and_removals_are_constant_time() {
     io.print("\(s) \(m.len()) \(t.len())")
 }
 "#;
-    agrees_within("map-ops", src, "6250025000 0 50000\n", Duration::from_secs(20), false);
+    agrees_within("map-ops", src, "6250025000 0 50000\n", Duration::from_secs(20), true);
 }
 
 /// A map literal of two hundred thousand entries is built in linear time:
@@ -279,7 +280,8 @@ fn a_large_match_and_a_long_field_chain_are_checked_in_linear_time() {
 /// A key is hashed whole, so keys that differ only far inside still spread
 /// over the buckets. The hash once stopped after 32 values, and 5,000 slice
 /// keys that shared their first 40 elements all landed in one bucket: a scan
-/// again, 18 s on the VM and natively alike.
+/// again, 18 s on the VM and natively alike. Wasm's hash reads every element
+/// of a slice too (13 s there when its maps were scans).
 #[test]
 fn keys_that_differ_only_deep_inside_are_still_hashed_apart() {
     let src = r#"fn key(i: int) -> [int] {
@@ -303,7 +305,7 @@ fn main() {
     io.print("\(s) \(m.len())")
 }
 "#;
-    agrees_within("map-deep-keys", src, "199990000 20000\n", Duration::from_secs(20), false);
+    agrees_within("map-deep-keys", src, "199990000 20000\n", Duration::from_secs(20), true);
 }
 
 /// A slice or a map grown across suspensions is written in place, as it is
@@ -312,8 +314,8 @@ fn main() {
 /// its next write copied it whole: a hundred thousand pushes, each after a
 /// `yield`, took about twenty seconds on the VM and eight on Wasm, released,
 /// and `out.push(await t)` — `task.all` — cost the same. A suspension moves
-/// the locals into the frame and back out now, owned flags and all. Maps are
-/// timed without Wasm, as the map test above is.
+/// the locals into the frame and back out now, owned flags and all — a map's
+/// too, on Wasm since its maps were given an index (15 s there before).
 #[test]
 fn a_slice_or_a_map_grown_across_suspensions_is_written_in_place() {
     let slices = "async fn one(i: int) -> int {\n  return i\n}\n\n\
@@ -327,7 +329,7 @@ fn a_slice_or_a_map_grown_across_suspensions_is_written_in_place() {
     let maps = "pub async fn main() {\n  var m: {int: int} = {}\n  for i in 0..100000 {\n\
                 \x20   m[i] = i\n    task.yield()\n  }\n  for i in 0..50000 {\n\
                 \x20   m.remove(i)\n    task.yield()\n  }\n  io.print(\"\\(m.len()) \\(or_else(m[99999], -1))\")\n}\n";
-    agrees_within("map-across-yield", maps, "50000 99999\n", Duration::from_secs(20), false);
+    agrees_within("map-across-yield", maps, "50000 99999\n", Duration::from_secs(20), true);
 }
 
 /// Writing a slice through a struct field is linear on all three backends:

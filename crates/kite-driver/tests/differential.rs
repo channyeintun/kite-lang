@@ -2693,6 +2693,84 @@ fn main() {
 }
 "#,
     ),
+    // What Wasm's map keeps beside its entries must not show either: a map
+    // past a few entries is indexed, a removal leaves a hole there, and every
+    // reader of the slots — `==`, `keys()`, `values()`, iteration, a copy, a
+    // map used as a key — closes the holes up or skips them; a computed
+    // literal is written entry by entry, and an equal key keeps the stored
+    // one.
+    (
+        "a-map-with-holes-reads-as-its-entries",
+        r#"fn show(m: { int: int }) -> str {
+    var out = "\(m.len()):"
+    for (k, v) in m {
+        out = out + " \(k)=\(v)"
+    }
+    return out
+}
+
+fn main() {
+    // Indexed, then holes: `==` against the same entries packed, and keys()
+    // and values() in order.
+    var m: { int: int } = { }
+    for i in 0..40 {
+        m[i] = i * 10
+    }
+    for i in 0..40 {
+        if i % 3 != 0 {
+            m.remove(i)
+        }
+    }
+    var packed: { int: int } = { }
+    for i in 0..40 {
+        if i % 3 == 0 {
+            packed[i] = i * 10
+        }
+    }
+    io.print("\(m == packed) \(packed == m) \(m.len())")
+    io.print(join_ints(m.keys(), ",") + " | " + join_ints(m.values(), ","))
+    // A copy of a map with holes, then each written: neither sees the other.
+    var c = m
+    c[1] = 1
+    m.remove(0)
+    m[2] = 2
+    io.print(show(c))
+    io.print(show(m))
+    // A map with holes as a key: found by an equal packed one.
+    var outer: { { int: int }: str } = { }
+    outer[m] = "holey"
+    var same: { int: int } = { }
+    for k in m.keys() {
+        same[k] = or_else(m[k], 0)
+    }
+    io.print("\(or_else(outer[same], "missing")) \(outer.len())")
+    // Removed down to nothing past the point of closing up, then refilled.
+    for k in c.keys() {
+        c.remove(k)
+    }
+    for i in 0..30 {
+        c[30 - i] = i
+    }
+    io.print(show(c))
+    // A computed literal naming keys twice: first position, last value.
+    let a = 1
+    let lit = { a: 1, 2: 2, a: 3, 4: 4, 5: 5, 6: 6, 7: 7, 8: 8, 9: 9, 10: 10, a + 1: 20, a + 10: 11 }
+    io.print(show(lit))
+    // A key equal to the stored one keeps the stored one.
+    var f: { float: int } = { }
+    for i in 0..20 {
+        f[i as float] = i
+    }
+    f[0.0 - 0.0] = 100
+    f[0.0] = 200
+    var keys = ""
+    for (k, v) in f {
+        keys = keys + "\(k):\(v) "
+    }
+    io.print(keys)
+}
+"#,
+    ),
 ];
 
 /// Programs pinning down the native target against the other two. Each one is
