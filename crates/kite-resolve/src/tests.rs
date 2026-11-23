@@ -219,3 +219,16 @@ fn every_builtin_module_is_listed() {
         assert!(BUILTIN_MODULES.contains(&head), "`{}` is not in BUILTIN_MODULES", head);
     }
 }
+
+/// A built-in type cannot take an `impl`, and is not "unknown": it is known
+/// everywhere, and the message said there was no such type in this module.
+#[test]
+fn an_impl_for_a_builtin_type_says_what_it_is() {
+    let c = run("trait Named {\n    fn name(self) -> str\n}\n\
+        impl Named for int {\n    fn name(self) -> str {\n        return \"i\"\n    }\n}\n");
+    assert_eq!(c.codes(), vec!["E0204"], "{}", c.render());
+    let text = c.render();
+    assert!(text.contains("`int` is not a struct or an enum"), "{}", text);
+    assert!(text.contains("a built-in type cannot take an `impl`"), "{}", text);
+    assert!(!text.contains("no such type"), "{}", text);
+}

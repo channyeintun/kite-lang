@@ -1116,6 +1116,24 @@ fn collect_functions(file: &SourceFile, map: &mut ResolveMap, diags: &mut DiagBa
                 let target = imp.self_ty.text();
                 let _ = &seen;
                 let Some(written) = map.type_by_name_in(&module, &target) else {
+                    // A built-in type is known everywhere, so "no such type
+                    // in this module" said something false about it.
+                    if matches!(target.as_str(), "int" | "float" | "bool" | "str" | "error" | "JsValue") {
+                        let mut d = Diagnostic::error(
+                            codes::E0204,
+                            format!("`{}` is not a struct or an enum", target),
+                        )
+                        .with_primary(imp.self_ty.span, "a built-in type cannot take an `impl`")
+                        .with_note("to give it methods, wrap it in a struct of its own and implement those");
+                        if matches!(target.as_str(), "int" | "float" | "bool" | "str") {
+                            d = d.with_note(format!(
+                                "as a bound, `{}` already meets `Display`, `Debug` and `Hash`",
+                                target
+                            ));
+                        }
+                        diags.push(d);
+                        continue;
+                    }
                     diags.push(
                         Diagnostic::error(codes::E0204, format!("unknown type `{}`", target))
                             .with_primary(imp.self_ty.span, "no such type in this module")

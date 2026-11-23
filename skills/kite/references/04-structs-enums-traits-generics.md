@@ -947,7 +947,8 @@ fn main() {
 ```
 
 A trait may not be implemented for a primitive — `impl Doubler for int` is
-`E0204`, "an `impl` block needs a type declared in this module".
+`E0204`, "`int` is not a struct or an enum". Wrap it in a struct of your own;
+as a bound, the primitives already meet `Display`, `Debug` and `Hash`.
 
 A type has **one method of each name across all of its `impl` blocks**, trait
 implementations and the defaults they take included. An inherent method and a
