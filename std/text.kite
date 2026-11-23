@@ -3059,11 +3059,15 @@ fn next_cluster(body: str, i: int, end: int) -> int {
             // follows it only from one emoji to another (GB11). It used to
             // take whatever followed, so "a", ZWJ, "中" was one cluster one
             // column wide, and a space after a stray joiner was swallowed.
+            // A joiner that joins nothing still ends no cluster: the marks
+            // and joiners after it attach as well (GB9), but no emoji after
+            // them is joined on, since only marks may stand between an emoji
+            // and the joiner GB11 joins across.
             k += 1
             if emoji && k < end && pictographic(body.code_at(k)) {
                 k += 1
             } else {
-                break
+                emoji = false
             }
         } else if is_combining(c) || within(c, 0x1F3FB, 0x1F3FF) || within(c, 0xE0020, 0xE007F) {
             k += 1
