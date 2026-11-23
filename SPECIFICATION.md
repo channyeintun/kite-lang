@@ -1605,6 +1605,14 @@ shows what actually ran, and a derived method is not privileged over a written
 one. Deriving something a type already implements by hand is an error rather
 than a silent replacement.
 
+So a derived method is exactly as visible as a written one would be: the
+methods of a trait implementation are as visible as the trait (§4.3), and the
+derivable traits are public. Deriving `Decode` is writing a public constructor
+— any module holding a document can build the type, private fields and all —
+and deriving `Encode` or `Debug` publishes every field's value. An opaque type
+(§4.3), whose point is that its fields are its module's own, should not derive
+them.
+
 The walk handles primitives, slices, maps, optionals, tuples, and other types
 that derive the same trait. Where it cannot go — a function field, a `dyn
 Trait`, a type parameter — it says which field stopped it and what would fix
