@@ -4905,6 +4905,22 @@ fn a_race_of_no_tasks_names_the_mistake() {
 /// says the program prints.
 const EXPECTED: &[(&str, &str, &str)] = &[
     (
+        // Writing to a key that is already there changes the value and keeps
+        // the stored key. `-0.0 == 0.0`, so the two keys are one, and Wasm
+        // alone wrote the new key over the old: iterating the map printed
+        // `-0.0` there and `0.0` on the VM and natively.
+        "an-equal-key-keeps-the-stored-one",
+        "fn z() -> float {\n  return -0.0\n}\n\
+         fn main() {\n  var m = {0.0: \"first\"}\n  m[-0.0] = \"second\"\n\
+         \x20 m[1.5] = \"third\"\n  m[1.5] = \"fourth\"\n\
+         \x20 for (k, v) in m {\n    io.print(\"\\(k) -> \\(v)\")\n  }\n  io.print(m.len())\n\
+         \x20 var n = {-0.0: 1}\n  n[0.0] = 2\n\
+         \x20 for (k, v) in n {\n    io.print(\"\\(k) -> \\(v)\")\n  }\n\
+         \x20 let l = {0.0: \"a\", z(): \"b\"}\n\
+         \x20 for (k, v) in l {\n    io.print(\"\\(k) -> \\(v)\")\n  }\n}\n",
+        "0.0 -> second\n1.5 -> fourth\n2\n-0.0 -> 2\n0.0 -> b\n",
+    ),
+    (
         // §4.2 allows an operator applied to constants, and `as` is one
         // (§5.1): a constant's cast folds by the rule the same cast in a body
         // runs by, truncating and saturating.
