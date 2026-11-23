@@ -513,3 +513,24 @@ fn an_inline_table_takes_no_trailing_comma_and_no_repeated_key() {
     let err = parse(&format!("{head}x = {{ path = \"p\", path = \"q\" }}\n")).expect_err("twice");
     assert!(err.message.contains("`path` is written twice"), "{}", err);
 }
+
+/// The reader honours escapes, so the writer has to make them: a path
+/// dependency at `../we\ird` was locked as `"../we\ird"`, and the next
+/// `kitec pkg` could not read the lockfile it had written.
+#[test]
+fn a_source_with_a_backslash_or_a_quote_reads_back() {
+    let entries = vec![Locked {
+        name: "a".into(),
+        version: "1.0.0".into(),
+        source: "../we\\ird \"x\"\tq".into(),
+        hash: "ab".repeat(32),
+    }];
+    let back = parse_lockfile(&lockfile(&entries)).expect("reads");
+    assert_eq!(back, entries);
+}
+
+#[test]
+fn a_unicode_escape_is_hex_digits_only() {
+    let err = parse("[package]\nname = \"a\\u+041\"\n").expect_err("a sign is not a digit");
+    assert!(err.message.contains("\\u+041"), "{}", err);
+}

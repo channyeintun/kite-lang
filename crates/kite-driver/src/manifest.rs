@@ -398,9 +398,13 @@ fn unquote(value: &str, line: usize) -> Result<String, ManifestError> {
             Some(k @ ('u' | 'U')) => {
                 let want = if k == 'u' { 4 } else { 8 };
                 let digits: String = chars.by_ref().take(want).collect();
+                // Hex digits only: `from_str_radix` also takes a sign, and
+                // `\u+041` is not an escape.
                 u32::from_str_radix(&digits, 16)
                     .ok()
-                    .filter(|_| digits.len() == want)
+                    .filter(|_| {
+                        digits.len() == want && digits.chars().all(|d| d.is_ascii_hexdigit())
+                    })
                     .and_then(char::from_u32)
                     .ok_or_else(|| bad_escape(format!("\\{}{}", k, digits)))?
             }
@@ -510,10 +514,31 @@ pub fn lockfile(entries: &[Locked]) -> String {
     );
     for entry in entries {
         out.push_str(&format!(
-            "[[locked]]\nname = \"{}\"\nversion = \"{}\"\nsource = \"{}\"\nhash = \"{}\"\n\n",
-            entry.name, entry.version, entry.source, entry.hash
+            "[[locked]]\nname = {}\nversion = {}\nsource = {}\nhash = {}\n\n",
+            quote(&entry.name),
+            quote(&entry.version),
+            quote(&entry.source),
+            quote(&entry.hash)
         ));
     }
+    out
+}
+
+/// A `"…"` string that `unquote` reads back as `text`. The reader honours
+/// TOML's escapes, so a path written with a `\` or a `"` in it — a source is a
+/// path as the manifest spelled it — has to be escaped on the way out, or the
+/// lockfile `kitec pkg` wrote is one it cannot read.
+fn quote(text: &str) -> String {
+    let mut out = String::from("\"");
+    for c in text.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            c if c.is_control() => out.push_str(&format!("\\u{:04X}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
     out
 }
 
