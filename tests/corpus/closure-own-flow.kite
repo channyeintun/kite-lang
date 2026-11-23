@@ -54,6 +54,13 @@ async fn suspends_nothing() {
     io.print("\(f())")
 }
 
+async fn yields_nothing() {
+    let f = || {
+        task.yield() //~ ERROR E0521
+    }
+    f()
+}
+
 fn untyped_return() {
     let pick = |x: int| match x {
         0 => {

@@ -5178,6 +5178,20 @@ impl<'a> Checker<'a> {
                 if !args.is_empty() {
                     self.arity_error("task.yield", args.len(), 0, span, None);
                 }
+                // A closure is never async, wherever it is written — the same
+                // rule, and the same reason, as for `await` in `await_expr`.
+                if let Some(closure) = self.closure_span {
+                    self.diags.push(
+                        Diagnostic::error(codes::E0521, "`task.yield` inside a closure")
+                            .with_primary(span, "this would suspend the closure")
+                            .with_secondary(closure, "a closure cannot be `async`")
+                            .with_note(
+                                "yield in the enclosing `async fn`, before or after the \
+                                 closure runs",
+                            ),
+                    );
+                    return self.lit(ExprKind::Error, TyId::ERROR, span);
+                }
                 if !self.sigs[self.fn_index].is_async {
                     self.diags.push(
                         Diagnostic::error(codes::E0521, "`task.yield` outside an async function")
