@@ -1518,6 +1518,31 @@ fn a_module_called_prelude_is_refused() {
     assert!(said.contains("E0403"), "{}", said);
 }
 
+/// A module's own constant hides the prelude's function of its name, so
+/// `max(1, 2)` beside `let max = 3` is E0205 — and its note says the
+/// constant hides the prelude's `max` and is what to rename, in the entry
+/// file and in a module alike. It said "drop the `()`", which is no help to
+/// a call that wanted the prelude's function. A constant that hides nothing
+/// keeps that note.
+#[test]
+fn calling_a_constant_that_hides_a_prelude_function_says_so() {
+    let p = Project::new("const-hides-prelude");
+    p.file("util.kite", "let max = 3\n\npub fn top() -> int {\n  return max(1, 2)\n}\n");
+    let main = p.file(
+        "main.kite",
+        "use util\n\nlet min = 1\nlet LIMIT = 4\n\n\
+         fn main() {\n  io.print(util.top() + min(1, 2) + LIMIT())\n}\n",
+    );
+    let said = p.run(&main).expect_err("E0205");
+    assert_eq!(said.matches("E0205").count(), 3, "{}", said);
+    for name in ["max", "min"] {
+        let note = format!("this module's constant `{0}` hides the prelude's function `{0}`", name);
+        assert!(said.contains(&note), "{}", said);
+    }
+    assert_eq!(said.matches("rename the constant").count(), 2, "{}", said);
+    assert_eq!(said.matches("drop the `()`").count(), 1, "{}", said);
+}
+
 /// A module spelled like one the standard library puts in every file is
 /// refused. Only a path's last segment was checked, never the name after
 /// `as`, so `use util as errors` was accepted and one spelling reached two

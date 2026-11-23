@@ -5653,11 +5653,29 @@ impl<'a> Checker<'a> {
             Some(Res::Const(index)) => {
                 let value = self.const_expr(index, p.span);
                 let decl = self.resolved.consts[index as usize].span;
+                // A module's own constant hides the prelude's function of its
+                // name (§4.2), so `max(1, 2)` beside `let max = 100` most
+                // likely meant the prelude's `max`: dropping the `()` is not
+                // the fix then, and the prelude cannot be named any other
+                // way, so the constant's name is what has to change.
+                let written = p.text();
+                let prelude_fn = format!("{}.{}", kite_resolve::PRELUDE, written);
+                let hides = !written.contains('.')
+                    && self.resolved.fns.iter().any(|f| f.owner.is_none() && f.name == prelude_fn);
+                let note = if hides {
+                    format!(
+                        "this module's constant `{0}` hides the prelude's function `{0}`; \
+                         to call that function, rename the constant",
+                        written
+                    )
+                } else {
+                    "a constant is already a value; drop the `()`".to_string()
+                };
                 self.diags.push(
-                    Diagnostic::error(codes::E0205, format!("`{}` is not a function", p.text()))
+                    Diagnostic::error(codes::E0205, format!("`{}` is not a function", written))
                         .with_primary(span, format!("this is {}", self.types.with_article(value.ty)))
                         .with_secondary(decl, "declared as a constant here")
-                        .with_note("a constant is already a value; drop the `()`"),
+                        .with_note(note),
                 );
                 value
             }
