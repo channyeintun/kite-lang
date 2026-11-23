@@ -114,8 +114,20 @@ pub async fn sha512(text: str) -> (str, error) {
 }
 
 /// HMAC-SHA-256 of `text` under `key`.
+///
+/// An empty key is a key (RFC 2104 pads every key with zeros to the block
+/// size), but WebCrypto refuses to import zero bytes. A single zero byte pads
+/// to exactly the same block, so that is what the host is given.
 pub async fn hmac(key: str, text: str) -> (str, error) {
-    return await finish(hmac_start("SHA-256", key, text), "hmac")
+    return await finish(hmac_start("SHA-256", hmac_key(key), text), "hmac")
+}
+
+/// `key`, or the one zero byte that means the same thing when it is empty.
+fn hmac_key(key: str) -> str {
+    if key.len() == 0 {
+        return "\u{0}"
+    }
+    return key
 }
 
 /// Whether two secrets are the same, in time that does not depend on where

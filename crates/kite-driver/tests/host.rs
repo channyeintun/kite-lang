@@ -454,6 +454,35 @@ fn crypto_binds_to_the_hosts_primitives() {
     );
 }
 
+/// RFC 2104 defines an HMAC under an empty key, but WebCrypto refuses to
+/// import zero bytes, so `hmac("", …)` was an error. A one-byte zero key pads
+/// to the same block; the value below is HMAC-SHA-256 of nothing under
+/// nothing, which any implementation gives.
+#[test]
+fn hmac_under_an_empty_key_is_defined() {
+    if !node_available() {
+        eprintln!("skipping: node is not on PATH");
+        return;
+    }
+    let out = run_under_node(
+        "hmac_empty",
+        "use std/crypto\n\
+         async fn main() {\n\
+         \x20 let (h, err) = await crypto.hmac(\"\", \"\")\n\
+         \x20 if err != nil {\n    io.print(err.message())\n    return\n  }\n\
+         \x20 io.print(h)\n\
+         \x20 let (z, zerr) = await crypto.hmac(\"\\u{0}\", \"\")\n\
+         \x20 if zerr != nil { return }\n\
+         \x20 io.print(h == z)\n}\n",
+    );
+    assert_eq!(
+        out,
+        "b613679a0814d9ec772f95d778c35fc5ff1697c493715653c6c712144292c5ad\ntrue\n",
+        "{}",
+        out
+    );
+}
+
 /// Sealed text opens back to the plaintext, and stops opening the moment a
 /// character changes or the key is wrong — an authentication failure is an
 /// error, not a wrong answer. Importing the same hex twice gives keys that
