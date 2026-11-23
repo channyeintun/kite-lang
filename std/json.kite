@@ -904,3 +904,132 @@ pub fn bool_or(value: Option<Json>, key: str, fallback: bool) -> bool {
     }
     return b
 }
+
+/// A field's number, or a fallback. An integer answers too: JSON has one
+/// number type.
+pub fn float_or(value: Option<Json>, key: str, fallback: float) -> float {
+    let n = number_of(field(value, key))
+    if n == nil {
+        return fallback
+    }
+    return n
+}
+
+/// The keys of an object, in the order the document wrote them — and none for
+/// anything that is not an object.
+///
+/// ```kite
+/// let (doc, err) = parse("{\"b\": 1, \"a\": 2}")
+/// if err != nil {
+///     return
+/// }
+/// assert(keys(doc) == ["b", "a"], "in document order")
+/// assert(keys(field(doc, "b")) == [], "a number has none")
+/// ```
+pub fn keys(value: Option<Json>) -> [str] {
+    var out: [str] = []
+    for (key, item) in entries(value) {
+        out.push(key)
+    }
+    return out
+}
+
+/// The value at a dotted path, or nil: `path(doc, "users.0.name")`.
+///
+/// Each segment is a key of an object, or, when the value so far is an array
+/// and the segment is a whole number, an index into it. A key that itself
+/// contains a dot, or that is a number on an object, cannot be named this way;
+/// chain [`field`] and [`at`] for those. An empty path is the value itself.
+///
+/// ```kite
+/// let (doc, err) = parse("{\"users\": [{\"name\": \"ada\"}]}")
+/// if err != nil {
+///     return
+/// }
+/// assert(text(path(doc, "users.0.name")) == "ada", "through an object, an array, an object")
+/// assert(path(doc, "users.1.name") == nil, "past the end")
+/// ```
+pub fn path(value: Option<Json>, dotted: str) -> Option<Json> {
+    var here = value
+    if dotted.len() == 0 {
+        return here
+    }
+    for segment in split(dotted, ".") {
+        if here == nil {
+            return nil
+        }
+        let index = parse_int(segment)
+        let in_array = match here {
+            Array(list) => true,
+            other => false,
+        }
+        if in_array {
+            if index == nil {
+                return nil
+            }
+            here = at(here, index)
+        } else {
+            here = field(here, segment)
+        }
+    }
+    return here
+}
+
+/// The document `input` holds, or `fallback` if it is not one.
+///
+/// For a configuration that is allowed to be missing or damaged. A caller that
+/// needs to say *why* it failed uses [`parse`].
+pub fn parse_or(input: str, fallback: Json) -> Json {
+    let (value, err) = parse(input)
+    if err != nil {
+        return fallback
+    }
+    return value
+}
+
+/// A value as compact JSON with the keys of every object in sorted order,
+/// where [`stringify`] keeps the order they were inserted in.
+///
+/// For output that has to be the same bytes whenever it means the same thing:
+/// a hash, a cache key, a signature, a file under version control. Sorted by
+/// the keys' characters (code points), which is the order `<` gives strings.
+/// Traps past 128 levels, as `stringify` does.
+///
+/// ```kite
+/// let (doc, err) = parse("{\"b\": 1, \"a\": {\"d\": 2, \"c\": 3}}")
+/// if err != nil {
+///     return
+/// }
+/// assert(stringify_sorted(doc) == "{\"a\":{\"c\":3,\"d\":2},\"b\":1}", "sorted at every level")
+/// ```
+pub fn stringify_sorted(value: Json) -> str {
+    require(!too_deep(value, 1), "json: the value is nested deeper than \(max_depth()) levels")
+    return write(sort_keys(value))
+}
+
+fn sort_keys(value: Json) -> Json {
+    return match value {
+        Array(list) => Json.Array(map(list, |item: Json| sort_keys(item))),
+        Object(entries) => sort_object(entries),
+        other => other,
+    }
+}
+
+fn sort_object(entries: { str: Json }) -> Json {
+    var out: { str: Json } = { }
+    for key in sorted(keys_of(entries), |a: str, b: str| a < b) {
+        let held = entries[key]
+        if held != nil {
+            out[key] = sort_keys(held)
+        }
+    }
+    return Json.Object(out)
+}
+
+fn keys_of(entries: { str: Json }) -> [str] {
+    var out: [str] = []
+    for (key, item) in entries {
+        out.push(key)
+    }
+    return out
+}

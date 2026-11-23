@@ -255,6 +255,34 @@ fn checks() -> [error] {
         out.push(test.equal_str(if bad == nil { "parsed" } else { bad.message() }, want, doc))
     }
 
+    // ---- the accessor family ----
+    let shop = parsed("{\"name\": \"kite\", \"price\": 2.5, \"n\": 3, \"tags\": [\"a\", {\"deep\": [10, 20]}], \"0\": \"zero\", \"a.b\": 1}")
+    out.push(test.equal_float(json.float_or(shop, "price", 0.0), 2.5, 0.0, "float_or"))
+    out.push(test.equal_float(json.float_or(shop, "n", 0.0), 3.0, 0.0, "float_or takes an integer"))
+    out.push(test.equal_float(json.float_or(shop, "name", 7.0), 7.0, 0.0, "float_or falls back on a string"))
+    out.push(test.equal_float(json.float_or(shop, "missing", 7.0), 7.0, 0.0, "and on a missing key"))
+    out.push(test.equal_strs(json.keys(shop), ["name", "price", "n", "tags", "0", "a.b"], "keys, in document order"))
+    out.push(test.equal_strs(json.keys(json.field(shop, "n")), [], "a number has no keys"))
+    out.push(test.equal_strs(json.keys(nil), [], "nor has nothing"))
+    out.push(test.equal_str(or_else(json.text(json.path(shop, "name")), "?"), "kite", "path to a key"))
+    out.push(test.equal_int(or_else(json.int_of(json.path(shop, "tags.1.deep.1")), 0), 20, "path through array and object"))
+    out.push(test.equal_str(or_else(json.text(json.path(shop, "tags.0")), "?"), "a", "path to an element"))
+    out.push(test.is_true(json.path(shop, "tags.2") == nil, "past the end of an array"))
+    out.push(test.is_true(json.path(shop, "tags.x") == nil, "a non-number on an array"))
+    out.push(test.is_true(json.path(shop, "name.x") == nil, "a key of a string"))
+    out.push(test.equal_str(or_else(json.text(json.path(shop, "0")), "?"), "zero", "a number is a key on an object"))
+    out.push(test.is_true(json.path(shop, "a.b") == nil, "a dotted key cannot be named"))
+    out.push(test.is_true(json.path(shop, "") == shop, "an empty path is the value"))
+    out.push(test.is_true(json.path(nil, "a") == nil, "nothing in, nothing out"))
+    out.push(test.equal_str(json.stringify(json.parse_or("{\"a\":1}", json.Json.Null)), "{\"a\":1}", "parse_or parses"))
+    out.push(test.equal_str(json.stringify(json.parse_or("{\"a\":", json.Json.Array([]))), "[]", "parse_or falls back"))
+    out.push(test.equal_str(
+            json.stringify_sorted(parsed("{\"b\": [{\"z\": 1, \"y\": 2}], \"a\": {\"d\": 2, \"c\": 3}, \"B\": null}")),
+            "{\"B\":null,\"a\":{\"c\":3,\"d\":2},\"b\":[{\"y\":2,\"z\":1}]}",
+            "stringify_sorted sorts at every level",
+        ))
+    out.push(test.equal_str(json.stringify_sorted(parsed("[3, \"x\", true]")), "[3,\"x\",true]", "and leaves the rest alone"))
+
     // ---- writing stops where reading does ----
     //
     // `stringify` of 2,000 nested arrays ran out of stack on Wasm alone.
