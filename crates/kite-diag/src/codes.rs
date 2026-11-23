@@ -362,7 +362,7 @@ codes! {
          - A call with too many or too few arguments: `f(1, 2, 3)` for `fn f(a: int, b: int)`. The message counts both, and the declaration is the secondary label.\n\
          - A named argument: `f(a: 1, b: 2)`. Write `f(1, 2)`; a struct is the way to name what is passed.\n\
          - A variant given a payload it does not carry (`Shape.Dot(1)`) or a different number of values than it carries; and a variant literal missing a field it names.\n\
-         - A tuple pattern that names a different number of elements than the tuple has.\n\
+         - A tuple pattern in a `match` arm that names a different number of elements than the tuple has. (A `let (a, b) = t` that does not fit its tuple is `E0200`, `expected 3 bindings, found 2`.)\n\
          - A method in an `impl` of a trait that takes a different number of parameters than the trait declares.\n\
          \n\
          Example:\n\
