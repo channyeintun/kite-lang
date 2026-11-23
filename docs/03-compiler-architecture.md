@@ -590,7 +590,7 @@ and is the obvious later improvement.
 | `enum E` | a base record holding an `i32` tag, and one subtype per variant carrying the tag and that variant's payload |
 | `Option<T>` | a nullable reference to a one-field box record, one per payload type: `nil` is null, and the payload keeps its own type |
 | `[T]` | a header record `{buf: (mut (ref $arr)), len: (mut i32)}` over `(array (mut T))`, one pair per element type. The buffer may be longer than the slice |
-| `{K: V}` | a record holding two parallel arrays, keys and values, in insertion order |
+| `{K: V}` | a mutable record: key and value arrays in insertion order with room to spare, the slots used and the entries, a hash index past eight entries, and a field mark (the `maps` module) |
 | `(A, B)` | one record per tuple shape |
 | `(T, error)` | one record per value type: the value slot, and the error |
 | `error` | a nullable reference to the error record — message, carried value, that value's type tag, and the error it wrapped |
@@ -803,8 +803,9 @@ entries and it is still right. A removal from an indexed map leaves a zeroed
 hole that every reader skips, until the holes outnumber the entries and the map
 closes up. A write through a struct field takes the map and marks it with
 `HELD_BIT` exactly as it does a slice. The VM keeps the same index beside a
-vector of entries (`kite-vm`'s `map` module); the Wasm backend's maps have
-none yet, and copy on every write wherever they are held.
+vector of entries (`kite-vm`'s `map` module), and the Wasm backend beside its
+record's arrays (`kite-codegen-wasm`'s `maps` module), with the owned flag and
+field mark slices have there.
 
 A variadic construction stages its operands in a fixed window of 4,096 words,
 `KITE_RT_STAGE`, before the runtime call that allocates. A slice or map

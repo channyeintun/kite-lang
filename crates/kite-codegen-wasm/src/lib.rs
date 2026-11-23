@@ -3414,11 +3414,6 @@ impl<'a> Emitter<'a> {
                 return true;
             }
 
-            // A map's keys or values as a slice, in insertion order. The map
-            // holds parallel arrays already, so this is a copy of one of them
-            // into a slice-shaped array — a copy rather than a share, because
-            // the two array types are declared separately and a slice is a
-            // value the caller may go on to modify.
             // A call across the declared boundary. The import was declared
             // from the same declaration this call came from, so the two cannot
             // disagree about its shape.
