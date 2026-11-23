@@ -548,6 +548,66 @@ fn main() {
     );
 }
 
+/// A slice or map handed to a function that only reads it, then written, is
+/// written in place on all three backends: asked about through a generic
+/// prelude function two calls down, read element by element, and taken
+/// through a `var` parameter only read on the way. Passing a
+/// local to any function cleared its owned flag natively and on Wasm, and
+/// on the VM the call's staging register kept a second count, so each write
+/// after a call copied the whole value: at twenty thousand the map loop
+/// took 5.5 s natively and 10 s on the VM, and two hundred thousand would
+/// take minutes on every backend. A callee proved not to keep its argument
+/// leaves the caller the one holder now (`kite_mir::Kept`), and a call moves
+/// its arguments out of the staging window.
+#[test]
+fn a_slice_or_map_passed_to_a_reader_is_written_in_place() {
+    let src = r#"fn seen(m: { str: int }, w: str) -> bool {
+    return has_key(m, w)
+}
+
+fn first(xs: [int]) -> int {
+    if xs.len() == 0 {
+        return 0
+    }
+    return xs[0] + xs[xs.len() - 1]
+}
+
+fn last(var xs: [int]) -> int {
+    if xs.len() > 0 {
+        return xs[xs.len() - 1]
+    }
+    return 0
+}
+
+fn main() {
+    let n = 200000
+    var m: { str: int } = { }
+    var xs: [int] = []
+    var ys: [int] = []
+    var t = 0
+    for i in 0..n {
+        let w = "k\(i % (n / 2))"
+        if !seen(m, w) {
+            m[w] = i
+        }
+        t += first(xs)
+        xs.push(i)
+        t += last(ys) % 2
+        ys.push(i)
+        ys[i] = i * 2
+    }
+    io.print("\(m.len()) \(xs.len()) \(ys[n - 1]) \(t)")
+}
+"#;
+    agrees_within(
+        "passed-to-a-reader",
+        src,
+        "100000 200000 399998 19999700001\n",
+        Duration::from_secs(20),
+        true,
+    );
+}
+
 /// A deep chain of awaits — a recursive `async fn`, the shape of a recursive
 /// walk — is linear on all three backends. An `await` that had to wait parked
 /// with no target, and every task finishing woke every parked task, so each

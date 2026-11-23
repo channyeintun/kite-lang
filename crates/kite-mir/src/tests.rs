@@ -583,3 +583,66 @@ fn a_field_read_glances_only_while_nothing_can_write() {
     let glancing: Vec<bool> = reads.iter().map(|l| glances[l.index()].is_some()).collect();
     assert_eq!(glancing, vec![true, false, false], "{}", b.show());
 }
+
+/// Which parameters a function may keep: every way of keeping one counts,
+/// directly, two calls deep, round a recursion, and on one branch only; a
+/// function that only reads a parameter, writes its own copy of it, or
+/// passes it round a cycle that keeps nothing does not keep it. An `async`
+/// function keeps everything, because its starter stores it in the frame.
+#[test]
+fn a_parameter_is_kept_unless_nothing_can_keep_it() {
+    let (mir, _) = lower_async(
+        "struct H {\n    xs: [int]\n}\n\n\
+         enum E {\n    A([int])\n}\n\n\
+         fn reads(xs: [int], m: { str: int }) -> int {\n\
+         \x20   var t = xs.len() + m.len()\n\
+         \x20   if xs.len() > 0 {\n        t += xs[0]\n    }\n\
+         \x20   for x in xs {\n        t += x\n    }\n\
+         \x20   let w = xs[0..1]\n    let k = m.keys()\n\
+         \x20   return t + w.len() + k.len()\n}\n\n\
+         fn writes(var xs: [int]) -> int {\n    xs.push(1)\n    xs[0] = 2\n    return xs.len()\n}\n\n\
+         fn ret(xs: [int]) -> [int] {\n    return xs\n}\n\n\
+         fn moved(xs: [int]) -> [int] {\n    var t = xs\n    let u = t\n    return u\n}\n\n\
+         fn field(xs: [int]) -> H {\n    return H{ xs: xs }\n}\n\n\
+         fn elem(xs: [int]) -> [[int]] {\n    return [xs]\n}\n\n\
+         fn entry(m: { str: int }) -> { int: { str: int } } {\n\
+         \x20   var out: { int: { str: int } } = { }\n    out[1] = m\n    return out\n}\n\n\
+         fn tuple(xs: [int]) -> ([int], int) {\n    return (xs, 1)\n}\n\n\
+         fn optional(xs: [int]) -> Option<[int]> {\n    return xs\n}\n\n\
+         fn variant(xs: [int]) -> E {\n    return E.A(xs)\n}\n\n\
+         fn closure(xs: [int]) -> fn() -> int {\n    return || xs.len()\n}\n\n\
+         fn branch(xs: [int], b: bool) -> [int] {\n    if b {\n        return xs\n    }\n    return []\n}\n\n\
+         fn deep(xs: [int]) -> [int] {\n    return ret(xs)\n}\n\n\
+         fn deep_reads(xs: [int], m: { str: int }) -> int {\n    return reads(xs, m)\n}\n\n\
+         fn rec(xs: [int], n: int) -> [int] {\n    if n == 0 {\n        return xs\n    }\n    return rec(xs, n - 1)\n}\n\n\
+         fn ping(xs: [int], n: int) -> int {\n    if n == 0 {\n        return xs.len()\n    }\n    return pong(xs, n - 1)\n}\n\n\
+         fn pong(xs: [int], n: int) -> int {\n    return ping(xs, n)\n}\n\n\
+         fn even(xs: [int], n: int) -> [int] {\n    if n == 0 {\n        return xs\n    }\n    return odd(xs, n - 1)\n}\n\n\
+         fn odd(xs: [int], n: int) -> [int] {\n    return even(xs, n)\n}\n\n\
+         fn value(xs: [int]) -> int {\n    let f = |ys: [int]| ys.len()\n    return f(xs)\n}\n\n\
+         async fn later(xs: [int]) -> int {\n    return xs.len()\n}\n\n\
+         fn main() {\n}\n",
+    );
+    let kept = Kept::of(&mir);
+    let keeps = |name: &str, p: usize| {
+        let i = mir.fns.iter().position(|f| f.name == name).unwrap_or_else(|| panic!("no `{}`", name));
+        kept.keeps(FnId(i as u32), p)
+    };
+    for (name, p) in [
+        ("reads", 0),
+        ("reads", 1),
+        ("writes", 0),
+        ("deep_reads", 0),
+        ("deep_reads", 1),
+        ("ping", 0),
+        ("pong", 0),
+    ] {
+        assert!(!keeps(name, p), "`{}` keeps its parameter {}", name, p);
+    }
+    for name in [
+        "ret", "moved", "field", "elem", "entry", "tuple", "optional", "variant", "closure",
+        "branch", "deep", "rec", "even", "odd", "value", "later",
+    ] {
+        assert!(keeps(name, 0), "`{}` does not keep its parameter", name);
+    }
+}

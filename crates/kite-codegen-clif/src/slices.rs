@@ -94,7 +94,12 @@ pub fn fresh(value: &mir::Rvalue) -> bool {
 /// One difference from the Wasm backend's list: `Unwrap` counts. An unwrap
 /// whose operand is not an optional is a move on this backend — the same
 /// pointer under a second name — and a move is an escape.
-pub fn escaping_operands(stmt: &mir::Inst) -> Vec<&mir::Operand> {
+///
+/// A direct call keeps only the arguments its callee may keep, and a builtin
+/// only when it is one that keeps ([`mir::Kept`], [`mir::builtin_keeps`]): a
+/// callee that only reads its parameter hands the caller back the one holder
+/// it had, so `if !seen(m, w) { m[w] = 1 }` does not copy `m` on every write.
+pub fn escaping_operands<'a>(stmt: &'a mir::Inst, kept: &mir::Kept) -> Vec<&'a mir::Operand> {
     use mir::Rvalue as R;
     let value = match stmt {
         mir::Inst::Assign { value, .. } => value,
@@ -108,11 +113,17 @@ pub fn escaping_operands(stmt: &mir::Inst) -> Vec<&mir::Operand> {
     };
     match value {
         R::Use(o) | R::Wrap { value: o } | R::Unwrap { value: o } => vec![o],
-        R::Call { args, .. }
-        | R::CallVirtual { args, .. }
-        | R::CallBuiltin { args, .. }
-        | R::CallExtern { args, .. }
-        | R::StrOp { args, .. } => args.iter().collect(),
+        R::Call { callee, args } => kept.kept_args(*callee, args),
+        R::CallBuiltin { builtin, args } => {
+            if mir::builtin_keeps(*builtin) {
+                args.iter().collect()
+            } else {
+                Vec::new()
+            }
+        }
+        R::CallVirtual { args, .. } | R::CallExtern { args, .. } | R::StrOp { args, .. } => {
+            args.iter().collect()
+        }
         R::ClosureNew { captures, .. } => captures.iter().collect(),
         R::CallClosure { callee, args } => std::iter::once(callee).chain(args).collect(),
         R::StructNew { fields, .. } | R::EnumNew { fields, .. } => fields.iter().collect(),

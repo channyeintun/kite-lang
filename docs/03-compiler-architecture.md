@@ -615,6 +615,21 @@ a field, a map, a box, a closure. A length, an element, a comparison or a range
 (which copies) keeps nothing and clears nothing. A parameter, or anything read
 out of somewhere else, starts unowned.
 
+Nor does a direct call to a function that provably keeps nothing of that
+argument: `kite_mir::Kept` works out, per function and parameter, whether the
+function stores it anywhere, captures it, returns it, renders it through a
+string operation, or hands it to a function value, a `dyn` method, the host, a
+builtin that keeps (listed one by one) or a parameter that keeps — following
+the locals it is moved into. It is the least fixed point of "keeps" over the
+call graph, computed upward from "keeps nothing", which is sound through
+recursion because a run that keeps a parameter does so through a finite chain
+of calls ending in an instruction that keeps. An `async` function keeps every
+parameter, because its starter stores them in the frame. So
+`if !seen(m, w) { m[w] = 1 }` copies `m` once, not on every write. The VM
+needs no analysis: a call moves its arguments out of the caller's staging
+registers rather than copying them, so when the callee returns the count is
+the caller's alone again.
+
 A write through a struct field (`q.items.push(v)`) takes the field's slice into
 a local, changes it and puts it back (§5.4), and the checker marks that read as
 a take (`FieldTake`). A field has nowhere to keep a flag, so the header keeps
@@ -778,7 +793,9 @@ traces and all `==` and the renderer walk. Every slice local a function writes
 into has an `i8` *owned* flag, set when the function made the slice itself (a
 literal, a range, `keys()`, or the copy a write made) and cleared wherever the
 local is read in a way that can keep the reference — the Wasm backend's list,
-plus an `Unwrap` of a non-optional, which is a move here. `kite_rt_slice_push`
+plus an `Unwrap` of a non-optional, which is a move here; a call to a function
+that keeps nothing of the argument is not such a read, by the same
+`kite_mir::Kept`. `kite_rt_slice_push`
 and `kite_rt_set_index` take the flag: owned with room, they write the slot
 and return the same object; otherwise they copy — twice the length plus four
 for a push, exactly the length for a write — and the local owns the copy. A

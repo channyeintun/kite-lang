@@ -3118,7 +3118,432 @@ pub async fn main() {
     // slice, and across `await` and `task.yield()`. None of them may see the
     // write. Its output is also pinned in `EXPECTED`.
     ("fields-are-written-in-place-unseen", FIELD_ALIASING),
+    // A slice or map passed to a function that keeps nothing stays the
+    // caller's to write in place. Here every way a callee can keep one is
+    // tried, then the caller writes: returned, moved and returned, stored in
+    // a struct, a slice, a map, a tuple, an optional, an enum payload, a
+    // closure and a task, kept on one branch only, two calls deep, round a
+    // recursion and a mutual one, through a `dyn` method, a function value
+    // and a closure. None of them may see the write. Its output is also
+    // pinned in `EXPECTED`.
+    ("passed-slices-are-written-in-place-unseen", CALL_ALIASING),
 ];
+
+/// See `passed-slices-are-written-in-place-unseen` in [`NATIVE_TARGET`].
+const CALL_ALIASING: &str = r#"use std/task
+
+// A slice or map handed to a function, then written by the caller: whatever
+// the function kept, in any way, must not see the write.
+
+struct Holder {
+    xs: [int]
+}
+
+struct Box {
+    var xs: [int]
+    var m: { str: int }
+}
+
+enum Kept {
+    Slice([int])
+    Table({ str: int })
+}
+
+trait Keeper {
+    fn keep(self, xs: [int]) -> [int]
+}
+
+struct K {
+    n: int
+}
+
+impl Keeper for K {
+    fn keep(self, xs: [int]) -> [int] {
+        return xs
+    }
+}
+
+fn sl(xs: [int]) -> str {
+    return "[" + join_ints(xs, ",") + "]"
+}
+
+fn mp(m: { str: int }) -> str {
+    var parts: [str] = []
+    for k in m.keys() {
+        parts.push("\(k)=\(or_else(m[k], 0))")
+    }
+    return "{" + join(parts, ",") + "}"
+}
+
+fn id(xs: [int]) -> [int] {
+    return xs
+}
+
+fn id_map(m: { str: int }) -> { str: int } {
+    return m
+}
+
+fn via_var(xs: [int]) -> [int] {
+    var t = xs
+    let u = t
+    return u
+}
+
+fn hold(xs: [int]) -> Holder {
+    return Holder{ xs: xs }
+}
+
+fn wrap(xs: [int]) -> [[int]] {
+    return [xs]
+}
+
+fn in_map(xs: [int]) -> { str: [int] } {
+    return { "a": xs }
+}
+
+fn as_value(m: { str: int }) -> { str: { str: int } } {
+    var out: { str: { str: int } } = { }
+    out["m"] = m
+    return out
+}
+
+fn pair(xs: [int]) -> ([int], int) {
+    return (xs, xs.len())
+}
+
+fn opt(xs: [int]) -> Option<[int]> {
+    if xs.len() > 100 {
+        return nil
+    }
+    return xs
+}
+
+fn tagged(xs: [int]) -> Kept {
+    return Kept.Slice(xs)
+}
+
+fn tagged_map(m: { str: int }) -> Kept {
+    return Kept.Table(m)
+}
+
+fn captured(xs: [int]) -> fn() -> [int] {
+    return || xs
+}
+
+fn maybe(xs: [int], keep: bool) -> [int] {
+    if keep {
+        return xs
+    }
+    return []
+}
+
+fn outer(xs: [int]) -> [int] {
+    return id(xs)
+}
+
+fn outer2(xs: [int]) -> Holder {
+    let ys = xs
+    return hold(ys)
+}
+
+fn rec(xs: [int], n: int) -> [int] {
+    if n == 0 {
+        return xs
+    }
+    return rec(xs, n - 1)
+}
+
+fn even(xs: [int], n: int) -> [int] {
+    if n == 0 {
+        return xs
+    }
+    return odd(xs, n - 1)
+}
+
+fn odd(xs: [int], n: int) -> [int] {
+    if n == 0 {
+        return []
+    }
+    return even(xs, n - 1)
+}
+
+fn count(xs: [int], n: int) -> int {
+    if n == 0 {
+        return xs.len()
+    }
+    return count(xs, n - 1)
+}
+
+fn ping(xs: [int], n: int) -> int {
+    if n == 0 {
+        return xs.len()
+    }
+    return pong(xs, n - 1)
+}
+
+fn pong(xs: [int], n: int) -> int {
+    return ping(xs, n)
+}
+
+fn into_box(var b: Box, xs: [int]) -> Box {
+    b.xs = xs
+    return b
+}
+
+fn put_into(var b: Box, m: { str: int }) -> Box {
+    b.m = m
+    return b
+}
+
+fn bump(var xs: [int]) -> int {
+    xs.push(99)
+    xs[0] = -1
+    return xs.len()
+}
+
+fn bump_map(var m: { str: int }) -> int {
+    m["zz"] = 26
+    m.remove("a")
+    return m.len()
+}
+
+fn first_row(g: [[int]]) -> [int] {
+    return g[0]
+}
+
+fn lookup(m: { str: [int] }) -> [int] {
+    return or_else(m["a"], [])
+}
+
+fn both(a: [int], b: [int]) -> [int] {
+    if a.len() > 0 {
+        return b
+    }
+    return a
+}
+
+fn reads(xs: [int]) -> int {
+    var t = 0
+    for x in xs {
+        t += x
+    }
+    return t
+}
+
+fn window(xs: [int]) -> [int] {
+    return xs[0..1]
+}
+
+fn keys_of(m: { str: int }) -> [str] {
+    return m.keys()
+}
+
+fn show(xs: [int]) -> str {
+    return join_ints(xs, "+")
+}
+
+async fn later(xs: [int]) -> int {
+    task.yield()
+    return xs.len()
+}
+
+async fn later_back(xs: [int]) -> [int] {
+    task.yield()
+    return xs
+}
+
+async fn run_tasks() {
+    var xs = [1, 2]
+    let t = later(xs)
+    xs.push(3)
+    io.print("task len \(await t) now \(sl(xs))")
+    let u = later_back(xs)
+    xs.push(4)
+    xs[0] = 100
+    io.print("task back \(sl(await u)) now \(sl(xs))")
+}
+
+async fn main() {
+    var a = [1, 2]
+    let a1 = id(a)
+    a.push(3)
+    a[0] = 10
+    io.print("id \(sl(a1)) \(sl(a))")
+
+    var b = [1, 2]
+    let b1 = via_var(b)
+    b.push(3)
+    io.print("via_var \(sl(b1)) \(sl(b))")
+
+    var c = [1, 2]
+    let c1 = hold(c)
+    c.push(3)
+    c[1] = 20
+    io.print("hold \(sl(c1.xs)) \(sl(c))")
+
+    var d = [1, 2]
+    let d1 = wrap(d)
+    d.push(3)
+    io.print("wrap \(sl(d1[0])) \(sl(d))")
+
+    var e = [1, 2]
+    let e1 = in_map(e)
+    e.push(3)
+    io.print("in_map \(sl(or_else(e1["a"], []))) \(sl(e))")
+
+    var f = [1, 2]
+    let f1 = pair(f)
+    f.push(3)
+    io.print("pair \(sl(f1.0)) \(f1.1) \(sl(f))")
+
+    var g = [1, 2]
+    let g1 = opt(g)
+    g.push(3)
+    io.print("opt \(sl(or_else(g1, []))) \(sl(g))")
+
+    var h = [1, 2]
+    let h1 = tagged(h)
+    h.push(3)
+    let h2 = match h1 {
+        Slice(xs) => sl(xs),
+        Table(m) => mp(m),
+    }
+    io.print("tagged \(h2) \(sl(h))")
+
+    var i = [1, 2]
+    let i1 = captured(i)
+    i.push(3)
+    io.print("captured \(sl(i1())) \(sl(i))")
+
+    var j = [1, 2]
+    let j1 = maybe(j, false)
+    j.push(3)
+    let j2 = maybe(j, true)
+    j.push(4)
+    io.print("maybe \(sl(j1)) \(sl(j2)) \(sl(j))")
+
+    var k = [1, 2]
+    let k1 = outer(k)
+    k.push(3)
+    let k2 = outer2(k)
+    k.push(4)
+    io.print("outer \(sl(k1)) \(sl(k2.xs)) \(sl(k))")
+
+    var l = [1, 2]
+    let l1 = rec(l, 5)
+    l.push(3)
+    let l2 = even(l, 4)
+    l.push(4)
+    let l3 = count(l, 7)
+    l.push(5)
+    let l4 = ping(l, 3)
+    l.push(6)
+    io.print("rec \(sl(l1)) \(sl(l2)) \(l3) \(l4) \(sl(l))")
+
+    var bx = Box{ xs: [], m: { } }
+    var n = [1, 2]
+    bx = into_box(bx, n)
+    n.push(3)
+    var mm = { "a": 1 }
+    bx = put_into(bx, mm)
+    mm["b"] = 2
+    io.print("box \(sl(bx.xs)) \(sl(n)) \(mp(bx.m)) \(mp(mm))")
+
+    var o = [1, 2]
+    let o1 = bump(o)
+    o.push(3)
+    var om = { "a": 1, "b": 2 }
+    let om1 = bump_map(om)
+    om["c"] = 3
+    io.print("bump \(o1) \(sl(o)) \(om1) \(mp(om))")
+
+    var rows = [[1], [2]]
+    let r1 = first_row(rows)
+    rows[0] = [7, 7]
+    rows.push([3])
+    let r2 = first_row(rows)
+    rows[0].push(8)
+    io.print("rows \(sl(r1)) \(sl(r2)) \(sl(rows[0])) \(rows.len())")
+
+    var lm = { "a": [1] }
+    let lm1 = lookup(lm)
+    lm["a"] = [5]
+    lm["b"] = [6]
+    io.print("lookup \(sl(lm1)) \(lm.len())")
+
+    var p = [1]
+    var q = [2]
+    let pq = both(p, q)
+    q.push(3)
+    p.push(4)
+    let pp = both(p, p)
+    p.push(5)
+    io.print("both \(sl(pq)) \(sl(pp)) \(sl(p)) \(sl(q))")
+
+    var s = [1, 2, 3]
+    var tot = 0
+    var w: [int] = []
+    var ks: [str] = []
+    var shown = ""
+    var ms = { "x": 1 }
+    for z in 0..5 {
+        tot += reads(s)
+        w = window(s)
+        shown = show(s)
+        s.push(z)
+        s[0] = z
+        ks = keys_of(ms)
+        ms["k\(z)"] = z
+    }
+    io.print("reads \(tot) \(sl(w)) \(shown) \(sl(s)) \(join(ks, ",")) \(ms.len())")
+
+    var t1 = { "a": 1 }
+    let t2 = id_map(t1)
+    t1["b"] = 2
+    t1.remove("a")
+    let t3 = as_value(t1)
+    t1["c"] = 3
+    let t4 = tagged_map(t1)
+    t1["d"] = 4
+    let t5 = match t4 {
+        Slice(xs) => sl(xs),
+        Table(m) => mp(m),
+    }
+    io.print("maps \(mp(t2)) \(mp(or_else(t3["m"], { }))) \(t5) \(mp(t1))")
+
+    let kp: dyn Keeper = K{ n: 1 }
+    var u = [1, 2]
+    let u1 = kp.keep(u)
+    u.push(3)
+    let fv = id
+    let u2 = fv(u)
+    u.push(4)
+    let cl = |ys: [int]| ys
+    let u3 = cl(u)
+    u.push(5)
+    io.print("indirect \(sl(u1)) \(sl(u2)) \(sl(u3)) \(sl(u))")
+
+    var big = [0]
+    var kept: [[int]] = []
+    for z in 0..20 {
+        if z % 3 == 0 {
+            kept.push(maybe(big, true))
+        }
+        big.push(z)
+        if z % 4 == 0 {
+            kept.push(rec(big, z % 3))
+        }
+        big[0] = z
+    }
+    var lines: [str] = []
+    for r in kept {
+        lines.push(sl(r))
+    }
+    io.print("loop \(join(lines, ";")) \(sl(big))")
+
+    await run_tasks()
+}
+"#;
 
 /// See `fields-are-written-in-place-unseen` in [`NATIVE_TARGET`].
 const FIELD_ALIASING: &str = r#"// Every way a slice or map read out of a field can be kept, each followed by
@@ -4853,6 +5278,7 @@ fn slices_agree_natively_with_a_page_of_nursery() {
         "maps-are-indexed-and-keep-their-order",
         "slices-and-maps-move-across-a-suspension",
         "fields-are-written-in-place-unseen",
+        "passed-slices-are-written-in-place-unseen",
     ] {
         let (_, src) = WASM_TARGET
             .iter()
@@ -7169,6 +7595,33 @@ task saw: [1,2,0,1,2,7] {a=1,k0=0,k1=1,k2=2,y=7} now [100,2,0,1,2,7,8] {k0=0,k1=
 await kept: [100,2,0,1,2,7,8] {k0=0,k1=1,k2=2,y=7} now [100,2,0,1,2,7,8,9] {k0=0,k1=1,k2=2,y=7,z=9}\n\
 in place then kept: [100,2,0,1,2,7,8,9,0,1,2,3] now [100,2,0,1,2,7,8,9,0,1,2,3,10,11]\n\
 nested across: [0,1,2] {n0=0,n1=1,n2=2} now [0,1,2,5] {n1=1,n2=2}\n\
+"),
+    // What a caller's slice or map holds after it was passed on, and what
+    // every function that kept it holds: as it was before a call to one that
+    // keeps nothing stopped ending the caller's right to write in place.
+    ("passed-slices-are-written-in-place-unseen", CALL_ALIASING, "id [1,2] [10,2,3]\n\
+via_var [1,2] [1,2,3]\n\
+hold [1,2] [1,20,3]\n\
+wrap [1,2] [1,2,3]\n\
+in_map [1,2] [1,2,3]\n\
+pair [1,2] 2 [1,2,3]\n\
+opt [1,2] [1,2,3]\n\
+tagged [1,2] [1,2,3]\n\
+captured [1,2] [1,2,3]\n\
+maybe [] [1,2,3] [1,2,3,4]\n\
+outer [1,2] [1,2,3] [1,2,3,4]\n\
+rec [1,2] [1,2,3] 4 5 [1,2,3,4,5,6]\n\
+box [1,2] [1,2,3] {a=1} {a=1,b=2}\n\
+bump 3 [1,2,3] 2 {a=1,b=2,c=3}\n\
+rows [1] [7,7] [7,7,8] 3\n\
+lookup [1] 2\n\
+both [2] [1,4] [1,4,5] [2,3]\n\
+reads 42 [3] 3+2+3+0+1+2+3 [4,2,3,0,1,2,3,4] x,k0,k1,k2,k3 6\n\
+maps {a=1} {b=2} {b=2,c=3} {b=2,c=3,d=4}\n\
+indirect [1,2] [1,2,3] [1,2,3,4] [1,2,3,4,5]\n\
+loop [0];[0,0];[2,0,1,2];[3,0,1,2,3,4];[5,0,1,2,3,4,5];[7,0,1,2,3,4,5,6,7,8];[8,0,1,2,3,4,5,6,7,8];[11,0,1,2,3,4,5,6,7,8,9,10,11];[11,0,1,2,3,4,5,6,7,8,9,10,11,12];[14,0,1,2,3,4,5,6,7,8,9,10,11,12,13,14];[15,0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16];[17,0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17] [19,0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19]\n\
+task len 2 now [1,2,3]\n\
+task back [1,2,3] now [100,2,3,4]\n\
 "),
     // An `Option<error>` that holds a nil error is present: `task.timeout` of
     // a task that finished in time has its result, whatever it is. The VM,

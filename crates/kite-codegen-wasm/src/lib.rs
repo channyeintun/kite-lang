@@ -1654,6 +1654,9 @@ pub fn compile_with(program: &mir::Program, types: &Types, debug_info: bool) -> 
         strings: string_runtime,
         maps: &map_helpers,
     };
+    // Which parameters each function may keep, so a call to one that keeps
+    // nothing leaves the caller's slice or map its own (see `slices`).
+    let kept = mir::Kept::of(program);
     let mut bodies: Vec<Function> = Vec::with_capacity(program.fns.len());
     let mut too_wide = Vec::new();
     for f in &program.fns {
@@ -1676,6 +1679,7 @@ pub fn compile_with(program: &mir::Program, types: &Types, debug_info: bool) -> 
             &map_helpers,
             &arith_helpers,
             &pieces,
+            &kept,
         );
         if locals > MAX_LOCALS {
             too_wide.push(TooLarge {
@@ -2375,6 +2379,7 @@ fn compile_fn(
     map_helpers: &maps::MapHelpers,
     arith: &arith::ArithHelpers,
     pieces: &pieces::Pieces,
+    kept: &mir::Kept,
 ) -> (Function, u32) {
     // Locals beyond the parameters, a block's temporaries sharing where their
     // lives allow (see `slots`), plus one synthetic program counter.
@@ -2593,6 +2598,7 @@ fn compile_fn(
             owned: &owned,
             taken: &taken,
             glance: &glance,
+            kept,
             slice_helpers,
             map_helpers,
             index_wide,
@@ -2705,6 +2711,8 @@ struct Emitter<'a> {
     /// (`kite_mir::held_reads`), so reading the field into it leaves the
     /// header's mark alone.
     glance: &'a [bool],
+    /// Which parameters each function may keep (`kite_mir::Kept`).
+    kept: &'a mir::Kept,
     /// The functions `xs[i]`, `xs[i] = v` and `xs.push(v)` call.
     slice_helpers: &'a slices::SliceHelpers,
     /// The functions `m[k] = v` and a map literal's collapsing call.
@@ -2908,7 +2916,7 @@ impl<'a> Emitter<'a> {
         if self.owned.is_empty() {
             return;
         }
-        for o in slices::escaping_operands(stmt) {
+        for o in slices::escaping_operands(stmt, self.kept) {
             if let mir::Operand::Local(l) = o {
                 if let Some(&flag) = self.owned.get(&l.0) {
                     func.instruction(&Instruction::I32Const(0));

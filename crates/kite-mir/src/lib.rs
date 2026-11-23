@@ -14,10 +14,12 @@ use kite_span::Span;
 use std::fmt;
 
 mod async_;
+mod keep;
 mod lower;
 pub use async_::frame_move;
 pub use async_::transform as asyncify;
 pub use async_::{DONE as TASK_DONE, VALUE as TASK_VALUE};
+pub use keep::{builtin_keeps, Kept};
 pub use lower::{lower, LITERAL_WINDOW};
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]

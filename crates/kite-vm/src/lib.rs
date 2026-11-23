@@ -1800,9 +1800,14 @@ impl<'a> Vm<'a> {
         for (i, v) in leading.iter().enumerate() {
             self.regs[new_base + i] = v.clone();
         }
-        // Arguments follow, in the callee's parameter registers.
+        // Arguments follow, in the callee's parameter registers — moved out
+        // of the caller's staging window, not copied. That window is scratch
+        // the call alone reads, and a slice left behind in it was a second
+        // holder after the call returned: `Rc::make_mut` saw it, and the
+        // caller's next write copied a slice it was again the one holder of
+        // (`if !seen(m, w) { m[w] = 1 }` was quadratic).
         for i in 0..argc as usize {
-            let v = self.regs[base + arg_base as usize + i].clone();
+            let v = std::mem::replace(&mut self.regs[base + arg_base as usize + i], Value::Unit);
             self.regs[new_base + leading.len() + i] = v;
         }
 

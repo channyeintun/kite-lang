@@ -301,6 +301,9 @@ struct ModuleCx<'a, M: Module> {
     /// `KITE_RT_DEPTH`, the count of calls in progress. See `kite_rt::MAX_FRAMES`.
     depth: DataId,
     call_conv: CallConv,
+    /// Which parameters each function may keep, so a call to one that keeps
+    /// nothing leaves the caller's slice its own (see `slices`).
+    kept: mir::Kept,
 }
 
 impl<'a, M: Module> ModuleCx<'a, M> {
@@ -354,6 +357,7 @@ fn build<M: Module>(
         stage,
         depth,
         call_conv,
+        kept: mir::Kept::of(program),
     };
 
     for (i, f) in program.fns.iter().enumerate() {
@@ -1327,7 +1331,7 @@ impl<'a, 'b, M: Module> FnLower<'a, 'b, M> {
         if self.owned.is_empty() {
             return;
         }
-        for o in slices::escaping_operands(s) {
+        for o in slices::escaping_operands(s, &self.cx.kept) {
             if let mir::Operand::Local(l) = o {
                 if let Some(&flag) = self.owned.get(&l.index()) {
                     let clear = self.b.ins().iconst(I8, 0);

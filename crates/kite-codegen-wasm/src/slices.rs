@@ -320,7 +320,11 @@ impl Parts {
 /// Deliberately exhaustive, with no catch-all: an operand position this does
 /// not know about would be a way for a shared buffer to be written in place,
 /// so a new MIR construct fails to compile here until someone decides.
-pub fn escaping_operands(stmt: &mir::Inst) -> Vec<&mir::Operand> {
+///
+/// A direct call keeps only the arguments its callee may keep, and a builtin
+/// only when it is one that keeps ([`mir::Kept`], [`mir::builtin_keeps`]),
+/// exactly as on the native backend.
+pub fn escaping_operands<'a>(stmt: &'a mir::Inst, kept: &mir::Kept) -> Vec<&'a mir::Operand> {
     use mir::Rvalue as R;
     let value = match stmt {
         mir::Inst::Assign { value, .. } => value,
@@ -334,11 +338,17 @@ pub fn escaping_operands(stmt: &mir::Inst) -> Vec<&mir::Operand> {
     };
     match value {
         R::Use(o) | R::Wrap { value: o } => vec![o],
-        R::Call { args, .. }
-        | R::CallVirtual { args, .. }
-        | R::CallBuiltin { args, .. }
-        | R::CallExtern { args, .. }
-        | R::StrOp { args, .. } => args.iter().collect(),
+        R::Call { callee, args } => kept.kept_args(*callee, args),
+        R::CallBuiltin { builtin, args } => {
+            if mir::builtin_keeps(*builtin) {
+                args.iter().collect()
+            } else {
+                Vec::new()
+            }
+        }
+        R::CallVirtual { args, .. } | R::CallExtern { args, .. } | R::StrOp { args, .. } => {
+            args.iter().collect()
+        }
         R::ClosureNew { captures, .. } => captures.iter().collect(),
         R::CallClosure { callee, args } => std::iter::once(callee).chain(args).collect(),
         R::StructNew { fields, .. } | R::EnumNew { fields, .. } => fields.iter().collect(),
