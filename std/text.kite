@@ -2896,14 +2896,17 @@ pub fn clusters(body: str) -> [str] {
 
 /// How many terminal columns `body` takes: 2 for each wide character (CJK
 /// ideographs, kana, Hangul syllables, fullwidth forms, emoji), 0 for what
-/// takes no room (marks, joiners, control characters) and 1 for the rest. A
+/// takes no room (marks, joiners, control and format characters) and 1 for the rest. A
 /// cluster is as wide as its first character — a family emoji is one wide
 /// glyph, not six — and a flag is 2.
 ///
 /// The wide blocks are listed rather than read from the Unicode database,
 /// as `bidi_class`'s are: the ranges below are the East Asian Wide and
 /// Fullwidth blocks and the emoji blocks, which is what a terminal draws two
-/// columns wide.
+/// columns wide. Not listed, and so counted as 1: the emoji scattered through
+/// the older symbol blocks (U+2300–27BF, such as ☕), which a terminal
+/// usually draws two wide, and the Hangul jamo vowels and finals, which it
+/// draws over the initial before them.
 ///
 /// ```kite
 /// assert(cell_width("abc") == 3, "one each")
@@ -2917,7 +2920,7 @@ pub fn cell_width(body: str) -> int {
     for i < n {
         let c = body.code_at(i)
         let next = next_cluster(body, i, n)
-        if within(c, 0x1F1E6, 0x1F1FF) && next > i + 1 {
+        if within(c, 0x1F1E6, 0x1F1FF) && within(body.code_at(i + 1), 0x1F1E6, 0x1F1FF) {
             total += 2
         } else {
             total += code_width(c)
@@ -2935,14 +2938,19 @@ fn code_width(c: int) -> int {
     if c < 0x300 {
         return 1
     }
-    if is_combining(c) || c == 0x200B || c == 0x200D || within(c, 0x1F3FB, 0x1F3FF) {
+    // Marks, skin-tone modifiers and the invisible format characters: the
+    // zero-width space and joiners, the direction marks and bidi controls,
+    // the word joiner and its kin, and the byte-order mark.
+    if is_combining(c) || within(c, 0x200B, 0x200F) || within(c, 0x202A, 0x202E) ||
+    within(c, 0x2060, 0x2069) || c == 0xFEFF || within(c, 0x1F3FB, 0x1F3FF) {
         return 0
     }
     if within(c, 0x1100, 0x115F) || within(c, 0x2E80, 0x303E) || within(c, 0x3041, 0x33FF) ||
     within(c, 0x3400, 0x4DBF) || within(c, 0x4E00, 0x9FFF) || within(c, 0xA000, 0xA4CF) ||
     within(c, 0xAC00, 0xD7A3) || within(c, 0xF900, 0xFAFF) || within(c, 0xFE30, 0xFE6F) ||
     within(c, 0xFF00, 0xFF60) || within(c, 0xFFE0, 0xFFE6) || within(c, 0x1F300, 0x1F64F) ||
-    within(c, 0x1F680, 0x1F6FF) || within(c, 0x1F900, 0x1F9FF) || within(c, 0x20000, 0x3FFFD) {
+    within(c, 0x1F680, 0x1F6FF) || within(c, 0x1F900, 0x1F9FF) || within(c, 0x1FA70, 0x1FAFF) ||
+    within(c, 0x20000, 0x3FFFD) {
         return 2
     }
     return 1

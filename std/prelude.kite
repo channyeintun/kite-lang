@@ -456,23 +456,26 @@ pub fn replace(s: str, from: str, to: str) -> str {
 /// assert(words("  two \t words\n").len() == 2, "any whitespace separates")
 /// ```
 pub fn words(s: str) -> [str] {
-    var out: [str] = []
-    var start = -1
-    let n = s.len()
-    for i in 0..n {
-        if is_white(s.code_at(i)) {
-            if start >= 0 {
-                out.push(s.slice(start, i))
-                start = -1
-            }
-        } else if start < 0 {
-            start = i
+    // Every other whitespace character is made a space, and the text is split
+    // at spaces: `index_of` and `split` move a piece at a time, where a walk
+    // with `code_at` counts from the start again for every character, and
+    // was several times slower on a long text.
+    var spaced = s
+    for code in white_codes() {
+        let c = text.from_code(code)
+        if spaced.index_of(c) >= 0 {
+            spaced = replace(spaced, c, " ")
         }
     }
-    if start >= 0 {
-        out.push(s.slice(start, n))
-    }
-    return out
+    return filter(split(spaced, " "), |w: str| w.len() > 0)
+}
+
+/// The code points `is_white` accepts, other than the space itself.
+fn white_codes() -> [int] {
+    return [
+        0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x85, 0xA0, 0x1680, 0x2000, 0x2001, 0x2002, 0x2003, 0x2004,
+        0x2005, 0x2006, 0x2007, 0x2008, 0x2009, 0x200A, 0x2028, 0x2029, 0x202F, 0x205F, 0x3000,
+    ]
 }
 
 /// Unicode White_Space — the characters `str.trim` removes on every backend.
@@ -550,11 +553,7 @@ pub fn pad_end(text: str, width: int, with: str) -> str {
     if with.len() == 0 || need <= 0 {
         return text
     }
-    var pad = with
-    for pad.len() < need {
-        pad = pad + with
-    }
-    return text + pad.slice(0, need)
+    return text + repeat(with, need / with.len() + 1).slice(0, need)
 }
 
 /// The lines of `s`. A line ends at `\n`, `\r\n` or `\r`, and the ending is not
@@ -565,23 +564,19 @@ pub fn pad_end(text: str, width: int, with: str) -> str {
 /// assert(lines("a\r\nb\n").len() == 2, "no phantom last line, no CR left over")
 /// ```
 pub fn lines(s: str) -> [str] {
-    var out: [str] = []
-    let n = s.len()
-    var start = 0
-    var i = 0
-    for i < n {
-        let c = s.code_at(i)
-        if c == 10 || c == 13 {
-            out.push(s.slice(start, i))
-            if c == 13 && i + 1 < n && s.code_at(i + 1) == 10 {
-                i += 1
-            }
-            start = i + 1
-        }
-        i += 1
+    // Split, not a walk with `code_at`, which counts from the start again for
+    // every character, and was several times slower on a long file.
+    var body = s
+    if body.index_of("\r") >= 0 {
+        body = replace(replace(body, "\r\n", "\n"), "\r", "\n")
     }
-    if start < n {
-        out.push(s.slice(start, n))
+    if body.len() == 0 {
+        let none: [str] = []
+        return none
+    }
+    let out = split(body, "\n")
+    if out[out.len() - 1].len() == 0 {
+        return out[0..out.len() - 1]
     }
     return out
 }
@@ -661,15 +656,28 @@ pub fn index_of_from(s: str, needle: str, from: int) -> int {
 /// assert(last_index_of("abc", "x") == -1, "absent")
 /// ```
 pub fn last_index_of(s: str, needle: str) -> int {
-    let n = needle.len()
-    var i = s.len() - n
-    for i >= 0 {
-        if s.slice(i, i + n) == needle {
-            return i
-        }
-        i -= 1
+    if needle.len() == 0 {
+        return s.len()
     }
-    return -1
+    // What follows the last one is the last piece of a split; a walk back
+    // with `slice` counts from the start again at every position.
+    let pieces = split(s, needle)
+    if pieces.len() < 2 {
+        return -1
+    }
+    let n = needle.len()
+    let at = s.len() - pieces[pieces.len() - 1].len() - n
+    // The split takes the occurrences that do not overlap, so a later one can
+    // only overlap this one — "aa" in "aaa" is at 1 — and starts within it.
+    let near = s.slice(at + 1, at + 2 * n)
+    var j = near.len() - n
+    for j >= 0 {
+        if near.slice(j, j + n) == needle {
+            return at + 1 + j
+        }
+        j -= 1
+    }
+    return at
 }
 
 /// The characters of `s` as code points, one per Unicode scalar.
@@ -1385,11 +1393,9 @@ pub fn pad_start(text: str, width: int, with: str) -> str {
     if with.len() == 0 || need <= 0 {
         return text
     }
-    var pad = with
-    for pad.len() < need {
-        pad = pad + with
-    }
-    return pad.slice(0, need) + text
+    // `repeat` doubles rather than adding one filler at a time, which copied
+    // the growing padding once per filler.
+    return repeat(with, need / with.len() + 1).slice(0, need) + text
 }
 
 // ---- ordering ---------------------------------------------------------------
@@ -1914,8 +1920,9 @@ pub fn hash_str(text: str) -> int {
 ///
 /// Every character that would move a cursor or hide in a log is written as an
 /// escape — `\n`, `\r`, `\t`, and `\u{..}` for the other controls, DEL, the C1
-/// controls and the line and paragraph separators — so one value is one line
-/// of output.
+/// controls, the line and paragraph separators and the invisible characters
+/// that reorder or hide text (the bidi overrides, the zero-width space, the
+/// byte-order mark) — so one value is one line of output, and reads as it is.
 ///
 /// ```kite
 /// assert(debug_str("a\rb") == "\"a\\rb\"", "a carriage return is written, not sent")
@@ -1934,13 +1941,24 @@ pub fn debug_str(text: str) -> str {
             out = out + "\\r"
         } else if code == 0x09 {
             out = out + "\\t"
-        } else if code < 0x20 || (code >= 0x7F && code <= 0x9F) || code == 0x2028 || code == 0x2029 {
+        } else if code < 0x20 || (code >= 0x7F && code <= 0x9F) || hides(code) {
             out = out + "\\u{" + hex_digits(code) + "}"
         } else {
             out = out + text.slice(i, i + 1)
         }
     }
     return out + "\""
+}
+
+/// The characters past the C1 controls that `debug_str` writes as escapes:
+/// the line and paragraph separators, and the invisible ones that reorder or
+/// hide text — the zero-width space, the direction marks and the explicit
+/// bidi embeddings, overrides and isolates (U+202E can make a log line read
+/// backwards), the word joiner and the byte-order mark. The joiners U+200C
+/// and U+200D are left alone: they are part of ordinary text and emoji.
+fn hides(code: int) -> bool {
+    return code == 0x200B || code == 0x200E || code == 0x200F || (code >= 0x2028 && code <= 0x202E) ||
+    code == 0x2060 || (code >= 0x2066 && code <= 0x2069) || code == 0xFEFF
 }
 
 /// `n`, which is not negative, in lowercase hexadecimal.
