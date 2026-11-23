@@ -126,7 +126,10 @@ pub fn find_in(parent: Element, selector: str) -> Option<Element> {
 /// The empty slice when nothing matches or the selector is malformed. A
 /// malformed selector throws in the browser; here it is the same answer as no
 /// matches, because a caller looping over the result cannot act on the
-/// difference. Use [`find`] when the distinction matters.
+/// difference. [`find`] answers the same way for the same two cases, so
+/// nothing here tells them apart: a program that must know calls
+/// `querySelectorAll` itself, through `js.call1` on the document, and reads
+/// the error.
 pub fn find_all(selector: str) -> [Element] {
     var out: [Element] = []
     let (list, err) = js.call1(document(), "querySelectorAll", js.of_str(selector))
