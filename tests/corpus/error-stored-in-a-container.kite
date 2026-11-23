@@ -1,0 +1,68 @@
+// A slice of errors is watched as a binding is (R7): built from a literal, or
+// pushed onto, it holds failures nobody has looked at until it is read. Each
+// of these used to compile. A failure stored into a struct field or a map
+// entry is handed on to that value, as passing it to a call is, and the
+// analysis does not follow it there (§7.3).
+
+fn touch(n: int) -> error {
+    if n > 0 {
+        return errors.new("boom \(n)")
+    }
+    return nil
+}
+
+struct Held {
+    e: error
+}
+
+fn a_literal() {
+    let xs: [error] = [touch(1)] //~ ERROR E0302
+    io.print("after")
+}
+
+fn pushed_onto() {
+    var errs: [error] = [] //~ ERROR E0302
+    for i in 0..3 {
+        errs.push(touch(i))
+    }
+    io.print("collected \(errs.len())")
+}
+
+fn collected_and_read() -> error {
+    var errs: [error] = []
+    for i in 0..3 {
+        errs.push(touch(i))
+    }
+    for e in errs {
+        check e
+    }
+    return nil
+}
+
+// Handed on: the struct and the map hold them now.
+fn handed_to_a_struct() -> Held {
+    let h = Held{ e: touch(1) }
+    return h
+}
+
+fn handed_to_a_map() -> { str: error } {
+    var m: { str: error } = { }
+    m["a"] = touch(1)
+    return m
+}
+
+fn main() {
+    a_literal()
+    pushed_onto()
+    let e = collected_and_read()
+    if e != nil {
+        io.print(e.message())
+    }
+    let h = handed_to_a_struct()
+    let m = handed_to_a_map()
+    io.print(m.len())
+    let held = h.e
+    if held != nil {
+        io.print(held.message())
+    }
+}

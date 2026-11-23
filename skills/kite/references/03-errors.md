@@ -400,6 +400,11 @@ Taking it apart, `let (v, err) = p`, re-enters the normal rules, and returning
 it passes it on; either clears the mark. `p` itself has no fields (`E0200`) and
 no methods (`E0205`), so destructure where you bind.
 
+**What the analysis does not follow:** a failure stored into a struct field
+(`Held{ e: f() }`, `h.e = f()`), a map entry, or a slice element by index is
+handed on to that value, like an argument, and nothing reports it if the value
+is never read. `errs.push(f())` *is* followed: a slice of errors is a binding.
+
 **A tuple or slice of results is watched the same way** — the shapes
 `task.both` and `task.all` answer with. Bound to one name it is Unchecked
 (`rs.len()` does not count as reading it); taking it apart, or walking it with

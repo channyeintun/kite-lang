@@ -8580,9 +8580,20 @@ impl<'a> Checker<'a> {
                     return Some(self.lit(ExprKind::Error, TyId::ERROR, span));
                 }
                 let mut stmts = Vec::new();
+                let holds = self.may_hold_failure(seq.ty);
                 let place = self.container_place(base, seq, "pushed to", None, &mut stmts, span)?;
+                let before = self.taint.clone();
                 let v = self.expr(&args[0], Some(elem));
                 let v = self.accept(v, elem, None);
+                // A failure pushed onto a slice of them is one more for the
+                // binding to answer for: `errs.push(f())` and nothing after
+                // it dropped `f`'s failure as surely as `let e = f()` would.
+                if let (true, Some(id)) = (holds, place.binding()) {
+                    if self.holds_obligation(&v, &before) {
+                        self.forget_copies(id);
+                        self.taint[id as usize] = Taint::Unchecked;
+                    }
+                }
                 // `push` is a statement, not an expression; the checker returns
                 // unit and MIR emits the mutation.
                 let push = match place.binding() {

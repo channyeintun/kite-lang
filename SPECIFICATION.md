@@ -1029,6 +1029,14 @@ and `dom.set_text(e, "hi")` would drop its failure in silence. That is
 the analysis did not watch, and it is the ordinary shape on the web, where
 nearly every `std/dom` function answers with a bare `error`.
 
+The analysis follows bindings, and what is bound to them. A failure stored
+into a struct field — by a literal, `Held{ e: f() }`, or by a write — or into
+a map entry or a slice element by index is handed on to that value, exactly
+as passing it to a call is, and is not followed there; read back out into a
+binding, `let e = h.e`, it is an obligation again. A slice of failures is a
+binding like any other, so `errs.push(f())` adds `f`'s failure to what `errs`
+answers for.
+
 To drop one deliberately, say so:
 
 ```kite
