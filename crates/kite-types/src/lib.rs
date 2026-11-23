@@ -6507,7 +6507,7 @@ impl<'a> Checker<'a> {
     ) -> hir::Expr {
         let def = self.types.trait_def(tr);
         let Some((index, method)) = def.method(&name.name) else {
-            let trait_name = def.name.clone();
+            let trait_name = written_trait(&def.name);
             let available: Vec<String> = def.methods.iter().map(|m| m.name.clone()).collect();
             let mut d = Diagnostic::error(
                 codes::E0205,
@@ -16288,7 +16288,6 @@ fn check_compared_params(
     }
 }
 
-/// The last segment of a possibly-qualified name.
 /// A trait's name as a program writes it. The prelude's traits are held as
 /// `prelude.Hash`, and a note that says so names something no program can
 /// write: the reader's own spelling is `Hash`.
@@ -16296,6 +16295,7 @@ fn written_trait(name: &str) -> String {
     name.strip_prefix("prelude.").unwrap_or(name).to_string()
 }
 
+/// The last segment of a possibly-qualified name.
 fn last_segment(name: &str) -> &str {
     name.rsplit('.').next().unwrap_or(name)
 }

@@ -1869,8 +1869,6 @@ impl<'a> Writer<'a, '_> {
         derived.is_some() || self.all_types.iter().any(|(n, _)| *n == qualified)
     }
 
-    /// The name to reach a nested type's derived function by, or empty when
-    /// the field cannot be walked — having reported why.
     /// The bare name of a type that derives the trait being derived — the
     /// name its own messages begin with — or `None` for one written by hand.
     fn derived_bare(&self, name: &str) -> Option<String> {
@@ -1882,6 +1880,8 @@ impl<'a> Writer<'a, '_> {
             .then(|| decl.bare.clone())
     }
 
+    /// The name to reach a nested type's derived function by, or empty when
+    /// the field cannot be walked — having reported why.
     fn recurse_type_name(&mut self, name: &str, ty: &Type) -> String {
         // The declaration the field names, read through the spellings of the
         // module it was written in: `m.Point` under `use models as m` is

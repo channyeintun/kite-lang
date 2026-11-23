@@ -512,11 +512,13 @@ fn a_note_about_a_prelude_trait_does_not_say_prelude() {
         "prelude-trait",
         "t.kite",
         "struct P {\n    a: int\n}\n\nfn s1<T: Hash>(x: T) {\n}\n\nfn s2<T: Display>(x: T) {\n}\n\n\
-         fn d1(x: dyn Debug) {\n}\n\nfn main() {\n    s1(P{ a: 1 })\n    s2(P{ a: 1 })\n    d1(P{ a: 1 })\n}\n",
+         fn d1(x: dyn Debug) {\n}\n\nfn d2(x: dyn Display) {\n    io.print(x.nothing())\n}\n\n\
+         fn main() {\n    s1(P{ a: 1 })\n    s2(P{ a: 1 })\n    d1(P{ a: 1 })\n}\n",
     );
     let Some((ok, _, err)) = kitec_in(&dir, &["check", "t.kite"]) else { return };
     assert!(!ok, "{}", err);
     assert!(err.contains("`P` does not implement `Hash`"), "{}", err);
+    assert!(err.contains("`dyn Display` has no method `nothing`"), "{}", err);
     assert!(!err.contains("prelude."), "{}", err);
     let _ = std::fs::remove_dir_all(&dir);
 }
