@@ -5346,6 +5346,49 @@ const EXPECTED: &[(&str, &str, &str)] = &[
         "base\nb\n1 7 99\nbump p\n1 7 99\n",
     ),
     (
+        // §5.3: operands run in the order written and are fixed then. A
+        // local was named, not copied, so it was read when the value was
+        // built: a later operand's match arm block that assigned it changed
+        // an earlier argument, field, element, payload, key or capture.
+        "an-operand-is-fixed-where-it-is-written",
+        "struct Q {\n  u: ()\n  y: int\n}\nenum E {\n  V(u: (), y: int)\n}\n\
+         fn g(x: int, u: (), z: int) -> int {\n  return x * 100 + z\n}\n\
+         fn n(x: int) -> int {\n  io.print(\"n \\(x)\")\n  return x\n}\n\
+         fn main() {\n\
+         \x20 var a = 1\n  let r = g(a, match a {\n    _ => {\n      io.print(\"arm\")\n      a = 7\n    }\n  }, n(a))\n\
+         \x20 io.print(\"\\(r) \\(a)\")\n\
+         \x20 var b = 1\n  let q = Q{ y: b, u: match b {\n    _ => {\n      io.print(\"arm\")\n      b = 7\n    }\n  } }\n\
+         \x20 io.print(\"\\(q.y) \\(b)\")\n\
+         \x20 var c = 1\n  let t = (c, match c {\n    _ => {\n      io.print(\"arm\")\n      c = 7\n    }\n  }, n(c))\n\
+         \x20 io.print(\"\\(t.0) \\(t.2) \\(c)\")\n\
+         \x20 var d = 1\n  let e = V(y: d, u: match d {\n    _ => {\n      d = 9\n    }\n  })\n\
+         \x20 match e {\n    V(u, y) => io.print(\"\\(y) \\(d)\"),\n  }\n\
+         \x20 var k = \"k\"\n  let m = {k: match k {\n    _ => {\n      k = \"j\"\n    }\n  }}\n\
+         \x20 io.print(\"\\(m.keys()[0]) \\(k)\")\n\
+         \x20 var w = 1\n  let f = |x: int, u: ()| x * 10\n\
+         \x20 io.print(f(w, match w {\n    _ => {\n      w = 5\n    }\n  }))\n}\n",
+        "arm\nn 7\n107 7\narm\n1 7\narm\nn 7\n1 7 7\n1 9\nk j\n10\n",
+    ),
+    (
+        // §5.4: `target op= value` evaluates the target's operands and the
+        // value first, then reads the target, for a local and a field as for
+        // an element. A field was read before the value ran, so `c.count +=
+        // incr(c)` ignored what `incr` stored, unlike `xs[0] += …`.
+        "a-compound-assignment-reads-its-target-last",
+        "struct Counter {\n  var count: int\n}\n\
+         struct Holder {\n  var items: [int]\n}\n\
+         fn g(x: int, u: ()) -> int {\n  return x\n}\n\
+         fn incr(var c: Counter, s: str) -> int {\n  io.print(s)\n  c.count = 50\n  return 1\n}\n\
+         fn set(var h: Holder) -> int {\n  io.print(\"element\")\n  h.items[0] = 50\n  return 1\n}\n\
+         fn make(c: Counter) -> Counter {\n  io.print(\"target\")\n  return c\n}\n\
+         fn main() {\n\
+         \x20 var x = 1\n  x += g(1, match x {\n    _ => {\n      io.print(\"arm\")\n      x = 5\n    }\n  })\n  io.print(x)\n\
+         \x20 var c = Counter{ count: 0 }\n  make(c).count += incr(c, \"value\")\n  io.print(c.count)\n\
+         \x20 var h = Holder{ items: [0] }\n  h.items[0] += set(h)\n  io.print(h.items[0])\n\
+         \x20 var e = Counter{ count: 0 }\n  e.count = e.count + incr(e, \"plain\")\n  io.print(e.count)\n}\n",
+        "arm\n6\ntarget\nvalue\n51\nelement\n51\nplain\n1\n",
+    ),
+    (
         // §2.4, in a file written with CRLF line endings: a line break in the
         // source is a line break however it was written, so no line of a
         // block string ends in `\r` — with a hole, without one, in a

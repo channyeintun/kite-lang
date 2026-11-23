@@ -422,6 +422,110 @@ pub enum ExprKind {
     Error,
 }
 
+impl Expr {
+    /// Whether evaluating this expression can write `local`.
+    ///
+    /// Only a statement can write a local, and the only statements inside an
+    /// expression are those of a block — a `match` arm written with braces.
+    /// A closure's body is another function, and a call cannot reach the
+    /// caller's locals: captures are copies and a `var` parameter writes
+    /// nothing back. So this is a walk to the blocks, and it is what lets an
+    /// operand list read a local where it is written (§5.3) without putting
+    /// every one of them in a temporary.
+    pub fn writes(&self, local: LocalId) -> bool {
+        use ExprKind as E;
+        let any = |es: &[Expr]| es.iter().any(|e| e.writes(local));
+        match &self.kind {
+            E::Int(_) | E::Float(_) | E::Str(_) | E::Bool(_) | E::Local(_) | E::Nil | E::Yield | E::Error => false,
+            E::Call { args, .. }
+            | E::CallVirtual { args, .. }
+            | E::StrOp { args, .. }
+            | E::CallBuiltin { args, .. }
+            | E::CallExtern { index: _, args } => any(args),
+            E::ClosureNew { captures, .. } => any(captures),
+            E::CallClosure { callee, args } => callee.writes(local) || any(args),
+            E::StructNew { fields, .. } | E::EnumNew { fields, .. } => any(fields),
+            E::TupleNew { elems } | E::SliceNew { elems } => any(elems),
+            E::MapNew { entries } => any(entries),
+            E::ToDyn { value, .. }
+            | E::ToStr { value }
+            | E::Cast { value, .. }
+            | E::IsNil { value }
+            | E::Wrap { value }
+            | E::Unwrap { value }
+            | E::Await { value } => value.writes(local),
+            E::Unary { operand, .. } => operand.writes(local),
+            E::Binary { lhs, rhs, .. } => lhs.writes(local) || rhs.writes(local),
+            E::If { cond, then, else_ } => cond.writes(local) || then.writes(local) || else_.writes(local),
+            E::FieldGet { base, .. }
+            | E::PairValue { base }
+            | E::PairError { base }
+            | E::ErrorMessage { base }
+            | E::ErrorCause { base }
+            | E::ErrorTag { base }
+            | E::ErrorAs { base, .. }
+            | E::MapLen { base }
+            | E::MapKeys { base }
+            | E::MapValues { base }
+            | E::SliceLen { base } => base.writes(local),
+            E::Match { scrutinee, arms } => {
+                scrutinee.writes(local)
+                    || arms.iter().any(|a| a.guard.as_ref().is_some_and(|g| g.writes(local)) || a.body.writes(local))
+            }
+            E::PairNew { value, error } => value.writes(local) || error.writes(local),
+            E::ErrorNew { message, value, tag, cause } => {
+                message.writes(local) || value.writes(local) || tag.writes(local) || cause.writes(local)
+            }
+            E::MapGet { base, key } => base.writes(local) || key.writes(local),
+            E::Index { base, index } | E::SliceGet { base, index } => base.writes(local) || index.writes(local),
+            E::SliceRange { base, start, end } => base.writes(local) || start.writes(local) || end.writes(local),
+            E::Block(b) => b.writes(local),
+        }
+    }
+}
+
+impl Block {
+    /// Whether running this block can write `local` (see [`Expr::writes`]).
+    pub fn writes(&self, local: LocalId) -> bool {
+        self.stmts.iter().any(|s| s.writes(local))
+    }
+}
+
+impl Stmt {
+    /// Whether running this statement can write `local` (see [`Expr::writes`]).
+    /// A slice or map changed in place is its local written: they are values.
+    pub fn writes(&self, local: LocalId) -> bool {
+        match self {
+            Stmt::Let { local: l, init, .. } => *l == local || init.as_ref().is_some_and(|e| e.writes(local)),
+            Stmt::Assign { local: l, value, .. } | Stmt::SlicePush { local: l, value, .. } => {
+                *l == local || value.writes(local)
+            }
+            Stmt::MapSet { local: l, key, value, .. } => *l == local || key.writes(local) || value.writes(local),
+            Stmt::MapRemove { local: l, key, .. } => *l == local || key.writes(local),
+            Stmt::SetField { base, value, .. } => base.writes(local) || value.writes(local),
+            Stmt::SetIndex { base, index, value, .. } => {
+                matches!(base.kind, ExprKind::Local(l) if l == local)
+                    || base.writes(local)
+                    || index.writes(local)
+                    || value.writes(local)
+            }
+            Stmt::ForSlice { var, slice, body, .. } => *var == local || slice.writes(local) || body.writes(local),
+            Stmt::ForRange { var, start, end, body, .. } => {
+                *var == local || start.writes(local) || end.writes(local) || body.writes(local)
+            }
+            Stmt::Expr(e) => e.writes(local),
+            Stmt::Return { value, .. } => value.as_ref().is_some_and(|e| e.writes(local)),
+            Stmt::If { cond, then, else_, .. } => {
+                cond.writes(local) || then.writes(local) || else_.as_ref().is_some_and(|b| b.writes(local))
+            }
+            Stmt::While { cond, body, .. } => cond.writes(local) || body.writes(local),
+            Stmt::Loop { body, .. } => body.writes(local),
+            Stmt::Break { .. } | Stmt::Continue { .. } => false,
+            Stmt::Block(b) => b.writes(local),
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct MatchArm {
     pub pattern: Pattern,

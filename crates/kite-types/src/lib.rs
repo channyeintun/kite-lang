@@ -1893,6 +1893,15 @@ impl<'a> Checker<'a> {
         let before = self.init[slot];
         let taint_before = self.taint.clone();
         let value = self.expr(&a.value, Some(local_ty));
+        // `n += v` reads `n` after `v` has run (§5.4), which matters only
+        // where `v` writes `n` — a `match` arm block in it can — since an
+        // operand is otherwise fixed where it is written.
+        let mut first = Vec::new();
+        let value = if a.op.to_binary().is_some() && value.writes(hir::LocalId(local_id)) {
+            self.evaluated_first(value, &mut first)
+        } else {
+            value
+        };
         let (value, written) = match a.op.to_binary() {
             None => {
                 let written = value.ty;
@@ -2006,10 +2015,12 @@ impl<'a> Checker<'a> {
         }
         self.error_nonnil.remove(&local_id);
 
-        Some((
-            hir::Stmt::Assign { local: hir::LocalId(local_id), value, span: a.span },
-            Flow::Falls,
-        ))
+        let assign = hir::Stmt::Assign { local: hir::LocalId(local_id), value, span: a.span };
+        if first.is_empty() {
+            return Some((assign, Flow::Falls));
+        }
+        first.push(assign);
+        Some((hir::Stmt::Block(hir::Block { stmts: first }), Flow::Falls))
     }
 
     /// Whether a binding of this type carries the obligation to be checked:
@@ -11896,18 +11907,42 @@ impl<'a> Checker<'a> {
             ty,
             span,
         };
+        // The right-hand side runs before the field is read (§5.4), as it
+        // does for `xs[i] += v`: `c.n += f(c)`, where `f` sets `c.n`, adds
+        // to what `f` left. The field was read first, and the two forms
+        // disagreed.
+        let mut stmts = vec![hir::Stmt::Let { local: hir::LocalId(holder), init: Some(obj), span }];
+        let value = self.evaluated_first(value, &mut stmts);
         let sum = self.binary(binop, current, value, a.span);
         let sum = self.coerce(sum, Some(ty));
         self.expect_ty(sum.ty, ty, sum.span, Some(decl_span));
-        Some((
-            hir::Stmt::Block(hir::Block {
-                stmts: vec![
-                    hir::Stmt::Let { local: hir::LocalId(holder), init: Some(obj), span },
-                    hir::Stmt::SetField { base: read, index: index as u32, value: sum, span: a.span },
-                ],
-            }),
-            Flow::Falls,
-        ))
+        stmts.push(hir::Stmt::SetField { base: read, index: index as u32, value: sum, span: a.span });
+        Some((hir::Stmt::Block(hir::Block { stmts }), Flow::Falls))
+    }
+
+    /// A compound assignment's right-hand side, evaluated ahead of the read
+    /// of its target: bound to a hidden local by a statement pushed onto
+    /// `stmts`, unless reading it later is the same as reading it now — a
+    /// literal, or a local, which nothing between here and the read can
+    /// write.
+    fn evaluated_first(&mut self, value: hir::Expr, stmts: &mut Vec<hir::Stmt>) -> hir::Expr {
+        let settled = matches!(
+            value.kind,
+            ExprKind::Int(_)
+                | ExprKind::Float(_)
+                | ExprKind::Bool(_)
+                | ExprKind::Str(_)
+                | ExprKind::Nil
+                | ExprKind::Local(_)
+                | ExprKind::Error
+        );
+        if settled || value.ty == TyId::NEVER || self.types.is_poisoned(value.ty) {
+            return value;
+        }
+        let (ty, span) = (value.ty, value.span);
+        let id = self.synthetic_local("value", ty, span);
+        stmts.push(hir::Stmt::Let { local: hir::LocalId(id), init: Some(value), span });
+        hir::Expr { kind: ExprKind::Local(hir::LocalId(id)), ty, span }
     }
 
     fn if_expr(

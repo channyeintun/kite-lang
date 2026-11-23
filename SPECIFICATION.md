@@ -759,7 +759,11 @@ becomes `0`, `""`, or `nil`.
 
 The fields of a struct literal, and the named payload of a variant such as
 `Rect(h: f(), w: g())`, are evaluated in the order they are written, not the
-order they are declared in. `..base` is written first, so it is evaluated
+order they are declared in. Every operand list runs in written order — a call's
+arguments, the elements of a tuple, slice or map literal, the two sides of an
+operator — and each operand's value is fixed when it is evaluated: a later one
+that assigns a local, as a `match` arm block can, does not change what an
+earlier one read from it. `..base` is written first, so it is evaluated
 first, and once; the fields it supplies are read from that one value, before
 any written field is evaluated — so a written field whose call changes the
 base through a `var` parameter does not change what the new value copies.
@@ -851,6 +855,14 @@ anything is copied, so no code the program wrote runs between taking a copy and
 writing it back, and a call in an index that changes the same field is not
 undone by the write. Because these are values, a copy of `grid` or of `grid[i]`
 taken before the write still holds what it did.
+
+**`target op= value` reads its target last**, by the same rule. The target's
+operands and the right-hand side are evaluated first, in the order written; then
+the target's current value is read, combined and stored. That holds for a local
+and a field as for an element: `c.count += f(c)`, where `f` sets `c.count`
+through a `var` parameter, adds to what `f` stored — as `xs[0] += f(h)` does —
+and is not the same as `c.count = c.count + f(c)`, which reads `c.count` where it
+is written, first.
 
 A `let` binding at the root, or a field not declared `var`, is `E0114`, as the
 same assignment written out would be. A call's result is held by nothing, so

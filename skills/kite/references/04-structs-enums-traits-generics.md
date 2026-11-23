@@ -18,6 +18,10 @@ Everything here was checked against `target/release/kitec`. Where SPECIFICATION.
 - **`..base` in a struct literal comes FIRST**, not last: `P{ ..old, x: 1 }`.
   `P{ x: 1, ..old }` is a parse error. Opposite of Rust. The base runs first and once,
   then the fields in the order written (as do a variant's named payload fields).
+  The fields the base supplies are read before any written field runs, so a written
+  field whose call changes the base through a `var` parameter does not leak into the
+  copy. Every operand is fixed where it is written — a later `match` arm block that
+  assigns a local does not change an earlier argument, element or field that read it.
   Compilers through 0.1.9 ran fields in declaration order and the base once per
   field it supplied.
 - **Struct fields and enum variants are newline-separated.** A comma between them

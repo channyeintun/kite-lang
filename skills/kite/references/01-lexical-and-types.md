@@ -609,7 +609,9 @@ fn main() {
 depth. The compiler copies each level out, changes the innermost and writes
 every level back — what you would otherwise write by hand — with the indices
 and the right-hand side evaluated once, first. So a copy of the outer slice
-taken before the write keeps its old contents: slices are values.
+taken before the write keeps its old contents: slices are values. Any `t op= v` —
+on a local, a field or an element — reads `t` after `v` has run: `c.n += f(c)`
+adds to whatever `f` stored in `c.n`, unlike `c.n = c.n + f(c)`.
 
 ```kite
 struct Board {
