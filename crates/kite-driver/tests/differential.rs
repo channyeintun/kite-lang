@@ -4383,6 +4383,25 @@ fn main() {
 }
 ",
     ),
+    // A race of no tasks has no winner. It waited forever, until the
+    // scheduler gave up on every task without saying which call was at
+    // fault; now it is a `require` at the call.
+    (
+        "a-race-of-no-tasks-traps",
+        "\
+use std/task
+
+async fn go() {
+  let none: [Task<int>] = []
+  io.print(\"before\")
+  io.print(await task.race(none))
+}
+
+fn main() {
+  _ = go()
+}
+",
+    ),
     (
         "a-negative-buffer-field-traps",
         "\
@@ -4695,6 +4714,27 @@ fn a_nil_error_beside_a_hole_traps_with_one_message() {
         let _ = std::fs::remove_dir_all(&dir);
         assert_eq!(outcome, (printed, true));
         assert!(stderr.contains(&format!("{}\n", MESSAGE)), "wasm said:\n{}", stderr);
+    }
+}
+
+/// `task.race` of no tasks traps at the call, saying so. It used to wait
+/// forever for a winner, until the scheduler trapped with "2 tasks can never
+/// make progress" — true, and no help finding the call.
+#[test]
+fn a_race_of_no_tasks_names_the_mistake() {
+    const MESSAGE: &str = "task.race of no tasks: there is nothing to finish first";
+    let name = "a-race-of-no-tasks-traps";
+    let (_, src) = TRAPPING.iter().find(|(n, _)| *n == name).expect("the program");
+    let c = compile(format!("{}.kite", name), src, Emit::Check);
+    assert!(!c.failed(), "{}", c.render_diagnostics());
+    let mut out = Vec::new();
+    let trap = c.run(&mut out).expect_err("a trap on the VM");
+    assert_eq!(String::from_utf8(out).unwrap(), "before\n");
+    assert_eq!(trap.to_string(), MESSAGE);
+    if native_available() {
+        let (outcome, stderr) = trap_on_native_with_stderr(name);
+        assert_eq!(outcome, ("before\n".to_string(), true));
+        assert!(stderr.contains(&format!("error: {}\n", MESSAGE)), "native said:\n{}", stderr);
     }
 }
 

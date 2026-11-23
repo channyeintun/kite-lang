@@ -37,7 +37,13 @@ pub async fn all<T>(tasks: [Task<T>]) -> [T] {
 /// The losers are not cancelled: a task the program started is the program's
 /// work, and stopping it silently is the kind of hidden control flow the
 /// language exists to remove.
+///
+/// At least one task is required. A race of none has no winner and no `T` to
+/// answer with, and it used to wait for one forever, until the scheduler
+/// reported that some tasks could never make progress without saying which;
+/// it traps at once now, naming the mistake.
 pub async fn race<T>(tasks: [Task<T>]) -> T {
+    require(tasks.len() > 0, "task.race of no tasks: there is nothing to finish first")
     for {
         for t in tasks {
             if task.finished(t) {

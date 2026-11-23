@@ -228,7 +228,7 @@ The library combinators, all `async`, all in `std/task`:
 |---|---|---|
 | `both(a, b)` | `Task<A>, Task<B> -> (A, B)` | Two of different types. |
 | `all(tasks)` | `[Task<T>] -> [T]` | In the order given, not the order they finished. |
-| `race(tasks)` | `[Task<T>] -> T` | **The losers are not cancelled.** They keep running. |
+| `race(tasks)` | `[Task<T>] -> T` | **The losers are not cancelled.** They keep running. A race of no tasks traps at the call. |
 | `timeout(work, ms)` | `Task<T>, int -> Option<T>` | `nil` on expiry; the task itself is not stopped. |
 | `sleep(ms)` | `int -> ()` | Virtual clock: a sleeping program costs no real time under `kitec test`. |
 | `parallel(items, f)` | `[T: Share], fn(T) -> U: Share -> [U]` | **Not parallel on any target.** See below. |
