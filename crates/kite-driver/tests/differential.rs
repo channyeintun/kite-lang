@@ -6479,8 +6479,9 @@ fn main() {
     ),
     // What E0114's notes tell the reader to write, written: a `var` copy and
     // a captured `let` of the result; a copy made inside the closure; a
-    // `var` given its value where it is declared. The notes said "declare
-    // it `var`" for each, which is E0211 or E0110.
+    // `var` given its value where it is declared; a copy of a loop's or a
+    // pattern's binding. The notes said "declare it `var`" for each, which
+    // is E0211, E0110 or a parse error.
     (
         "e0114-notes-followed-compile",
         r#"fn main() {
@@ -6505,9 +6506,18 @@ fn main() {
   var zs: [int] = [1]
   zs.push(2)
   io.print(zs.len())
+  for ys in [[1]] {
+    var copy = ys
+    copy.push(2)
+    io.print(copy.len())
+  }
+  let (ws, n) = ([1], 2)
+  var wcopy = ws
+  wcopy.push(n)
+  io.print(wcopy.len())
 }
 "#,
-        "2\n2\n2\n",
+        "2\n2\n2\n2\n2\n",
     ),
     // A named `async fn` used as a value is its starter, a function that
     // returns the task: passed where `fn(int) -> Task<int>` is wanted, bound

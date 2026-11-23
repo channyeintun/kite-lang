@@ -635,6 +635,7 @@ pub fn check_recording(
             locals: Vec::new(),
             init: Vec::new(),
             bare_lets: std::collections::HashSet::new(),
+            param_count: 0,
             captured_decls: std::collections::HashSet::new(),
             var_fixes: Vec::new(),
             taint: Vec::new(),
@@ -1177,6 +1178,10 @@ struct Checker<'a> {
     /// The names of the `let`s declared without an initialiser. `var x: T` with
     /// none is E0110, so E0114 offers no `var` fix for one.
     bare_lets: std::collections::HashSet<Span>,
+    /// How many of `locals` are the function's own parameters (`self`
+    /// included): a parameter may be declared `var`, a loop's or a pattern's
+    /// binding may not.
+    param_count: usize,
     /// The declarations of the locals some closure in this function captures.
     /// A `var` cannot be captured (E0211), so E0114 offers no `var` fix for
     /// one — and the capture may come after the write, so the fixes offered
@@ -1545,6 +1550,7 @@ impl<'a> Checker<'a> {
             .collect();
 
         let param_count = params.len() + offset;
+        self.param_count = param_count;
 
         // Parameters always hold a value; everything else starts unassigned.
         self.init = (0..self.locals.len())
@@ -9634,6 +9640,7 @@ impl<'a> Checker<'a> {
             return Some(());
         }
         let (name, decl, ty) = (local.name.clone(), local.span, local.ty);
+        let written_let = self.bare_lets.contains(&decl) || self.let_keyword_span(decl).is_some();
         let noun = match *self.types.kind(ty) {
             TyKind::Optional(inner) => self.container_noun(inner),
             _ => self.container_noun(ty),
@@ -9653,12 +9660,21 @@ impl<'a> Checker<'a> {
             // `let x: T` is given its value later, and a `var` may not be
             // (E0110), so the `var` takes that value where it is declared.
             format!("declare it `var` with the value it is first given, as in `var {} = …`", name)
+        } else if !written_let && (id as usize) >= self.param_count {
+            // A loop's binding (`for xs in …`), one a pattern names (`let
+            // (a, b) = …`, a `match` arm) and a closure's parameter have no
+            // `var` form: `for var xs`, `var (a, b)` and `|var xs|` do not
+            // parse. Only a function's own parameters may be `var`.
+            format!(
+                "`{}` cannot be made `var` where it is bound: change a copy, `var copy = {}`",
+                name, name
+            )
         } else {
             "declare it `var`".to_string()
         };
         let mut d = Diagnostic::error(codes::E0114, format!("`{}` cannot be {}", name, what))
             .with_primary(at, "this binding is immutable")
-            .with_secondary(decl, "declared with `let` here")
+            .with_secondary(decl, if written_let { "declared with `let` here" } else { "declared here" })
             .with_note(match top {
                 None => format!(
                     "a {} is a copy-on-write value, so changing its contents changes the \

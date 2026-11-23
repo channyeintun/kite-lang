@@ -307,6 +307,19 @@ fn the_var_note_names_what_compiles() {
     // Where `var` compiles, the note still says so.
     let c = body("  let xs = [1]\n  xs.push(2)");
     assert!(c.render().contains("binding; declare it `var`"), "{}", c.render());
+    // A loop's binding, a pattern's and a closure's parameter have no `var`
+    // form (`for var ys` does not parse): a copy of it is what works.
+    for src in [
+        "  for ys in [[1]] {\n    ys.push(2)\n  }",
+        "  let (ys, n) = ([1], 2)\n  ys.push(n)",
+        "  let f = |ys: [int]| {\n    ys.push(2)\n  }\n  f([1])",
+    ] {
+        let out = body(src).render();
+        assert!(out.contains("`ys` cannot be made `var` where it is bound"), "{}", out);
+        assert!(out.contains("`var copy = ys`"), "{}", out);
+        assert!(!out.contains("declare it `var`"), "{}", out);
+        assert!(!out.contains("declared with `let` here"), "{}", out);
+    }
 }
 
 #[test]
