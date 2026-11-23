@@ -1592,7 +1592,12 @@ impl<'a> Checker<'a> {
                     )
                     .with_secondary(
                         sig.name_span,
-                        format!("`{}` declared here", self.types.name(sig.ret)),
+                        // A result type that was itself reported has no name.
+                        if self.types.holds_error(sig.ret) {
+                            "a result declared here".to_string()
+                        } else {
+                            format!("`{}` declared here", self.types.name(sig.ret))
+                        },
                     ),
             );
         }
@@ -4453,7 +4458,7 @@ impl<'a> Checker<'a> {
                 Some(want) if matches!(self.types.kind(want), TyKind::Optional(_)) => {
                     hir::Expr { kind: ExprKind::Nil, ty: want, span: *span }
                 }
-                Some(want) if !self.types.is_poisoned(want) => {
+                Some(want) if !self.types.is_poisoned(want) && !self.types.holds_error(want) => {
                     let name = self.types.name(want);
                     self.diags.push(
                         Diagnostic::error(
@@ -15482,10 +15487,9 @@ fn resolve_named_ty(
                 .iter()
                 .map(|e| resolve_named_ty(e, resolved, module, type_ids, generics, types, diags))
                 .collect();
-            // Except `(T, error)`, which may be a fallible function's result:
-            // the function stays fallible, its `return _, err` no new error.
-            let pair = es.len() == 2 && es[1] == TyId::ERR;
-            if es.contains(&TyId::ERROR) && !pair {
+            // A signature's `-> (T, error)` is resolved by its value type, so
+            // a fallible function stays fallible; this is only ever a tuple.
+            if es.contains(&TyId::ERROR) {
                 return TyId::ERROR;
             }
             if es.is_empty() {

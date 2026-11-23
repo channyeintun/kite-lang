@@ -1940,6 +1940,8 @@ mod tests {
             "fn main() {\n  var x = [nope]\n  io.print(x.foo)\n}\n",
             "fn main() {\n  var x = (1, nope)\n  return x\n}\n",
             "fn take(n: int) -> int {\n  return n\n}\nfn main() {\n  let m = {\"a\": nope}\n  io.print(take(m))\n}\n",
+            "fn f(n: Int) -> Int {\n  if n == 0 {\n    return 1\n  }\n}\nfn main() {\n}\n",
+            "fn f() -> (Nope, error) {\n  return nil\n}\nstruct S {\n  a: (Nope, error)\n}\nfn main() {\n  let s = S{ a: nil }\n}\n",
         ];
         for src in programs {
             let c = compile("t.kite", src, Emit::Check);
