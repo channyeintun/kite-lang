@@ -2918,8 +2918,9 @@ Existing functions that answer differently:
   the prelude's `minf`, `maxf` and `clampf` — carry a NaN whichever side it is
   on; `round`, `trunc`, `floor` and `ceil` keep a zero's sign; `powf` of a
   negative base and a whole exponent is the real answer; `ipow`, new in the
-  first round, is `checked_pow`. `divides(x, 0)` answers `x == 0` rather than
-  trapping, and `approx_eq` and `test.equal_float` pass equal infinities.
+  first round, is `checked_pow`. The prelude's `divides(x, 0)` answers
+  `x == 0` rather than trapping, and its `approx_eq` and `test.equal_float`
+  pass equal infinities.
 - **`std/json` and `std/toml`.** An `int` at or past 2⁵³ in magnitude encodes
   as a string of its digits and decodes only from one; `stringify`, `pretty`
   and `stringify_sorted` trap past 128 levels (`check_nesting` asks first); a

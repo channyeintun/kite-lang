@@ -125,8 +125,8 @@ handling with `check`.
 **Concurrency.** `async fn` compiles to a state machine in MIR — a starter and
 a resume function — so every backend sees ordinary code and none of them knows
 concurrency exists. `std/task` supplies `both`, `all`, `race`, `sleep`,
-`timeout`, `scope`, `map` and `parallel`, all written in Kite over seven compiler
-primitives.
+`timeout`, `scope`, `map` and `parallel`, all written in Kite over seven
+compiler primitives.
 
 ```kite
 let a = fetch("alpha", 100)
