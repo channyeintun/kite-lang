@@ -225,6 +225,12 @@ The `f` suffix is the float form: Kite has no overloading, so `min` is
 `sumf([float]) -> float`. `approx_eq(a, b, tolerance) -> bool` lives here, not
 in `std/math`.
 
+The float forms mind the edges as `std/math`'s do: `absf(-0.0)` is +0.0,
+`minf`/`maxf`/`clampf` carry a NaN whichever side it is on (and -0.0 is the
+smaller zero), and `approx_eq` holds for equal infinities at any tolerance and
+never for a NaN. `divides(x, 0)` answers rather than trapping: true only for
+`x == 0`. `abs(min_int)` has no answer and overflows (a trap in a debug build).
+
 ### Strings
 
 `contains` `starts_with` `ends_with` `split` `join` `replace` `words`
@@ -1269,7 +1275,9 @@ place and almost always correctly rounded; `powf` hands a whole exponent to
 `pow`, so `powf(10.0, 2.0)` is exactly 100, and is within one unit otherwise.
 The inverse trigonometric functions are within a few units.
 
-Edges. A NaN in is a NaN out everywhere, and `min`, `max` and `clamp` carry
+Edges. A NaN in is a NaN out — except where C99 gives a number whatever the
+other argument (`pow(x, 0)` and `powf(x, 0.0)` are 1, `powf(1.0, y)` is 1,
+`hypot` with an infinite side is infinite) — and `min`, `max` and `clamp` carry
 one whichever side it is on (IEEE 754's `minimum`/`maximum`; -0.0 is the
 smaller zero). `exp` overflows to **infinity** past about 709.78, as IEEE 754
 has it; `pow`, `powf` and `atan2` follow C99's special values (`pow(0.0, -1)`

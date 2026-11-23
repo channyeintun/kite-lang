@@ -179,6 +179,25 @@ fn checks() -> [error] {
     out.push(test.equal_float(absf(-2.5), 2.5, 0.0001, "absf"))
     out.push(test.is_true(approx_eq(0.1 + 0.2, 0.3, 0.0001), "approx_eq"))
     out.push(test.is_true(divides(9, 3), "divides"))
+    // The edges: a zero's sign, a NaN on either side, an infinity, a zero
+    // divisor. Each of these was wrong, or trapped.
+    let inf = 1.0 / 0.0
+    let nan = 0.0 / 0.0
+    out.push(test.is_true(1.0 / absf(-0.0) > 0.0, "absf(-0.0) is +0.0"))
+    out.push(test.is_true(!(minf(nan, 1.0) >= 0.0) && !(minf(1.0, nan) >= 0.0), "minf carries a NaN from either side"))
+    out.push(test.is_true(!(maxf(nan, 1.0) >= 0.0) && !(maxf(1.0, nan) >= 0.0), "maxf carries a NaN from either side"))
+    out.push(test.is_true(1.0 / minf(0.0, -0.0) < 0.0 && 1.0 / minf(-0.0, 0.0) < 0.0, "minf: -0.0 is the smaller zero"))
+    out.push(test.is_true(1.0 / maxf(0.0, -0.0) > 0.0 && 1.0 / maxf(-0.0, 0.0) > 0.0, "maxf: 0.0 is the larger zero"))
+    out.push(test.equal_float(minf(2.0, -3.0), -3.0, 0.0, "minf"))
+    out.push(test.equal_float(maxf(2.0, -3.0), 2.0, 0.0, "maxf"))
+    out.push(test.is_true(!(clampf(nan, 0.0, 1.0) >= 0.0), "clampf keeps a NaN"))
+    out.push(test.equal_float(clampf(-inf, 0.0, 1.0), 0.0, 0.0, "clampf(-inf)"))
+    out.push(test.is_true(approx_eq(inf, inf, 0.5) && approx_eq(-inf, -inf, 0.0), "approx_eq of equal infinities"))
+    out.push(test.is_false(approx_eq(inf, -inf, 0.5), "approx_eq of opposite infinities"))
+    out.push(test.is_false(approx_eq(nan, nan, inf), "a NaN is near nothing"))
+    out.push(test.is_true(divides(0, 0), "zero is a multiple of zero"))
+    out.push(test.is_false(divides(5, 0), "and nothing else is"))
+    out.push(test.is_true(divides(-9223372036854775807 - 1, -1), "divides(min_int, -1)"))
 
     // ---- strings ----
     out.push(test.is_true(contains("hello", "ell"), "contains"))

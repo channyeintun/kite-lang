@@ -231,6 +231,10 @@ pub fn drop<T>(items: [T], n: int) -> [T] {
 // ---- numbers --------------------------------------------------------------
 
 /// The distance from zero.
+///
+/// `abs(min_int)` has no answer, since 2⁶³ is not an `int`: negating it is an
+/// overflow, which traps in a debug build and wraps back to itself in a
+/// release one, as any overflow does.
 pub fn abs(x: int) -> int {
     if x < 0 {
         return 0 - x
@@ -238,8 +242,16 @@ pub fn abs(x: int) -> int {
     return x
 }
 
+/// The distance from zero, never negative: `absf(-0.0)` is 0.0.
+///
+/// ```kite
+/// assert(1.0 / absf(-0.0) > 0.0, "absf(-0.0) is +0.0")
+/// ```
+///
+/// `x <= 0.0` rather than `x < 0.0`, because -0.0 is not below zero and so
+/// came back as itself; `0.0 - -0.0` is +0.0. The same as `math.abs`.
 pub fn absf(x: float) -> float {
-    if x < 0.0 {
+    if x <= 0.0 {
         return 0.0 - x
     }
     return x
@@ -259,18 +271,52 @@ pub fn max(a: int, b: int) -> int {
     return b
 }
 
+/// The smaller of two floats. A NaN on either side is the answer, and -0.0
+/// is smaller than 0.0: IEEE 754's `minimum`, as `math.min` is.
+///
+/// ```kite
+/// assert(!(minf(0.0 / 0.0, 1.0) >= 0.0), "a NaN is carried through")
+/// assert(!(minf(1.0, 0.0 / 0.0) >= 0.0), "from either side")
+/// assert(1.0 / minf(0.0, -0.0) < 0.0, "-0.0 is the smaller zero")
+/// ```
+///
+/// Returning `b` whenever `a < b` is false, as this did, made the answer
+/// depend on which argument the NaN was: `minf(nan, 1.0)` was 1.0 and
+/// `minf(1.0, nan)` a NaN.
 pub fn minf(a: float, b: float) -> float {
     if a < b {
         return a
     }
-    return b
+    if b < a {
+        return b
+    }
+    // Equal, or unordered because one is a NaN. Of two equal zeros the
+    // negative one is the smaller; only dividing by it tells -0.0 apart.
+    if a >= b {
+        if 1.0 / a < 0.0 {
+            return a
+        }
+        return b
+    }
+    return a + b
 }
 
+/// The larger of two floats. A NaN on either side is the answer, and 0.0 is
+/// larger than -0.0: IEEE 754's `maximum`, the mirror of [`minf`].
 pub fn maxf(a: float, b: float) -> float {
     if a > b {
         return a
     }
-    return b
+    if b > a {
+        return b
+    }
+    if a >= b {
+        if 1.0 / a > 0.0 {
+            return a
+        }
+        return b
+    }
+    return a + b
 }
 
 /// `x` held within `[low, high]`.
@@ -278,18 +324,44 @@ pub fn clamp(x: int, low: int, high: int) -> int {
     return min(max(x, low), high)
 }
 
+/// `x` held within `[low, high]`. A NaN stays a NaN rather than becoming
+/// `low`, since [`minf`] and [`maxf`] carry it.
 pub fn clampf(x: float, low: float, high: float) -> float {
     return minf(maxf(x, low), high)
 }
 
 /// Floating-point equality within a tolerance. Comparing floats with `==` is
 /// almost never what is meant, which is why the compiler warns and points here.
+///
+/// Equal floats are equal at any tolerance, infinities included: `inf - inf`
+/// is a NaN, which is within no tolerance, so `approx_eq(inf, inf, 0.5)` was
+/// false. A NaN is approximately equal to nothing, itself included.
+///
+/// ```kite
+/// let inf = 1.0 / 0.0
+/// assert(approx_eq(inf, inf, 0.5), "an infinity is itself")
+/// assert(!approx_eq(0.0 / 0.0, 0.0 / 0.0, inf), "a NaN is near nothing")
+/// ```
 pub fn approx_eq(a: float, b: float, tolerance: float) -> bool {
+    if a <= b && a >= b {
+        return true
+    }
     return absf(a - b) <= tolerance
 }
 
-/// Whether `x` divides evenly by `by`.
+/// Whether `x` divides evenly by `by`: whether `by` is a divisor of `x`.
+///
+/// ```kite
+/// assert(divides(9, 3) && !divides(9, 2), "divides")
+/// assert(divides(0, 0) && !divides(5, 0), "only zero is a multiple of zero")
+/// ```
+///
+/// A predicate does not trap, so a `by` of zero is answered rather than
+/// divided by: the multiples of zero are zero alone.
 pub fn divides(x: int, by: int) -> bool {
+    if by == 0 {
+        return x == 0
+    }
     return x % by == 0
 }
 
