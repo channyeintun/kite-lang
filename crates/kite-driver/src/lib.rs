@@ -1491,6 +1491,25 @@ mod tests {
         assert!(text.contains("a `[int]` cannot be given an `impl`"), "{}", text);
     }
 
+    /// `Wrapped.as(err)` at an argument its `impl Error` is bounded against
+    /// is told which bound the argument misses, not to write the `impl` it
+    /// already has.
+    #[test]
+    fn a_downcast_outside_a_bounded_error_impl_names_the_bound() {
+        let c = compile(
+            "t.kite",
+            "struct Wrapped<T> {\n  inner: T\n}\n\
+             impl<T: Display> Error for Wrapped<T> {\n  fn message(self) -> str {\n    return \"w\"\n  }\n}\n\
+             fn main() {\n  let e: error = nil\n  let w: Option<Wrapped<[int]>> = Wrapped.as(e)\n  io.print(w == nil)\n}\n",
+            Emit::Check,
+        );
+        let codes: Vec<&str> = c.diags.iter().filter_map(|d| d.code.map(|x| x.0)).collect();
+        assert_eq!(codes, vec!["E0205"], "{}", c.render_diagnostics());
+        let text = c.render_diagnostics();
+        assert!(text.contains("only where `T: Display`, and `[int]` is not one"), "{}", text);
+        assert!(!text.contains("write `impl<T> Error"), "{}", text);
+    }
+
     /// `wrap(wrap(…(x)))`, `depth` calls deep.
     fn nested(call: &str, depth: usize, core: &str) -> String {
         let mut s = core.to_string();

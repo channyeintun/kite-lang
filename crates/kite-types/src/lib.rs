@@ -6787,6 +6787,22 @@ impl<'a> Checker<'a> {
         if let Some(tr) = self.error_trait() {
             if !self.type_implements(ty, tr) {
                 let name = self.types.name(ty);
+                // A bounded `impl Error` is there already, and is told which
+                // argument misses its bound rather than to be written again.
+                let fix = match self.unmet_impl_bound(ty, tr) {
+                    Some((param, arg, bound)) => format!(
+                        "`{}` implements `Error` only where `{}: {}`, and `{}` is not one",
+                        name,
+                        param,
+                        last_segment(&self.types.trait_def(bound).name),
+                        self.types.name(arg)
+                    ),
+                    None => format!(
+                        "write `{} {{ fn message(self) -> str {{ … }} }}`, or name the type \
+                         the error was made from",
+                        self.impl_to_write("Error", ty)
+                    ),
+                };
                 self.diags.push(
                     Diagnostic::error(
                         codes::E0205,
@@ -6797,11 +6813,7 @@ impl<'a> Checker<'a> {
                         "`is` and `as` ask which failure an error was, and only a type that \
                          implements `Error` can be one",
                     )
-                    .with_note(format!(
-                        "write `{} {{ fn message(self) -> str {{ … }} }}`, or name the type \
-                         the error was made from",
-                        self.impl_to_write("Error", ty)
-                    )),
+                    .with_note(fix),
                 );
                 return self.lit(ExprKind::Error, TyId::ERROR, span);
             }
