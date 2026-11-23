@@ -1737,7 +1737,7 @@ help: make the binding mutable
   │     ~~~
 ```
 
-`kitec fix cart.kite` applies that `help` in place.
+`kitec fix cart.kite` applies that `help` in place, then checks the file again: it prints what is left and exits non-zero while errors remain.
 
 ### Ranges
 

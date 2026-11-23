@@ -640,7 +640,7 @@ fn fix_file(path: &str, src: &str) -> ExitCode {
     if edits.is_empty() {
         eprintln!("nothing to fix in {}", path);
         eprint!("{}", result.render_diagnostics());
-        return ExitCode::SUCCESS;
+        return still_failing(&result);
     }
     // Back to front: an edit near the end cannot move one before it.
     edits.sort_by_key(|(start, _, _)| std::cmp::Reverse(*start));
@@ -657,10 +657,30 @@ fn fix_file(path: &str, src: &str) -> ExitCode {
                 if applied == 1 { "" } else { "es" },
                 path
             );
-            ExitCode::SUCCESS
+            // What is left is said, and the exit status says it too: the
+            // fixes are the ones the compiler could make, and a file that
+            // still does not compile is not one `kitec fix && ship` may pass.
+            let after = compile(path, &out, kite_driver::Emit::Check);
+            if after.diags.has_errors() {
+                eprint!("{}", after.render_diagnostics());
+            }
+            still_failing(&after)
         }
         Err(e) => fail(&format!("cannot write `{}`: {}", path, e)),
     }
+}
+
+/// How `kitec fix` ends: failing while the file still has errors.
+fn still_failing(result: &kite_driver::Compilation) -> ExitCode {
+    let errors = result.diags.error_count();
+    if errors == 0 {
+        return ExitCode::SUCCESS;
+    }
+    fail(&format!(
+        "{} error{} left that `kitec fix` cannot fix",
+        errors,
+        if errors == 1 { "" } else { "s" }
+    ))
 }
 
 /// `--emit native` — write the object file, then link it into an executable.

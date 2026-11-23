@@ -200,7 +200,8 @@ fn kitec_fix_edits_only_what_it_is_sure_of() {
     let unclosed = "fn main() {\n    var xs = [1]\n    xs.push(2\n    xs.push(3)\n    io.print(xs.len())\n}\n";
     let dir = scratch("fix-unclosed", "t.kite", unclosed);
     let Some((ok, _, err)) = kitec_in(&dir, &["fix", "t.kite"]) else { return };
-    assert!(ok, "{}", err);
+    // Nothing was fixable, and the file still fails: that is not a success.
+    assert!(!ok, "{}", err);
     assert!(err.contains("nothing to fix"), "{}", err);
     assert_eq!(std::fs::read_to_string(dir.join("t.kite")).expect("read"), unclosed);
     let _ = std::fs::remove_dir_all(&dir);
@@ -209,7 +210,8 @@ fn kitec_fix_edits_only_what_it_is_sure_of() {
     let guess = "fn main() {\n    let n = 1\n    io.print(\"n is \" n)\n}\n";
     let dir = scratch("fix-guess", "t.kite", guess);
     let Some((ok, _, err)) = kitec_in(&dir, &["fix", "t.kite"]) else { return };
-    assert!(ok, "{}", err);
+    // Nothing was fixable, and the file still fails: that is not a success.
+    assert!(!ok, "{}", err);
     assert!(err.contains("nothing to fix"), "{}", err);
     assert_eq!(std::fs::read_to_string(dir.join("t.kite")).expect("read"), guess);
     let _ = std::fs::remove_dir_all(&dir);
@@ -236,6 +238,34 @@ fn kitec_fix_edits_only_what_it_is_sure_of() {
     let Some((ok, out, err)) = kitec_in(&dir, &["run", "t.kite"]) else { return };
     assert!(ok, "{}", err);
     assert_eq!(out, "3\n");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `kitec fix` removes every stray comma of a struct in one run, and says what
+/// it left. It removed the first and reported "applied 1 fix" until the third
+/// run, and after a fix it exited 0 whatever was still wrong with the file.
+#[test]
+fn kitec_fix_finishes_the_job_and_reports_what_is_left() {
+    let commas = "struct P {\n    x: int,\n    y: int,\n    z: int\n}\n\nfn main() {\n    let p = P{ x: 1, y: 2, z: 3 }\n    io.print(p.x)\n}\n";
+    let dir = scratch("fix-commas", "t.kite", commas);
+    let Some((ok, _, err)) = kitec_in(&dir, &["fix", "t.kite"]) else { return };
+    assert!(ok, "{}", err);
+    assert!(err.contains("applied 2 fixes"), "{}", err);
+    let fixed = std::fs::read_to_string(dir.join("t.kite")).expect("read");
+    let declaration = fixed.lines().take(5).collect::<Vec<_>>().join("\n");
+    assert!(!declaration.contains(','), "{}", declaration);
+    let Some((ok, _, err)) = kitec_in(&dir, &["fix", "t.kite"]) else { return };
+    assert!(ok && err.contains("nothing to fix"), "a second run changes nothing: {}", err);
+    let _ = std::fs::remove_dir_all(&dir);
+
+    // A fix that leaves another error behind says so, and fails.
+    let left = "enum E {\n    A,\n    B\n}\n\nfn main() {\n    let n: int = \"s\"\n    io.print(n)\n}\n";
+    let dir = scratch("fix-left", "t.kite", left);
+    let Some((ok, _, err)) = kitec_in(&dir, &["fix", "t.kite"]) else { return };
+    assert!(!ok, "{}", err);
+    assert!(err.contains("applied 1 fix"), "{}", err);
+    assert!(err.contains("E0200"), "the error that is left is shown: {}", err);
+    assert!(err.contains("error left that `kitec fix` cannot fix"), "{}", err);
     let _ = std::fs::remove_dir_all(&dir);
 }
 
