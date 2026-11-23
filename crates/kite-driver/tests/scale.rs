@@ -322,10 +322,12 @@ fn a_slice_or_a_map_grown_across_suspensions_is_written_in_place() {
                   \x20 for i in 0..100000 {\n    got.push(await one(i))\n    got[i] = got[i] + 1\n  }\n\
                   \x20 io.print(\"\\(out.len()) \\(out[99999]) \\(got.len()) \\(got[99999])\")\n}\n";
     agrees_within("push-across-yield", slices, "100000 99999 100000 100000\n", Duration::from_secs(20), true);
-    let maps = "pub async fn main() {\n  var m: {int: int} = {}\n  for i in 0..50000 {\n\
-                \x20   m[i] = i\n    task.yield()\n  }\n  for i in 0..25000 {\n\
-                \x20   m.remove(i)\n    task.yield()\n  }\n  io.print(\"\\(m.len()) \\(or_else(m[49999], -1))\")\n}\n";
-    agrees_within("map-across-yield", maps, "25000 49999\n", Duration::from_secs(20), false);
+    // A hundred thousand: at fifty thousand the old VM took about the bound
+    // itself, which a faster machine would have passed.
+    let maps = "pub async fn main() {\n  var m: {int: int} = {}\n  for i in 0..100000 {\n\
+                \x20   m[i] = i\n    task.yield()\n  }\n  for i in 0..50000 {\n\
+                \x20   m.remove(i)\n    task.yield()\n  }\n  io.print(\"\\(m.len()) \\(or_else(m[99999], -1))\")\n}\n";
+    agrees_within("map-across-yield", maps, "50000 99999\n", Duration::from_secs(20), false);
 }
 
 /// A deep chain of awaits — a recursive `async fn`, the shape of a recursive
