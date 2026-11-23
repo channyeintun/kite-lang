@@ -84,11 +84,14 @@ fn sync(dir: &Path, manifest: Manifest, offline: bool, update: bool) -> Result<M
             Ok(entries) => entries,
             Err(_) if update => Vec::new(),
             Err(e) => {
+                // `ManifestError` prints `kite.toml:N`, which is where it was made
+                // for; this is the lockfile's line.
                 return Err(format!(
-                    "`{}` does not read: {}\n\nnote: `kitec pkg --update` writes it again from \
-                     what resolution finds",
+                    "`{}` does not read: kite.lock:{}: {}\n\nnote: `kitec pkg --update` writes it \
+                     again from what resolution finds",
                     lock_path.display(),
-                    e
+                    e.line,
+                    e.message
                 ))
             }
         },
@@ -1430,6 +1433,19 @@ mod tests {
         assert!(why.starts_with("error[E0405]: "), "{}", why);
         assert!(why.contains("kite.toml:4:1"), "points at the line: {}", why);
         assert!(why.contains("`[package]` has no `bogus`"), "{}", why);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A lockfile that does not parse names `kite.lock`, not `kite.toml`.
+    #[test]
+    fn a_lockfile_that_does_not_parse_is_labelled_as_one() {
+        let dir = fixture("badlock");
+        write(dir.join("kite.toml"), "[package]\nname = \"app\"\nversion = \"0.1.0\"\n");
+        write(dir.join("kite.lock"), "# generated\ngarbage\n");
+        let manifest = root_manifest(&dir).expect("reads");
+        let why = sync(&dir, manifest, true, false).expect_err("the lockfile does not read");
+        assert!(why.contains("kite.lock:2: expected `key = value`"), "{}", why);
+        assert!(!why.contains("kite.toml"), "{}", why);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
