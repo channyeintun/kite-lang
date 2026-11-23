@@ -392,6 +392,16 @@ fn a_derive_on_a_generic_type_bounds_the_parameters_it_walks() {
     assert_eq!(out, "Tagged{ id: 3 }\nPair{ a: 1, b: [\"x\"] }\n");
     let text = errors_of("@derive(Debug)\nstruct Cb<T> {\n    f: fn(T) -> int\n}\nfn main() {\n}\n");
     assert!(text.contains("this is the field it stopped at"), "{}", text);
+    // An argument that cannot meet the bound is named at the field, not in
+    // the generated code.
+    let text = errors_of(
+        "@derive(Debug)\nstruct Box<T> {\n    value: T\n}\n\
+         @derive(Debug)\nstruct Outer {\n    b: Box<fn()>\n    t: Tagged<fn()>\n}\n\
+         @derive(Debug)\nstruct Tagged<T> {\n    id: int\n}\nfn main() {\n}\n",
+    );
+    assert!(text.contains("`Box` walks its `T` through that type's own `debug`, and `fn()` has none"), "{}", text);
+    assert!(!text.contains("<derive>"), "{}", text);
+    assert!(!text.contains("Tagged"), "{}", text);
     let text = errors_of("@derive(Encode)\nstruct Box<T> {\n    value: T\n}\nfn main() {\n}\n");
     assert!(text.contains("generic type"), "{}", text);
 }

@@ -1975,7 +1975,8 @@ fn main() {
 parameters is walked through that parameter's own method, and the generated
 `impl` bounds the parameter by the trait — `impl<T: Debug> Debug for Box<T>` —
 so a `Box<int>` is `Debug` and a `Box<[int]>` is not (`E0208` where it is
-used). A parameter no field reaches gets no bound. `Encode` and `Decode` still
+used; `E0702` naming the field when a type deriving `Debug` has a
+`Box<[int]>` field). A parameter no field reaches gets no bound. `Encode` and `Decode` still
 refuse a generic type (`E0702`).
 
 ```kite

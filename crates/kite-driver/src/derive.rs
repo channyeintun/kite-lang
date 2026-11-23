@@ -467,6 +467,32 @@ fn names_in(
 }
 
 /// `mod.Type<A>` as written.
+/// Whether a type's fields mention the parameter `name` anywhere its derived
+/// walk would go into, which is where its generated `impl` bounds it.
+fn decl_mentions(kind: &Shape, name: &str) -> bool {
+    fn mentions(ty: &Type, name: &str) -> bool {
+        match ty {
+            Type::Path(p) => {
+                (p.args.is_empty() && p.segments.len() == 1 && p.segments[0].name == name)
+                    || p.args.iter().any(|a| mentions(a, name))
+            }
+            Type::Optional { inner, .. } => mentions(inner, name),
+            Type::Slice { elem, .. } => mentions(elem, name),
+            Type::Map { key, value, .. } => mentions(key, name) || mentions(value, name),
+            Type::Tuple { elems, .. } => elems.iter().any(|e| mentions(e, name)),
+            Type::Fn { .. } | Type::Dyn { .. } | Type::Error(_) => false,
+        }
+    }
+    match kind {
+        Shape::Struct(s) => s.fields.iter().any(|f| mentions(&f.ty, name)),
+        Shape::Enum(e) => e.variants.iter().any(|v| match &v.payload {
+            VariantPayload::Unit => false,
+            VariantPayload::Named(fields) => fields.iter().any(|f| mentions(&f.ty, name)),
+            VariantPayload::Positional(tys) => tys.iter().any(|t| mentions(t, name)),
+        }),
+    }
+}
+
 fn path_text(p: &TypePath) -> String {
     let base = p.segments.iter().map(|s| s.name.as_str()).collect::<Vec<_>>().join(".");
     if p.args.is_empty() {
@@ -1413,7 +1439,83 @@ impl<'a> Writer<'a, '_> {
         if checked.is_empty() {
             return "\"\"".to_string();
         }
+        if let Type::Path(p) = ty {
+            if !p.args.is_empty() && !self.args_meet(&base, p) {
+                return "\"\"".to_string();
+            }
+        }
         format!("{}.{}()", expr, self.trait_.method())
+    }
+
+    /// Whether the arguments of a field's generic type meet what that type's
+    /// derived `impl` bounds them by, having said which one does not. A
+    /// `Box<fn()>` field otherwise reached the checker as a call in generated
+    /// code, and was reported at a line of `<derive>` nobody wrote.
+    fn args_meet(&mut self, base: &str, p: &TypePath) -> bool {
+        let qualified = declared_name(self.aliases, &self.lookup, base);
+        let Some(&index) = self.known.get(&qualified) else { return true };
+        let decl = &self.decls[index];
+        if !decl.derives.iter().any(|(t, _)| *t == self.trait_) {
+            return true;
+        }
+        // The parameters its own walk reaches, which are the ones its `impl`
+        // bounds: those some field mentions outside a function or a `dyn`.
+        let reached: Vec<(String, bool)> = decl
+            .params
+            .iter()
+            .map(|(name, _)| (name.clone(), decl_mentions(&decl.kind, name)))
+            .collect();
+        for ((param, reached), arg) in reached.iter().zip(&p.args) {
+            if !reached {
+                continue;
+            }
+            if self.arg_misses(arg) {
+                let fix = match arg {
+                    Type::Path(_) => format!("add `@derive({})` to it", self.trait_.name()),
+                    _ => format!("hold it in a struct that derives `{}`", self.trait_.name()),
+                };
+                self.cannot(
+                    arg.span(),
+                    &format!("a field of type `{}`", path_text(p)),
+                    &format!(
+                        "`{}` walks its `{}` through that type's own `{}`, and `{}` has none — {}",
+                        base,
+                        param,
+                        self.trait_.method(),
+                        render_type(arg),
+                        fix
+                    ),
+                );
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Whether an argument standing for a bounded parameter cannot meet the
+    /// bound: only a primitive, a parameter of the deriving type (which the
+    /// generated `impl` bounds in turn), or a type with the method can. A
+    /// type the walk cannot see — an alias, a name it does not know — is left
+    /// to the checker.
+    fn arg_misses(&mut self, arg: &Type) -> bool {
+        let Type::Path(p) = arg else { return !matches!(arg, Type::Error(_)) };
+        if p.args.is_empty() && p.segments.len() == 1 {
+            let name = &p.segments[0].name;
+            if matches!(name.as_str(), "int" | "float" | "bool" | "str") || self.params.contains(name) {
+                return false;
+            }
+        }
+        if self.through_alias(arg).is_some() {
+            return false;
+        }
+        let text = p.segments.iter().map(|s| s.name.as_str()).collect::<Vec<_>>().join(".");
+        let qualified = declared_name(self.aliases, &self.lookup, &text);
+        let derived = self.known.get(&qualified).map(|i| &self.decls[*i]);
+        let derives = derived.is_some_and(|d| d.derives.iter().any(|(t, _)| *t == self.trait_));
+        if derives || self.by_hand.covers(&qualified, self.trait_).is_some() {
+            return false;
+        }
+        derived.is_some() || self.all_types.iter().any(|(n, _)| *n == qualified)
     }
 
     /// The name to reach a nested type's derived function by, or empty when
