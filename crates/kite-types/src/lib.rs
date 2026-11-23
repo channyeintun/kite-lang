@@ -9508,7 +9508,7 @@ impl<'a> Checker<'a> {
             PlaceRoot::Field { holder, index, ty } => {
                 let base = Box::new(holder.clone());
                 let kind = match self.types.kind(*ty) {
-                    TyKind::Slice(_) => ExprKind::FieldTake { base, index: *index },
+                    TyKind::Slice(_) | TyKind::Map(..) => ExprKind::FieldTake { base, index: *index },
                     _ => ExprKind::FieldGet { base, index: *index },
                 };
                 let read = hir::Expr { kind, ty: *ty, span };

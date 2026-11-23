@@ -390,6 +390,59 @@ fn main() {
     );
 }
 
+/// Writing and removing map entries through a struct field is linear on the
+/// VM and natively: a field, a nested field and `self`'s field in a `var self`
+/// method, with lookups between the writes. Each write copied the whole map,
+/// as a push copied a field's slice: at two hundred thousand the native
+/// backend took a quarter of an hour. Not on Wasm, whose maps are still
+/// their entries alone, scanned and copied by every write wherever they are
+/// held (§3.2).
+#[test]
+fn a_map_written_through_a_field_is_written_in_place() {
+    let src = r#"struct S {
+    var m: { int: int }
+    var hits: int
+}
+
+struct Out {
+    var b: S
+}
+
+impl S {
+    fn put(var self, k: int, v: int) {
+        self.m[k] = v
+    }
+}
+
+fn main() {
+    let n = 200000
+    var s = S{ m: { }, hits: 0 }
+    var o = Out{ b: S{ m: { }, hits: 0 } }
+    var t = S{ m: { }, hits: 0 }
+    for i in 0..n {
+        s.m[i] = i
+        o.b.m[i] = i
+        t.put(i, i)
+        if s.m.len() > 0 && s.m[i / 2] != nil {
+            s.hits += 1
+        }
+    }
+    for i in 0..n / 2 {
+        s.m.remove(i)
+        o.b.m.remove(i * 2)
+    }
+    io.print("\(s.m.len()) \(o.b.m.len()) \(t.m.len()) \(s.hits) \(or_else(s.m[n - 1], -1))")
+}
+"#;
+    agrees_within(
+        "map-through-a-field",
+        src,
+        "100000 100000 200000 200000 199999\n",
+        Duration::from_secs(20),
+        false,
+    );
+}
+
 /// A deep chain of awaits — a recursive `async fn`, the shape of a recursive
 /// walk — is linear on all three backends. An `await` that had to wait parked
 /// with no target, and every task finishing woke every parked task, so each

@@ -801,8 +801,10 @@ per slot the key's hash and the next slot in its bucket. The index holds hashes
 of content and slot numbers, never an address, so evacuation copies it with the
 entries and it is still right. A removal from an indexed map leaves a zeroed
 hole that every reader skips, until the holes outnumber the entries and the map
-closes up. The VM keeps the same index beside a vector of entries
-(`kite-vm`'s `map` module); the Wasm backend's maps have none yet.
+closes up. A write through a struct field takes the map and marks it with
+`HELD_BIT` exactly as it does a slice. The VM keeps the same index beside a
+vector of entries (`kite-vm`'s `map` module); the Wasm backend's maps have
+none yet, and copy on every write wherever they are held.
 
 A variadic construction stages its operands in a fixed window of 4,096 words,
 `KITE_RT_STAGE`, before the runtime call that allocates. A slice or map
