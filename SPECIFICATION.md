@@ -490,7 +490,10 @@ Methods and associated functions in an `impl` block are unmarked, and so
 private to the module, unless they say `pub`. The methods of a trait
 implementation are as visible as the trait. A type that is not `pub` cannot be
 named outside its module at all — not in an expression, and not in a signature,
-a field or an annotation either. Each of these is `E0401`.
+a field, an annotation or an `impl` header either, and a trait that is not
+`pub` cannot be implemented outside its module. Nor can a `pub` alias name a
+type that is not: an alias is the type it names everywhere (§3.4), so it would
+be a way to name it. Each of these is `E0401`.
 
 ```kite
 pub struct Connection {

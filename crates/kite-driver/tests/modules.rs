@@ -138,6 +138,62 @@ fn a_private_enums_bare_unit_variant_cannot_be_matched_from_outside() {
     assert_eq!(p.run(&main).expect("a public enum's variant"), "yes\n");
 }
 
+/// An `impl` header names its type and its trait, and a private one cannot be
+/// named outside its module (§4.3). Both headers were accepted, while every
+/// other position naming `m.Secret` was `E0401`.
+#[test]
+fn an_impl_header_cannot_name_a_private_type_or_trait() {
+    let p = Project::new("private-in-header");
+    p.file(
+        "m.kite",
+        "struct Secret {\n  n: int\n}\n\ntrait Hidden {\n  fn reveal(self) -> int\n}\n\n\
+         pub fn make() -> Secret {\n  return Secret{ n: 1 }\n}\n",
+    );
+    let main = p.file(
+        "main.kite",
+        "use m\n\ntrait Probe {\n  fn tag(self) -> str\n}\n\n\
+         impl Probe for m.Secret {\n  fn tag(self) -> str {\n    return \"x\"\n  }\n}\n\n\
+         struct Mine {\n  n: int\n}\n\n\
+         impl m.Hidden for Mine {\n  fn reveal(self) -> int {\n    return 1\n  }\n}\n\n\
+         fn main() {\n  io.print(m.make().tag())\n  io.print(Mine{ n: 1 }.reveal())\n}\n",
+    );
+    let said = p.run(&main).expect_err("both are private").replace('\\', "/");
+    assert!(said.contains("`m.Secret` is private to module `m`"), "{}", said);
+    assert!(said.contains("main.kite:7:16"), "at the type in the header: {}", said);
+    assert!(said.contains("`m.Hidden` is private to module `m`"), "{}", said);
+    assert!(said.contains("main.kite:17:6"), "at the trait in the header: {}", said);
+    assert_eq!(said.matches("error[").count(), 2, "one cause, one error each: {}", said);
+}
+
+/// A `pub` alias does not export the private type it names: it is refused
+/// where it is declared. It was usable in a signature, and a literal through
+/// it said ``m.Door` is private`` — of a `pub` alias — with a second `E0401`.
+#[test]
+fn a_pub_alias_cannot_name_a_private_type() {
+    let p = Project::new("pub-alias-private");
+    p.file(
+        "m.kite",
+        "struct Also {\n  pub n: int\n}\n\npub type Door = Also\npub type Doors = [Also]\n\n\
+         pub struct Open {\n  pub n: int\n}\n\npub type Gate = Open\n",
+    );
+    let main = p.file(
+        "main.kite",
+        "use m\n\nfn take(a: m.Door) -> int {\n  return a.n\n}\n\n\
+         fn main() {\n  io.print(take(m.Door{ n: 3 }))\n  io.print(m.Gate{ n: 4 }.n)\n}\n",
+    );
+    let said = p.run(&main).expect_err("`Also` is private").replace('\\', "/");
+    assert!(said.contains("a `pub` alias cannot name `Also`"), "{}", said);
+    assert!(said.contains("m.kite:5:17"), "at the alias: {}", said);
+    assert!(said.contains("m.kite:6:19"), "inside a slice too: {}", said);
+    assert!(!said.contains("main.kite"), "nothing at the uses: {}", said);
+    assert_eq!(said.matches("error[").count(), 2, "{}", said);
+
+    // A `pub` alias of a `pub` type is that type, by either name.
+    let main = p.file("main.kite", "use m\n\nfn main() {\n  io.print(m.Gate{ n: 4 }.n)\n}\n");
+    p.file("m.kite", "pub struct Open {\n  pub n: int\n}\n\npub type Gate = Open\n");
+    assert_eq!(p.run(&main).expect("compiles"), "4\n");
+}
+
 #[test]
 fn an_unmarked_declaration_is_private_to_its_module() {
     let p = Project::new("private");

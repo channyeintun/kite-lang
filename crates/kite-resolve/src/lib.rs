@@ -1193,6 +1193,22 @@ fn collect_functions(file: &SourceFile, map: &mut ResolveMap, diags: &mut DiagBa
                     },
                 };
 
+                // **An `impl` header names its type and its trait**, and a
+                // type or trait that is not `pub` cannot be named outside its
+                // module at all (§4.3). Every other position held to that, and
+                // this one did not: `impl Probe for m.Secret` gave a private
+                // type a method from outside, and `impl t.Secret for Mine`
+                // implemented a private trait. The methods are still
+                // registered, so the calls to them say nothing more.
+                if let Some(d) = private_in_header(map, &module, written, &imp.self_ty) {
+                    diags.push(d);
+                }
+                if let (Some(tp), Some(t)) = (&imp.trait_path, trait_index) {
+                    if let Some(d) = private_in_header(map, &module, t, tp) {
+                        diags.push(d);
+                    }
+                }
+
                 // Coherence (§8.2, §10.2): an inherent `impl` is written where
                 // its type is declared, and a trait's where the trait or the
                 // type is. The methods are still registered, so a call to one
@@ -1491,7 +1507,15 @@ impl<'a> FnResolver<'a> {
                 (self.map.modules.of(c.decl_index), c.is_pub, c.span, "constant")
             }
             Res::Type(i) | Res::Variant(i, _) => {
-                let t = &self.map.types[i as usize];
+                // Named through an alias, the alias is what was named, and
+                // whether it may be is the alias's to say. The type it stood
+                // for was asked instead, so a literal through a `pub` alias
+                // said the alias was private.
+                let named = match self.map.type_by_name_in(&self.module, name) {
+                    Some(a) if self.map.types[a as usize].kind == TypeKind::Alias => a,
+                    _ => i,
+                };
+                let t = &self.map.types[named as usize];
                 (self.map.modules.of(t.decl_index), t.is_pub, t.span, t.kind.describe())
             }
             _ => return,
@@ -2265,6 +2289,26 @@ const SELF_OUTSIDE_AN_IMPL: &str = "`Self` names a type inside an `impl` block, 
 /// alias of one, such as `type Id = int`, or a trait. Either was accepted and
 /// its block never reached, since nothing has the alias or the trait itself
 /// as its type.
+/// The `E0401` for an `impl` header in `module` naming `named` as written at
+/// `header`, when that is another module's declaration not marked `pub`.
+fn private_in_header(map: &ResolveMap, module: &str, named: u32, header: &TypePath) -> Option<Diagnostic> {
+    let decl = &map.types[named as usize];
+    let home = map.modules.of(decl.decl_index);
+    if decl.is_pub || home.is_empty() || home == PRELUDE || home == module {
+        return None;
+    }
+    let what = decl.kind.describe();
+    Some(
+        Diagnostic::error(codes::E0401, format!("`{}` is private to module `{}`", header.text(), home))
+            .with_primary(header.span, "not visible here")
+            .with_secondary(decl.span, format!("this {} is not marked `pub`", what))
+            .with_note(
+                "unmarked declarations are visible only within their own module, and an `impl` \
+                 header names its type and its trait",
+            ),
+    )
+}
+
 fn not_for_an_alias(file: &SourceFile, map: &ResolveMap, named: u32, header: &TypePath) -> Diagnostic {
     let decl = &map.types[named as usize];
     let d = Diagnostic::error(

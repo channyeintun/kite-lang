@@ -743,7 +743,7 @@ the module's `pub fn` list before you touch the import.
 | Code | Meaning |
 |---|---|
 | `E0400` | Module not found. Lists every directory and `.kite` file it looked for, nearest first. Also used for `use std/<not-a-std-module>`, and then lists the whole standard library. |
-| `E0401` | The item is not `pub`, so it is visible only inside its own module. Applies to functions, types (in expressions and in signatures), enum variants, struct fields, methods and associated functions. |
+| `E0401` | The item is not `pub`, so it is visible only inside its own module. Applies to functions, types (in expressions, signatures and `impl` headers), traits (implementing one from outside), enum variants, struct fields, methods and associated functions — and to a `pub type` alias of a type that is not `pub`, refused where the alias is. |
 | `E0406` | An `impl` outside its type's module: an extension method, or an imported trait implemented for an imported type. |
 | `E0402` | Import cycle. The diagnostic prints the chain (`a → b`). Extract the shared part into a third module. |
 | `E0403` | Reserved standard-library name (above). |

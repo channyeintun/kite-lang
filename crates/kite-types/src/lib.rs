@@ -6486,6 +6486,12 @@ impl<'a> Checker<'a> {
         if decl.is_pub || module == self.module {
             return true;
         }
+        // An implementation written in this module of a trait it cannot see
+        // was refused at its header (E0401), which is the cause; the calls to
+        // its methods are not a second one.
+        if self.resolved.module_of_fn(fn_index) == self.module {
+            return false;
+        }
         let already = self
             .diags
             .iter()
@@ -12689,6 +12695,36 @@ fn expand_aliases(
                 if pending {
                     continue;
                 }
+            }
+            // **A `pub` alias does not export what it names.** An alias is
+            // the type it names everywhere (§3.4), so `pub type Door = Also`
+            // with `Also` private was a way to name `Also` outside its
+            // module, which §4.3 says nothing may do; a signature took it, and
+            // a literal said `m.Door` was private although it is `pub`.
+            // Refused here, where the alias is, rather than at every use.
+            if alias.is_pub && !module.is_empty() && module != kite_resolve::PRELUDE {
+                walk_named_types(&alias.ty, &mut |p: &ast::TypePath| {
+                    let Some(j) = resolved.type_by_name_in(module, &p.text()) else { return };
+                    let named = &resolved.types[j as usize];
+                    if named.is_pub || resolved.module_of_item(named.decl_index) != module {
+                        return;
+                    }
+                    diags.push(
+                        Diagnostic::error(
+                            codes::E0401,
+                            format!("a `pub` alias cannot name `{}`, which is not `pub`", p.text()),
+                        )
+                        .with_primary(p.span, "private to this module")
+                        .with_secondary(
+                            named.span,
+                            format!("this {} is not marked `pub`", named.kind.describe()),
+                        )
+                        .with_note(
+                            "an alias is the type it names everywhere, so this would name it \
+                             outside the module; mark that `pub`, or leave the alias unmarked",
+                        ),
+                    );
+                });
             }
             // Every alias this one names is expanded, so this one can be.
             let ty = resolve_named_ty(&alias.ty, resolved, module, type_ids, &[], types, diags);
