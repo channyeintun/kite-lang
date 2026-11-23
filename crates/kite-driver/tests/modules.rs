@@ -2115,3 +2115,23 @@ fn a_module_that_imports_itself_is_told_so() {
     let said = p.run(&main).expect_err("a cycle of one");
     assert!(said.contains("module `ui` imports itself"), "{}", said);
 }
+
+/// A module is named in `E0111` and `E0204` the way the `use` that brought it
+/// in writes it. The title and the note said `money`; the label under the
+/// member said `src/money`, its identity below the package's `kite.toml`,
+/// which nothing in the program ever wrote.
+#[test]
+fn a_missing_member_names_its_module_as_the_use_writes_it() {
+    let p = Project::new("missing-member-label");
+    p.file("kite.toml", "[package]\nname = \"app\"\nversion = \"0.1.0\"\n");
+    p.file("src/money.kite", "pub fn zero() -> int {\n  return 0\n}\n");
+    let main = p.file(
+        "src/main.kite",
+        "use money\n\nfn main() {\n  let a: money.Nothing = 1\n  io.print(money.nothing())\n}\n",
+    );
+    let said = p.run(&main).expect_err("members that are not there");
+    assert!(said.contains("E0111") && said.contains("E0204"), "{}", said);
+    assert!(said.contains("`money` declares nothing public of this name"), "{}", said);
+    assert!(said.contains("`money` declares no public type of this name"), "{}", said);
+    assert!(!said.contains("src/money"), "{}", said);
+}

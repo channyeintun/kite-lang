@@ -906,7 +906,7 @@ impl ResolveMap {
         )
         .with_primary(
             member.span,
-            format!("`{}` declares no public type of this name", module.trim_start_matches('@')),
+            format!("`{}` declares no public type of this name", head.name),
         );
         Some(match nearest(&member.name, &members) {
             Some(near) => d.with_note(format!("a similar type is in `{}`: `{}`", head.name, near)),
@@ -2533,12 +2533,14 @@ impl<'a> FnResolver<'a> {
         if imported.is_none() && nearest(&name.name, &members).is_none() {
             return None;
         }
-        let shown = module.trim_start_matches('@');
+        // The module as the reader's `use` spells it, as the title and the note
+        // do: its identity is a path below `kite.toml` (`src/money`), which the
+        // `use` never wrote.
         let mut d = Diagnostic::error(
             codes::E0111,
             format!("cannot find `{}` in module `{}`", name.name, spelled),
         )
-        .with_primary(name.span, format!("`{}` declares nothing public of this name", shown));
+        .with_primary(name.span, format!("`{}` declares nothing public of this name", spelled));
         d = match nearest(&name.name, &members) {
             Some(near) => d.with_note(format!("a similar name is in `{}`: `{}`", spelled, near)),
             None => d.with_note(format!(
