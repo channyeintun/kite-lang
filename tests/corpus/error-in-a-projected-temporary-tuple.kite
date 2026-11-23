@@ -1,0 +1,96 @@
+// A projection of a tuple nobody holds takes one element and throws the rest
+// away: `(f(1), f(2)).0` and `both(f(1), f(2)).0` leave nothing that could
+// take the other failure later, so it is `E0302` where the projection drops
+// it — at the element in a literal, at the call otherwise. Both used to be
+// accepted, and `f(2)`'s failure went unheard.
+
+use std/task
+
+fn f(i: int) -> error {
+    if i == 1 {
+        return errors.new("boom")
+    }
+    return nil
+}
+
+fn both<A, B>(a: A, b: B) -> (A, B) {
+    return (a, b)
+}
+
+async fn save(n: int) -> error {
+    return f(n)
+}
+
+fn accepts(e: error) -> bool {
+    return e != nil
+}
+
+fn the_first_of_a_literal() {
+    let e = (f(1), f(2)).0 //~ ERROR E0302
+    if e != nil {
+        io.print(e.message())
+    }
+}
+
+fn the_second_of_a_literal() {
+    let e = (f(1), f(2)).1 //~ ERROR E0302
+    if e != nil {
+        io.print(e.message())
+    }
+}
+
+fn through_parentheses_and_a_nested_literal() {
+    let e = ((f(1), f(2))).0 //~ ERROR E0302
+    let d = ((f(3), f(4)), 5).0.1 //~ ERROR E0302
+    if e != nil || d != nil {
+        io.print("failed")
+    }
+}
+
+fn as_an_argument_and_as_a_condition() {
+    io.print(accepts((f(1), f(2)).0)) //~ ERROR E0302
+    if (f(3), f(4)).1 != nil { //~ ERROR E0302
+        io.print("failed")
+    }
+}
+
+fn of_a_call() {
+    let e = both(f(1), f(2)).0 //~ ERROR E0302
+    if e != nil {
+        io.print(e.message())
+    }
+}
+
+async fn of_an_await() {
+    let e = (await task.both(save(1), save(2))).1 //~ ERROR E0302
+    if e != nil {
+        io.print(e.message())
+    }
+}
+
+// What is not a failure, or was never taken, stays quiet; a binding read to
+// build the literal still answers for its own failure, here and later.
+fn nothing_else_is_dropped(c: error) {
+    let e = (f(1), 2, "x").0
+    let d = (3, f(2)).1
+    let b = (f(3), c).0
+    if e != nil || d != nil || b != nil || c != nil {
+        io.print("failed")
+    }
+    let (x, _) = (f(4), f(5))
+    if x != nil {
+        io.print("failed")
+    }
+}
+
+fn a_binding_put_in_and_left_behind() {
+    let c = f(1) //~ ERROR E0302
+    let e = (f(2), c).0
+    if e != nil {
+        io.print("failed")
+    }
+}
+
+fn main() {
+    the_first_of_a_literal()
+}

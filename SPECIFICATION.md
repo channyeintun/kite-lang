@@ -1183,7 +1183,10 @@ The rules:
 > `len` is not reading it. A projection `r.0` takes one element of a tuple:
 > its failure goes where it lands, and the others are still owed, so the
 > tuple is settled once each has been taken; taken apart after that, it
-> binds only the failures not yet taken. A slice cannot be followed
+> binds only the failures not yet taken. A projection of a tuple no binding
+holds — `(f(1), f(2)).0`, `pair().0` — leaves nothing that could take the
+other elements later, so each failure among them is `E0302` at the
+projection: at its element in a literal, at the call otherwise. A slice cannot be followed
 > element by element, so `rs[0]` counts as reading all of it. Nor is testing an optional against `nil`, which
 > asks only whether a failure is there: where it is nil there is none, and
 > where it is present the optional, narrowed to what it holds, is still

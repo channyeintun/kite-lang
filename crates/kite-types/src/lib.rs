@@ -12140,6 +12140,121 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// **A projection of a temporary tuple throws the rest of it away.**
+    /// `(f(1), f(2)).0` and `pair().0` take one element of a tuple nothing
+    /// else will ever see, so a failure in any other element is gone the
+    /// moment the projection is made: nothing can take it later, and nothing
+    /// is left at the end of the scope to report it, so it is `E0302` here —
+    /// at the element in a literal, at the call otherwise. A binding read to
+    /// build the literal was not taken either, so it is put back as it was
+    /// (`before`) and still answers for its failure. A tuple read out of a
+    /// binding or a field is not a temporary: what is not taken is still
+    /// there.
+    fn drop_untaken(&mut self, obj: &hir::Expr, name: &ast::Ident, before: &[Taint]) {
+        enum Source<'a> {
+            Literal(&'a [hir::Expr]),
+            Temporary(&'a hir::Expr),
+            Place,
+        }
+        fn source(e: &hir::Expr) -> Source<'_> {
+            match &e.kind {
+                ExprKind::TupleNew { elems } => Source::Literal(elems),
+                ExprKind::FieldGet { base, index } => match source(base) {
+                    Source::Literal(elems) => match elems.get(*index as usize) {
+                        Some(x) => source(x),
+                        None => Source::Place,
+                    },
+                    Source::Temporary(_) => Source::Temporary(e),
+                    Source::Place => Source::Place,
+                },
+                ExprKind::Call { .. }
+                | ExprKind::CallVirtual { .. }
+                | ExprKind::CallClosure { .. }
+                | ExprKind::CallBuiltin { .. }
+                | ExprKind::CallExtern { .. }
+                | ExprKind::Await { .. }
+                | ExprKind::If { .. }
+                | ExprKind::Match { .. }
+                | ExprKind::Block { .. } => Source::Temporary(e),
+                _ => Source::Place,
+            }
+        }
+        let Ok(index) = name.name.parse::<usize>() else {
+            return;
+        };
+        let TyKind::Tuple(tys) = self.types.kind(obj.ty).clone() else {
+            return;
+        };
+        if index >= tys.len() {
+            return;
+        }
+        match source(obj) {
+            Source::Literal(elems) => {
+                for (j, x) in elems.iter().enumerate() {
+                    if j != index {
+                        self.drop_element(x, index, name.span, before);
+                    }
+                }
+            }
+            Source::Temporary(t) => {
+                let dropped: Vec<String> = (0..tys.len())
+                    .filter(|&j| j != index && self.may_hold_failure(tys[j]))
+                    .map(|j| j.to_string())
+                    .collect();
+                if dropped.is_empty() {
+                    return;
+                }
+                let what = match dropped.as_slice() {
+                    [one] => format!("element {} of this tuple holds a failure, and it is thrown away", one),
+                    [rest @ .., last] => format!(
+                        "elements {} and {} of this tuple hold failures, and they are thrown away",
+                        rest.join(", "),
+                        last
+                    ),
+                    [] => unreachable!(),
+                };
+                self.diags.push(
+                    Diagnostic::error(codes::E0302, "error is never checked")
+                        .with_primary(t.span, what)
+                        .with_secondary(name.span, format!("only element {} is taken", index))
+                        .with_note(
+                            "bind the tuple and take it apart — `let (a, b) = …` — and check \
+                             each error in it",
+                        )
+                        .with_note("to throw one away on purpose, write `_` in its place: `let (a, _) = …`"),
+                );
+            }
+            Source::Place => {}
+        }
+    }
+
+    /// An element of a tuple literal that a projection did not take: see
+    /// [`Self::drop_untaken`].
+    fn drop_element(&mut self, x: &hir::Expr, index: usize, at: Span, before: &[Taint]) {
+        if !self.may_hold_failure(x.ty) {
+            return;
+        }
+        match &x.kind {
+            ExprKind::Nil | ExprKind::Error => {}
+            ExprKind::Local(id) => self.keep_unread(id.0, before),
+            ExprKind::TupleNew { elems } | ExprKind::SliceNew { elems } => {
+                for y in elems {
+                    self.drop_element(y, index, at, before);
+                }
+            }
+            _ => self.diags.push(
+                Diagnostic::error(codes::E0302, "error is never checked")
+                    .with_primary(x.span, "this is never taken out of the tuple, so its failure is thrown away")
+                    .with_secondary(at, format!("only element {} is taken", index))
+                    .with_note(
+                        "bind the tuple and take it apart — `let (a, b) = …` — and check \
+                         each error in it",
+                    )
+                    .with_note("to throw one away on purpose, write `_` in its place: `let (a, _) = …`"),
+            ),
+        }
+    }
+
     /// `p.x`
     fn field_access(&mut self, base: &ast::Expr, name: &ast::Ident, span: Span) -> hir::Expr {
         // **`.N` takes one element of a tuple of failures**, not the whole:
@@ -12147,7 +12262,9 @@ impl<'a> Checker<'a> {
         // first failure and leaves the second owed. Reading the tuple to
         // project it is not looking at what else is in it; each element is
         // settled as it is taken, and the tuple once every one has been.
-        let owed = match base {
+        // What is projected is followed through parentheses and through
+        // projections of a tuple literal, so `(r, 1).0.1` takes `r.1`.
+        let owed = match projected_source(base) {
             ast::Expr::Path(p) => match self.resolved.lookup_use(p.span) {
                 Some(Res::Local(id))
                     if self.taint.get(id as usize) == Some(&Taint::Unchecked)
@@ -12159,7 +12276,18 @@ impl<'a> Checker<'a> {
             },
             _ => None,
         };
+        // A tuple literal's elements that are not taken are thrown away with
+        // it; a binding read to build one is put back as it was, below.
+        let literal = match projected_source(base) {
+            ast::Expr::Tuple { .. } => Some(self.taint.clone()),
+            _ => None,
+        };
         let obj = self.expr(base, None);
+        if let Some(before) = literal {
+            self.drop_untaken(&obj, name, &before);
+        } else if owed.is_none() {
+            self.drop_untaken(&obj, name, &[]);
+        }
         if let Some((id, before)) = owed {
             self.keep_unread(id, &before);
             let index = name.name.parse::<u32>().ok();
@@ -15354,6 +15482,25 @@ fn float_key(f: f64) -> Option<(String, String)> {
     let shown = format!("{:?}", f);
     let key = if f == 0.0 { "0.0".to_string() } else { shown.clone() };
     Some((key, shown))
+}
+
+/// What a projection's base gives the tuple of: the base itself, followed
+/// through parentheses and through projections of a tuple literal, so
+/// `((r, 1)).0` is `r` and `((a, b), c).0` is `(a, b)`.
+fn projected_source(e: &ast::Expr) -> &ast::Expr {
+    match e {
+        ast::Expr::Paren { inner, .. } => projected_source(inner),
+        ast::Expr::Field { base, name, .. } => match projected_source(base) {
+            ast::Expr::Tuple { elems, .. } => {
+                match name.name.parse::<usize>().ok().and_then(|i| elems.get(i)) {
+                    Some(x) => projected_source(x),
+                    None => e,
+                }
+            }
+            _ => e,
+        },
+        _ => e,
+    }
 }
 
 /// A constructor's evaluation order as `StructNew` and `EnumNew` carry it:
