@@ -1047,7 +1047,9 @@ The rules:
 > and `v` becomes Clean. A condition proves what logic says it does: `e ==
 > nil` and `!(e != nil)` when they hold, either side of an `&&` that held
 > (the right side included, which runs only then), and either side of an
-> `||` that did not.
+> `||` that did not. A `match` guard is a condition too: its arm runs where
+> it held, and when the arm's pattern is `_` or a bare name, which matches
+> anything, the arms after it are reached only where it did not.
 >
 > **R5.** On any path where `e != nil`, `e` becomes Checked and `v` remains
 > Tainted permanently. The value slot on an error path holds no value at all —

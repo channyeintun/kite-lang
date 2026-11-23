@@ -473,6 +473,27 @@ fn main() {
 }
 ```
 
+A guard is a test, though. An arm whose pattern is `_` or a bare name is passed
+over only when its guard came out false, so the arms after it know what the
+guard proved, and the arm itself runs knowing it held:
+
+```kite
+fn touch() -> error {
+    return errors.new("no")
+}
+
+fn main() {
+    let e = touch()
+    match e {
+        x if x != nil => io.print(x.message()),
+        _ => io.print("fine"),
+    }
+}
+```
+
+A guard behind a pattern that can fail (`1 if e != nil`) may never run, so it
+proves nothing to the arms after it.
+
 Writing over a binding that still holds an unchecked failure drops that
 failure, so it is `E0302` at the write, whatever is written:
 

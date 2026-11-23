@@ -9288,11 +9288,11 @@ impl<'a> Checker<'a> {
         // ahead of it looked at the name an earlier arm gave it, as in `e if
         // e != nil => …`, and so let through to the `_` only what it saw.
         // Which guards look is known once the arms are checked.
-        let mut dropped_at = (source.is_none()
-            && held
-            && m.arms.iter().any(|a| matches!(a.pattern, ast::Pattern::Wildcard(_))))
-        .then_some(scrutinee.span);
-        let mut before_wildcard = true;
+        let mut dropped_at = None;
+        // Whether a fresh failure is still unlooked-at where the next arm
+        // begins: a guard that read the name an arm gave it, and came out
+        // false, let through to later arms only what it saw.
+        let mut open = held;
 
         if m.arms.is_empty() {
             // Arms the parser could not read are not no arms.
@@ -9312,7 +9312,15 @@ impl<'a> Checker<'a> {
         // an error checked in one case clean in every other — and taking the
         // entry state for what survives, as definite assignment once did,
         // refused a `let` that every arm assigns.
+        //
+        // One thing does lead from an arm to the next: an arm whose pattern
+        // takes anything is passed over only when its guard ran and came out
+        // false, so the next arm begins where that guard left off, knowing
+        // what it proved. `_ if e != nil => …, _ => …` tests `e` on both
+        // ways through; starting the second arm from the entry state made
+        // `e` look unread there.
         let entry = self.flow_state();
+        let mut start = entry.clone();
         let mut exit: Option<FlowState> = None;
         // The arms that leave, joined, stand for the match when every arm
         // does: nothing follows it, but the end of the function still asks
@@ -9336,19 +9344,29 @@ impl<'a> Checker<'a> {
         let mut rejected = Vec::with_capacity(m.arms.len());
 
         for arm in &m.arms {
-            self.set_flow_state(entry.clone());
+            self.set_flow_state(start.clone());
             let bind_ty = match *self.types.kind(scrut_ty) {
                 TyKind::Optional(inner) if nil_covered => inner,
                 _ => scrut_ty,
             };
             self.arm_bound.clear();
             let pattern = self.pattern_with(&arm.pattern, scrut_ty, bind_ty);
+            // The arm's name holds the failure only if nothing before this arm
+            // has looked at it.
+            let unseen = match source {
+                Some(src) => self.taint.get(src as usize) == Some(&Taint::Unchecked),
+                None => open,
+            };
             if let (true, hir::Pattern::Binding { local, .. }) = (held, &pattern) {
                 self.forget_copies(local.0);
-                self.taint[local.index()] = Taint::Unchecked;
-                if let Some(src) = source {
+                self.taint[local.index()] = if unseen { Taint::Unchecked } else { Taint::Clean };
+                if let (true, Some(src)) = (unseen, source) {
                     self.note_copy(local.0, src);
                 }
+            }
+            if source.is_none() && open && matches!(arm.pattern, ast::Pattern::Wildcard(_)) {
+                // A fresh failure reaching a `_` unlooked-at is dropped there.
+                dropped_at = dropped_at.or(Some(scrutinee.span));
             }
             // Refused here or by the resolver, which reports a variant that
             // does not exist before any of this runs.
@@ -9374,14 +9392,30 @@ impl<'a> Checker<'a> {
                 }
                 c
             });
-            if matches!(arm.pattern, ast::Pattern::Wildcard(_)) {
-                before_wildcard = false;
-            } else if let (true, Some(_), hir::Pattern::Binding { local, .. }) =
-                (before_wildcard, &guard, &pattern)
-            {
-                if self.taint[local.index()] != Taint::Unchecked {
-                    dropped_at = None;
+            if let (Some(g), true) = (&arm.guard, self.binds_whole(&arm.pattern, scrut_ty)) {
+                let after = self.flow_state();
+                if let hir::Pattern::Binding { local, .. } = &pattern {
+                    if held && self.taint[local.index()] != Taint::Unchecked {
+                        open = false;
+                    }
                 }
+                let facts = self.error_facts(g, false);
+                self.assume_error_facts(&facts);
+                // What the arm's own pattern bound is out of scope in the
+                // next one; a failure it alone held unread is still `open`.
+                for i in 0..self.taint.len() {
+                    if self.declared_inside(i as u32, arm.span) {
+                        self.forget_copies(i as u32);
+                        self.taint[i] = Taint::Clean;
+                    }
+                }
+                start = self.flow_state();
+                self.set_flow_state(after);
+            }
+            // The arm runs where its guard held, as an `if`'s body does.
+            if let Some(g) = &arm.guard {
+                let facts = self.error_facts(g, true);
+                self.assume_error_facts(&facts);
             }
 
             // In a `match` statement the arms' values are thrown away, so one
