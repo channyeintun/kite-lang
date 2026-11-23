@@ -413,7 +413,7 @@ fn an_inclusive_range_leaves_before_incrementing_past_its_bound() {
 fn a_discarded_index_or_division_is_still_evaluated() {
     let b = build(
         "fn id(x: int) -> int {\n  return x\n}\n\
-         fn main() {\n  let xs = [1, 2, 3]\n  _ = xs[10]\n  _ = id(1) / id(0)\n  xs[5]\n}\n",
+         fn main() {\n  let xs = [1, 2, 3]\n  _ = xs[10]\n  _ = id(1) / id(0)\n  _ = xs[5]\n}\n",
     );
     let f = b.main();
     let count = |want: fn(&Rvalue) -> bool| {
