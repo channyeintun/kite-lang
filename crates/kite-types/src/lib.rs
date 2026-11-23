@@ -635,6 +635,8 @@ pub fn check_recording(
             locals: Vec::new(),
             init: Vec::new(),
             bare_lets: std::collections::HashSet::new(),
+            captured_decls: std::collections::HashSet::new(),
+            var_fixes: Vec::new(),
             taint: Vec::new(),
             guards: std::collections::HashMap::new(),
             narrowed: std::collections::HashMap::new(),
@@ -673,6 +675,7 @@ pub fn check_recording(
                 &sigs[i],
                 m.self_param.is_some(),
             );
+            checker.settle_var_fixes(reported);
             let copies = default_reports.remove(&(d.item_index, d.method_index)).unwrap_or_default();
             if !diags.iter().skip(reported).any(|x| x.severity == kite_diag::Severity::Error) {
                 let mut seen: std::collections::HashSet<DiagKey> = std::collections::HashSet::new();
@@ -782,6 +785,7 @@ pub fn check_recording(
                 )
             }
         };
+        checker.settle_var_fixes(reported);
         fns.push(func);
         // Functions lifted out of this one's closure literals. Their ids were
         // handed out assuming they land after every declared function, so they
@@ -1171,6 +1175,14 @@ struct Checker<'a> {
     /// The names of the `let`s declared without an initialiser. `var x: T` with
     /// none is E0110, so E0114 offers no `var` fix for one.
     bare_lets: std::collections::HashSet<Span>,
+    /// The declarations of the locals some closure in this function captures.
+    /// A `var` cannot be captured (E0211), so E0114 offers no `var` fix for
+    /// one — and the capture may come after the write, so the fixes offered
+    /// are settled once the whole function has been read ([`Self::settle_var_fixes`]).
+    captured_decls: std::collections::HashSet<Span>,
+    /// Each `var` fix offered: the `let` keyword it replaces, and the
+    /// declaration it is for.
+    var_fixes: Vec<(Span, Span)>,
     /// Error-taint state, parallel to `locals`. See [`Taint`].
     taint: Vec<Taint>,
     /// Which value local each error local guards, so checking the error cleans
@@ -4702,6 +4714,7 @@ impl<'a> Checker<'a> {
         if self.declared_inside(id, region) || self.captures.contains(&id) {
             return;
         }
+        self.captured_decls.insert(self.locals[id as usize].span);
         // `var self` is the one mutable binding a capture cannot go stale on:
         // nothing can assign to `self`, only to its fields, and a struct is a
         // reference — so the copy and the original are one value.
@@ -13207,9 +13220,11 @@ impl<'a> Checker<'a> {
     /// E0114's "make the binding mutable", offered only where it compiles.
     /// `kitec fix` applies every fix it is shown, so one that swaps this error
     /// for another is worse than none: a `let` with no initialiser would become
-    /// a `var` with none (E0110), and a `let` that the closure being checked
-    /// captures would become a captured `var` (E0211).
-    fn var_fix(&self, decl: Span) -> Option<Fix> {
+    /// a `var` with none (E0110), and a `let` that a closure captures would
+    /// become a captured `var` (E0211). A write inside the closure is seen
+    /// here; a capture anywhere else in the function, before or after the
+    /// write, is taken back by [`Self::settle_var_fixes`].
+    fn var_fix(&mut self, decl: Span) -> Option<Fix> {
         if self.bare_lets.contains(&decl) {
             return None;
         }
@@ -13219,7 +13234,27 @@ impl<'a> Checker<'a> {
             }
         }
         let kw = self.let_keyword_span(decl)?;
+        self.var_fixes.push((kw, decl));
         Some(Fix::replace("make the binding mutable", kw, "var"))
+    }
+
+    /// Take back the `var` fixes offered for a `let` that a closure in this
+    /// function captures — wherever the closure is, so a write above it is
+    /// covered too. `from` is where this function's diagnostics start.
+    fn settle_var_fixes(&mut self, from: usize) {
+        let refused: Vec<Span> = self
+            .var_fixes
+            .iter()
+            .filter(|(_, decl)| self.captured_decls.contains(decl))
+            .map(|(kw, _)| *kw)
+            .collect();
+        if refused.is_empty() {
+            return;
+        }
+        for i in from..self.diags.len() {
+            let Some(d) = self.diags.get_mut(i) else { continue };
+            d.fixes.retain(|f| !(f.edits.len() == 1 && refused.contains(&f.edits[0].span)));
+        }
     }
 
     /// The span of the `let` keyword preceding a binding, so E0114 can offer a
@@ -15421,12 +15456,24 @@ mod tests;
 /// Source text as a one-line message quotes it. A diagnostic's message is one
 /// line (`kite-diag`), and an expression written across two — `r .` then `e` —
 /// is the same expression, so a run of whitespace is one space and none is
-/// kept beside a `.`, which is how the formatter would write it. A string
-/// literal's own text is left as it is, apart from its line breaks.
+/// kept beside a `.`, which is how the formatter would write it. A comment
+/// written between the parts is dropped, since it ran to the line break that
+/// is no longer there. A string literal's own text is left as it is, apart
+/// from its line breaks.
 fn one_line(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let (mut in_string, mut escaped, mut pending_space) = (false, false, false);
-    for c in text.chars() {
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        if !in_string && c == '/' && chars.peek() == Some(&'/') {
+            for c in chars.by_ref() {
+                if c == '\n' {
+                    break;
+                }
+            }
+            pending_space = true;
+            continue;
+        }
         if in_string {
             let c = if c == '\n' || c == '\r' { ' ' } else { c };
             out.push(c);

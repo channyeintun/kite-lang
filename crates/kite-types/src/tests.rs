@@ -275,6 +275,10 @@ fn the_var_fix_is_offered_only_where_it_compiles() {
     let c = body("  let xs = [1]\n  let f = || {\n    xs.push(2)\n  }\n  f()");
     assert!(c.has("E0114"), "{}", c.render());
     assert!(!c.render().contains("make the binding mutable"), "{}", c.render());
+    // The write outside the closure, the capture after it: still a captured var.
+    let c = body("  let n = 1\n  n = 2\n  let f = || {\n    io.print(n)\n  }\n  f()");
+    assert!(c.has("E0114"), "{}", c.render());
+    assert!(!c.render().contains("make the binding mutable"), "{}", c.render());
     let c = body("  let f = || {\n    let ys = [1]\n    ys.push(2)\n  }\n  f()");
     assert!(c.render().contains("help: make the binding mutable"), "{}", c.render());
 }
@@ -2411,4 +2415,7 @@ fn a_quoted_expression_is_on_one_line() {
     let out = c.render();
     assert!(out.contains("`Shape` has no variant `Nope`"), "{}", out);
     assert_eq!(one_line("a  .\n   b(\"x\n  y\")  +  c"), "a.b(\"x   y\") + c");
+    // A comment between the parts went with the line break.
+    assert_eq!(one_line("r . // why\n    e"), "r.e");
+    assert_eq!(one_line("f(\"a // b\")"), "f(\"a // b\")");
 }
