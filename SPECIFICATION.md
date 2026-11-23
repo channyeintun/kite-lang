@@ -1667,8 +1667,9 @@ A `match` in statement position discards its arms' values, so its arms need not
 agree in type: `0 => io.print("zero")` beside `_ => count()`, where `count`
 returns an `int`, is fine. Each arm is in statement position too: a `match` or
 `if` written as an arm discards its own branches' values, so they need not
-agree either, and an arm that does nothing — `0 => 1`, or `{ done == true }` —
-is [E0117](#16-diagnostics), exactly as the same line on its own is; `0 => ()`
+agree either and an `if` there needs no `else`; an arm that does nothing —
+`0 => 1`, or `{ done == true }` — is [E0117](#16-diagnostics), exactly as the
+same line on its own is; `0 => ()`
 says that nothing happens, as `0 => {}` does, and is fine. An arm
 whose value is an `error` is still one dropped ([E0302](#16-diagnostics)), as a
 bare call's would be. A `match` used as a value needs every arm to produce the

@@ -565,7 +565,8 @@ is an ordinary binding, and does catch all.
 names the missing variants. In statement position the arms' values are thrown
 away, so the arms need not agree in type (`0 => io.print("zero")` beside
 `_ => count()` is fine). Each arm is in statement position as well: a `match` or
-`if` written as an arm need not agree in type either, and an arm that does
+`if` written as an arm need not agree in type either, an `if` there needs no
+`else` (`0 => if verbose { io.print("zero") }`), and an arm that does
 nothing (`0 => 1`, `0 => { done == true }`) is `E0117`. An arm whose value is an
 `error` is still `E0302`.
 

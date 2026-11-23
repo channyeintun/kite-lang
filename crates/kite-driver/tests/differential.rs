@@ -8470,6 +8470,29 @@ fn main() {
 "#,
         "3\nno\n7\n",
     ),
+    // An arm of a `match` statement is in statement position (§9.2), so an
+    // `if` written as one needs no `else`. It was E0100 "`if` used as a
+    // value needs an `else`".
+    (
+        "an-arm-of-a-match-statement-may-be-an-if-with-no-else",
+        r#"fn show(n: int, loud: bool) {
+  match n {
+    0 => if loud { io.print("ZERO") },
+    1 => if loud { io.print("ONE") } else if n > 0 { io.print("one") },
+    _ => io.print("many"),
+  }
+}
+fn main() {
+  show(0, true)
+  show(0, false)
+  show(1, false)
+  show(5, true)
+  let k = match 2 { 0 => if true { 1 } else { 5 } + 1, _ => 2 }
+  io.print(k)
+}
+"#,
+        "ZERO\none\nmany\n2\n",
+    ),
 ];
 
 #[test]

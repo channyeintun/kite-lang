@@ -10810,6 +10810,15 @@ impl<'a> Checker<'a> {
                 self.if_expr(&i.cond, &i.then, else_, i.span, expected)
             }
             [ast::Stmt::Match(m)] if !discard && match_is_value(m) => self.match_expr(m, expected),
+            // `0 => if c { 1 },` where the arm's value is wanted.
+            _ if !discard && b.unbraced_if().is_some() => {
+                self.diags.push(
+                    Diagnostic::error(codes::E0100, "`if` used as a value needs an `else`")
+                        .with_primary(b.span, "this `if` produces no value on one path")
+                        .with_note("every branch of a value `if` must yield a value"),
+                );
+                self.lit(ExprKind::Error, TyId::ERROR, b.span)
+            }
             _ => {
                 let sig = self.current_signature();
                 let (block, flow) = self.block(b, &sig);
@@ -15842,7 +15851,8 @@ fn if_is_value(i: &ast::IfStmt) -> bool {
 fn match_is_value(m: &ast::MatchExpr) -> bool {
     m.arms.iter().all(|a| match &a.body {
         ast::MatchBody::Expr(_) => true,
-        ast::MatchBody::Block(b) => block_is_value(b),
+        // Written as an expression, so taken as a value where one is wanted.
+        ast::MatchBody::Block(b) => block_is_value(b) || b.unbraced_if().is_some(),
     })
 }
 

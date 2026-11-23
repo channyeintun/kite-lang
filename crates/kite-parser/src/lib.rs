@@ -2999,6 +2999,8 @@ impl<'a> Parser<'a> {
 
         let body = if self.at(T::LBrace) {
             MatchBody::Block(self.parse_block()?)
+        } else if self.at(T::If) {
+            self.parse_arm_if()?
         } else {
             MatchBody::Expr(self.parse_expr()?)
         };
@@ -3007,6 +3009,39 @@ impl<'a> Parser<'a> {
         self.eat(T::Comma);
         let span = start.to(self.prev_span());
         Some(MatchArm { pattern, guard, body, span })
+    }
+
+    /// An arm written as an `if`. With an `else` it is a value `if`, which
+    /// goes on as any expression may: `if a { 1 } else { 2 } + n`. Without
+    /// one it has a value on one path only — and an arm of a `match`
+    /// statement needs none, being in statement position (§9.2). Whether
+    /// this match is one is the checker's to say, so the `if` is kept as a
+    /// statement (see [`MatchBody`]) rather than refused here as a value
+    /// `if` with no `else`.
+    fn parse_arm_if(&mut self) -> Option<MatchBody> {
+        self.deeper()?;
+        let out = self.parse_arm_if_inner();
+        self.depth -= 1;
+        out
+    }
+
+    fn parse_arm_if_inner(&mut self) -> Option<MatchBody> {
+        let if_stmt = self.parse_if()?;
+        if self.unwinding {
+            return Some(MatchBody::Expr(Expr::Error(if_stmt.span)));
+        }
+        let IfStmt { cond, then, else_, span } = if_stmt;
+        let Some(else_) = else_ else {
+            let i = IfStmt { cond, then, else_: None, span };
+            return Some(MatchBody::Block(Block { stmts: vec![Stmt::If(i)], span }));
+        };
+        let e = Expr::If { cond: Box::new(cond), then, else_, span };
+        let mut links = 0;
+        let out = self
+            .parse_postfix(e, &mut links)
+            .and_then(|mut lhs| self.parse_infix(&mut lhs, 0, &mut links).map(|()| lhs));
+        self.chain -= links;
+        out.map(MatchBody::Expr)
     }
 
     fn parse_pattern(&mut self) -> Option<Pattern> {
