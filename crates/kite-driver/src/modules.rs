@@ -651,6 +651,9 @@ pub struct Loader {
     /// of `lib` and as `lib/shape`, so one declaration became two types and
     /// `expected lib/shape.Pt, found lib.Pt` was the only sign of it.
     files_of: HashMap<PathBuf, (String, bool)>,
+    /// The package each module found on a filesystem was loaded as part of —
+    /// see [`Loader::another_package`] — with the `use` that loaded it.
+    packages: HashMap<Origin, ((Option<PathBuf>, String), Span)>,
 }
 
 impl Loader {
@@ -1024,6 +1027,10 @@ impl Loader {
                     self.unresolved.insert(failed);
                     continue;
                 }
+            } else if let Some(refusal) = self.another_package(&found, &origin, u.span) {
+                diags.push(refusal);
+                self.unresolved.insert(failed);
+                continue;
             }
             let identity = match self.seen.get(&origin) {
                 Some(known) => known.clone(),
@@ -1264,23 +1271,35 @@ impl Loader {
     ///
     /// A module outside its package's root — which nothing loads — is looked
     /// for beside itself only.
+    ///
+    /// **Walked from where the module is, not along the route that reached
+    /// it.** The walk followed the path as the importer wrote it, so a module
+    /// reached through a symbolic link walked out through the link's
+    /// directories and the same module reached directly walked out through
+    /// its own — and whichever `use` loaded it first decided what its `use
+    /// config` meant. The directories are the real ones below the root,
+    /// spelled under the root as it was written, so the paths read are the
+    /// ones a bundle records.
     fn levels(&self, base: &Path, scope: &Scope) -> Vec<(PathBuf, String)> {
-        let mut out = vec![(base.to_path_buf(), scope.prefix.clone())];
+        let only = vec![(base.to_path_buf(), scope.prefix.clone())];
         let Some(root) = scope.package.root.as_deref() else {
-            return out;
+            return only;
         };
-        if !base.starts_with(root) {
-            return out;
-        }
-        let mut dir = base;
+        let real_root = self.files.canonical(root);
+        let real_base = self.files.canonical(base);
+        let Ok(below) = real_base.strip_prefix(&real_root) else {
+            return only;
+        };
+        let mut out = Vec::new();
+        let mut here = below.to_path_buf();
         let mut prefix = scope.prefix.clone();
-        while dir != root {
-            let Some(up) = dir.parent() else {
+        loop {
+            let dir = if here.as_os_str().is_empty() { root.to_path_buf() } else { root.join(&here) };
+            out.push((dir, prefix.clone()));
+            if !here.pop() {
                 break;
-            };
-            dir = up;
+            }
             prefix = Loader::package_of(&prefix);
-            out.push((dir.to_path_buf(), prefix.clone()));
         }
         out
     }
@@ -1323,6 +1342,60 @@ impl Loader {
         tried.push(at);
         tried.push(as_file);
         None
+    }
+
+    /// The package a module found on a filesystem resolves its own `use`s in:
+    /// its root, canonicalised, and its label.
+    fn package_key(&self, found: &Found) -> Option<(Option<PathBuf>, String)> {
+        let Found::Path { package, .. } = found else {
+            return None;
+        };
+        let root = package.root.as_deref().map(|root| self.files.canonical(root));
+        Some((root, package.label.clone()))
+    }
+
+    /// The `E0404` for a module already loaded, reached again as part of
+    /// another package.
+    ///
+    /// **One module, one resolution scope.** A module's own `use`s resolve
+    /// within the package it belongs to, and that was whichever package the
+    /// first `use` to reach it came through. A dependency vendored inside the
+    /// program is reachable both by the dependency's name and by a path from
+    /// the program, and whichever `use` came first decided whether its `use
+    /// util` was the program's `util.kite` or `E0400` — so swapping two `use`
+    /// lines changed what the program did. Two routes that agree on the
+    /// package are one module; two that do not are refused, in either order.
+    fn another_package(&self, found: &Found, origin: &Origin, span: Span) -> Option<Diagnostic> {
+        let (first, at) = self.packages.get(origin)?;
+        let now = self.package_key(found)?;
+        if *first == now {
+            return None;
+        }
+        let describe = |label: &str| {
+            if label.is_empty() {
+                "the program".to_string()
+            } else {
+                format!("the package `{}`", label.trim_start_matches('@'))
+            }
+        };
+        let identity = self.seen.get(origin).cloned().unwrap_or_default();
+        Some(
+            Diagnostic::error(
+                codes::E0404,
+                format!("`{}` is already loaded as part of {}", identity, describe(&first.1)),
+            )
+            .with_primary(span, format!("this reaches it as part of {}", describe(&now.1)))
+            .with_secondary(*at, "it was first reached here")
+            .with_note(format!(
+                "{} is one module, and a module's own `use`s are looked for within its package — \
+                 two packages would resolve them differently",
+                origin.describe()
+            ))
+            .with_note(
+                "reach it one way only: a dependency by the name its manifest declares, or a \
+                 module of the program by its path, not both",
+            ),
+        )
     }
 
     /// The `E0404` for a module `found` some of whose files already belong
@@ -1382,6 +1455,9 @@ impl Loader {
         diags: &mut DiagBag,
     ) {
         let origin = found.origin(&self.files);
+        if let Some(package) = self.package_key(&found) {
+            self.packages.insert(origin.clone(), (package, span));
+        }
         let mut files = Vec::new();
         // Where this module's *own* imports resolve from — its directory and
         // its package, or the package it was handed over inside. Every branch

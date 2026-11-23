@@ -1720,3 +1720,52 @@ fn a_dependency_root_never_falls_back_to_a_file_beside_it() {
     let said = p.run(&main).expect_err("there is no package");
     assert!(said.contains("E0400"), "{}", said);
 }
+
+/// A module reached through a symbolic link and directly is one module, and
+/// its own `use config` walks out from where it is, whichever `use` came
+/// first. It walked out along the route that loaded it, so swapping the two
+/// `use` lines changed which `config` it reached.
+#[cfg(unix)]
+#[test]
+fn a_module_reached_through_a_link_resolves_from_where_it_is() {
+    let p = Project::new("linked-route");
+    p.file("real/r.kite", "use config\n\npub fn f() -> str {\n  return config.c()\n}\n");
+    p.file("config.kite", "pub fn c() -> str {\n  return \"top\"\n}\n");
+    p.file("a/config.kite", "pub fn c() -> str {\n  return \"a\"\n}\n");
+    std::os::unix::fs::symlink("../real", p.dir.join("a/link")).expect("a link");
+    let body = "fn main() {\n  io.print(real.f())\n  io.print(link.f())\n}\n";
+    let one = p.file("m1.kite", &format!("use real\nuse a/link\n\n{}", body));
+    let two = p.file("m2.kite", &format!("use a/link\nuse real\n\n{}", body));
+    assert_eq!(p.run(&one).expect("compiles"), "top\ntop\n");
+    assert_eq!(p.run(&two).expect("compiles"), "top\ntop\n");
+}
+
+/// A dependency vendored inside the program is reachable by its name and by a
+/// path from the program. Its own `use util` resolved within whichever package
+/// the first `use` reached it through — the program's `util.kite` one way,
+/// `E0400` the other. One module belongs to one package: the second route is
+/// `E0404`, in either order.
+#[test]
+fn a_module_reached_as_part_of_two_packages_is_refused() {
+    let p = Project::new("two-packages-route");
+    p.file(
+        "kite.toml",
+        "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n[dependencies]\nd = \"src/vend/d\"\n",
+    );
+    p.file("src/util.kite", "pub fn secret() -> str {\n  return \"program\"\n}\n");
+    p.file("src/vend/d/kite.toml", "[package]\nname = \"d\"\nversion = \"1.0.0\"\n");
+    p.file("src/vend/d/inner/x.kite", "pub fn x() -> int {\n  return 1\n}\n");
+    let body = "fn main() {\n  io.print(inner.x())\n}\n";
+    for (name, uses) in [
+        ("src/m1.kite", "use vend/d/inner as vi\nuse d/inner\n"),
+        ("src/m2.kite", "use d/inner\nuse vend/d/inner as vi\n"),
+    ] {
+        let main = p.file(name, &format!("{}\n{}", uses, body));
+        let said = p.run(&main).expect_err("one module, two packages");
+        assert!(said.contains("E0404"), "{}", said);
+        assert!(said.contains("it was first reached here"), "{}", said);
+    }
+    // One route alone is fine.
+    let one = p.file("src/one.kite", &format!("use d/inner\n\n{}", body));
+    assert_eq!(p.run(&one).expect("compiles"), "1\n");
+}

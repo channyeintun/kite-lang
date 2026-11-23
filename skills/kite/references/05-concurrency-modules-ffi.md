@@ -544,6 +544,12 @@ config` written in `src/ui/` and in `src/main.kite` reach the one module, with
 one set of types. The `E0400` diagnostic lists every place it tried, nearest
 first, which is the fastest way to see where it looked.
 
+A module's own `use`s walk out from where its source really is (a symbolic
+link followed), so the route that reached it never changes what they mean. And
+a module belongs to one package: a dependency vendored inside the program,
+reached both as `use d/inner` and as `use vend/d/inner`, is `E0404` at the
+second `use`, in either order.
+
 The one exception is the first segment: if it names a declared dependency, the
 path roots there instead (§5).
 
@@ -759,7 +765,7 @@ when the member is near one of their builtins: `io.prnt` is ``cannot find
 | `E0406` | An `impl` outside its type's module: an extension method, or an imported trait implemented for an imported type. |
 | `E0402` | Import cycle. The diagnostic prints the chain (`a → b`). Extract the shared part into a third module. |
 | `E0403` | Reserved standard-library name (above). |
-| `E0404` | One module spelling two modules alike — give one an alias — or two packages of one name reached from two different places, or one file reached as two modules: a file of a directory module imported on its own (`use shape` inside `lib/`, or `use lib/shape` beside `use lib`). |
+| `E0404` | One module spelling two modules alike — give one an alias — or two packages of one name reached from two different places, or one file reached as two modules: a file of a directory module imported on its own (`use shape` inside `lib/`, or `use lib/shape` beside `use lib`) — or one module reached as part of two packages. |
 | `E0405` | A `kite.toml` that does not read. Reported at the offending line; a build no longer treats a broken manifest as no manifest. |
 | `E0111` | A qualified name whose module this module never imported — **or** an unknown member of one it did, reported at the member (above). |
 

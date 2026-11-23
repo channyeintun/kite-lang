@@ -656,7 +656,13 @@ codes! {
          inside `lib/`, or `use lib/shape` beside `use lib`, would compile \
          `shape.kite` a second time as a module of its own, and each of its \
          types would become two. Inside `lib`, its declarations are already \
-         in scope unqualified; elsewhere, write `lib.…`.";
+         in scope unqualified; elsewhere, write `lib.…`.\n\n\
+         Last, one module reached as part of two packages. A module's own \
+         `use`s are looked for within its package, so a dependency vendored \
+         inside the program — reachable both by the name its manifest \
+         declares and by a path from the program — would resolve its imports \
+         one way or the other depending on which `use` came first. Reach it \
+         one way only.";
 
     E0405 = "E0405", "a `kite.toml` that does not read",
         "The manifest is what says where a package's dependencies are, so a \

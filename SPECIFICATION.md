@@ -2094,7 +2094,11 @@ inside `b/` are two modules when each finds a `utils` of its own, and one when
 both find the `utils` beside them, and `use dep/utils` and `use utils` are two
 modules, because every segment is honoured when the files are found. A `use`
 that finds nothing is `E0400` — never answered by some other module that
-happens to be spelled alike. A first segment naming one of the importing
+happens to be spelled alike. A module's own `use`s are looked for from where
+its source is, too — its real directory, past any symbolic link — so the route
+a `use` took to reach it does not change what its imports mean; and it
+belongs to one package, so reaching one module both through a dependency's
+name and by a path from the program is `E0404`. A first segment naming one of the importing
 package's declared dependencies roots there instead, so `use markdown/render`
 reaches inside the package. `use markdown` alone is the package's root
 module, which is its own directory and only that: a directory with no `.kite`
