@@ -1,0 +1,123 @@
+// `.N` takes one element of a tuple of failures, not the whole. Its failure
+// goes where it lands, the other elements are still owed, and the tuple is
+// settled once every one has been taken — or it was taken apart, returned or
+// passed on. Reading `r.0` used to settle `r.1` as well, so the second
+// result of `task.both` could be dropped by looking only at the first.
+
+use std/task
+
+async fn save(n: int) -> error {
+    if n == 2 {
+        return errors.new("second failed")
+    }
+    return nil
+}
+
+fn f(i: int) -> error {
+    if i == 1 {
+        return errors.new("boom")
+    }
+    return nil
+}
+
+async fn only_the_first_taken() {
+    let r = await task.both(save(1), save(2)) //~ ERROR E0302
+    let e = r.0
+    if e != nil {
+        io.print(e.message())
+    }
+}
+
+fn only_the_other_element() {
+    let t = (f(1), 2) //~ ERROR E0302
+    io.print(t.1)
+}
+
+fn taken_on_one_branch_only(c: bool) {
+    let t = (f(1), f(2)) //~ ERROR E0302
+    if c {
+        let e = t.0
+        if e != nil {
+            io.print("first")
+        }
+    }
+    if t.1 != nil {
+        io.print("second")
+    }
+}
+
+fn left_owed_by_a_return() {
+    let t = (f(1), f(2))
+    if t.0 != nil {
+        return //~ ERROR E0302
+    }
+    if t.1 != nil {
+        io.print("second")
+    }
+}
+
+async fn each_taken() {
+    let r = await task.both(save(1), save(2))
+    let a = r.0
+    let b = r.1
+    if a != nil || b != nil {
+        io.print("failed")
+    }
+}
+
+fn each_tested() {
+    let t = (f(1), 2)
+    io.print(t.1)
+    if t.0 != nil {
+        io.print("failed")
+    }
+}
+
+fn taken_apart_on_the_other_branch(c: bool) {
+    let t = (f(1), f(2))
+    if c {
+        let (a, b) = t
+        if a != nil || b != nil {
+            io.print("failed")
+        }
+    } else {
+        if t.0 != nil {
+            io.print("first")
+        }
+    }
+    if t.1 != nil {
+        io.print("second")
+    }
+}
+
+fn the_rest_dropped_on_purpose() {
+    let t = (f(1), f(2))
+    if t.0 != nil {
+        _ = t.1
+        return
+    }
+    if t.1 != nil {
+        io.print("second")
+    }
+}
+
+// A slice cannot be followed element by element, so indexing it counts as
+// reading all of it.
+async fn a_slice_indexed() {
+    let rs = await task.all([save(1), save(2)])
+    if rs[0] != nil {
+        io.print("first")
+    }
+}
+
+async fn main() {
+    await only_the_first_taken()
+    only_the_other_element()
+    taken_on_one_branch_only(true)
+    left_owed_by_a_return()
+    await each_taken()
+    each_tested()
+    taken_apart_on_the_other_branch(true)
+    the_rest_dropped_on_purpose()
+    await a_slice_indexed()
+}

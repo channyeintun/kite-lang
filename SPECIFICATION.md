@@ -1087,7 +1087,10 @@ The rules:
 > these in it — what `task.both`, `task.all` and `task.timeout` answer
 > with — is Unchecked when bound, taking it apart or walking it with `for`
 > hands each failure in it to the name it is bound to, and counting it with
-> `len` is not reading it. Nor is testing an optional against `nil`, which
+> `len` is not reading it. A projection `r.0` takes one element of a tuple:
+> its failure goes where it lands, and the others are still owed, so the
+> tuple is settled once each has been taken. A slice cannot be followed
+> element by element, so `rs[0]` counts as reading all of it. Nor is testing an optional against `nil`, which
 > asks only whether a failure is there: where it is nil there is none, and
 > where it is present the optional, narrowed to what it holds, is still
 > Unchecked — `if r == nil { return }` is followed by a test of the error

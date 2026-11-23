@@ -645,6 +645,7 @@ pub fn check_recording(
             closure_ret_unknown: None,
             reported_unchecked: std::collections::HashSet::new(),
             copies: std::collections::BTreeSet::new(),
+            parts: std::collections::HashMap::new(),
             arm_bound: Vec::new(),
             defers: None,
             release,
@@ -1212,6 +1213,14 @@ struct Checker<'a> {
     /// inspecting one inspects both, and one left behind while the other is
     /// still in scope has dropped nothing. Each pair is written lowest first.
     copies: std::collections::BTreeSet<(u32, u32)>,
+    /// For a local holding a tuple of failures, one hidden local per element
+    /// that can hold one, each Unchecked until that element is taken with
+    /// `.N`: `r.0` hands on the first failure and leaves the others owed,
+    /// and the tuple is settled once every one has been taken. The hidden
+    /// locals are flow state like any other, so branches and loops join
+    /// them; they are made where the tuple is first bound, so no state that
+    /// knows the tuple lacks them.
+    parts: std::collections::HashMap<u32, Vec<(u32, u32)>>,
     /// The locals the current `match` arm's pattern has bound so far, for
     /// [`ResolveMap::rebound`].
     arm_bound: Vec<u32>,
@@ -2088,11 +2097,7 @@ impl<'a> Checker<'a> {
         self.forget_copies(local);
         let state = match value.kind {
             ExprKind::Local(src) if src.0 != local && self.holds_obligation(value, before) => {
-                for i in self.copies_of(src.0) {
-                    if before.get(i as usize) == Some(&Taint::Unchecked) {
-                        self.taint[i as usize] = Taint::Unchecked;
-                    }
-                }
+                self.keep_unread(src.0, before);
                 self.note_copy(local, src.0);
                 Taint::Unchecked
             }
@@ -2100,6 +2105,28 @@ impl<'a> Checker<'a> {
             _ => Taint::Clean,
         };
         self.taint[local as usize] = state;
+        self.reset_parts(local, state);
+    }
+
+    /// A tuple of failures was just bound: each element that can hold one is
+    /// owed again, or settled with the whole. See [`Checker::parts`].
+    fn reset_parts(&mut self, local: u32, state: Taint) {
+        let TyKind::Tuple(elems) = self.types.kind(self.locals[local as usize].ty).clone() else {
+            return;
+        };
+        if !self.parts.contains_key(&local) {
+            let span = self.locals[local as usize].span;
+            let mut made = Vec::new();
+            for (i, ty) in elems.iter().enumerate() {
+                if self.may_hold_failure(*ty) {
+                    made.push((i as u32, self.synthetic_local("part", *ty, span)));
+                }
+            }
+            self.parts.insert(local, made);
+        }
+        for &(_, part) in &self.parts[&local] {
+            self.taint[part as usize] = state;
+        }
     }
 
     /// Inspect the failure a local holds, under every name it has.
@@ -2107,6 +2134,25 @@ impl<'a> Checker<'a> {
         for i in self.copies_of(id) {
             if self.taint.get(i as usize) == Some(&Taint::Unchecked) {
                 self.taint[i as usize] = Taint::Clean;
+            }
+            if let Some(parts) = self.parts.get(&i) {
+                for &(_, part) in parts {
+                    self.taint[part as usize] = Taint::Clean;
+                }
+            }
+        }
+    }
+
+    /// Put back what reading `id` to look at something other than its
+    /// failure marked inspected: the failure under every name, and each
+    /// element of a tuple of them still owed.
+    fn keep_unread(&mut self, id: u32, before: &[Taint]) {
+        for i in self.copies_of(id) {
+            let parts = self.parts.get(&i).map(|p| p.iter().map(|&(_, s)| s).collect::<Vec<_>>());
+            for j in std::iter::once(i).chain(parts.into_iter().flatten()) {
+                if before.get(j as usize) == Some(&Taint::Unchecked) {
+                    self.taint[j as usize] = Taint::Unchecked;
+                }
             }
         }
     }
@@ -3590,6 +3636,7 @@ impl<'a> Checker<'a> {
         // built, which is being thrown away; so is a closure it lifted, whose
         // number the real check hands out again.
         self.locals.truncate(t.locals);
+        self.parts.retain(|_, ps| ps.iter().all(|&(_, s)| (s as usize) < t.locals));
         self.lifted.truncate(t.lifted);
         self.set_flow_state(t.flow);
         self.guards = t.guards;
@@ -3837,11 +3884,7 @@ impl<'a> Checker<'a> {
                 let before = held.map(|_| self.taint.clone());
                 let value = self.expr(subject, None);
                 if let (Some(id), Some(before)) = (held, before) {
-                    for i in self.copies_of(id) {
-                        if before.get(i as usize) == Some(&Taint::Unchecked) {
-                            self.taint[i as usize] = Taint::Unchecked;
-                        }
-                    }
+                    self.keep_unread(id, &before);
                 }
                 if !matches!(self.types.kind(value.ty), TyKind::Optional(_))
                     && value.ty != TyId::ERR
@@ -9346,11 +9389,7 @@ impl<'a> Checker<'a> {
             _ => None,
         };
         if let Some(src) = source {
-            for i in self.copies_of(src) {
-                if before.get(i as usize) == Some(&Taint::Unchecked) {
-                    self.taint[i as usize] = Taint::Unchecked;
-                }
-            }
+            self.keep_unread(src, &before);
         }
         // A fresh failure reaching a `_` is dropped there — unless a guard
         // ahead of it looked at the name an earlier arm gave it, as in `e if
@@ -11327,7 +11366,37 @@ impl<'a> Checker<'a> {
 
     /// `p.x`
     fn field_access(&mut self, base: &ast::Expr, name: &ast::Ident, span: Span) -> hir::Expr {
+        // **`.N` takes one element of a tuple of failures**, not the whole:
+        // `let e = r.0` after `let r = await task.both(a, b)` hands on the
+        // first failure and leaves the second owed. Reading the tuple to
+        // project it is not looking at what else is in it; each element is
+        // settled as it is taken, and the tuple once every one has been.
+        let owed = match base {
+            ast::Expr::Path(p) => match self.resolved.lookup_use(p.span) {
+                Some(Res::Local(id))
+                    if self.taint.get(id as usize) == Some(&Taint::Unchecked)
+                        && self.parts.contains_key(&id) =>
+                {
+                    Some((id, self.taint.clone()))
+                }
+                _ => None,
+            },
+            _ => None,
+        };
         let obj = self.expr(base, None);
+        if let Some((id, before)) = owed {
+            self.keep_unread(id, &before);
+            let index = name.name.parse::<u32>().ok();
+            let parts = self.parts[&id].clone();
+            for &(i, part) in &parts {
+                if Some(i) == index {
+                    self.taint[part as usize] = Taint::Clean;
+                }
+            }
+            if parts.iter().all(|&(_, part)| self.taint[part as usize] != Taint::Unchecked) {
+                self.inspect(id);
+            }
+        }
 
         if self.types.is_poisoned(obj.ty) {
             return self.lit(ExprKind::Error, TyId::ERROR, span);
