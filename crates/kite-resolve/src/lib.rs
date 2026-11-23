@@ -2759,10 +2759,37 @@ impl<'a> FnResolver<'a> {
             .with_primary(p.span, "not found in this scope");
         if name == "Self" {
             d = d.with_note(SELF_OUTSIDE_AN_IMPL);
+        } else if let Some(alias) = self.imported_as(name) {
+            // `use std/errors as errs` renames the module here: the name it
+            // had is not one this file knows, and "cannot find" said nothing
+            // of the one it does.
+            d = d.with_note(format!(
+                "`{}` is imported here as `{}`, so this file writes the module `{}`",
+                name, alias, alias
+            ));
         } else if let Some(sugg) = self.suggest(name) {
             d = d.with_note(format!("a similar name is in scope: `{}`", sugg));
         }
         self.diags.push(d);
+    }
+
+    /// The name this module gave the module `name` with `use … as …`, when
+    /// `name` is how that module is known elsewhere and not a name this
+    /// module has for anything.
+    fn imported_as(&self, name: &str) -> Option<String> {
+        let mut found = self
+            .map
+            .modules
+            .aliases
+            .iter()
+            .filter(|((asking, spelling), target)| {
+                *asking == self.module
+                    && spelling != name
+                    && target.trim_start_matches('@').rsplit('/').next() == Some(name)
+            })
+            .map(|((_, spelling), _)| spelling.clone());
+        let first = found.next()?;
+        found.next().is_none().then_some(first)
     }
 
     /// Nearest name by edit distance, when it is close enough to be a likely

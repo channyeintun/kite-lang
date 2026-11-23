@@ -500,3 +500,22 @@ fn a_note_about_a_prelude_trait_does_not_say_prelude() {
     assert!(!err.contains("prelude."), "{}", err);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// After `use std/errors as errs`, the module's old name is not one this file
+/// knows, and the error says what it is called here. The member that is
+/// missing is named under the alias too.
+#[test]
+fn a_module_used_by_its_old_name_says_what_it_is_called_here() {
+    let dir = scratch(
+        "alias-old-name",
+        "t.kite",
+        "use std/errors as errs\nuse std/text as t\n\nfn main() {\n    let g = errors.wrap(errs.new(\"x\"), \"c\")\n    \
+         io.print(text.upper(\"a\"))\n    io.print(errs.nothing(g))\n}\n",
+    );
+    let Some((ok, _, err)) = kitec_in(&dir, &["check", "t.kite"]) else { return };
+    assert!(!ok, "{}", err);
+    assert!(err.contains("`errors` is imported here as `errs`"), "{}", err);
+    assert!(err.contains("`text` is imported here as `t`"), "{}", err);
+    assert!(err.contains("cannot find `nothing` in module `errs`"), "{}", err);
+    let _ = std::fs::remove_dir_all(&dir);
+}
