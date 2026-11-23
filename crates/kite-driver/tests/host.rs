@@ -1197,6 +1197,247 @@ fn the_batch_driver_still_runs_on_a_virtual_clock() {
     );
 }
 
+/// The resident driver's runner on a simulated event loop, and the batch
+/// driver's beside it, with a host object either can be called back through.
+///
+/// Timers run in deadline order and the clock moves only when the earliest
+/// one is in the future, which is exactly when the batch driver's virtual
+/// clock jumps: so a page and a test make the same passes at the same times,
+/// and print the same text, `time.now()` included. A real event loop would
+/// make the page's sleeps real and its output a race. `bus.handler`, if the
+/// program sets one, is called from outside the program at 20 ms — a host
+/// event arriving while nothing is running.
+const SIMULATED_PAGE_RUNNER: &str = r#"import { readFile } from "node:fs/promises";
+import { instantiate, resident, setWriter, stopped } from "./app.js";
+globalThis.bus = { fire: (h) => { h(null); return null; }, handler: null };
+const out = [];
+setWriter((l) => out.push(l));
+let clock = 0;
+let order = 0;
+const timers = [];
+globalThis.setTimeout = (fn, ms) => {
+  const t = { at: clock + Math.max(0, Number(ms) || 0), order: order++, fn };
+  timers.push(t);
+  return t;
+};
+globalThis.clearTimeout = (t) => {
+  const i = timers.indexOf(t);
+  if (i >= 0) timers.splice(i, 1);
+};
+Object.defineProperty(globalThis.performance, "now", { value: () => clock, configurable: true });
+setTimeout(() => { if (globalThis.bus.handler) globalThis.bus.handler(null); }, 20);
+const exports = await instantiate(new Uint8Array(await readFile(new URL("./app.wasm", import.meta.url))));
+exports.main();
+resident(exports);
+while (timers.length > 0) {
+  timers.sort((a, b) => a.at - b.at || a.order - b.order);
+  const t = timers.shift();
+  clock = Math.max(clock, t.at);
+  t.fn();
+}
+if (stopped() !== null) throw stopped();
+process.stdout.write(out.map((l) => l + "\n").join(""));
+"#;
+
+const SIMULATED_BATCH_RUNNER: &str = r#"import { readFile } from "node:fs/promises";
+import { run, setWriter } from "./app.js";
+globalThis.bus = { fire: (h) => { h(null); return null; }, handler: null };
+const out = [];
+setWriter((l) => out.push(l));
+setTimeout(() => { if (globalThis.bus.handler) globalThis.bus.handler(null); }, 20);
+await run(new Uint8Array(await readFile(new URL("./app.wasm", import.meta.url))));
+process.stdout.write(out.map((l) => l + "\n").join(""));
+"#;
+
+/// A page polls its tasks in the order a test does.
+///
+/// The resident driver shares `sweep` with the batch driver, but keeps its own
+/// account of when to come back: a host event releasing tasks into a pass
+/// that is running, tasks woken since the last pass merged into the next in
+/// spawn order, and a pass made at once after one in which something finished
+/// while awaiters stayed parked. That account was only read until this ran
+/// it. The scheduling programs are pinned to what the VM prints; the two
+/// below need a host, so they are pinned to what the batch driver prints. In
+/// the first, a task fires a host callback twice in the middle of a pass:
+/// the host waiters later in spawn order run in that same pass, the earlier
+/// one in the next, and the tasks that parked as well as waiting on the host
+/// wait for a completion too. In the second, the host event comes from
+/// outside after a pass in which something finished — leaving out the
+/// immediate pass after it ran the awaiter a pass early.
+#[test]
+fn the_page_driver_polls_in_the_batch_drivers_order() {
+    if !node_available() {
+        eprintln!("skipping: node is not on PATH");
+        return;
+    }
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/scheduling");
+    let mut names: Vec<String> = std::fs::read_dir(&dir)
+        .expect("tests/scheduling")
+        .filter_map(|e| {
+            let name = e.ok()?.file_name().into_string().ok()?;
+            Some(name.strip_suffix(".kite")?.to_string())
+        })
+        .collect();
+    names.sort();
+    assert!(names.len() >= 7, "only {} scheduling programs", names.len());
+    let mut wrong = Vec::new();
+    for name in &names {
+        let src = std::fs::read_to_string(dir.join(format!("{}.kite", name))).expect("read program");
+        let want = std::fs::read_to_string(dir.join(format!("{}.out", name))).expect("read output");
+        let page = run_runner_under_node(&format!("page-{}", name), &src, SIMULATED_PAGE_RUNNER, &[]);
+        if page != want {
+            wrong.push(format!("{} in a page:\n  want: {:?}\n  got:  {:?}", name, want, page));
+        }
+    }
+    for (name, src, want) in [
+        ("released-mid-pass", HOST_RELEASED_MID_PASS, HOST_RELEASED_MID_PASS_OUT),
+        ("released-after-armed", HOST_RELEASED_AFTER_ARMED, HOST_RELEASED_AFTER_ARMED_OUT),
+    ] {
+        let batch = run_runner_under_node(&format!("batch-{}", name), src, SIMULATED_BATCH_RUNNER, &[]);
+        let page = run_runner_under_node(&format!("page-{}", name), src, SIMULATED_PAGE_RUNNER, &[]);
+        for (driver, out) in [("by the batch driver", batch), ("in a page", page)] {
+            if out != want {
+                wrong.push(format!("{} {}:\n  want: {:?}\n  got:  {:?}", name, driver, want, out));
+            }
+        }
+    }
+    assert!(wrong.is_empty(), "{}", wrong.join("\n\n"));
+}
+
+const HOST_RELEASED_MID_PASS: &str = r#"use std/js
+use std/task
+
+struct Flag {
+  var on: bool
+  var fired: int
+}
+
+fn turn_on(var f: Flag) {
+  f.on = true
+  f.fired = f.fired + 1
+}
+
+async fn host_waiter(id: int, f: Flag) -> int {
+  var turns = 0
+  for !f.on {
+    io.print("h\(id) waits")
+    task.wait_host()
+    task.yield()
+    turns = turns + 1
+  }
+  io.print("h\(id) woke after \(turns)")
+  return id
+}
+
+async fn both_ways(id: int, f: Flag) -> int {
+  for !f.on {
+    io.print("b\(id) parks and waits")
+    task.park()
+    task.wait_host()
+    task.yield()
+  }
+  io.print("b\(id) woke")
+  return id
+}
+
+async fn ticker(id: int, n: int) -> int {
+  for i in 0..n {
+    io.print("t\(id) \(i)")
+    task.yield()
+  }
+  return id
+}
+
+async fn firer(f: Flag, h: JsValue, times: int) -> int {
+  task.yield()
+  io.print("firing")
+  for i in 0..times {
+    let (_, err) = js.call1(js.global("bus"), "fire", h)
+    if err != nil {
+      io.print(err.message())
+    }
+  }
+  io.print("fired \(f.fired)")
+  task.yield()
+  io.print("firer done")
+  return 0
+}
+
+async fn awaiter(id: int, t: Task<int>) -> int {
+  let v = await t
+  io.print("a\(id) got \(v)")
+  return v
+}
+
+pub async fn main() {
+  let f = Flag{ on: false, fired: 0 }
+  let h = js.func(|e: JsValue| { turn_on(f) })
+  let a = host_waiter(1, f)
+  let b = both_ways(2, f)
+  let t = ticker(3, 6)
+  let x = firer(f, h, 2)
+  let c = host_waiter(5, f)
+  let d = awaiter(6, a)
+  let e = both_ways(7, f)
+  let g = awaiter(8, e)
+  var total = 0
+  for k in [a, b, t, x, c, d, e, g] {
+    total = total + await k
+  }
+  io.print("total \(total)")
+}
+"#;
+
+const HOST_RELEASED_MID_PASS_OUT: &str = "h1 waits\nb2 parks and waits\nt3 0\nh5 waits\nb7 parks and waits\nt3 1\nfiring\nfired 2\nh5 woke after 1\nh1 woke after 1\nb2 woke\nt3 2\nfirer done\na6 got 1\nb7 woke\na8 got 7\nt3 3\nt3 4\nt3 5\ntotal 26\n";
+
+const HOST_RELEASED_AFTER_ARMED: &str = r#"use std/js
+use std/task
+
+struct Flag {
+  var on: bool
+}
+
+fn turn_on(var f: Flag) {
+  f.on = true
+}
+
+async fn host_waiter(id: int, f: Flag) -> int {
+  for !f.on {
+    task.wait_host()
+    task.yield()
+  }
+  io.print("h\(id) woke")
+  return id
+}
+
+async fn quick(id: int) -> int {
+  io.print("q\(id) done")
+  return id
+}
+
+async fn awaiter(id: int, t: Task<int>) -> int {
+  let v = await t
+  io.print("a\(id) got \(v)")
+  return v
+}
+
+fn main() {
+  let f = Flag{ on: false }
+  let err = js.set(js.global("bus"), "handler", js.func(|e: JsValue| { turn_on(f) }))
+  if err != nil {
+    io.print(err.message())
+    return
+  }
+  let h = host_waiter(0, f)
+  awaiter(1, h)
+  host_waiter(2, f)
+  quick(3)
+  io.print("main returns")
+}
+"#;
+
+const HOST_RELEASED_AFTER_ARMED_OUT: &str = "main returns\nq3 done\nh0 woke\nh2 woke\na1 got 0\n";
+
 /// An idle resident program schedules nothing.
 ///
 /// This is the third fault the phase set out to fix, and the one that decides
