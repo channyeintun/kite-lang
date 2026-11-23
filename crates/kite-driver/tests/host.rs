@@ -1684,6 +1684,137 @@ fn a_failed_html_update_leaves_the_view_true_to_the_page() {
     );
 }
 
+/// `html.render` and `html.escape` write a description out as text.
+#[test]
+fn html_renders_a_description_as_text() {
+    if !node_available() {
+        eprintln!("skipping: node is not on PATH");
+        return;
+    }
+    let src = "use std/dom\nuse std/html\n\n\
+        fn main() {\n\
+        \x20 let page = [html.el(\"ul\", [html.class(\"list\"), html.click(|e: dom.Event| { })], [\n\
+        \x20   html.txt(\"li\", [html.data(\"n\", \"1\")], \"a < b & \\\"c\\\"\"),\n\
+        \x20   html.empty(\"br\", []),\n\
+        \x20   html.text(\"bare\"),\n\
+        \x20   html.empty(\"input\", [html.attr(\"value\", \"x\\\" onclick=\\\"y\"), html.attr(\"a b\", \"1\")]),\n\
+        \x20   html.txt(\"b>\", [], \"odd tag\"),\n\
+        \x20 ])]\n\
+        \x20 io.print(html.render(page))\n\
+        \x20 io.print(html.escape(\"Tom & Jerry's <b>\"))\n\
+        }\n";
+    let out = run_under_node("htmlrender", src);
+    assert_eq!(
+        out,
+        "<ul class=\"list\"><li data-n=\"1\">a &lt; b &amp; &quot;c&quot;</li><br>\
+         <span>bare</span><input value=\"x&quot; onclick=&quot;y\"><span>odd tag</span></ul>\n\
+         Tom &amp; Jerry&#39;s &lt;b&gt;\n"
+    );
+}
+
+/// The one-line wrappers on `dom` and `js` call what they say they call.
+#[test]
+fn dom_and_js_shorthands_reach_the_page() {
+    if !node_available() {
+        eprintln!("skipping: node is not on PATH");
+        return;
+    }
+    let src = "use std/dom\nuse std/js\n\n\
+        fn main() {\n\
+        \x20 let cell = dom.find(\"#cell\")\n\
+        \x20 if cell == nil {\n    return\n  }\n\
+        \x20 io.print(\"disabled \\(dom.has_attribute(cell, \"disabled\")) hidden \\(dom.has_attribute(cell, \"hidden\"))\")\n\
+        \x20 let row = dom.closest(cell, \"tr\")\n\
+        \x20 io.print(\"closest tr: \\(row != nil) none: \\(dom.closest(cell, \"table\") == nil)\")\n\
+        \x20 let up = dom.parent(cell)\n\
+        \x20 if up == nil {\n    return\n  }\n\
+        \x20 io.print(\"parent is a row: \\(dom.has_attribute(up, \"row\")) its parent: \\(dom.parent(up) == nil)\")\n\
+        \x20 io.print(\"focus: \\(dom.focus(cell) == nil)\")\n\
+        \x20 io.print(\"clear: \\(dom.clear(cell) == nil) text [\\(dom.text(cell))]\")\n\
+        \x20 let probe = js.global(\"probe\")\n\
+        \x20 io.print(\"int_or \\(js.int_or(probe, \"count\", -1)) \\(js.int_or(probe, \"ratio\", -1)) \\(js.int_or(probe, \"missing\", -1)) \\(js.int_or(probe, \"name\", -1))\")\n\
+        \x20 io.print(\"has \\(js.has(probe, \"count\")) \\(js.has(probe, \"missing\")) \\(js.has(probe, \"nope\")) \\(js.has(probe, \"off\"))\")\n\
+        }\n";
+    let runner = "import { readFile } from \"node:fs/promises\";\n\
+         import { run, setWriter } from \"./app.js\";\n\
+         class Element {}\n\
+         const mk = (tag, attrs, parent) => {\n\
+         \x20 const el = { tagName: tag, attrs, parentElement: parent ?? null, text: \"stuff\", focused: false,\n\
+         \x20   hasAttribute(n) { return n in this.attrs; },\n\
+         \x20   closest(s) { for (let e = this; e; e = e.parentElement) if (e.tagName === s) return e; return null; },\n\
+         \x20   focus() { this.focused = true; },\n\
+         \x20   get textContent() { return this.text; },\n\
+         \x20   set textContent(v) { this.text = v; },\n\
+         \x20 };\n\
+         \x20 Object.setPrototypeOf(el, Element.prototype);\n\
+         \x20 return el;\n\
+         };\n\
+         const row = mk(\"tr\", { row: \"\" }, null);\n\
+         const cell = mk(\"td\", { disabled: \"\" }, row);\n\
+         globalThis.Element = Element;\n\
+         globalThis.document = { querySelector: (s) => (s === \"#cell\" ? cell : null) };\n\
+         globalThis.probe = { count: 7, ratio: 1.5, missing: undefined, name: \"kite\", off: false };\n\
+         const out = [];\n\
+         setWriter((l) => out.push(l));\n\
+         await run(new Uint8Array(await readFile(new URL(\"./app.wasm\", import.meta.url))));\n\
+         out.push(\"focused \" + cell.focused);\n\
+         process.stdout.write(out.map((l) => l + \"\\n\").join(\"\"));\n";
+    let out = run_runner_under_node("domshort", src, runner, &[]);
+    assert_eq!(
+        out,
+        "disabled true hidden false\n\
+         closest tr: true none: true\n\
+         parent is a row: true its parent: true\n\
+         focus: true\n\
+         clear: true text []\n\
+         int_or 7 -1 -1 -1\n\
+         has true false false true\n\
+         focused true\n"
+    );
+}
+
+/// `socket.take` answers at once, with a message or with nothing.
+#[test]
+fn a_socket_can_be_polled() {
+    if !node_available() {
+        eprintln!("skipping: node is not on PATH");
+        return;
+    }
+    // A socket that opens, then delivers two messages in one turn, so that after
+    // waiting for the first the second is already there and a third is not.
+    let runner = "import { readFile } from \"node:fs/promises\";\n\
+         import { run, setWriter } from \"./app.js\";\n\
+         globalThis.WebSocket = class {\n\
+         \x20 constructor() {\n\
+         \x20   setTimeout(() => {\n\
+         \x20     this.onopen();\n\
+         \x20     setTimeout(() => {\n\
+         \x20       this.onmessage({ data: \"one\" });\n\
+         \x20       this.onmessage({ data: \"two\" });\n\
+         \x20     }, 0);\n\
+         \x20   }, 0);\n\
+         \x20 }\n\
+         \x20 close() {}\n\
+         };\n\
+         const out = [];\n\
+         setWriter((l) => out.push(l));\n\
+         await run(new Uint8Array(await readFile(new URL(\"./app.wasm\", import.meta.url))));\n\
+         process.stdout.write(out.map((l) => l + \"\\n\").join(\"\"));\n";
+    let src = "use std/socket\n\
+         async fn main() {\n\
+         \x20 let (s, err) = await socket.connect(\"ws://x/y\")\n\
+         \x20 if err != nil {\n    io.print(\"failed\")\n    return\n  }\n\
+         \x20 io.print(\"before: \\(socket.take(s) == nil)\")\n\
+         \x20 let (first, rerr) = await socket.receive(s)\n\
+         \x20 if rerr != nil {\n    io.print(\"receive failed\")\n    return\n  }\n\
+         \x20 io.print(first)\n\
+         \x20 io.print(or_else(socket.take(s), \"<nil>\"))\n\
+         \x20 io.print(\"after: \\(socket.take(s) == nil)\")\n\
+         \x20 socket.close(s)\n}\n";
+    let out = run_runner_under_node("socket-take", src, runner, &[]);
+    assert_eq!(out, "before: true\none\ntwo\nafter: true\n", "{}", out);
+}
+
 /// A world for `std/window` to read: an address, a scroll position, and a time
 /// zone with daylight saving, so that "now" and "at an instant" can differ.
 const WINDOW_RUNNER: &str = "import { readFile } from \"node:fs/promises\";\n\
@@ -1717,13 +1848,15 @@ fn window_decodes_rounds_and_dates_as_documented() {
         }\n\
         fn main() {\n\
         \x20 io.print(\"\\(show(\"a b\")) \\(show(\"c d\")) \\(show(\"e\")) \\(show(\"f\")) \\(show(\"g\")) \\(show(\"zz\"))\")\n\
+        \x20 let all = window.parameters()\n\
+        \x20 io.print(\"\\(all.len()) [\\(or_else(all[\"a b\"], \"-\"))] [\\(or_else(all[\"e\"], \"-\"))] [\\(or_else(all[\"f\"], \"-\"))]\")\n\
         \x20 io.print(\"\\(window.scroll_y()) \\(window.scroll_x()) \\(window.width())\")\n\
         \x20 io.print(\"\\(window.timezone_offset_at(1705276800000)) \\(window.timezone_offset_at(1721001600000))\")\n\
         }\n";
     let out = run_runner_under_node("window", src, WINDOW_RUNNER, &[]);
     assert_eq!(
         out,
-        "[1] [2] [A%zz] [] [h\u{4e2d}] nil\n-1 3 800\n-300 -240\n"
+        "[1] [2] [A%zz] [] [h\u{4e2d}] nil\n5 [1] [A%zz] []\n-1 3 800\n-300 -240\n"
     );
 }
 

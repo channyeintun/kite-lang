@@ -100,6 +100,15 @@ pub async fn receive(s: Socket) -> (str, error) {
     return socket_next(s.id), nil
 }
 
+/// The next message if one has already arrived, and nothing if not — without
+/// waiting, which [`receive`] does. For a program that polls once a frame.
+pub fn take(s: Socket) -> Option<str> {
+    if socket_pending(s.id) == 0 {
+        return nil
+    }
+    return socket_next(s.id)
+}
+
 /// How many messages are waiting. A program with something else to do asks
 /// this rather than `receive`.
 pub fn pending(s: Socket) -> int {

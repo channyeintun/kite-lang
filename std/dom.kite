@@ -109,6 +109,59 @@ pub fn find(selector: str) -> Option<Element> {
     return Element{ raw: found }
 }
 
+/// Whether an element carries an attribute, whatever its value — `disabled` is
+/// there with the value "". False when the call fails.
+pub fn has_attribute(e: Element, name: str) -> bool {
+    let (found, err) = js.call1(e.raw, "hasAttribute", js.of_str(name))
+    if err != nil {
+        return false
+    }
+    let (on, aerr) = js.as_bool(found)
+    if aerr != nil {
+        return false
+    }
+    return on
+}
+
+/// The nearest element, starting with this one and going up the tree, that
+/// matches a selector — what an event handler asks to find the row a click
+/// landed in. Nothing when none does, or the selector is malformed.
+pub fn closest(e: Element, selector: str) -> Option<Element> {
+    let (found, err) = js.call1(e.raw, "closest", js.of_str(selector))
+    if err != nil {
+        return nil
+    }
+    if js.is_nothing(found) {
+        return nil
+    }
+    return Element{ raw: found }
+}
+
+/// The element this one is inside, or nothing for the root of a tree or an
+/// element that is not in one. Elements only: a child of the document is not
+/// an element's child, so `<html>` has no parent here.
+pub fn parent(e: Element) -> Option<Element> {
+    let (found, err) = js.get(e.raw, "parentElement")
+    if err != nil {
+        return nil
+    }
+    if js.is_nothing(found) {
+        return nil
+    }
+    return Element{ raw: found }
+}
+
+/// Give an element the keyboard focus.
+pub fn focus(e: Element) -> error {
+    let (_, err) = js.call0(e.raw, "focus")
+    return err
+}
+
+/// Take everything out of an element: its children and its text.
+pub fn clear(e: Element) -> error {
+    return set_text(e, "")
+}
+
 /// The first element inside `parent` matching a selector.
 pub fn find_in(parent: Element, selector: str) -> Option<Element> {
     let (found, err) = js.call1(parent.raw, "querySelector", js.of_str(selector))

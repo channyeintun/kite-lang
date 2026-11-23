@@ -295,6 +295,34 @@ pub fn parameter(name: str) -> Option<str> {
     return nil
 }
 
+/// Every parameter of the query string, decoded as [`parameter`] decodes them.
+/// A name that repeats keeps its first value, as [`parameter`] answers, and one
+/// with no `=` has the value "".
+pub fn parameters() -> { str: str } {
+    var out: { str: str } = { }
+    var body = query()
+    if starts_with(body, "?") {
+        body = body.slice(1, body.len())
+    }
+    for pair in split(body, "&") {
+        if pair.len() == 0 {
+            continue
+        }
+        let at = pair.index_of("=")
+        var key = pair
+        var value = ""
+        if at >= 0 {
+            key = pair.slice(0, at)
+            value = pair.slice(at + 1, pair.len())
+        }
+        let name = http.form_decoded(key)
+        if out[name] == nil {
+            out[name] = http.form_decoded(value)
+        }
+    }
+    return out
+}
+
 /// A component of a URL, percent-encoded.
 pub fn escaped(text: str) -> str {
     return through("encodeURIComponent", text)

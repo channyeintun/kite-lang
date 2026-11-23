@@ -526,6 +526,31 @@ pub fn num_or(target: JsValue, name: str, fallback: float) -> float {
     return number
 }
 
+/// A whole-number property, or `fallback` when it is missing, is not a number,
+/// or is not a whole one that survives the crossing (see [`as_int`]).
+pub fn int_or(target: JsValue, name: str, fallback: int) -> int {
+    let (value, err) = get(target, name)
+    if err != nil {
+        return fallback
+    }
+    let (whole, werr) = as_int(value)
+    if werr != nil {
+        return fallback
+    }
+    return whole
+}
+
+/// Whether a property is there to be read: it can be read without failing, and
+/// is neither `null` nor `undefined`. A property that holds `false`, `0` or ""
+/// is there.
+pub fn has(target: JsValue, name: str) -> bool {
+    let (value, err) = get(target, name)
+    if err != nil {
+        return false
+    }
+    return !is_nothing(value)
+}
+
 /// A boolean property, or `fallback`.
 pub fn bool_or(target: JsValue, name: str, fallback: bool) -> bool {
     let (value, err) = get(target, name)
