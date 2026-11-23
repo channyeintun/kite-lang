@@ -1605,3 +1605,23 @@ fn a_comma_between_members_is_fixed_at_the_first_members_column() {
         }
     }
 }
+
+/// `pub` before a variant is refused with the reason, wherever the variant is
+/// written: on the same line, or — a layout like any other — on the line
+/// below. The second was the generic "expected a variant, found `pub`", whose
+/// note talks about methods; and the variant is still declared either way.
+#[test]
+fn pub_above_a_variant_is_refused_as_pub_on_a_variant() {
+    for src in [
+        "enum E {\n    pub A\n    B\n}\n",
+        "enum E {\n    pub\n    A\n    B\n}\n",
+        "enum E {\n    pub\n\n    A\n    B\n}\n",
+    ] {
+        let p = parse_src(src);
+        assert_eq!(p.codes(), vec!["E0100"], "{:?}\n{}", src, p.render());
+        assert!(p.render().contains("a variant cannot be marked `pub`"), "{:?}\n{}", src, p.render());
+        assert!(!p.render().contains("methods"), "{:?}\n{}", src, p.render());
+        let Item::Enum(e) = &p.file.items[0] else { panic!("{}", p.render()) };
+        assert_eq!(e.variants.len(), 2, "{:?}", src);
+    }
+}

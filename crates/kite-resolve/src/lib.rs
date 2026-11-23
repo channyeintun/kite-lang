@@ -906,7 +906,7 @@ impl ResolveMap {
         )
         .with_primary(
             member.span,
-            format!("`{}` declares no public type of this name", module.trim_start_matches('@')),
+            format!("`{}` declares no public type of this name", head.name),
         );
         Some(match nearest(&member.name, &members) {
             Some(near) => d.with_note(format!("a similar type is in `{}`: `{}`", head.name, near)),
@@ -945,6 +945,26 @@ impl ResolveMap {
     /// The module an item was declared in.
     pub fn module_of_item(&self, decl_index: usize) -> &str {
         self.modules.of(decl_index)
+    }
+
+    /// How a diagnostic in `asking` names the module `identity`: the name the
+    /// one `use` of it there gives it — `money`, or its alias — and the
+    /// identity only where no `use` of `asking` names it, or two do.
+    ///
+    /// **A module is named as the reader's `use` writes it.** ``private to
+    /// module `src/money` `` beside the `money.secret` that was written named
+    /// one module two ways, the second a path below `kite.toml` nobody wrote.
+    pub fn module_as_spelled_in(&self, asking: &str, identity: &str) -> String {
+        let mut names = self
+            .modules
+            .aliases
+            .iter()
+            .filter(|((from, _), to)| from == asking && to.as_str() == identity)
+            .map(|((_, alias), _)| alias);
+        match (names.next(), names.next()) {
+            (Some(one), None) => one.clone(),
+            _ => identity.trim_start_matches('@').to_string(),
+        }
     }
 
     /// The module a function was declared in.
@@ -1730,6 +1750,24 @@ impl<'a> FnResolver<'a> {
         self.map.fn_by_name_in(&self.module, name)
     }
 
+    /// The builtin a dotted path names, as written or through an alias.
+    ///
+    /// **An alias of a module is the whole module.** `errors.new` is a
+    /// builtin and `errors.wrap` is written in std/errors, but both are the
+    /// one module `errors`: after `use std/errors as errs`, `errs.wrap`
+    /// resolved and `errs.new` was `E0111`, so a file that renamed the module
+    /// had to spell it both ways. Only a standard-library module can be
+    /// spelled like a builtin's (§13.1), so no other alias reaches one.
+    fn builtin(&self, dotted: &str) -> Option<BuiltinFn> {
+        BuiltinFn::from_path(dotted).or_else(|| {
+            let canonical = self.map.modules.canonical(&self.module, dotted);
+            if canonical == dotted {
+                return None;
+            }
+            BuiltinFn::from_path(&canonical)
+        })
+    }
+
     /// A constant visible from the module being resolved.
     fn find_const(&self, name: &str) -> Option<u32> {
         self.map.const_by_name_in(&self.module, name)
@@ -1773,7 +1811,7 @@ impl<'a> FnResolver<'a> {
         if module.is_empty() || module == PRELUDE || module == self.module || is_pub {
             return;
         }
-        let module = module.to_string();
+        let module = self.map.module_as_spelled_in(&self.module, module);
         self.diags.push(
             Diagnostic::error(
                 codes::E0401,
@@ -2507,12 +2545,13 @@ impl<'a> FnResolver<'a> {
         }
         let spelled = p.text();
         let imported = self.map.modules.aliases.get(&(self.module.clone(), spelled.clone()));
-        let builtin = BUILTIN_MODULES.contains(&spelled.as_str());
         let module = match imported {
             Some(module) => module.clone(),
-            None if builtin => spelled.clone(),
+            None if BUILTIN_MODULES.contains(&spelled.as_str()) => spelled.clone(),
             None => return None,
         };
+        // Under an alias, the builtins of the module it names are members too.
+        let builtin = BUILTIN_MODULES.contains(&module.as_str());
         let prefix = format!("{}.", module);
         let mut names: Vec<&str> = Vec::new();
         if imported.is_some() {
@@ -2533,12 +2572,14 @@ impl<'a> FnResolver<'a> {
         if imported.is_none() && nearest(&name.name, &members).is_none() {
             return None;
         }
-        let shown = module.trim_start_matches('@');
+        // The module as the reader's `use` spells it, as the title and the note
+        // do: its identity is a path below `kite.toml` (`src/money`), which the
+        // `use` never wrote.
         let mut d = Diagnostic::error(
             codes::E0111,
             format!("cannot find `{}` in module `{}`", name.name, spelled),
         )
-        .with_primary(name.span, format!("`{}` declares nothing public of this name", shown));
+        .with_primary(name.span, format!("`{}` declares nothing public of this name", spelled));
         d = match nearest(&name.name, &members) {
             Some(near) => d.with_note(format!("a similar name is in `{}`: `{}`", spelled, near)),
             None => d.with_note(format!(
@@ -2563,7 +2604,7 @@ impl<'a> FnResolver<'a> {
         }
 
         let dotted = format!("{}.{}", head, name.name);
-        if let Some(b) = BuiltinFn::from_path(&dotted) {
+        if let Some(b) = self.builtin(&dotted) {
             return Some(Res::Builtin(b));
         }
         // `task.all` — a function in an imported module. Declared names are
@@ -2629,7 +2670,7 @@ impl<'a> FnResolver<'a> {
 
         if !p.is_simple() {
             // `io.print`
-            if let Some(b) = BuiltinFn::from_path(&text) {
+            if let Some(b) = self.builtin(&text) {
                 self.map.uses.insert(p.span, Res::Builtin(b));
                 return;
             }
@@ -2757,6 +2798,7 @@ fn private_in_header(map: &ResolveMap, module: &str, named: u32, header: &TypePa
         return None;
     }
     let what = decl.kind.describe();
+    let home = map.module_as_spelled_in(module, home);
     Some(
         Diagnostic::error(codes::E0401, format!("`{}` is private to module `{}`", header.text(), home))
             .with_primary(header.span, "not visible here")

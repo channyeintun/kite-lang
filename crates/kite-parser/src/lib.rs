@@ -1789,8 +1789,12 @@ impl<'a> Parser<'a> {
             if self.at(T::RBrace) || self.at_end() || self.left_open(&open) {
                 break;
             }
-            if self.at(T::Pub) && self.peek_at(1) == T::Ident {
+            // The variant may be on the line below its `pub`: a layout as much
+            // a `pub` on a variant as `pub A`, and the refusal says why.
+            let named_next = (1..).map(|i| self.peek_at(i)).find(|t| *t != T::Newline) == Some(T::Ident);
+            if self.at(T::Pub) && named_next {
                 self.refuse_pub_on_variant(&name, is_pub, "a variant");
+                self.skip_newlines();
             }
             if self.declaration_starts_line() {
                 self.misplaced_declaration(
@@ -3677,6 +3681,14 @@ impl<'a> Parser<'a> {
         // Skip the opening delimiter; the closing one ends the scan naturally,
         // because a `\` cannot be the last byte of a well-formed literal.
         let open = if raw.starts_with("\"\"\"") { 3 } else { 1 };
+        // A block string the lexer reported never closed read the rest of the
+        // file as its text, so a `\(…)` in it is some later line of the file,
+        // not a hole its author wrote. Reading it as one reported what that
+        // line named — `let a = """ab` with a `\(a)` after it, `cannot find
+        // `a`` — as a second error for the one mistake.
+        if open == 3 && self.unterminated.contains(&span.start) {
+            return None;
+        }
 
         let bytes = raw.as_bytes();
         let mut parts: Vec<StrPart> = Vec::new();

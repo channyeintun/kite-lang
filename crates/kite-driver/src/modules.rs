@@ -424,6 +424,16 @@ impl Found {
         }
     }
 
+    /// How a diagnostic names where the module is: the path as this `use`
+    /// found it, with its `..` folded away, as the program was given and not
+    /// the canonical path that tells two routes to one file apart.
+    fn shown(&self, files: &Files) -> String {
+        match self {
+            Found::Path { at, .. } => format!("`{}`", normalise(at).display()),
+            other => other.origin(files).describe(),
+        }
+    }
+
     /// The module's identity: the name its declarations are qualified under.
     ///
     /// **It is where the module is, not how it was reached.** A file module is
@@ -670,8 +680,9 @@ pub struct Loader {
     /// Every module loaded so far, by where its source came from, with the
     /// identity it was given.
     seen: HashMap<Origin, String>,
-    /// The other direction, so that no identity is handed to two sources.
-    taken: HashMap<String, Origin>,
+    /// The other direction, so that no identity is handed to two sources, with
+    /// where each was found, as a diagnostic names it.
+    taken: HashMap<String, String>,
     /// Each package's declared dependencies, by its directory, so a manifest
     /// is read — and a broken one reported — once.
     manifests: HashMap<PathBuf, Rc<HashMap<String, PathBuf>>>,
@@ -1293,8 +1304,8 @@ impl Loader {
                         .with_note(format!(
                             "`{}` was loaded from {}, and this one is {}",
                             name,
-                            other.describe(),
-                            origin.describe()
+                            other,
+                            found.shown(&self.files)
                         ))
                         .with_note(
                             "a package's name means one thing across the whole program — the \
@@ -1692,11 +1703,15 @@ impl Loader {
             )
             .with_primary(span, format!("this reaches it as part of {}", describe(&now.1)))
             .with_secondary(*at, "it was first reached here")
-            .with_note(format!(
-                "{} is one module, and a module's own `use`s are looked for within its package — \
-                 two packages would resolve them differently",
-                origin.describe()
-            ))
+            // **No path in the note.** It named the module by its canonical
+            // location, an absolute path where every other diagnostic of the
+            // program's own files is spelled as the program was given; the
+            // title has the module's name and the two labels the two `use`s,
+            // which is all that tells the routes apart.
+            .with_note(
+                "it is one module, and a module's own `use`s are looked for within its package \
+                 — two packages would resolve them differently",
+            )
             .with_note(
                 "reach it one way only: a dependency by the name its manifest declares, or a \
                  module of the program by its path, not both",
@@ -1859,6 +1874,7 @@ impl Loader {
         diags: &mut DiagBag,
     ) {
         let origin = found.origin(&self.files);
+        let shown = found.shown(&self.files);
         if let Some(package) = self.package_key(&found) {
             self.packages.insert(origin.clone(), (package, span));
         }
@@ -1909,7 +1925,7 @@ impl Loader {
         };
 
         self.seen.insert(origin.clone(), identity.clone());
-        self.taken.insert(identity.clone(), origin.clone());
+        self.taken.insert(identity.clone(), shown);
         stack.push(Frame { origin, identity: identity.clone(), entered: span });
         // A module's own imports are loaded before it is recorded, so a
         // dependency is always earlier in the list than its dependent.

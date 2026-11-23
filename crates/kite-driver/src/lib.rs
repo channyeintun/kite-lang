@@ -654,7 +654,7 @@ fn compile_reading(
         tests: Vec::new(),
         marked: Vec::new(),
     };
-    let (output, chunk, wasm, native, index) = run_passes(
+    let (output, chunk, wasm, native, mut index) = run_passes(
         prelude,
         file,
         &path,
@@ -677,6 +677,21 @@ fn compile_reading(
             for note in &mut d.notes {
                 *note = modules::shown(note, &marked);
             }
+        }
+    }
+    // **What an editor shows is named the same way.** A hover said `t: @b.T`
+    // and an inlay hint `: @b.T` of a type from a package only a dependency
+    // declares: the mark that keeps that package's modules apart from the
+    // program's own, in text no diagnostic would print it in.
+    if !marked.is_empty() {
+        for u in &mut index.uses {
+            u.label = modules::shown(&u.label, &marked);
+        }
+        for s in &mut index.symbols {
+            s.label = modules::shown(&s.label, &marked);
+        }
+        for h in &mut index.hints {
+            h.text = modules::shown(&h.text, &marked);
         }
     }
     let mut c =

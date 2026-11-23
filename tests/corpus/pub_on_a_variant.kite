@@ -1,15 +1,18 @@
 // A variant, and a field of its payload, is exactly as visible as its enum
 // (§4.3), so `pub` on one is refused: once, at the `pub`, saying why. The
 // variant is still declared, so the uses of it below are not errors too. It
-// was "expected a variant, found `pub`", or "expected a type".
+// was "expected a variant, found `pub`", or "expected a type". Written on a
+// line of its own above the variant it is the same refusal.
 
 pub enum Shape {
     pub Dot //~ ERROR E0100
     Circle(pub radius: float) //~ ERROR E0100
     Square(pub float) //~ ERROR E0100
+    pub //~ ERROR E0100
+    Hexagon
 }
 
 fn main() {
-    let shapes = [Dot, Circle(radius: 1.0), Square(2.0)]
+    let shapes = [Dot, Circle(radius: 1.0), Square(2.0), Hexagon]
     io.print(shapes.len())
 }

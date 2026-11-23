@@ -1183,7 +1183,13 @@ The rules:
 > `len` is not reading it. A projection `r.0` takes one element of a tuple:
 > its failure goes where it lands, and the others are still owed, so the
 > tuple is settled once each has been taken; taken apart after that, it
-> binds only the failures not yet taken. A slice cannot be followed
+> binds only the failures not yet taken. A projection of a tuple no binding
+> holds — `(f(1), f(2)).0`, `pair().0` — leaves nothing that could take the
+> other elements later, so each failure among them is `E0302` at the
+> projection: at its element in a literal, at the call otherwise. A binding
+> written into the literal and not taken is not thrown away with it, and still
+> answers for its failure — unless the element taken holds that same failure,
+> as in `(c, c).0`. A slice cannot be followed
 > element by element, so `rs[0]` counts as reading all of it. Nor is testing an optional against `nil`, which
 > asks only whether a failure is there: where it is nil there is none, and
 > where it is present the optional, narrowed to what it holds, is still
@@ -1226,7 +1232,11 @@ error names the same failure (R7). A loop body is entered both from before the
 loop and from its own end and every `continue`, so the state at its top is the
 join of all of them, and a failure one iteration leaves unchecked is still
 there when the next writes over it: `var e: error = nil` then
-`for i in 0..3 { e = f(i) }` is `E0302` at the write. A body whose end changes
+`for i in 0..3 { e = f(i) }` is `E0302` at the write. A copy is followed
+around a loop one way at a time: after `var e: error = nil` and
+`for i in 0..n { e = c }`, `e` holds `c`'s failure or nothing, so the next
+iteration's `e = c` drops nothing, but testing `e` after the loop does not
+answer for `c` on the way that skipped it, and that is `E0302` at `c`. A body whose end changes
 nothing is checked once; one that does is checked again from the join, which
 ends because the lattice has height two and a state can only get worse. What
 follows a loop is reached from its top and from every `break` — except after a
@@ -2191,6 +2201,9 @@ reach the importing program's own modules by naming them.
 program-wide table, so `use leak as crypto` written anywhere — including inside
 a dependency — rewrote every `crypto.…` call in every other module, silently
 and with no diagnostic. An alias is a convenience for the file that writes it.
+It names the whole module, the builtins reached through it included: after
+`use std/errors as errs`, `errs.new` is `errors.new` as `errs.wrap` is
+`errors.wrap`.
 
 **A module is where its source is.** Two `use` lines reach one module exactly
 when they reach one file or directory: `use utils` inside `a/` and `use utils`

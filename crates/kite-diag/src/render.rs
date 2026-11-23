@@ -324,6 +324,18 @@ fn windowed(text: &str, labels: &[(usize, usize)]) -> (String, View) {
         // A mark that combines with the character before it goes with it.
         if w > 0 {
             shown = col >= start && col + w <= end;
+            // One that straddles the left edge cannot be drawn, but the
+            // columns of it inside the window are there: a space holds them,
+            // or everything after is one column nearer the edge than its
+            // underline is told.
+            if col < start && col + w > start {
+                kept.extend(std::iter::repeat_n(' ', col + w - start));
+            }
+            // And the right edge the same, so the `…` there stands where a
+            // label beyond the window is drawn.
+            if col >= start && col < end && col + w > end {
+                kept.extend(std::iter::repeat_n(' ', end - col));
+            }
         }
         if shown {
             kept.push(c);
@@ -717,5 +729,57 @@ error[E0200]: mismatched types
         let (m, f) = setup();
         let out = Diagnostic::error(codes::E0111, "x").with_primary(Span::new(f, 3, 8), "").render(&m);
         assert!(!out.contains('…'), "{}", out);
+    }
+
+    /// A wide character that straddles the window's left edge has half of it
+    /// outside, so it cannot be shown — but the columns it occupied are still
+    /// there, and the underline is counted from the window's start. Dropped
+    /// with nothing in its place, it left the text one column ahead of its
+    /// underline.
+    #[test]
+    fn a_wide_character_on_the_windows_left_edge_keeps_the_underline_true() {
+        // Where the window starts depends on where the span is, so a one-column
+        // character before it moves the start onto the middle of a two-column
+        // one, whichever side of the run's parity the line began on.
+        for pad in ["", "x"] {
+            let line = format!("let s = [{}{}, bad, {}]\n", "日".repeat(100), pad, "日".repeat(100));
+            let mut m = SourceMap::new();
+            let f = m.add("wide.kite", &line);
+            let at = line.find("bad").unwrap() as u32;
+            let out = Diagnostic::error(codes::E0111, "unknown name")
+                .with_primary(Span::new(f, at, at + 3), "here")
+                .render(&m);
+            let after_bar = |l: &str| l.split_once("│ ").map(|(_, rest)| rest.to_string()).unwrap();
+            let src = after_bar(out.lines().find(|l| l.contains("bad")).expect("source"));
+            let carets = after_bar(out.lines().find(|l| l.contains('^')).expect("underline"));
+            assert!(src.starts_with('…'), "{}", out);
+            let before = &src[..src.find("bad").unwrap()];
+            let indent = carets.chars().take_while(|c| *c == ' ').count();
+            assert_eq!(indent, super::drawn_width(before), "{}", out);
+        }
+    }
+
+    /// The right edge is the same: a label beyond the window is drawn as one
+    /// mark under the `…` that stands for what was cut, and a wide character
+    /// the edge splits, dropped with nothing in its place, put the `…` one
+    /// column before the mark.
+    #[test]
+    fn a_wide_character_on_the_windows_right_edge_keeps_the_edge_mark_true() {
+        for pad in ["", "x"] {
+            let line = format!("let s = [bad, {}{}, far]\n", pad, "日".repeat(200));
+            let mut m = SourceMap::new();
+            let f = m.add("wide.kite", &line);
+            let (at, far) = (line.find("bad").unwrap() as u32, line.find("far").unwrap() as u32);
+            let out = Diagnostic::error(codes::E0111, "unknown name")
+                .with_primary(Span::new(f, at, at + 3), "here")
+                .with_secondary(Span::new(f, far, far + 3), "and here")
+                .render(&m);
+            let after_bar = |l: &str| l.split_once("│ ").map(|(_, rest)| rest.to_string()).unwrap();
+            let src = after_bar(out.lines().find(|l| l.contains("bad")).expect("source"));
+            assert!(src.ends_with('…'), "{}", out);
+            let marks = after_bar(out.lines().find(|l| l.contains('-')).expect("the far mark"));
+            let mark = marks.chars().position(|c| c == '-').unwrap();
+            assert_eq!(mark, super::drawn_width(&src) - 1, "{}", out);
+        }
     }
 }
