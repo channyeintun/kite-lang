@@ -449,9 +449,37 @@ pub fn replace(s: str, from: str, to: str) -> str {
     return join(split(s, from), to)
 }
 
-/// The words of `s`, with runs of spaces collapsed.
+/// The words of `s`: what lies between runs of whitespace — the characters
+/// `s.trim()` removes, so a tab or a newline separates words as a space does.
+///
+/// ```kite
+/// assert(words("  two \t words\n").len() == 2, "any whitespace separates")
+/// ```
 pub fn words(s: str) -> [str] {
-    return filter(split(s.trim(), " "), |w: str| w.len() > 0)
+    var out: [str] = []
+    var start = -1
+    let n = s.len()
+    for i in 0..n {
+        if is_white(s.code_at(i)) {
+            if start >= 0 {
+                out.push(s.slice(start, i))
+                start = -1
+            }
+        } else if start < 0 {
+            start = i
+        }
+    }
+    if start >= 0 {
+        out.push(s.slice(start, n))
+    }
+    return out
+}
+
+/// Unicode White_Space — the characters `str.trim` removes on every backend.
+fn is_white(c: int) -> bool {
+    return (c >= 0x09 && c <= 0x0D) || c == 0x20 || c == 0x85 || c == 0xA0 || c == 0x1680 ||
+    (c >= 0x2000 && c <= 0x200A) || c == 0x2028 || c == 0x2029 || c == 0x202F || c == 0x205F ||
+    c == 0x3000
 }
 
 // ---- optionals ------------------------------------------------------------
