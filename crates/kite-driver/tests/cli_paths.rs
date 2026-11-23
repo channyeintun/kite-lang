@@ -315,6 +315,25 @@ fn an_error_in_a_doc_example_points_at_the_line_it_was_written_on() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// One bad fence fails only itself. The fences used to be compiled as one
+/// unit, so a fence that mixes a declaration with a statement (which does not
+/// parse) marked every example in the file FAILED.
+#[test]
+fn a_bad_doc_example_fails_alone() {
+    let src = "/// One.\n///\n/// ```kite\n/// assert(one() == 1, \"one\")\n/// ```\npub fn one() -> int {\n    return 1\n}\n\n\
+/// Mixed.\n///\n/// ```kite\n/// fn helper() -> int { return 2 }\n/// assert(helper() == 2, \"two\")\n/// ```\npub fn two() -> int {\n    return 2\n}\n\n\
+/// Three.\n///\n/// ```kite\n/// assert(three() == 3, \"three\")\n/// ```\npub fn three() -> int {\n    return 3\n}\n";
+    let dir = scratch("doc-alone", "t.kite", src);
+    let Some((ok, out, err)) = kitec_in(&dir, &["test", "t.kite"]) else { return };
+    assert!(!ok, "{}{}", out, err);
+    assert!(out.contains("FAILED   ./t.kite:12 (doc example)"), "{}", out);
+    assert!(out.contains("ok       ./t.kite:3 (doc example)"), "{}", out);
+    assert!(out.contains("ok       ./t.kite:22 (doc example)"), "{}", out);
+    assert!(out.contains("2 passed, 1 failed"), "{}", out);
+    assert!(!out.contains("FAILED   t.kite:3 "), "{}", out);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// A file with no tests says so in one line and still succeeds. The line used
 /// to describe a signature, `-> (int, error)`, that a test does not need.
 #[test]

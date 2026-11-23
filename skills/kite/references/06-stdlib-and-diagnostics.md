@@ -1587,7 +1587,10 @@ example fails by trapping on an `assert`, which a release build drops. A
 ` ```kite ` fence may start with `use` lines; they go to the top of the file.
 Only a fence of statements runs. One that declares a function or a type is
 compiled and reported `(doc example, compiled)`: the `assert`s inside its
-`fn main` are never evaluated, so they pass whatever they say.
+`fn main` are never evaluated, so they pass whatever they say. A fence that
+does not compile (one that mixes declarations and statements, say) is reported
+`FAILED` by the line it opened on, with its own diagnostics, and the other
+fences still run.
 
 Discovery reads the entry file's own declarations, which has one consequence
 worth knowing before you lay a project out.

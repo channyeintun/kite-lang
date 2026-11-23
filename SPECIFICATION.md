@@ -135,7 +135,9 @@ A ` ```kite ` fence is compiled and run by `kitec test`, alongside the file's
 everything the comment documents is in scope with no import to get wrong; a
 fence that declares a type or a function lands at file scope and is checked by
 compiling — it is not run, so an `assert` inside a function it declares is
-never evaluated; a fence holds declarations or statements, not both. `kitec
+never evaluated; a fence holds declarations or statements, not both, and one
+that does not compile fails alone — it is reported `FAILED` with the line it
+opened on and its own diagnostics, and the other examples still run. `kitec
 test` and `kitec doc` take one file: a file of a directory
 module tested on its own is compiled as that file alone, so its fences and
 `test_…` functions do not see what its sibling files declare — a directory
