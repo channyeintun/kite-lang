@@ -1674,6 +1674,7 @@ impl<'a> Parser<'a> {
             self.expect_terminator();
             return;
         }
+        let comma_at = self.pos;
         let comma = self.bump().span;
         if self.unwinding || self.panicking {
             return;
@@ -1691,7 +1692,7 @@ impl<'a> Parser<'a> {
             let next = self.span().start;
             Edit {
                 span: Span::new(self.file, comma.start, next),
-                replacement: format!("\n{}", self.member_indent(comma.start)),
+                replacement: format!("\n{}", self.member_indent(comma_at)),
             }
         };
         let message = |removed_only: bool, many: bool| match (removed_only, many) {
@@ -1722,22 +1723,35 @@ impl<'a> Parser<'a> {
         self.diags.push(d);
     }
 
-    /// The indentation a member written after a `,` at `offset` goes on its
-    /// own line with: the column of the first member on that line — just
-    /// after the `{` when the declaration opens on it, so that
+    /// The indentation a member written after the `,` at token `comma` goes
+    /// on its own line with: the column of the first member on that line —
+    /// just after the `{` when the declaration opens on it, so that
     /// `struct P { x: int, y: int }` puts `y` under `x` — and otherwise the
     /// line's own indentation, as written.
-    fn member_indent(&self, offset: u32) -> String {
-        let line_start = self.line_start(offset as usize);
-        let line = &self.src[line_start..offset as usize];
-        match line.rfind('{') {
-            Some(brace) => {
-                let after = &line[brace + 1..];
-                let pad = after.len() - after.trim_start().len();
-                " ".repeat(line[..brace + 1].chars().count() + pad)
+    ///
+    /// Found by tokens, not by looking for a `{` in the line's text: a
+    /// member's own type may hold one, `m: {str: int}`, and its brace is not
+    /// where the members start.
+    fn member_indent(&self, comma: usize) -> String {
+        let mut depth = 0u32;
+        let mut first = comma;
+        for i in (0..comma).rev() {
+            match self.tokens[i].kind {
+                T::RBrace | T::RParen | T::RBracket => depth += 1,
+                T::LBrace | T::LParen | T::LBracket if depth == 0 => break,
+                T::LBrace | T::LParen | T::LBracket => depth -= 1,
+                _ => {}
             }
-            None => line[..line.len() - line.trim_start().len()].to_string(),
+            first = i;
+            if depth == 0 && self.starts_line(i) {
+                break;
+            }
         }
+        let start = (self.tokens[first].span.start as usize).min(self.src.len());
+        self.src[self.line_start(start)..start]
+            .chars()
+            .map(|c| if c == '\t' { '\t' } else { ' ' })
+            .collect()
     }
 
     /// A declaration written where only the members of something else can

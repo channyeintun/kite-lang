@@ -1584,3 +1584,24 @@ fn a_use_path_with_dots_ends_with_its_line() {
         assert_eq!(p.fns().iter().map(|f| f.name.name.as_str()).collect::<Vec<_>>(), vec!["main"]);
     }
 }
+
+/// A comma between two members on one line becomes a line break indented to
+/// the first member on that line, found by tokens: a `{` in a member's own
+/// type (`m: {str: int}`) is not where the members start. Taken from the
+/// line's text, the third member went under the map type's brace.
+#[test]
+fn a_comma_between_members_is_fixed_at_the_first_members_column() {
+    for (src, indent) in [
+        ("struct P { x: Pair<int, int>, m: {str: int}, y: int }\n", "           "),
+        ("enum E {\n    A(x: {str: int}), B, C\n}\n", "    "),
+        ("struct P {\n\tm: {str: int}, y: int\n}\n", "\t"),
+    ] {
+        let p = parse_src(src);
+        assert_eq!(p.codes(), vec!["E0100"], "{}", p.render());
+        let edits = &p.diags.iter().next().unwrap().fixes[0].edits;
+        assert!(!edits.is_empty());
+        for e in edits {
+            assert_eq!(e.replacement, format!("\n{}", indent), "{:?}", src);
+        }
+    }
+}
