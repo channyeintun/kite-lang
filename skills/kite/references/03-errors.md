@@ -224,7 +224,7 @@ aliasing, no lifetimes.
 | R4 | on a path where `e == nil` is proved, `e` becomes Checked and `v` Clean |
 | R5 | on a path where `e != nil`, `e` becomes Checked and `v` stays Tainted **permanently** |
 | R6 | a bare-statement call whose type is `error` or `(T, error)` is `E0302` |
-| R7 | an `error` or a whole `(T, error)` bound to one name — `let` or `var`, from a call, `await`, a value `if`, or assigned later with `e = f()` — is **Unchecked**; only `nil` and a copy of another binding are not |
+| R7 | an `error` or a whole `(T, error)` bound to one name — `let` or `var`, from a call, `await`, a value `if`, a tuple literal, or assigned later with `e = f()` — is **Unchecked**; only `nil` is not. A copy of another binding (`let e = err`) shares that binding's obligation: inspect either name |
 
 R2 in practice:
 
@@ -401,8 +401,27 @@ it passes it on; either clears the mark. `p` itself has no fields (`E0200`) and
 no methods (`E0205`), so destructure where you bind.
 
 The same holds however the failure got into a single binding — `var e = f()`,
-`let e = await f()`, `let e = if c { f() } else { g() }`: the binding has to be
-looked at. Only `nil` and a copy of another binding start out Checked.
+`let e = await f()`, `let e = if c { f() } else { g() }`, `let (n, e) = (1,
+f())`: the binding has to be looked at. Only `nil` starts out Checked.
+
+**Copying an error is not looking at it.** `let e = err` gives the failure a
+second name, and one of the two has to be inspected — either will do. A
+`match` whose every arm is `_` or a bare name tests nothing either; `match f()
+{ _ => … }` is `E0302` at the scrutinee:
+
+```kite fails
+fn touch() -> error {
+    return errors.new("no")
+}
+
+fn main() {
+    let c = touch() //~ E0302
+    let e = c
+    match touch() { //~ E0302
+        _ => io.print("nothing tested"),
+    }
+}
+```
 
 Writing over a binding that still holds an unchecked failure drops that
 failure, so it is `E0302` at the write, whatever is written:

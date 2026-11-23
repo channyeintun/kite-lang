@@ -1005,10 +1005,14 @@ The rules:
 > that binding Unchecked — by `let` or by `var`, whether it came straight from
 > a call or through `await`, a branch of a value `if`, or anything else that
 > can hold a new failure. Assigning one to an existing binding, `e = f()`,
-> does the same. Only `nil` and a copy of another binding, which
-> carries its own obligation, leave it Checked. Reading it — testing it,
-> checking it, returning it, taking it apart — inspects it, and R3 applies
-> otherwise. Binding everything under one name is not a way out either.
+> does the same. Only `nil` leaves it Checked. A copy of another binding
+> — `let e = err`, `e = err`, a `match err { x => … }` arm — holds that
+> binding's failure: the two names share one obligation, met by inspecting
+> either. Reading it — testing it, checking it, returning it, taking it
+> apart, passing it on — inspects it, and R3 applies otherwise; copying it
+> is not reading it, and nor is a `match` whose every arm is `_` or a bare
+> name. Binding everything under one name is not a way out either, and nor
+> is a tuple literal: `let (n, e) = (1, f())` makes `e` Unchecked.
 
 R1–R5 are about bindings, and R6 and R7 close the shapes they leave open: a
 call written as a statement makes no binding, so nothing in R1–R5 ever sees it,

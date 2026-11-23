@@ -621,6 +621,7 @@ pub fn check_recording(
             closure_sig: None,
             closure_ret_unknown: None,
             reported_unchecked: std::collections::HashSet::new(),
+            copies: std::collections::BTreeSet::new(),
             defers: None,
             release,
             solved: &mut *solved,
@@ -1163,6 +1164,13 @@ struct Checker<'a> {
     /// it left scope on one path is not reported again where the function
     /// ends.
     reported_unchecked: std::collections::HashSet<u32>,
+    /// Pairs of locals holding one and the same unchecked failure, because
+    /// one was made a copy of the other: `let e = err`, `e = err`, or a
+    /// `match err { x => … }` arm. A copy is not an inspection, so the
+    /// failure still has to be looked at — but through either name, so
+    /// inspecting one inspects both, and one left behind while the other is
+    /// still in scope has dropped nothing. Each pair is written lowest first.
+    copies: std::collections::BTreeSet<(u32, u32)>,
 }
 
 /// Whether a local certainly holds a value at this point.
@@ -1250,6 +1258,7 @@ struct FlowState {
     taint: Vec<Taint>,
     narrowed: std::collections::HashMap<u32, TyId>,
     error_nonnil: std::collections::HashSet<u32>,
+    copies: std::collections::BTreeSet<(u32, u32)>,
 }
 
 /// What a trial check may change, kept to be put back.
@@ -1275,22 +1284,29 @@ struct Enclosing {
     taint: Vec<Taint>,
     narrowed: std::collections::HashMap<u32, TyId>,
     error_nonnil: std::collections::HashSet<u32>,
+    copies: std::collections::BTreeSet<(u32, u32)>,
     defers: Option<u32>,
     loops: Vec<(Span, Option<String>)>,
     sig: Option<Signature>,
     ret_unknown: Option<Span>,
 }
 
-/// Whether an `error` or `(T, error)` value put into a binding may be a
-/// failure nobody has looked at yet.
+/// The copies that still hold where control arrives from either of two
+/// paths, each given as its copies and its taint.
 ///
-/// Everything may, except `nil` — a deliberate absence, with nothing in it to
-/// drop — and a read of another binding, which carries its own obligation and
-/// had it discharged by being read. Asking the question the other way round,
-/// "is this a call", let a failure through whenever the call was wrapped:
-/// `await f()`, `if c { f() } else { g() }`.
-fn produces_failure(kind: &ExprKind) -> bool {
-    !matches!(kind, ExprKind::Nil | ExprKind::Local(_) | ExprKind::Error)
+/// Two names hold one failure after the join only if inspecting either
+/// inspects the other on both ways in: they were copies on that path, or
+/// neither held anything unchecked there, so there was nothing to inspect.
+fn join_copies(
+    a: (&std::collections::BTreeSet<(u32, u32)>, &[Taint]),
+    b: (&std::collections::BTreeSet<(u32, u32)>, &[Taint]),
+) -> std::collections::BTreeSet<(u32, u32)> {
+    let holds = |(copies, taint): (&std::collections::BTreeSet<(u32, u32)>, &[Taint]),
+                 pair: &(u32, u32)| {
+        copies.contains(pair)
+            || [pair.0, pair.1].iter().all(|i| taint.get(*i as usize) != Some(&Taint::Unchecked))
+    };
+    a.0.union(b.0).filter(|pair| holds(a, pair) && holds(b, pair)).copied().collect()
 }
 
 impl Flow {
@@ -1462,7 +1478,30 @@ impl<'a> Checker<'a> {
             .filter(|(id, ty)| self.narrowed.get(id) == Some(ty))
             .collect();
         self.error_nonnil = entry_nonnil.intersection(&self.error_nonnil).copied().collect();
+        self.copies_leave(b.span);
         (out, flow)
+    }
+
+    /// The end of a block the copies declared in it do not outlive. A copy
+    /// whose failure a name outside the block still holds unchecked has
+    /// dropped nothing by going, and is let go here: left behind, it would
+    /// outlast the join after a branch, where the path that skipped the
+    /// branch knows nothing of it and so cannot say both names hold one
+    /// failure.
+    fn copies_leave(&mut self, region: Span) {
+        if self.copies.is_empty() {
+            return;
+        }
+        for i in 0..self.taint.len() {
+            let id = i as u32;
+            if self.taint[i] == Taint::Unchecked
+                && self.declared_inside(id, region)
+                && self.carried_elsewhere(id, |j| self.declared_inside(j, region))
+            {
+                self.taint[i] = Taint::Clean;
+                self.forget_copies(id);
+            }
+        }
     }
 
     fn stmt(&mut self, s: &ast::Stmt, sig: &Signature) -> Option<(hir::Stmt, Flow)> {
@@ -1549,6 +1588,7 @@ impl<'a> Checker<'a> {
         let local_id = self.resolved.lookup_binding(name.span)?;
         let annotated = l.ty.as_ref().map(|t| self.resolve_type(t));
 
+        let before = self.taint.clone();
         let init = l.init.as_ref().map(|e| {
             let v = self.expr(e, annotated);
             self.coerce(v, annotated)
@@ -1606,18 +1646,22 @@ impl<'a> Checker<'a> {
         // test it" — for the half of the rule that was enforced.
         //
         // `let e: error = nil` is not marked: it is a deliberate absence and
-        // there is nothing there to drop. Nor is a copy of another binding.
-        // Reading the binding anywhere clears the mark, because reading an
-        // error is inspecting it.
+        // there is nothing there to drop. A copy of another binding holds
+        // that binding's failure, if it held one unchecked. Reading the
+        // binding anywhere else clears the mark, because reading an error is
+        // inspecting it.
         //
         // A whole `(T, error)` bound to one name is the same hole one level
         // up: `let p = load()` never destructures, so R1 never marks an error
         // and the failure inside `p` went out of scope in silence. Taking it
         // apart later, or returning it, reads it and clears the mark.
-        self.taint[local_id as usize] = match &init {
-            Some(i) if self.may_hold_failure(ty) && produces_failure(&i.kind) => Taint::Unchecked,
-            _ => Taint::Clean,
-        };
+        self.forget_copies(local_id);
+        self.taint[local_id as usize] = Taint::Clean;
+        if let Some(i) = &init {
+            if self.may_hold_failure(ty) {
+                self.bind_failure(local_id, i, &before);
+            }
+        }
         let _ = sig;
         Some((
             hir::Stmt::Let { local: hir::LocalId(local_id), init, span: l.span },
@@ -1628,6 +1672,7 @@ impl<'a> Checker<'a> {
     fn var_stmt(&mut self, v: &ast::VarStmt, _sig: &Signature) -> Option<(hir::Stmt, Flow)> {
         let local_id = self.resolved.lookup_binding(v.name.span)?;
         let annotated = v.ty.as_ref().map(|t| self.resolve_type(t));
+        let before = self.taint.clone();
         let init = self.expr(&v.init, annotated);
         let init = self.coerce(init, annotated);
 
@@ -1647,12 +1692,11 @@ impl<'a> Checker<'a> {
         // The same obligation a `let` takes on: `var e = f()` holds a failure
         // just as surely, and being able to reassign it later does not mean
         // anybody looked at this one.
-        self.taint[local_id as usize] =
-            if self.may_hold_failure(ty) && produces_failure(&init.kind) {
-                Taint::Unchecked
-            } else {
-                Taint::Clean
-            };
+        self.forget_copies(local_id);
+        self.taint[local_id as usize] = Taint::Clean;
+        if self.may_hold_failure(ty) {
+            self.bind_failure(local_id, &init, &before);
+        }
 
         Some((
             hir::Stmt::Let { local: hir::LocalId(local_id), init: Some(init), span: v.span },
@@ -1746,6 +1790,7 @@ impl<'a> Checker<'a> {
         // against the state before it: `let x: int` then `x = x + 1` reads an
         // `x` that has no value yet.
         let before = self.init[slot];
+        let taint_before = self.taint.clone();
         let value = self.expr(&a.value, Some(local_ty));
         let (value, written) = match a.op.to_binary() {
             None => {
@@ -1818,7 +1863,8 @@ impl<'a> Checker<'a> {
         // Writing a new failure into an error binding is a new obligation,
         // as binding one is (R7): `var e: error = nil` then `e = f()`, or a
         // `let e: error` assigned in a branch, dropped `f`'s failure unseen.
-        // `nil` and a copy of another binding stay checked, as in a `let`.
+        // `nil` stays checked, and a copy of another binding holds that
+        // binding's failure, as in a `let`.
         //
         // That is the state of the value written, and says nothing about the
         // one it replaces. A failure nobody has looked at is dropped by being
@@ -1826,15 +1872,17 @@ impl<'a> Checker<'a> {
         // then `e = nil` lost `f`'s failure unseen. The right-hand side was
         // checked first, so `e = errors.wrap(e, "…")` has read the old value
         // and is not reported.
+        // A copy of the failure still unchecked under another name has not
+        // been dropped: that name carries it.
         if !compound && self.may_hold_failure(local_ty) {
             if self.taint[slot] == Taint::Unchecked
                 && !self.locals[slot].synthetic
+                && !self.carried_elsewhere(local_id, |_| false)
                 && self.reported_unchecked.insert(local_id)
             {
                 self.overwritten_unchecked(&name, decl_span, a.span, local_ty);
             }
-            self.taint[slot] =
-                if produces_failure(&value.kind) { Taint::Unchecked } else { Taint::Clean };
+            self.bind_failure(local_id, &value, &taint_before);
         }
 
         // A write replaces the value every earlier test was about. `x != nil`
@@ -1863,6 +1911,119 @@ impl<'a> Checker<'a> {
     /// an `error`, or a whole `(T, error)`.
     fn may_hold_failure(&self, ty: TyId) -> bool {
         ty == TyId::ERR || self.types.fallible_value(ty).is_some()
+    }
+
+    /// Whether a value put somewhere new brings an unchecked failure with it,
+    /// given the taint from before it was evaluated.
+    ///
+    /// A new failure does — anything but `nil` may be one, a deliberate
+    /// absence with nothing in it to drop — and so does a read of a binding
+    /// that held one unchecked, since reading it to put it somewhere else
+    /// hands the failure on rather than looking at it. A tuple or slice
+    /// literal brings what its elements bring: `(1, f())` holds `f`'s
+    /// failure, and `[]` holds none. Asking the question the other way
+    /// round, "is this a call", let a failure through whenever the call was
+    /// wrapped: `await f()`, `if c { f() } else { g() }`.
+    fn holds_obligation(&self, e: &hir::Expr, before: &[Taint]) -> bool {
+        match &e.kind {
+            ExprKind::Nil | ExprKind::Error => false,
+            ExprKind::Local(id) => before.get(id.index()) == Some(&Taint::Unchecked),
+            ExprKind::TupleNew { elems } | ExprKind::SliceNew { elems } => elems
+                .iter()
+                .any(|x| self.may_hold_failure(x.ty) && self.holds_obligation(x, before)),
+            _ => true,
+        }
+    }
+
+    /// Set the state of a binding a value that may hold a failure was just
+    /// put into, by `let`, `var` or a write; `before` is the taint from
+    /// before the value was evaluated.
+    ///
+    /// **A copy is not an inspection** (R7). Reading `err` to bind it as `e`
+    /// used to count as looking at it, so `let e = err` and nothing else
+    /// dropped the failure with no diagnostic. A copy of a binding holding an
+    /// unchecked failure now holds the same one: both names stay Unchecked,
+    /// and inspecting either inspects both ([`Self::inspect`]).
+    fn bind_failure(&mut self, local: u32, value: &hir::Expr, before: &[Taint]) {
+        // Whatever the binding was a copy of before, it holds this now.
+        self.forget_copies(local);
+        let state = match value.kind {
+            ExprKind::Local(src) if src.0 != local && self.holds_obligation(value, before) => {
+                for i in self.copies_of(src.0) {
+                    if before.get(i as usize) == Some(&Taint::Unchecked) {
+                        self.taint[i as usize] = Taint::Unchecked;
+                    }
+                }
+                self.note_copy(local, src.0);
+                Taint::Unchecked
+            }
+            _ if self.holds_obligation(value, before) => Taint::Unchecked,
+            _ => Taint::Clean,
+        };
+        self.taint[local as usize] = state;
+    }
+
+    /// Inspect the failure a local holds, under every name it has.
+    fn inspect(&mut self, id: u32) {
+        for i in self.copies_of(id) {
+            if self.taint.get(i as usize) == Some(&Taint::Unchecked) {
+                self.taint[i as usize] = Taint::Clean;
+            }
+        }
+    }
+
+    /// A local and every local holding the same failure as it, itself first.
+    fn copies_of(&self, id: u32) -> Vec<u32> {
+        let mut group = vec![id];
+        let mut i = 0;
+        while i < group.len() {
+            let x = group[i];
+            for &(a, b) in &self.copies {
+                let other = if a == x {
+                    b
+                } else if b == x {
+                    a
+                } else {
+                    continue;
+                };
+                if !group.contains(&other) {
+                    group.push(other);
+                }
+            }
+            i += 1;
+        }
+        group
+    }
+
+    /// Whether another name than `id` holds `id`'s failure unchecked and
+    /// stays in scope past what `leaves` says is going out.
+    fn carried_elsewhere(&self, id: u32, leaves: impl Fn(u32) -> bool) -> bool {
+        self.copies_of(id)
+            .into_iter()
+            .skip(1)
+            .any(|j| self.taint.get(j as usize) == Some(&Taint::Unchecked) && !leaves(j))
+    }
+
+    fn note_copy(&mut self, a: u32, b: u32) {
+        if a != b {
+            self.copies.insert((a.min(b), a.max(b)));
+        }
+    }
+
+    /// A local is about to hold something else: it is no longer a copy of
+    /// anything. What it was a copy of, and what was a copy of it, still
+    /// hold one failure between them.
+    fn forget_copies(&mut self, id: u32) {
+        let others: Vec<u32> = self.copies_of(id).into_iter().skip(1).collect();
+        if others.is_empty() {
+            return;
+        }
+        self.copies.retain(|&(a, b)| a != id && b != id);
+        if others.len() > 1 {
+            for &x in &others[1..] {
+                self.note_copy(others[0], x);
+            }
+        }
     }
 
     /// A second write to an immutable binding.
@@ -2433,9 +2594,7 @@ impl<'a> Checker<'a> {
         let narrowing = self.nil_test(&i.cond);
         let cond = self.condition(&i.cond);
         if let Some((id, _)) = tested {
-            if self.taint[id as usize] == Taint::Unchecked {
-                self.taint[id as usize] = Taint::Clean;
-            }
+            self.inspect(id);
         }
 
         // Each branch is checked from the same entry state, and the states are
@@ -2511,6 +2670,7 @@ impl<'a> Checker<'a> {
         // the entry state joined with whatever the body left. Without this, a
         // `for false { check err }` makes the value it guards readable.
         let entry_taint = self.taint.clone();
+        let entry_copies = self.copies.clone();
         // The body is checked once, but runs again from its own end: a local
         // it assigns may hold, on the second pass, whatever the first pass
         // put there. So nothing proved about such a local before the loop is
@@ -2583,7 +2743,7 @@ impl<'a> Checker<'a> {
         // runs the body zero times, which does not exist, made the walk's
         // subject look unread.
         if !runs {
-            self.merge_loop_taint(&entry_taint);
+            self.merge_loop_taint(&entry_taint, &entry_copies);
         }
         // What the body proved is not known after it, which may be after zero
         // runs of it; what it disproved was removed before it started.
@@ -2927,7 +3087,12 @@ impl<'a> Checker<'a> {
 
     /// Leave a loop: join what the body left with the state it was entered in,
     /// because control also reaches here having run the body zero times.
-    fn merge_loop_taint(&mut self, entry: &[Taint]) {
+    fn merge_loop_taint(
+        &mut self,
+        entry: &[Taint],
+        entry_copies: &std::collections::BTreeSet<(u32, u32)>,
+    ) {
+        self.copies = join_copies((entry_copies, entry), (&self.copies, &self.taint));
         let merged = self.join_taint(entry, &self.taint);
         self.restore_taint(merged);
     }
@@ -3058,6 +3223,7 @@ impl<'a> Checker<'a> {
             taint: self.taint.clone(),
             narrowed: self.narrowed.clone(),
             error_nonnil: self.error_nonnil.clone(),
+            copies: self.copies.clone(),
         }
     }
 
@@ -3066,6 +3232,7 @@ impl<'a> Checker<'a> {
         self.restore_taint(state.taint);
         self.narrowed = state.narrowed;
         self.error_nonnil = state.error_nonnil;
+        self.copies = state.copies;
     }
 
     /// The state at a point control reaches from either of two others: what
@@ -3089,6 +3256,7 @@ impl<'a> Checker<'a> {
                 .map(|(id, ty)| (*id, *ty))
                 .collect(),
             error_nonnil: a.error_nonnil.intersection(&b.error_nonnil).copied().collect(),
+            copies: join_copies((&a.copies, &a.taint), (&b.copies, &b.taint)),
         }
     }
 
@@ -3613,6 +3781,7 @@ impl<'a> Checker<'a> {
             taint: self.taint.clone(),
             narrowed: self.narrowed.clone(),
             error_nonnil: self.error_nonnil.clone(),
+            copies: self.copies.clone(),
             defers: self.defers.take(),
             loops: std::mem::take(&mut self.loops),
             sig: self.closure_sig.replace(sig.clone()),
@@ -3665,13 +3834,11 @@ impl<'a> Checker<'a> {
         // Reading an error is inspecting it, and a closure that reads one has
         // been handed it. The closure may run later or not at all, but that
         // is the same as passing it to a function: somebody is responsible.
-        let mut taint = outer.taint;
+        self.restore_taint(outer.taint);
+        self.copies = outer.copies;
         for id in &captures {
-            if taint.get(*id as usize) == Some(&Taint::Unchecked) {
-                taint[*id as usize] = Taint::Clean;
-            }
+            self.inspect(*id);
         }
-        self.restore_taint(taint);
         self.narrowed = outer.narrowed;
         self.error_nonnil = outer.error_nonnil;
         self.defers = outer.defers;
@@ -3920,9 +4087,7 @@ impl<'a> Checker<'a> {
                 // `log(err)`, `test.failed(err, …)` — is a way of handling a
                 // failure, and E0302 exists to catch the error nobody looked
                 // at, not the error somebody passed on.
-                if self.taint[id as usize] == Taint::Unchecked {
-                    self.taint[id as usize] = Taint::Clean;
-                }
+                self.inspect(id);
                 if self.init[id as usize] != Init::Assigned {
                     let local = &self.locals[id as usize];
                     let (name, decl) = (local.name.clone(), local.span);
@@ -6648,6 +6813,7 @@ impl<'a> Checker<'a> {
         elems: &[ast::BindElem],
         value: hir::Expr,
         span: Span,
+        before: &[Taint],
     ) -> Option<(hir::Stmt, Flow)> {
         let TyKind::Tuple(parts) = self.types.kind(value.ty).clone() else {
             return None;
@@ -6669,6 +6835,22 @@ impl<'a> Checker<'a> {
             return None;
         }
 
+        // An element that may hold a failure is a binding of one, as a
+        // destructured error is (R1): `let (n, err) = (1, f())` and
+        // `let (a, b) = await task.both(x, y)` each bind failures nobody has
+        // looked at, and marking none of them let every one go unread. What
+        // each element brings is what it was built from, for a tuple literal,
+        // and for a read of a binding whatever that binding held unchecked.
+        let held: Vec<bool> = (0..parts.len())
+            .map(|i| {
+                self.may_hold_failure(parts[i])
+                    && match &value.kind {
+                        ExprKind::TupleNew { elems } => self.holds_obligation(&elems[i], before),
+                        _ => self.holds_obligation(&value, before),
+                    }
+            })
+            .collect();
+
         // The tuple is held in a local of its own, so an initialiser with side
         // effects runs once however many elements are taken from it.
         let holder = hir::LocalId(self.synthetic_local("tuple", value.ty, span));
@@ -6682,7 +6864,8 @@ impl<'a> Checker<'a> {
             let Some(local) = self.resolved.lookup_binding(name.span) else { continue };
             self.locals[local as usize].ty = parts[i];
             self.init[local as usize] = Init::Assigned;
-            self.taint[local as usize] = Taint::Clean;
+            self.forget_copies(local);
+            self.taint[local as usize] = if held[i] { Taint::Unchecked } else { Taint::Clean };
             stmts.push(hir::Stmt::Let {
                 local: hir::LocalId(local),
                 init: Some(hir::Expr {
@@ -6715,10 +6898,11 @@ impl<'a> Checker<'a> {
         // first — once, for both paths: checking it again on the second
         // reported every mistake in it twice.
         let annotated = l.ty.as_ref().map(|t| self.resolve_type(t));
+        let before = self.taint.clone();
         let checked = l.init.as_ref().map(|init| self.expr(init, annotated));
         let checked = match checked {
             Some(value) if matches!(self.types.kind(value.ty), TyKind::Tuple(_)) => {
-                return self.let_tuple(elems, value, span);
+                return self.let_tuple(elems, value, span, &before);
             }
             // A value that is already an error — most often what the parser
             // could not read — has been reported. Each name is still bound,
@@ -6826,6 +7010,7 @@ impl<'a> Checker<'a> {
         if let Some(e) = error_local {
             self.locals[e as usize].ty = TyId::ERR;
             self.init[e as usize] = Init::Assigned;
+            self.forget_copies(e);
             self.taint[e as usize] = Taint::Unchecked;
             let pair_ty = self.types.fallible_of(inner);
             stmts.push(hir::Stmt::Let {
@@ -7060,9 +7245,7 @@ impl<'a> Checker<'a> {
                 let Some(Res::Local(id)) = self.resolved.lookup_use(p.span) else {
                     return;
                 };
-                if self.taint[id as usize] == Taint::Unchecked {
-                    self.taint[id as usize] = Taint::Clean;
-                }
+                self.inspect(id);
                 if let Some(&guarded) = self.guards.get(&id) {
                     self.taint[guarded as usize] = Taint::Clean;
                 }
@@ -7140,12 +7323,30 @@ impl<'a> Checker<'a> {
     /// error bound above them in silence.
     fn report_unchecked_errors_at(&mut self, region: Option<Span>, exit: Option<(Span, &str)>) {
         let mut pending: Vec<(String, Span, bool)> = Vec::new();
-        for (i, state) in self.taint.iter().enumerate() {
-            if *state == Taint::Unchecked
-                && !self.locals[i].synthetic
-                && region.is_none_or(|r| self.declared_inside(i as u32, r))
-                && self.reported_unchecked.insert(i as u32)
+        let leaves = |s: &Self, j: u32| region.is_none_or(|r| s.declared_inside(j, r));
+        for i in 0..self.taint.len() {
+            let id = i as u32;
+            if self.taint[i] != Taint::Unchecked
+                || self.locals[i].synthetic
+                || !leaves(self, id)
+                || self.reported_unchecked.contains(&id)
             {
+                continue;
+            }
+            // A copy leaving while the name it copies stays has dropped
+            // nothing; and a failure under several names leaving together is
+            // one failure, reported once, under the first of them.
+            if self.carried_elsewhere(id, |j| leaves(self, j)) {
+                continue;
+            }
+            let group: Vec<u32> = self
+                .copies_of(id)
+                .into_iter()
+                .filter(|j| self.taint.get(*j as usize) == Some(&Taint::Unchecked))
+                .collect();
+            let first = !group.iter().any(|j| self.reported_unchecked.contains(j));
+            self.reported_unchecked.extend(group);
+            if first {
                 let local = &self.locals[i];
                 let pair = self.types.fallible_value(local.ty).is_some();
                 pending.push((local.name.clone(), local.span, pair));
@@ -8309,8 +8510,41 @@ impl<'a> Checker<'a> {
         m: &ast::MatchExpr,
         expected: Option<TyId>,
     ) -> (hir::Expr, Flow) {
+        let before = self.taint.clone();
         let scrutinee = self.expr(&m.scrutinee, None);
         let scrut_ty = scrutinee.ty;
+
+        // **A match that tests nothing inspects nothing.** Reading the
+        // scrutinee is not looking at a failure when every arm is `_` or a
+        // bare name: `match p { _ => … }` matches without asking what `p`
+        // holds, and `match f() { e => … }` only gives the failure a new
+        // name. So the failure stays where it was — a binding scrutinee keeps
+        // it, an arm's name holds it as a copy — and a new failure with only
+        // `_` to receive it is dropped right there, as by a bare call (R6).
+        let tests_nothing = self.may_hold_failure(scrut_ty)
+            && m.arms.iter().all(|a| self.binds_whole(&a.pattern, scrut_ty));
+        let held = tests_nothing && self.holds_obligation(&scrutinee, &before);
+        let source = match scrutinee.kind {
+            ExprKind::Local(id) if held => Some(id.0),
+            _ => None,
+        };
+        if let Some(src) = source {
+            for i in self.copies_of(src) {
+                if before.get(i as usize) == Some(&Taint::Unchecked) {
+                    self.taint[i as usize] = Taint::Unchecked;
+                }
+            }
+        } else if held && m.arms.iter().any(|a| matches!(a.pattern, ast::Pattern::Wildcard(_))) {
+            self.diags.push(
+                Diagnostic::error(codes::E0302, "error is never checked")
+                    .with_primary(scrutinee.span, "this `match` never looks at the failure it holds")
+                    .with_note(
+                        "`_` matches anything without testing it; match `nil` first, or bind \
+                         it and test it — `let err = …` then `if err != nil { … }`",
+                    )
+                    .with_note("to throw it away on purpose, write `_ = …`"),
+            );
+        }
 
         if m.arms.is_empty() {
             self.diags.push(
@@ -8356,6 +8590,13 @@ impl<'a> Checker<'a> {
                 _ => scrut_ty,
             };
             let pattern = self.pattern_with(&arm.pattern, scrut_ty, bind_ty);
+            if let (true, hir::Pattern::Binding { local, .. }) = (held, &pattern) {
+                self.forget_copies(local.0);
+                self.taint[local.index()] = Taint::Unchecked;
+                if let Some(src) = source {
+                    self.note_copy(local.0, src);
+                }
+            }
             // Refused here or by the resolver, which reports a variant that
             // does not exist before any of this runs.
             let region = arm.pattern.span();
@@ -8391,6 +8632,8 @@ impl<'a> Checker<'a> {
             // and `other => nil` are arms of one `Option<str>` match rather
             // than a type error about two arms disagreeing.
             let body = self.coerce(body, want);
+            // What the pattern bound goes out of scope with the arm.
+            self.copies_leave(arm.span);
 
             // An arm that diverges contributes nothing to the join: control
             // never arrives at the join from it. What it declared goes out of
@@ -8475,6 +8718,19 @@ impl<'a> Checker<'a> {
             span: m.span,
         };
         (expr, flow)
+    }
+
+    /// Whether a pattern matches the whole scrutinee without testing it: `_`,
+    /// or a name that is not one of the scrutinee's unit variants.
+    fn binds_whole(&self, p: &ast::Pattern, scrut: TyId) -> bool {
+        match p {
+            ast::Pattern::Wildcard(_) => true,
+            ast::Pattern::Binding(name) => {
+                self.unit_variant_of(scrut, &name.name).is_none()
+                    && self.resolved.lookup_binding(name.span).is_some()
+            }
+            _ => false,
+        }
     }
 
     /// A block arm.
