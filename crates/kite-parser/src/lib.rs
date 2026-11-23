@@ -2202,8 +2202,16 @@ impl<'a> Parser<'a> {
     /// `>` of a type that was never being written. A name after `as` is only
     /// a name; anything else is parsed as a type as usual and left to the
     /// type checker to refuse.
+    ///
+    /// Except where the `<` can only be a type's: `as Option<int>` with
+    /// nothing after its `>` but the end of the line or of a bracket. As
+    /// comparisons that is `a < b >` with no right operand, never a program,
+    /// and it was reported as one — "comparison operators cannot be
+    /// chained", or a missing expression on the next line. Read as the type
+    /// it is, the cast gets the checker's error: `as` converts only between
+    /// `int` and `float`.
     fn parse_cast_target(&mut self) -> Option<Type> {
-        if !self.at(T::Ident) || self.text_at(self.pos) == "dyn" {
+        if !self.at(T::Ident) || self.text_at(self.pos) == "dyn" || self.type_args_end_the_cast() {
             return self.parse_type();
         }
         let start = self.span();
@@ -2213,6 +2221,48 @@ impl<'a> Parser<'a> {
             segments.push(self.ident()?);
         }
         Some(Type::Path(TypePath { segments, args: Vec::new(), span: start.to(self.prev_span()) }))
+    }
+
+    /// Whether the name after `as` is followed by `<`, tokens that can spell
+    /// a type, and the `>` that closes them, and then nothing but a line
+    /// break, a `,` or a closing bracket. Anything else — `as int < n`,
+    /// `as int < a && b > c`, `as int < n >> 1` — stays a comparison.
+    fn type_args_end_the_cast(&self) -> bool {
+        let kind = |i: usize| self.tokens.get(i).map_or(T::Eof, |t| t.kind);
+        let mut i = self.pos + 1;
+        while kind(i) == T::Dot && kind(i + 1) == T::Ident {
+            i += 2;
+        }
+        if kind(i) != T::Lt {
+            return false;
+        }
+        let (mut angles, mut brackets) = (0u32, 0u32);
+        loop {
+            match kind(i) {
+                T::Lt => angles += 1,
+                // `>>` closes two lists, never more than are open: one too
+                // many is the shift in `as int < n >> 1`.
+                k @ (T::Gt | T::Shr) => {
+                    let n = if k == T::Shr { 2 } else { 1 };
+                    if n > angles {
+                        return false;
+                    }
+                    angles -= n;
+                    if angles == 0 {
+                        return brackets == 0
+                            && matches!(
+                                kind(i + 1),
+                                T::Newline | T::Eof | T::RParen | T::RBracket | T::RBrace | T::Comma
+                            );
+                    }
+                }
+                T::LParen | T::LBracket | T::LBrace => brackets += 1,
+                T::RParen | T::RBracket | T::RBrace if brackets > 0 => brackets -= 1,
+                T::Ident | T::Dot | T::Comma | T::Colon | T::Fn | T::Arrow => {}
+                _ => return false,
+            }
+            i += 1;
+        }
     }
 
     // ---- blocks and statements -------------------------------------------

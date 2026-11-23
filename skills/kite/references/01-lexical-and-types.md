@@ -1017,6 +1017,20 @@ fn main() {
 }
 ```
 
+A `<` after `as int` is a comparison — `if f as int < n {` — so the name after
+`as` takes no type arguments, with one exception: when the `>` that closes them
+is the last thing on the line or in its bracket, as in `3 as Option<int>`, it
+is read as the type, and the cast is the `E0212` it is. (Compilers through
+0.1.9 reported that as `E0100 comparison operators cannot be chained`, or a
+missing expression on the next line.)
+
+```kite fails
+fn main() {
+    let q = 3 as Option<int> //~ E0212
+    io.print("\(q)")
+}
+```
+
 ## 13. Binding rules that bite in the lexer/type layer
 
 Same-scope redefinition is an error; a nested scope may shadow.

@@ -1,0 +1,21 @@
+// A cast to a type with arguments is the checker's E0212, once, at the cast:
+// the `<` and `>` of `Option<int>` close a type, not two comparisons. It was
+// E0100 "comparison operators cannot be chained", or a missing expression on
+// the next line when the cast ended the line. A `<` after `as int` that goes
+// on into more than a type is still a comparison.
+
+struct Box<T> {
+    item: T
+}
+
+fn main() {
+    let q = 3 as Option<int> //~ ERROR E0212
+    let r = (3 as Box<int>) //~ ERROR E0212
+    let n = 7
+    let f = 2.5
+    let less = n as float < f
+    let both = n as float < f && f > 1.0
+    let shifted = n as int < n >> 1
+    io.print("\(q)\(r)\(less)\(both)\(shifted)")
+    let last = 3 as Option<Box<int>> //~ ERROR E0212
+}
