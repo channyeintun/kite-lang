@@ -1730,6 +1730,24 @@ impl<'a> FnResolver<'a> {
         self.map.fn_by_name_in(&self.module, name)
     }
 
+    /// The builtin a dotted path names, as written or through an alias.
+    ///
+    /// **An alias of a module is the whole module.** `errors.new` is a
+    /// builtin and `errors.wrap` is written in std/errors, but both are the
+    /// one module `errors`: after `use std/errors as errs`, `errs.wrap`
+    /// resolved and `errs.new` was `E0111`, so a file that renamed the module
+    /// had to spell it both ways. Only a standard-library module can be
+    /// spelled like a builtin's (§13.1), so no other alias reaches one.
+    fn builtin(&self, dotted: &str) -> Option<BuiltinFn> {
+        BuiltinFn::from_path(dotted).or_else(|| {
+            let canonical = self.map.modules.canonical(&self.module, dotted);
+            if canonical == dotted {
+                return None;
+            }
+            BuiltinFn::from_path(&canonical)
+        })
+    }
+
     /// A constant visible from the module being resolved.
     fn find_const(&self, name: &str) -> Option<u32> {
         self.map.const_by_name_in(&self.module, name)
@@ -2507,12 +2525,13 @@ impl<'a> FnResolver<'a> {
         }
         let spelled = p.text();
         let imported = self.map.modules.aliases.get(&(self.module.clone(), spelled.clone()));
-        let builtin = BUILTIN_MODULES.contains(&spelled.as_str());
         let module = match imported {
             Some(module) => module.clone(),
-            None if builtin => spelled.clone(),
+            None if BUILTIN_MODULES.contains(&spelled.as_str()) => spelled.clone(),
             None => return None,
         };
+        // Under an alias, the builtins of the module it names are members too.
+        let builtin = BUILTIN_MODULES.contains(&module.as_str());
         let prefix = format!("{}.", module);
         let mut names: Vec<&str> = Vec::new();
         if imported.is_some() {
@@ -2563,7 +2582,7 @@ impl<'a> FnResolver<'a> {
         }
 
         let dotted = format!("{}.{}", head, name.name);
-        if let Some(b) = BuiltinFn::from_path(&dotted) {
+        if let Some(b) = self.builtin(&dotted) {
             return Some(Res::Builtin(b));
         }
         // `task.all` — a function in an imported module. Declared names are
@@ -2629,7 +2648,7 @@ impl<'a> FnResolver<'a> {
 
         if !p.is_simple() {
             // `io.print`
-            if let Some(b) = BuiltinFn::from_path(&text) {
+            if let Some(b) = self.builtin(&text) {
                 self.map.uses.insert(p.span, Res::Builtin(b));
                 return;
             }

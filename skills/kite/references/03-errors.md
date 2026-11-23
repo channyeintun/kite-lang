@@ -226,7 +226,7 @@ aliasing, no lifetimes.
 | R4 | on a path where `e == nil` is proved, `e` becomes Checked and `v` Clean — by `e == nil` or `!(e != nil)`, by either side of an `&&` that held, by either side of an `||` that failed, and past `check errors.wrap(…)`, nested or not. An error test crosses `&&` and `\|\|`, so `if err == nil && v > 0 { … }` and `if err != nil \|\| v < 0 { return }` both read `v` cleanly (an optional's narrowing does not) |
 | R5 | on a path where `e != nil`, `e` becomes Checked and `v` stays Tainted **permanently** |
 | R6 | a bare-statement call whose type is `error` or `(T, error)` is `E0302` — and so is the `Task` of one: an `async fn` answering with an error, called and never awaited — and so is a `defer` of any of them |
-| R7 | an `error` or a whole `(T, error)` bound to one name — `let` or `var`, from a call, `await`, a value `if`, a tuple literal, or assigned later with `e = f()` — is **Unchecked**; only `nil` is not. A copy of another binding (`let e = err`) shares that binding's obligation: inspect either name. A test inspects wherever it is written, the right operand of `&&` or `\|\|` included: `if verbose && e != nil { … }` meets `e`'s obligation even when `verbose` is false |
+| R7 | an `error` or a whole `(T, error)` bound to one name — `let` or `var`, from a call, `await`, a value `if`, a tuple literal, or assigned later with `e = f()` — is **Unchecked**; only `nil` is not. A copy of another binding (`let e = err`) shares that binding's obligation: inspect either name. After `var e: error = nil` and `for i in 0..n { e = c }`, `e` holds `c`'s failure or nothing: testing `e` does not answer for `c`, so test `c`. A test inspects wherever it is written, the right operand of `&&` or `\|\|` included: `if verbose && e != nil { … }` meets `e`'s obligation even when `verbose` is false |
 
 R2 in practice:
 
@@ -415,8 +415,11 @@ shapes `task.both`, `task.all` and `task.timeout` answer with. Bound to one name
 (`rs.len()` does not count as reading it); taking it apart, or walking it with
 `for`, hands each failure to the name it lands in. `r.0` takes one element of a
 tuple and leaves the others owed — the tuple is settled once each has been taken,
-and taking it apart afterwards binds only the failures not yet taken —
-but `rs[0]` on a slice counts as reading the whole slice, since a slice cannot be
+and taking it apart afterwards binds only the failures not yet taken. A
+projection of a tuple nobody holds, `(f(1), f(2)).0` or `pair().0`, throws the
+other elements away on the spot, so each failure among them is `E0302` there;
+bind the tuple and take it apart, with `_` for one you mean to drop. `rs[0]`
+on a slice, though, counts as reading the whole slice, since a slice cannot be
 followed element by element. Both results of
 `task.both` arrive together, so deal with both before any exit — a `check` on
 the first leaves the second behind:

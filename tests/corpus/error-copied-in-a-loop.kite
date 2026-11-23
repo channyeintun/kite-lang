@@ -1,0 +1,73 @@
+// A copy made in a loop over a name that held nothing before it holds the
+// copied failure or none. `var e: error = nil` then `for … { e = c }` leaves
+// `e` holding `c`'s failure or nothing, so writing over `e` again in the next
+// iteration drops nothing — that used to be "`e` is overwritten", at `e`. But
+// testing `e` says nothing of `c` on the way that skipped the loop, so `c` is
+// what is left unread there, and the report is at `c`.
+
+fn touch() -> error {
+    return errors.new("boom")
+}
+
+fn a_walk_that_certainly_runs() {
+    let c = touch()
+    var e: error = nil
+    for i in 0..3 {
+        e = c
+    }
+    if e != nil {
+        io.print(e.message())
+    }
+}
+
+fn a_walk_that_may_not_run(n: int) {
+    let c = touch() //~ ERROR E0302
+    var e: error = nil
+    for i in 0..n {
+        e = c
+    }
+    if e != nil {
+        io.print(e.message())
+    }
+}
+
+fn testing_the_original_answers_for_both(n: int) {
+    let c = touch()
+    var e: error = nil
+    for i in 0..n {
+        e = c
+    }
+    if c != nil {
+        io.print(c.message())
+    }
+}
+
+// The way that skips the loop is still a way: here `c` is written over
+// there before anything looked at it.
+fn the_original_written_over(n: int) {
+    var c = touch()
+    var e: error = nil
+    for i in 0..n {
+        e = c
+    }
+    c = touch() //~ ERROR E0302
+    if c != nil || e != nil {
+        io.print("failed")
+    }
+}
+
+// `e` holds `c`'s failure or nothing, so writing over `c` drops it where
+// `e` holds nothing.
+fn a_value_if_and_the_original_written_over(x: bool) -> error {
+    var c = touch()
+    let e = if x { c } else { nil }
+    c = touch() //~ ERROR E0302
+    if c != nil {
+        return c
+    }
+    return e
+}
+
+fn main() {
+    a_walk_that_certainly_runs()
+}

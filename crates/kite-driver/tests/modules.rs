@@ -486,6 +486,31 @@ fn an_alias_is_how_the_module_is_spelled() {
     assert_eq!(p.run(&main).expect("compiles"), "3000\n");
 }
 
+/// An alias of a standard-library module is the whole module, its builtins
+/// included: after `use std/errors as errs`, `errs.wrap` resolved and
+/// `errs.new` was `E0111`. And a note offering `errors.wrap` names it the way
+/// the `use` spells it, rather than asking for a second `use std/errors`.
+#[test]
+fn an_alias_of_a_standard_module_reaches_its_builtins() {
+    let p = Project::new("std-alias");
+    let main = p.file(
+        "main.kite",
+        "use std/errors as errs\n\nfn main() {\n  let e = errs.wrap(errs.new(\"boom\"), \"loading\")\n  \
+         if e != nil {\n    io.print(e.message())\n  }\n}\n",
+    );
+    assert_eq!(p.run(&main).expect("compiles"), "loading: boom\n");
+
+    let main = p.file(
+        "dropped.kite",
+        "use std/errors as errs\n\nfn main() {\n  var e = errs.new(\"x\")\n  e = errs.new(\"y\")\n  \
+         if e != nil {\n    io.print(e.message())\n  }\n}\n",
+    );
+    let err = p.run(&main).expect_err("the first failure is dropped");
+    assert!(err.contains("E0302") && !err.contains("E0111"), "{}", err);
+    assert!(err.contains("`e = errs.wrap(e, \"…\")`"), "{}", err);
+    assert!(!err.contains("after `use std/errors`"), "{}", err);
+}
+
 /// Cycles make separate compilation, incremental rebuilds and initialisation
 /// order all harder, and every one can be broken by extracting the shared part.
 #[test]

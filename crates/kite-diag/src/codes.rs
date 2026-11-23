@@ -859,7 +859,9 @@ codes! {
          rule: it has to be awaited, returned or passed on. A call whose \
          result holds a failure cannot be deferred: it runs after the \
          function has returned, so its error has nowhere to go — defer a \
-         function that handles it instead. Silently \
+         function that handles it instead. Projecting one element of a \
+         tuple no binding holds, `(f(1), f(2)).0`, throws the others away \
+         with any failure in them; bind the tuple and take it apart. Silently \
          dropping errors is the single most common source of production \
          failures in languages that permit it.\n\n\
          To propagate, write `check`. To handle it where it happened, test \

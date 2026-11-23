@@ -1240,12 +1240,26 @@ struct Checker<'a> {
     /// it left scope on one path is not reported again where the function
     /// ends.
     reported_unchecked: std::collections::HashSet<u32>,
-    /// Pairs of locals holding one and the same unchecked failure, because
-    /// one was made a copy of the other: `let e = err`, `e = err`, or a
-    /// `match err { x => … }` arm. A copy is not an inspection, so the
-    /// failure still has to be looked at — but through either name, so
-    /// inspecting one inspects both, and one left behind while the other is
-    /// still in scope has dropped nothing. Each pair is written lowest first.
+    /// Which locals hold what others hold. A pair `(a, b)` says that every
+    /// unchecked failure `a` holds, `b` holds unchecked too: inspecting `b`
+    /// inspects `a`, and `a` left behind or written over while `b` is still
+    /// in scope has dropped nothing.
+    ///
+    /// A copy — `let e = err`, `e = err`, a `match err { x => … }` arm —
+    /// holds one and the same failure as what it copies, so it is both
+    /// pairs: the two names share one obligation, met through either. A
+    /// pair in one direction alone is what a join leaves where a copy held
+    /// on one way in and the first name held nothing unchecked on the
+    /// other: after `var e: error = nil` and a loop of `e = c`, `e` holds
+    /// `c`'s failure or none, so writing over `e` again drops nothing, but
+    /// testing `e` says nothing of `c` on the way that skipped the loop.
+    ///
+    /// What keeps it sound: whenever `(a, b)` is here and `a` is Unchecked,
+    /// `b` is Unchecked too. A copy starts that way, inspecting `b` cleans
+    /// `a` with it, a write to either drops every pair that names it (what
+    /// `a` held is still held by what held it — see
+    /// [`Checker::forget_copies`]), and a join keeps a pair only where it
+    /// held on both ways in ([`join_copies`]).
     copies: std::collections::BTreeSet<(u32, u32)>,
     /// For a local holding a tuple of failures, one hidden local per element
     /// that can hold one, each Unchecked until that element is taken with
@@ -1435,20 +1449,25 @@ struct Enclosing {
     inferred_ret: Option<(TyId, Option<TyId>)>,
 }
 
-/// The copies that still hold where control arrives from either of two
-/// paths, each given as its copies and its taint.
+/// Which locals hold what others hold where control arrives from either of
+/// two paths, each given as its pairs and its taint (see
+/// [`Checker::copies`]).
 ///
-/// Two names hold one failure after the join only if inspecting either
-/// inspects the other on both ways in: they were copies on that path, or
-/// neither held anything unchecked there, so there was nothing to inspect.
+/// `(x, y)` holds after the join only if it held on both ways in: the pair
+/// was there, or `x` held nothing unchecked, so that everything it held —
+/// nothing — `y` held too. Each pair is taken alone, and each direction of
+/// a copy alone, so a copy that held on one way in, joined with a way in
+/// where its first name held nothing, keeps the one direction that is
+/// still true. That keeps the invariant: if `x` is Unchecked after the
+/// join it was Unchecked on some way in, where the pair was there and so
+/// `y` was Unchecked too, and the join of taint keeps it so.
 fn join_copies(
     a: (&std::collections::BTreeSet<(u32, u32)>, &[Taint]),
     b: (&std::collections::BTreeSet<(u32, u32)>, &[Taint]),
 ) -> std::collections::BTreeSet<(u32, u32)> {
     let holds = |(copies, taint): (&std::collections::BTreeSet<(u32, u32)>, &[Taint]),
                  pair: &(u32, u32)| {
-        copies.contains(pair)
-            || [pair.0, pair.1].iter().all(|i| taint.get(*i as usize) != Some(&Taint::Unchecked))
+        copies.contains(pair) || taint.get(pair.0 as usize) != Some(&Taint::Unchecked)
     };
     a.0.union(b.0).filter(|pair| holds(a, pair) && holds(b, pair)).copied().collect()
 }
@@ -2289,20 +2308,34 @@ impl<'a> Checker<'a> {
         }
     }
 
-    /// A local and every local holding the same failure as it, itself first.
+    /// A local and every local whose failure inspecting it inspects — each
+    /// that holds nothing it does not hold (see [`Self::copies`]) — itself
+    /// first. For a copy, that is every name of the failure.
     ///
     /// The pairs are read once into a table of neighbours and the group is
     /// walked over that. Scanning every pair for each member, and the group
     /// for each find, made a chain of a thousand copies take seconds: the
     /// cost was cubic in the number of copies of one error.
     fn copies_of(&self, id: u32) -> Vec<u32> {
+        self.reach(id, false)
+    }
+
+    /// A local and every local that holds everything it holds, itself
+    /// first: what may answer for its failure if it goes.
+    fn held_by(&self, id: u32) -> Vec<u32> {
+        self.reach(id, true)
+    }
+
+    /// `id` and every local reached from it along the pairs, forward (from
+    /// a holder to what holds all it holds) or backward.
+    fn reach(&self, id: u32, forward: bool) -> Vec<u32> {
         if !self.copies.iter().any(|&(a, b)| a == id || b == id) {
             return vec![id];
         }
         let mut next: std::collections::HashMap<u32, Vec<u32>> = std::collections::HashMap::new();
         for &(a, b) in &self.copies {
-            next.entry(a).or_default().push(b);
-            next.entry(b).or_default().push(a);
+            let (from, to) = if forward { (a, b) } else { (b, a) };
+            next.entry(from).or_default().push(to);
         }
         let mut group = vec![id];
         let mut seen: std::collections::HashSet<u32> = std::collections::HashSet::from([id]);
@@ -2319,32 +2352,79 @@ impl<'a> Checker<'a> {
     }
 
     /// Whether another name than `id` holds `id`'s failure unchecked and
-    /// stays in scope past what `leaves` says is going out.
+    /// stays in scope past what `leaves` says is going out. One that holds
+    /// everything `id` holds does: by the invariant on [`Self::copies`] it
+    /// is Unchecked wherever `id` holds a failure, and it still holds it.
     fn carried_elsewhere(&self, id: u32, leaves: impl Fn(u32) -> bool) -> bool {
-        self.copies_of(id)
+        self.held_by(id)
             .into_iter()
             .skip(1)
             .any(|j| self.taint.get(j as usize) == Some(&Taint::Unchecked) && !leaves(j))
     }
 
+    /// `a` was made a copy of `b`: each holds exactly what the other does.
     fn note_copy(&mut self, a: u32, b: u32) {
         if a != b {
-            self.copies.insert((a.min(b), a.max(b)));
+            self.copies.insert((a, b));
+            self.copies.insert((b, a));
         }
     }
 
-    /// A local is about to hold something else: it is no longer a copy of
-    /// anything. What it was a copy of, and what was a copy of it, still
-    /// hold one failure between them.
+    /// A local is about to hold something else, or nothing: no pair naming
+    /// it is true any more, so every one goes. What they said about the
+    /// others is still true and is kept: whatever held nothing `id` did not
+    /// still holds nothing that what held all of `id`'s does not, so each
+    /// of the first is joined to each of the second.
+    ///
+    /// The names `id` was a copy of are joined through one of them, as a
+    /// chain, rather than each to each: a failure with a thousand names
+    /// would otherwise make a million pairs.
     fn forget_copies(&mut self, id: u32) {
-        let others: Vec<u32> = self.copies_of(id).into_iter().skip(1).collect();
-        if others.is_empty() {
+        let mut into: Vec<u32> = Vec::new();
+        let mut from: Vec<u32> = Vec::new();
+        for &(a, b) in &self.copies {
+            if b == id && a != id {
+                into.push(a);
+            }
+            if a == id && b != id {
+                from.push(b);
+            }
+        }
+        if into.is_empty() && from.is_empty() {
             return;
         }
         self.copies.retain(|&(a, b)| a != id && b != id);
-        if others.len() > 1 {
-            for &x in &others[1..] {
-                self.note_copy(others[0], x);
+        let out: std::collections::HashSet<u32> = from.iter().copied().collect();
+        let both: Vec<u32> = into.iter().copied().filter(|x| out.contains(x)).collect();
+        let shared: std::collections::HashSet<u32> = both.iter().copied().collect();
+        match both.split_first() {
+            Some((&hub, rest)) => {
+                for &x in rest {
+                    self.note_copy(hub, x);
+                }
+                for &x in into.iter().filter(|x| !shared.contains(x)) {
+                    self.copies.insert((x, hub));
+                }
+                for &y in from.iter().filter(|y| !shared.contains(y)) {
+                    self.copies.insert((hub, y));
+                }
+            }
+            // With no name that holds just what `id` did, each is joined to
+            // each only while one side is a single name. Many on both sides
+            // would make every one of the first a pair with every one of the
+            // second — a thousand names in a loop of `x = m` and a thousand
+            // copies of `m` made a million pairs, and the check took minutes
+            // — so then the pairs are let go. Fewer pairs is never less
+            // sound: each only ever spares a report.
+            None if into.len() > 1 && from.len() > 1 => {}
+            None => {
+                for &x in &into {
+                    for &y in &from {
+                        if x != y {
+                            self.copies.insert((x, y));
+                        }
+                    }
+                }
             }
         }
     }
@@ -8712,6 +8792,19 @@ impl<'a> Checker<'a> {
             if self.carried_elsewhere(id, |j| leaves(self, j)) {
                 continue;
             }
+            // One that holds all this one holds, and more, is leaving with
+            // it: the report is that one's, which covers this one, since it
+            // is the name that answers for every failure the two hold. After
+            // `var e: error = nil` and a loop of `e = c`, it is `c` that the
+            // way around the loop leaves unread, not `e`.
+            let within: std::collections::HashSet<u32> = self.copies_of(id).into_iter().collect();
+            if self.held_by(id).into_iter().any(|j| {
+                !within.contains(&j)
+                    && self.taint.get(j as usize) == Some(&Taint::Unchecked)
+                    && !self.locals[j as usize].synthetic
+            }) {
+                continue;
+            }
             let group: Vec<u32> = self
                 .copies_of(id)
                 .into_iter()
@@ -8798,17 +8891,23 @@ impl<'a> Checker<'a> {
     /// `std/errors`, and with the import it needs where it does not — the
     /// bare spelling was E0111 when copied.
     fn wrap_spelled(&self, name: &str) -> String {
-        let wrap = format!("`{} = errors.wrap({}, \"…\")`", name, name);
-        let imported = self
-            .resolved
-            .modules
-            .aliases
-            .get(&(self.module.clone(), "errors".to_string()))
-            .is_some_and(|m| m == "errors");
-        if imported {
-            wrap
+        // The module is named as this one's `use` spells it: `errs.wrap`
+        // after `use std/errors as errs`, where a second `use std/errors`
+        // would be the fix the note offered.
+        let aliases = &self.resolved.modules.aliases;
+        let spelled = |s: &str| aliases.get(&(self.module.clone(), s.to_string())).is_some_and(|m| m == "errors");
+        let alias = if spelled("errors") {
+            Some("errors".to_string())
         } else {
-            format!("{} after `use std/errors`", wrap)
+            aliases
+                .iter()
+                .filter(|((m, s), to)| *m == self.module && to.as_str() == "errors" && s.as_str() != "errors")
+                .map(|((_, s), _)| s.clone())
+                .min()
+        };
+        match alias {
+            Some(a) => format!("`{} = {}.wrap({}, \"…\")`", name, a, name),
+            None => format!("`{} = errors.wrap({}, \"…\")` after `use std/errors`", name, name),
         }
     }
 
@@ -12148,6 +12247,149 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// **A projection of a temporary tuple throws the rest of it away.**
+    /// `(f(1), f(2)).0` and `pair().0` take one element of a tuple nothing
+    /// else will ever see, so a failure in any other element is gone the
+    /// moment the projection is made: nothing can take it later, and nothing
+    /// is left at the end of the scope to report it, so it is `E0302` here —
+    /// at the element in a literal, at the call otherwise. A binding read to
+    /// build the literal was not taken either, so it is put back as it was
+    /// (`before`) and still answers for its failure. A tuple read out of a
+    /// binding or a field is not a temporary: what is not taken is still
+    /// there.
+    fn drop_untaken(&mut self, obj: &hir::Expr, name: &ast::Ident, before: &[Taint]) {
+        enum Source<'a> {
+            Literal(&'a [hir::Expr]),
+            Temporary(&'a hir::Expr),
+            Place,
+        }
+        fn source(e: &hir::Expr) -> Source<'_> {
+            match &e.kind {
+                ExprKind::TupleNew { elems } => Source::Literal(elems),
+                ExprKind::FieldGet { base, index } => match source(base) {
+                    Source::Literal(elems) => match elems.get(*index as usize) {
+                        Some(x) => source(x),
+                        None => Source::Place,
+                    },
+                    Source::Temporary(_) => Source::Temporary(e),
+                    Source::Place => Source::Place,
+                },
+                ExprKind::Call { .. }
+                | ExprKind::CallVirtual { .. }
+                | ExprKind::CallClosure { .. }
+                | ExprKind::CallBuiltin { .. }
+                | ExprKind::CallExtern { .. }
+                | ExprKind::Await { .. }
+                | ExprKind::If { .. }
+                | ExprKind::Match { .. }
+                | ExprKind::Block { .. } => Source::Temporary(e),
+                _ => Source::Place,
+            }
+        }
+        let Ok(index) = name.name.parse::<usize>() else {
+            return;
+        };
+        let TyKind::Tuple(tys) = self.types.kind(obj.ty).clone() else {
+            return;
+        };
+        if index >= tys.len() {
+            return;
+        }
+        match source(obj) {
+            Source::Literal(elems) => {
+                // A binding whose failure the element taken holds as well —
+                // the same name, or a copy of it — has handed it on with that
+                // element: `(c, c).0` takes `c`'s failure once, and putting the
+                // other back would owe it twice. Only what the taken one holds
+                // all of counts: one that may hold more is put back.
+                fn locals(x: &hir::Expr, out: &mut Vec<u32>) {
+                    match &x.kind {
+                        ExprKind::Local(id) => out.push(id.0),
+                        ExprKind::TupleNew { elems } | ExprKind::SliceNew { elems } => {
+                            elems.iter().for_each(|y| locals(y, out))
+                        }
+                        _ => {}
+                    }
+                }
+                let mut taken = Vec::new();
+                if let Some(x) = elems.get(index) {
+                    locals(x, &mut taken);
+                }
+                let handed: std::collections::HashSet<u32> =
+                    taken.into_iter().flat_map(|t| self.copies_of(t)).collect();
+                for (j, x) in elems.iter().enumerate() {
+                    if j != index {
+                        self.drop_element(x, index, name.span, before, &handed);
+                    }
+                }
+            }
+            Source::Temporary(t) => {
+                let dropped: Vec<String> = (0..tys.len())
+                    .filter(|&j| j != index && self.may_hold_failure(tys[j]))
+                    .map(|j| j.to_string())
+                    .collect();
+                if dropped.is_empty() {
+                    return;
+                }
+                let what = match dropped.as_slice() {
+                    [one] => format!("element {} of this tuple holds a failure, and it is thrown away", one),
+                    [rest @ .., last] => format!(
+                        "elements {} and {} of this tuple hold failures, and they are thrown away",
+                        rest.join(", "),
+                        last
+                    ),
+                    [] => unreachable!(),
+                };
+                self.diags.push(
+                    Diagnostic::error(codes::E0302, "error is never checked")
+                        .with_primary(t.span, what)
+                        .with_secondary(name.span, format!("only element {} is taken", index))
+                        .with_note(
+                            "bind the tuple and take it apart — `let (a, b) = …` — and check \
+                             each error in it",
+                        )
+                        .with_note("to throw one away on purpose, write `_` in its place: `let (a, _) = …`"),
+                );
+            }
+            Source::Place => {}
+        }
+    }
+
+    /// An element of a tuple literal that a projection did not take: see
+    /// [`Self::drop_untaken`].
+    fn drop_element(
+        &mut self,
+        x: &hir::Expr,
+        index: usize,
+        at: Span,
+        before: &[Taint],
+        handed: &std::collections::HashSet<u32>,
+    ) {
+        if !self.may_hold_failure(x.ty) {
+            return;
+        }
+        match &x.kind {
+            ExprKind::Nil | ExprKind::Error => {}
+            ExprKind::Local(id) if handed.contains(&id.0) => {}
+            ExprKind::Local(id) => self.keep_unread(id.0, before),
+            ExprKind::TupleNew { elems } | ExprKind::SliceNew { elems } => {
+                for y in elems {
+                    self.drop_element(y, index, at, before, handed);
+                }
+            }
+            _ => self.diags.push(
+                Diagnostic::error(codes::E0302, "error is never checked")
+                    .with_primary(x.span, "this is never taken out of the tuple, so its failure is thrown away")
+                    .with_secondary(at, format!("only element {} is taken", index))
+                    .with_note(
+                        "bind the tuple and take it apart — `let (a, b) = …` — and check \
+                         each error in it",
+                    )
+                    .with_note("to throw one away on purpose, write `_` in its place: `let (a, _) = …`"),
+            ),
+        }
+    }
+
     /// `p.x`
     fn field_access(&mut self, base: &ast::Expr, name: &ast::Ident, span: Span) -> hir::Expr {
         // **`.N` takes one element of a tuple of failures**, not the whole:
@@ -12155,7 +12397,9 @@ impl<'a> Checker<'a> {
         // first failure and leaves the second owed. Reading the tuple to
         // project it is not looking at what else is in it; each element is
         // settled as it is taken, and the tuple once every one has been.
-        let owed = match base {
+        // What is projected is followed through parentheses and through
+        // projections of a tuple literal, so `(r, 1).0.1` takes `r.1`.
+        let owed = match projected_source(base) {
             ast::Expr::Path(p) => match self.resolved.lookup_use(p.span) {
                 Some(Res::Local(id))
                     if self.taint.get(id as usize) == Some(&Taint::Unchecked)
@@ -12167,7 +12411,18 @@ impl<'a> Checker<'a> {
             },
             _ => None,
         };
+        // A tuple literal's elements that are not taken are thrown away with
+        // it; a binding read to build one is put back as it was, below.
+        let literal = match projected_source(base) {
+            ast::Expr::Tuple { .. } => Some(self.taint.clone()),
+            _ => None,
+        };
         let obj = self.expr(base, None);
+        if let Some(before) = literal {
+            self.drop_untaken(&obj, name, &before);
+        } else if owed.is_none() {
+            self.drop_untaken(&obj, name, &[]);
+        }
         if let Some((id, before)) = owed {
             self.keep_unread(id, &before);
             let index = name.name.parse::<u32>().ok();
@@ -15362,6 +15617,25 @@ fn float_key(f: f64) -> Option<(String, String)> {
     let shown = format!("{:?}", f);
     let key = if f == 0.0 { "0.0".to_string() } else { shown.clone() };
     Some((key, shown))
+}
+
+/// What a projection's base gives the tuple of: the base itself, followed
+/// through parentheses and through projections of a tuple literal, so
+/// `((r, 1)).0` is `r` and `((a, b), c).0` is `(a, b)`.
+fn projected_source(e: &ast::Expr) -> &ast::Expr {
+    match e {
+        ast::Expr::Paren { inner, .. } => projected_source(inner),
+        ast::Expr::Field { base, name, .. } => match projected_source(base) {
+            ast::Expr::Tuple { elems, .. } => {
+                match name.name.parse::<usize>().ok().and_then(|i| elems.get(i)) {
+                    Some(x) => projected_source(x),
+                    None => e,
+                }
+            }
+            _ => e,
+        },
+        _ => e,
+    }
 }
 
 /// A constructor's evaluation order as `StructNew` and `EnumNew` carry it:
