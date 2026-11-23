@@ -118,6 +118,12 @@ fn parse_value(input: str, at: int, depth: int) -> (Step, error) {
     if c == "n" {
         return keyword(input, at, "null", Json.Null)
     }
+    // Anything else that cannot begin a number is not a value at all —
+    // `{"a":}`, `[1,]` and `[}` used to say "expected a number", which names
+    // one of six things that could have stood there.
+    if c != "-" && digit(c) < 0 {
+        return _, errors.new("json: expected a value at \(at)")
+    }
     return parse_number(input, at)
 }
 

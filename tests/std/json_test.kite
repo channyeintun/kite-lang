@@ -240,6 +240,21 @@ fn checks() -> [error] {
     out.push(test.is_true(json.int_of(parsed("\"9223372036854775808\"")) == nil, "text past the range is nil"))
     out.push(test.is_true(json.int_of(parsed("\"12abc\"")) == nil, "text that is not a number is nil"))
 
+    // ---- what is wrong is said, not guessed at ----
+    //
+    // `{"a":}` said "expected a number", which is one of six things that could
+    // have been there.
+    for (doc, want) in [
+        ("{\"a\":}", "json: expected a value at 5"),
+        ("[1,]", "json: expected a value at 3"),
+        ("[}", "json: expected a value at 1"),
+        ("-", "json: expected a number at 0"),
+        ("[-]", "json: expected a number at 1"),
+    ] {
+        let (_, bad) = json.parse(doc)
+        out.push(test.equal_str(if bad == nil { "parsed" } else { bad.message() }, want, doc))
+    }
+
     // ---- writing stops where reading does ----
     //
     // `stringify` of 2,000 nested arrays ran out of stack on Wasm alone.
