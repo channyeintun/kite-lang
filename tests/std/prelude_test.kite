@@ -360,6 +360,10 @@ fn checks() -> [error] {
     out.push(test.equal_int(get_or(ages, "eve", -1), -1, "get_or absent"))
     out.push(test.equal_int(get_or(ages, "bob", -1), 0, "get_or a zero is present"))
     out.push(test.is_true(has_key(ages, "bob") && !has_key(ages, "eve"), "has_key"))
+    // As documented: on a map of optional values a stored nil reads as absent.
+    var maybe: { str: Option<int> } = { }
+    maybe["a"] = nil
+    out.push(test.is_true(!has_key(maybe, "a") && maybe.len() == 1 && get_or(maybe, "a", 5) == 5, "a stored nil reads as absent"))
     let both = merged({ "a": 1, "b": 2 }, { "b": 3, "c": 4 })
     out.push(test.equal_int(both.len(), 3, "merged size"))
     out.push(test.equal_int(get_or(both, "b", -1), 3, "merged: the right wins"))
