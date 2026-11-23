@@ -88,6 +88,63 @@ pub fn column(b: F64, field: int) -> [float] {
     return out
 }
 
+/// Every record, as a slice of slices — the copy out of the flat layout.
+///
+/// ```kite
+/// let b = from_records(2, [[0.0, 1.0], [2.0, 3.0]])
+/// assert(records(b).len() == 2 && records(b)[1][0] == 2.0, "records")
+/// ```
+pub fn records(b: F64) -> [[float]] {
+    var out: [[float]] = []
+    for i in 0..count(b) {
+        out.push(record(b, i))
+    }
+    return out
+}
+
+/// A buffer of `stride`-long records built from rows, in one go — the copy
+/// into the flat layout. Every row must be exactly `stride` long, as with
+/// [`push`]; the stride is given rather than read off the first row so that
+/// no rows at all is still a buffer of a known shape.
+///
+/// ```kite
+/// let b = from_records(3, [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])
+/// assert(count(b) == 2 && get(b, 1, 2) == 6.0, "from_records")
+/// ```
+///
+/// One copy of each row, where pushing them one at a time copies the whole
+/// buffer each time.
+pub fn from_records(stride: int, rows: [[float]]) -> F64 {
+    let shape = max(stride, 1)
+    var values: [float] = []
+    for row in rows {
+        require(row.len() == shape, "buffer: a row of \(row.len()) numbers in records of \(shape)")
+        for v in row {
+            values.push(v)
+        }
+    }
+    return F64{ values: values, stride: shape }
+}
+
+/// A buffer with `f` applied to one field of every record, the others
+/// untouched.
+///
+/// ```kite
+/// let b = from_records(2, [[1.0, 2.0], [3.0, 4.0]])
+/// let scaled = map_column(b, 1, |v: float| v * 10.0)
+/// assert(get(scaled, 1, 1) == 40.0 && get(scaled, 1, 0) == 3.0, "map_column")
+/// ```
+pub fn map_column(b: F64, field: int, f: fn(float) -> float) -> F64 {
+    check_field(b, field)
+    var out = b.values
+    var i = field
+    for i < out.len() {
+        out[i] = f(out[i])
+        i += b.stride
+    }
+    return F64{ values: out, stride: b.stride }
+}
+
 /// The smallest and largest value in a field.
 pub fn extent(b: F64, field: int) -> (float, float) {
     let values = column(b, field)

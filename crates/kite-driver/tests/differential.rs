@@ -4416,6 +4416,17 @@ fn main() {
 ",
     ),
     (
+        "a-ragged-row-in-from-records-traps",
+        "\
+use std/buffer
+
+fn main() {
+  io.print(buffer.count(buffer.from_records(2, [[1.0, 2.0]])))
+  io.print(buffer.count(buffer.from_records(2, [[1.0, 2.0], [3.0]])))
+}
+",
+    ),
+    (
         "a-negative-buffer-field-traps",
         "\
 use std/buffer

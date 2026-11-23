@@ -311,6 +311,20 @@ fn checks() -> [error] {
     let edited = buffer.set(b, 0, 0, 9.0)
     out.push(test.equal_float(buffer.get(edited, 0, 0), 9.0, 0.0001, "set"))
     out.push(test.equal_float(buffer.get(b, 0, 0), 1.0, 0.0001, "a buffer is a value"))
+    // In and out of the flat layout in one go.
+    let built = buffer.from_records(3, [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])
+    out.push(test.equal_int(built.stride, 3, "from_records keeps the stride"))
+    out.push(test.equal_int(buffer.count(built), 2, "from_records count"))
+    out.push(test.equal_float(buffer.get(built, 1, 2), 6.0, 0.0, "from_records get"))
+    out.push(test.equal_int(buffer.count(buffer.from_records(4, [])), 0, "from_records of no rows"))
+    out.push(test.equal_int(buffer.from_records(4, []).stride, 4, "and the shape is still known"))
+    let rows = buffer.records(built)
+    out.push(test.equal_int(rows.len(), 2, "records"))
+    out.push(test.equal_floats(rows[1], [4.0, 5.0, 6.0], 0.0, "records keeps each record"))
+    out.push(test.equal_int(buffer.records(buffer.f64(2)).len(), 0, "records of an empty buffer"))
+    let tenfold = buffer.map_column(built, 1, |v: float| v * 10.0)
+    out.push(test.equal_floats(tenfold.values, [1.0, 20.0, 3.0, 4.0, 50.0, 6.0], 0.0, "map_column touches one field"))
+    out.push(test.equal_floats(built.values, [1.0, 2.0, 3.0, 4.0, 5.0, 6.0], 0.0, "map_column makes a new buffer"))
 
     return out
 }
