@@ -646,6 +646,7 @@ pub fn check_recording(
             reported_unchecked: std::collections::HashSet::new(),
             copies: std::collections::BTreeSet::new(),
             parts: std::collections::HashMap::new(),
+            loop_seeds: std::collections::HashMap::new(),
             arm_bound: Vec::new(),
             defers: None,
             release,
@@ -1221,6 +1222,9 @@ struct Checker<'a> {
     /// them; they are made where the tuple is first bound, so no state that
     /// knows the tuple lacks them.
     parts: std::collections::HashMap<u32, Vec<(u32, u32)>>,
+    /// What came back to the start of each loop's body the last time it was
+    /// checked to its fixed point, which the next check of it starts from.
+    loop_seeds: std::collections::HashMap<Span, ErrorState>,
     /// The locals the current `match` arm's pattern has bound so far, for
     /// [`ResolveMap::rebound`].
     arm_bound: Vec<u32>,
@@ -3026,7 +3030,17 @@ impl<'a> Checker<'a> {
         // checked once.
         let depth = self.loops.len() - 1;
         let entry: ErrorState = (self.taint.clone(), self.copies.clone());
-        let mut carried: Option<ErrorState> = None;
+        // **A loop checked again starts from what came back to it last
+        // time.** One nested in a loop whose body is checked again was
+        // checked to its fixed point afresh in every round of the outer one,
+        // so a nest of loops that each hand state back cost 2^depth. What
+        // came back last time came from an entry no worse than this one, and
+        // the analysis only gets worse as its input does, so it is at most
+        // the fixed point this round reaches: starting there skips the
+        // rounds that would only find it again, and finds anything new as
+        // before. Only names the resolver made are seeded; a temporary's
+        // number may belong to another by now.
+        let mut carried: Option<ErrorState> = self.loop_seeds.get(&f.span).cloned();
         let mut round = 0;
         let (result, runs, edges) = loop {
             round += 1;
@@ -3037,6 +3051,18 @@ impl<'a> Checker<'a> {
             let edges = std::mem::take(&mut self.loop_edges[depth]);
             let Some(next) = self.carry(f.span, &edges, round) else {
                 self.keep_trial(trial);
+                if let Some((mut taint, copies)) = edges.carried.clone() {
+                    for (i, t) in taint.iter_mut().enumerate() {
+                        if self.locals.get(i).is_none_or(|l| l.synthetic) {
+                            *t = Taint::Clean;
+                        }
+                    }
+                    let copies = copies
+                        .into_iter()
+                        .filter(|p| [p.0, p.1].iter().all(|&i| self.locals.get(i as usize).is_some_and(|l| !l.synthetic)))
+                        .collect();
+                    self.loop_seeds.insert(f.span, (taint, copies));
+                }
                 break (result, runs, edges);
             };
             self.end_trial(trial);
