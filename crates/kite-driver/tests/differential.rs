@@ -4905,6 +4905,17 @@ fn a_race_of_no_tasks_names_the_mistake() {
 /// says the program prints.
 const EXPECTED: &[(&str, &str, &str)] = &[
     (
+        // §4.2 allows an operator applied to constants, and `as` is one
+        // (§5.1): a constant's cast folds by the rule the same cast in a body
+        // runs by, truncating and saturating.
+        "a-cast-in-a-constant-folds-as-it-runs",
+        "let A = 3 as float\nlet B = -7.9 as int\nlet C = (A * 2.0) as int + 1\n\
+         let D = \"\\(2 as float)\"\nlet E = 1e300 as int\n\
+         fn main() {\n  io.print(A)\n  io.print(B)\n  io.print(C)\n  io.print(D)\n  io.print(E)\n\
+         \x20 io.print(-7.9 as int)\n  io.print(1e300 as int)\n}\n",
+        "3.0\n-7\n7\n2.0\n9223372036854775807\n-7\n9223372036854775807\n",
+    ),
+    (
         // §5.4: a window clamps, so `..=max_int` is to the end. Its `+ 1`
         // trapped in a debug build and wrapped to an empty window in a
         // release one; it saturates now, which is the same in both, and an

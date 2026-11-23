@@ -289,6 +289,53 @@ impl<'a> Eval<'a> {
                 }
             },
 
+            // `as` is an operator (§5.1), so `let A = 3 as float` is an
+            // operator applied to a constant. It folds by the rule a body's
+            // cast runs by: an `int` becomes the nearest `float`, and a
+            // `float` is truncated towards zero, saturating, with NaN as zero
+            // — which is what Rust's own `as` does.
+            ast::Expr::Cast { expr, ty, span } => {
+                let v = self.eval(expr)?;
+                let to = match ty {
+                    ast::Type::Path(p) if p.is_simple() && p.args.is_empty() => p.name(),
+                    _ => "",
+                };
+                match (&v, to) {
+                    (ConstValue::Int(i), "int") => Some(ConstValue::Int(*i)),
+                    (ConstValue::Int(i), "float") => Some(ConstValue::Float(*i as f64)),
+                    (ConstValue::Float(f), "float") => Some(ConstValue::Float(*f)),
+                    (ConstValue::Float(f), "int") => {
+                        self.diags.push(
+                            Diagnostic::warning(codes::E0212, "this cast discards the fractional part")
+                                .with_primary(*span, "truncated towards zero")
+                                .with_note(
+                                    "a value too large for an `int` saturates rather than \
+                                     trapping, and a NaN becomes zero",
+                                ),
+                        );
+                        Some(ConstValue::Int(*f as i64))
+                    }
+                    (_, "int" | "float" | "bool" | "str") => {
+                        self.diags.push(
+                            Diagnostic::error(
+                                codes::E0212,
+                                format!("cannot cast `{}` to `{}`", v.type_name(), to),
+                            )
+                            .with_primary(*span, "`as` converts between `int` and `float`, and nothing else")
+                            .with_note(
+                                "there is no conversion between other types: a `str` is not a \
+                                 number and a number is not a `str`",
+                            ),
+                        );
+                        None
+                    }
+                    _ => {
+                        self.not_constant(*span, "a cast to a type other than `int` or `float`");
+                        None
+                    }
+                }
+            }
+
             ast::Expr::Call { span, .. } => {
                 self.not_constant(*span, "a call");
                 None
