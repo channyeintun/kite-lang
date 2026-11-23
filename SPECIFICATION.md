@@ -1136,7 +1136,9 @@ there when the next writes over it: `var e: error = nil` then
 `for i in 0..3 { e = f(i) }` is `E0302` at the write. A body whose end changes
 nothing is checked once; one that does is checked again from the join, which
 ends because the lattice has height two and a state can only get worse. What
-follows a loop is reached from its top and from every `break`.
+follows a loop is reached from its top and from every `break` — except after a
+`for { }`, which has no header to leave from and is left only by `break`, so
+`for { if err == nil { break } … }` leaves only where `err` was tested.
 
 In practice:
 

@@ -3004,8 +3004,18 @@ impl<'a> Checker<'a> {
         // body's end is not itself a way out: `for err != nil { err = g() }`
         // leaves only once `err` has been tested. Of the body's end only what
         // it declared is kept, to be reported where the function ends.
-        match (&f.header, edges.head) {
-            (ast::ForHeader::While(_), Some((mut taint, copies))) if !runs => {
+        //
+        // A `for { }` has no header at all, so it is left only by `break`:
+        // neither the state it was entered in nor its body's end is a way
+        // out, and the retry `for { if err == nil { break } … }` leaves only
+        // where `err` was tested. One with no `break` never falls out.
+        let leave = match &f.header {
+            ast::ForHeader::While(_) => edges.head.clone(),
+            ast::ForHeader::Loop => edges.exit.clone(),
+            ast::ForHeader::In { .. } => None,
+        };
+        match (&f.header, leave) {
+            (ast::ForHeader::While(_) | ast::ForHeader::Loop, Some((mut taint, copies))) if !runs => {
                 taint.resize(self.taint.len(), Taint::Clean);
                 for (i, t) in taint.iter_mut().enumerate() {
                     if self.declared_inside(i as u32, f.span) {
@@ -3022,8 +3032,8 @@ impl<'a> Checker<'a> {
                 self.copies.extend(inside);
                 self.restore_taint(taint);
             }
-            (_, head) if !runs => {
-                let (taint, copies) = head.unwrap_or(entry);
+            (_, _) if !runs => {
+                let (taint, copies) = edges.head.unwrap_or(entry);
                 self.merge_loop_taint(&taint, &copies);
                 if let Some((taint, copies)) = edges.back {
                     self.merge_loop_taint(&taint, &copies);
