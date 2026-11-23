@@ -261,6 +261,17 @@ fn checks() -> [error] {
     out.push(test.equal_strs(text.clusters("\(thumb)\(thumb)"), [thumb, thumb], "a modifier stays with its base"))
     out.push(test.equal_strs(text.clusters("\(flag)\(flag)"), [flag, flag], "two regional indicators are a flag"))
     out.push(test.equal_strs(text.clusters("x\(zwj)"), ["x\(zwj)"], "a trailing joiner stays"))
+    // GB9 and GB11: a joiner stays with what is before it, and joins across
+    // only from one emoji to another. It took whatever followed it.
+    out.push(test.equal_strs(text.clusters("a\(zwj)中文"), ["a\(zwj)", "中", "文"], "a joiner after a letter joins nothing"))
+    out.push(test.equal_strs(text.clusters("x\(zwj) y"), ["x\(zwj)", " ", "y"], "nor does it swallow a space"))
+    out.push(test.equal_int(text.cell_width("a\(zwj)中文"), 5, "so the ideographs keep their columns"))
+    let heart = text.from_code(0x2764) + text.from_code(0xFE0F)
+    let couple = text.from_code(0x1F469) + zwj + heart + zwj + text.from_code(0x1F468)
+    out.push(test.equal_strs(text.clusters("\(couple)!"), [couple, "!"], "an older symbol joins as an emoji"))
+    let tone = text.from_code(0x1F44B) + text.from_code(0x1F3FD) + zwj + text.from_code(0x1F680)
+    out.push(test.equal_strs(text.clusters(tone), [tone], "a skin tone before the joiner keeps the emoji"))
+    out.push(test.equal_strs(text.clusters("\(family)\(zwj)a"), [family + zwj, "a"], "an emoji's joiner before a letter joins nothing"))
     out.push(test.equal_int(text.clusters("").len(), 0, "nothing is no clusters"))
     out.push(test.equal_str(join(text.clusters("é日\(family)"), ""), "é日\(family)", "joined, they are the text again"))
     out.push(test.equal_int(text.cell_width("abc"), 3, "one column each"))

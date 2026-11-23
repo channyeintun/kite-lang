@@ -2843,20 +2843,32 @@ fn split_point(body: str, start: int, end: int, width: float, measure: fn(str) -
 }
 
 /// The position after the character at `i` and everything that stays with it:
-/// the marks attached to it, an emoji skin-tone modifier or tag character, and
-/// a zero-width joiner together with the character it joins on — so a family
-/// emoji, which is several people stuck together with joiners, is one cluster.
+/// the marks attached to it, an emoji skin-tone modifier or tag character, a
+/// zero-width joiner, and — when the joiner is between two emoji — the emoji
+/// after it, so a family emoji, which is several people stuck together with
+/// joiners, is one cluster.
 fn next_cluster(body: str, i: int, end: int) -> int {
     var k = i + 1
     // Two regional indicators are one flag.
     if k < end && within(body.code_at(i), 0x1F1E6, 0x1F1FF) && within(body.code_at(k), 0x1F1E6, 0x1F1FF) {
         k += 1
     }
+    // Whether the cluster so far is an emoji and what has attached to it,
+    // which is what UAX #29 rule GB11 asks before it joins across a ZWJ.
+    var emoji = pictographic(body.code_at(i))
     for k < end {
         let c = body.code_at(k)
         if c == 0x200D {
-            // The joiner takes what follows it, whatever that is.
-            k = if k + 1 < end { k + 2 } else { k + 1 }
+            // A joiner stays with what is before it (GB9), and takes what
+            // follows it only from one emoji to another (GB11). It used to
+            // take whatever followed, so "a", ZWJ, "中" was one cluster one
+            // column wide, and a space after a stray joiner was swallowed.
+            k += 1
+            if emoji && k < end && pictographic(body.code_at(k)) {
+                k += 1
+            } else {
+                break
+            }
         } else if is_combining(c) || within(c, 0x1F3FB, 0x1F3FF) || within(c, 0xE0020, 0xE007F) {
             k += 1
         } else {
@@ -2866,11 +2878,33 @@ fn next_cluster(body: str, i: int, end: int) -> int {
     return k
 }
 
+/// Extended_Pictographic, as far as GB11 needs it: the characters an emoji
+/// ZWJ sequence is made of. Listed by block rather than read from the Unicode
+/// database — the older symbol and arrow blocks emoji were drawn from, and the
+/// emoji planes from U+1F000 on, less the regional indicators and skin tones,
+/// which are not pictographs. Pictographic punctuation (‼, ⁉, ™, ©, ®) is
+/// counted too; a few non-emoji symbols in the listed blocks are as well,
+/// which matters only where one is followed by a joiner and an emoji.
+fn pictographic(c: int) -> bool {
+    if c < 0x2000 {
+        return c == 0xA9 || c == 0xAE
+    }
+    if c < 0x1F000 {
+        return c == 0x203C || c == 0x2049 || c == 0x2122 || c == 0x2139 || within(c, 0x2194, 0x21AA) ||
+        within(c, 0x231A, 0x23FF) || c == 0x24C2 || within(c, 0x25AA, 0x25FE) || within(c, 0x2600, 0x27BF) ||
+        within(c, 0x2934, 0x2935) || within(c, 0x2B05, 0x2B55) || c == 0x3030 || c == 0x303D || c == 0x3297 ||
+        c == 0x3299
+    }
+    return (within(c, 0x1F000, 0x1FAFF) && !within(c, 0x1F1E6, 0x1F1FF) && !within(c, 0x1F3FB, 0x1F3FF)) ||
+    within(c, 0x1FC00, 0x1FFFD)
+}
+
 /// `body` cut into clusters: each entry is one character with everything that
 /// stays with it — the combining marks and variation selectors after it, an
-/// emoji skin-tone modifier, a zero-width joiner and the character it joins
-/// on, and a pair of regional indicators (a flag). Joined, the entries are
-/// `body` again.
+/// emoji skin-tone modifier, a zero-width joiner, and a pair of regional
+/// indicators (a flag). A joiner between two emoji joins them into one entry,
+/// as UAX #29 has it; after anything else it stays with what is before it and
+/// joins nothing. Joined, the entries are `body` again.
 ///
 /// The same cut `wrap` makes when it must break inside a word. It is a
 /// reading of what the library knows as a mark (see `is_combining`), not the
@@ -2881,6 +2915,9 @@ fn next_cluster(body: str, i: int, end: int) -> int {
 /// let parts = clusters("ae\u{301}b")
 /// assert(parts.len() == 3, "the accent stays with its letter")
 /// assert(parts[1] == "e\u{301}", "as one entry")
+/// let family = "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}"
+/// assert(clusters(family).len() == 1, "joined emoji are one entry")
+/// assert(clusters("a\u{200D}b").len() == 2, "a joiner after a letter joins nothing")
 /// ```
 pub fn clusters(body: str) -> [str] {
     var out: [str] = []
