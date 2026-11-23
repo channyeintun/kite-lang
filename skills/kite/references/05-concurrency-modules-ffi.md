@@ -1160,8 +1160,9 @@ fn main() {
 — the drawing calls are compiler builtins.
 
 A host answers with one value when it is called, so an `extern fn` cannot
-return `(T, error)` (`E0204`) and cannot be `async` (`E0100`); the Kite function
-wrapping it makes the `error`, or waits. Where `kitec run` answers a host
+return `(T, error)` (`E0204`) and cannot be `async` (`E0100`, and nothing more:
+an `await` of its call is not refused again); the Kite function wrapping it
+makes the `error`, or waits. Where `kitec run` answers a host
 itself (`@host("fs")`, on the VM and natively), a declaration whose parameters
 are not exactly what the host reads — one too many included — or whose result
 is not what it answers traps before the call, in the same words on both:

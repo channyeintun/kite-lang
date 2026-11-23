@@ -1504,7 +1504,14 @@ impl<'a> Parser<'a> {
                             ),
                     );
                 }
-                return self.parse_extern(is_pub, host, start).map(Item::Extern);
+                let mut decl = self.parse_extern(is_pub, host, start)?;
+                // What the call gives back is unknown — a task, or what the
+                // task holds — so it is left unknown, and an `await` of it
+                // is not refused a second time for being an `int`.
+                if is_async {
+                    decl.ret = Some(RetType::Simple(Type::Error(async_at)));
+                }
+                return Some(Item::Extern(decl));
             }
             Some(Attribute::Derive(names)) => names,
             None => Vec::new(),
