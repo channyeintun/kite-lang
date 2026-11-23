@@ -1264,6 +1264,37 @@ impl<'a> Writer<'a, '_> {
                     let args = match &v.payload {
                         VariantPayload::Named(fields) => {
                             let mut args = Vec::new();
+                            // Said as the positional form says its own: an
+                            // array where an object belongs, or `{}`, reached
+                            // the first field's reader as a type error about
+                            // that field, and a key that was not there as one
+                            // about the value that was not there either.
+                            let names: Vec<&str> =
+                                fields.iter().map(|f| f.name.name.as_str()).collect();
+                            body.push(format!("        if {j}.entries({}).len() == 0 {{", held));
+                            body.push(format!(
+                                "            return _, errors.new(\"{}.{}: expected an object with the keys {}\")",
+                                decl.bare,
+                                v.name.name,
+                                names.join(", ")
+                            ));
+                            body.push("        }".to_string());
+                            for f in fields {
+                                if let Type::Path(p) = &f.ty {
+                                    if matches!(path_text(p).as_str(), "int" | "float" | "bool" | "str") {
+                                        body.push(format!(
+                                            "        if {j}.field({}, {}) == nil {{",
+                                            held,
+                                            quote(&f.name.name)
+                                        ));
+                                        body.push(format!(
+                                            "            return _, errors.new(\"{}.{}: missing\")",
+                                            v.name.name, f.name.name
+                                        ));
+                                        body.push("        }".to_string());
+                                    }
+                                }
+                            }
                             for f in fields {
                                 let where_ = format!("{}.{}", v.name.name, f.name.name);
                                 let value = self.decode_of(
