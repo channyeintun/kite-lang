@@ -548,16 +548,16 @@ pub fn wrapping_mul(a: int, b: int) -> int {
 /// the power is negative — an `int` has no reciprocals.
 ///
 /// ```kite
-/// assert(ipow(3, 4) == 81, "ipow")
-/// assert(ipow(-2, 63) == min_int(), "exactly the smallest int")
-/// assert(ipow(2, 63) == nil, "one past the largest")
-/// assert(ipow(0, 0) == 1, "anything to the zero is one")
+/// assert(checked_pow(3, 4) == 81, "checked_pow")
+/// assert(checked_pow(-2, 63) == min_int(), "exactly the smallest int")
+/// assert(checked_pow(2, 63) == nil, "one past the largest")
+/// assert(checked_pow(0, 0) == 1, "anything to the zero is one")
 /// ```
 ///
 /// By squaring, with every product checked. The square is not taken after
 /// the last bit of the power is used, so an answer that fits is never
 /// refused because a square it did not need would have overflowed.
-pub fn ipow(base: int, exponent: int) -> Option<int> {
+pub fn checked_pow(base: int, exponent: int) -> Option<int> {
     if exponent < 0 {
         return nil
     }
