@@ -215,9 +215,9 @@ and needs `use std/task`.
 | Builtin | Arity | Meaning |
 |---|---|---|
 | `task.yield()` | 0 | Suspend and let another task run. `async` only, else `E0521`. |
-| `task.park()` | 0 | Declare there is nothing to wait for but another task finishing, so a poll loop is not mistaken for progress. |
+| `task.park()` | 0 | Declare there is nothing to wait for but another task finishing, so a poll loop is not mistaken for progress. `async` only, else `E0521`. |
 | `task.wake_at(ms)` | 1 | Ask the scheduler to resume no earlier than this absolute millisecond. |
-| `task.wait_host()` | 0 | Suspend until the host hands something back. |
+| `task.wait_host()` | 0 | Suspend until the host hands something back. `async` only, else `E0521`. |
 | `task.finished(t)` | 1 | `bool` — has the task produced a value? |
 | `task.get(t)` | 1 | `T` — the task's result slot, read without suspending. |
 | `time.now()` | 0 | `int` milliseconds. Virtual under the bytecode VM and the web glue. |

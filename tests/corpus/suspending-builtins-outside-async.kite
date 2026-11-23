@@ -1,0 +1,28 @@
+// `task.park()` and `task.wait_host()` each say what a suspension is waiting
+// for, so each suspends, as `task.yield()` does: in a plain `fn` there is
+// nothing to suspend. Both used to compile there and do nothing at all.
+
+fn plain() {
+    task.park() //~ ERROR E0521
+    task.wait_host() //~ ERROR E0521
+    task.yield() //~ ERROR E0521
+}
+
+async fn in_a_closure() {
+    let f = || {
+        task.wait_host() //~ ERROR E0521
+    }
+    f()
+}
+
+async fn suspends() {
+    task.park()
+    task.wait_host()
+    task.yield()
+}
+
+async fn main() {
+    plain()
+    await in_a_closure()
+    await suspends()
+}

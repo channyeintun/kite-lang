@@ -5407,27 +5407,7 @@ impl<'a> Checker<'a> {
                 if !args.is_empty() {
                     self.arity_error("task.yield", args.len(), 0, span, None);
                 }
-                // A closure is never async, wherever it is written — the same
-                // rule, and the same reason, as for `await` in `await_expr`.
-                if let Some(closure) = self.closure_span {
-                    self.diags.push(
-                        Diagnostic::error(codes::E0521, "`task.yield` inside a closure")
-                            .with_primary(span, "this would suspend the closure")
-                            .with_secondary(closure, "a closure cannot be `async`")
-                            .with_note(
-                                "yield in the enclosing `async fn`, before or after the \
-                                 closure runs",
-                            ),
-                    );
-                    return self.lit(ExprKind::Error, TyId::ERROR, span);
-                }
-                if !self.sigs[self.fn_index].is_async {
-                    self.diags.push(
-                        Diagnostic::error(codes::E0521, "`task.yield` outside an async function")
-                            .with_primary(span, "this suspends the enclosing function")
-                            .with_secondary(self.sigs[self.fn_index].name_span, "declared here")
-                            .with_note("write `async fn` to allow it to suspend"),
-                    );
+                if !self.may_suspend("task.yield", span) {
                     return self.lit(ExprKind::Error, TyId::ERROR, span);
                 }
                 hir::Expr { kind: ExprKind::Yield, ty: TyId::UNIT, span }
@@ -5532,9 +5512,15 @@ impl<'a> Checker<'a> {
                 }
             }
 
+            // Each says what a suspension is waiting for, so each suspends:
+            // in a plain `fn` there is nothing to suspend, and both compiled
+            // there and did nothing at all.
             BuiltinFn::TaskPark | BuiltinFn::TaskWaitHost => {
                 if !args.is_empty() {
                     self.arity_error(b.path(), args.len(), 0, span, None);
+                }
+                if !self.may_suspend(b.path(), span) {
+                    return self.lit(ExprKind::Error, TyId::ERROR, span);
                 }
                 let builtin = if b == BuiltinFn::TaskPark {
                     Builtin::TaskPark
@@ -12846,6 +12832,36 @@ impl<'a> Checker<'a> {
     /// Permanent rather than pending: a builtin has no body to take a
     /// reference to, and several of them choose what to do from the type of
     /// the argument they are given — so there is no one function to hand over.
+    /// Whether a builtin that suspends — `task.yield`, `task.park`,
+    /// `task.wait_host` — may be written here, reporting `E0521` if not.
+    ///
+    /// A closure is never async, wherever it is written — the same rule,
+    /// and the same reason, as for `await` in `await_expr`.
+    fn may_suspend(&mut self, what: &str, span: Span) -> bool {
+        if let Some(closure) = self.closure_span {
+            self.diags.push(
+                Diagnostic::error(codes::E0521, format!("`{}` inside a closure", what))
+                    .with_primary(span, "this would suspend the closure")
+                    .with_secondary(closure, "a closure cannot be `async`")
+                    .with_note(format!(
+                        "call `{}` in the enclosing `async fn`, before or after the closure runs",
+                        what
+                    )),
+            );
+            return false;
+        }
+        if !self.sigs[self.fn_index].is_async {
+            self.diags.push(
+                Diagnostic::error(codes::E0521, format!("`{}` outside an async function", what))
+                    .with_primary(span, "this suspends the enclosing function")
+                    .with_secondary(self.sigs[self.fn_index].name_span, "declared here")
+                    .with_note("write `async fn` to allow it to suspend"),
+            );
+            return false;
+        }
+        true
+    }
+
     fn builtin_not_a_value(&mut self, span: Span) {
         self.diags.push(
             Diagnostic::error(codes::E0200, "a builtin is not a value")
