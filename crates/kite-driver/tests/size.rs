@@ -129,6 +129,35 @@ fn a_dom_island_stays_under_thirty_two_kilobytes() {
     assert!(size < 32768, "the island is {} bytes, budget 32768", size);
 }
 
+/// Importing a module costs nothing until something in it is called: a
+/// `hello world` with any one standard module imported is `hello world`'s
+/// size to the byte.
+///
+/// Dead-code elimination removed an unused module's functions, and its types
+/// stayed: every struct and enum the checker knew of was declared, so `use
+/// std/text` cost 550 bytes and `use std/http` 252 in a program that called
+/// neither. So did a trait's dispatchers when nothing implements the trait —
+/// `std/json`'s `Encode`, and the prelude's own in every program — and the
+/// signature of each of the thirty-one host imports, declared or not. The
+/// Wasm backend declares only what the code it emits can name now.
+#[test]
+fn importing_a_module_costs_nothing_until_it_is_called() {
+    let hello = size_of("hello", "fn main() {\n  io.print(\"hello\")\n}\n");
+    let std = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../std");
+    let mut modules: Vec<String> = std::fs::read_dir(&std)
+        .expect("read std/")
+        .filter_map(|e| e.ok()?.file_name().to_str()?.strip_suffix(".kite").map(String::from))
+        .filter(|m| m != "prelude")
+        .collect();
+    modules.sort();
+    assert!(modules.len() > 10, "found only {:?}", modules);
+    for m in &modules {
+        let src = format!("use std/{}\n\nfn main() {{\n  io.print(\"hello\")\n}}\n", m);
+        let size = size_of(m, &src);
+        assert_eq!(size, hello, "`use std/{}` costs {} bytes", m, size as isize - hello as isize);
+    }
+}
+
 /// Importing `std/dom` does not drag the rest of the library in with it.
 ///
 /// The specific regression this guards. `std/js` and `std/dom` are ordinary

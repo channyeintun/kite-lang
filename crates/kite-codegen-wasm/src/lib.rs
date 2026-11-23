@@ -233,8 +233,6 @@ const IMPORTS: [(&str, &[ValType], &[ValType]); 31] = [
     ),
 ];
 
-const IMPORT_COUNT: u32 = IMPORTS.len() as u32;
-
 /// How many scalars one `array.new_fixed` in a string literal may carry.
 ///
 /// Held well under V8's 10,000 so the ceiling is the compiler's rather than
@@ -300,6 +298,11 @@ impl Hosts {
 
     fn declared(&self, i: u32) -> bool {
         self.declared[i as usize]
+    }
+
+    /// How many of the fixed imports the module declares.
+    fn declared_count(&self) -> u32 {
+        self.declared.iter().filter(|d| **d).count() as u32
     }
 
     /// The function index of a host call. A call to an import that was not
@@ -573,7 +576,9 @@ pub struct HostImport {
 /// declarations work — which they must, because every Kite aggregate is a GC
 /// reference and recursion needs no annotation from the user.
 struct TypeLayout {
-    struct_base: u32,
+    /// Each struct's record, by struct id; `u32::MAX` for one no code holds
+    /// (see [`live_nominals`]).
+    struct_index: Vec<u32>,
     /// Each enum contributes one base record plus one per variant, so its
     /// types are found through this offset table rather than by arithmetic.
     enum_base: Vec<u32>,
@@ -660,7 +665,7 @@ impl TypeLayout {
     }
 
     fn struct_type(&self, id: kite_hir::StructId) -> u32 {
-        self.struct_base + id.0
+        self.struct_index[id.0 as usize]
     }
 
     /// The common supertype for an enum. Every variant record extends it, so
@@ -672,7 +677,10 @@ impl TypeLayout {
     /// The record for one variant, which carries the tag plus that variant's
     /// payload.
     fn variant_type(&self, id: kite_hir::EnumId, variant: u32) -> u32 {
-        self.enum_base[id.index()] + 1 + variant
+        match self.enum_base[id.index()] {
+            u32::MAX => u32::MAX,
+            base => base + 1 + variant,
+        }
     }
 
     fn closure_type(&self, ty: TyId) -> Option<u32> {
@@ -704,6 +712,91 @@ impl TypeLayout {
     fn map_layout(&self, ty: TyId) -> Option<MapLayout> {
         self.map_record.get(&ty).copied()
     }
+}
+
+/// Which structs and enums the module declares a type for: those a value the
+/// code handles can be, or can hold, by struct id and by enum id.
+///
+/// The checker's arena holds every nominal type of every module the program
+/// imports, used or not, and generic templates beside their specialisations.
+/// All of them used to be declared, so `use std/text` cost about 550 bytes in
+/// a program that called nothing in it. A type is needed when a local, a
+/// parameter, a result, a host function's signature, a placeholder constant,
+/// a vtable or its trait's methods name it — every index the code asks for comes from one of
+/// those — and then everything it holds is needed too, through fields,
+/// payloads and the element types of what it holds.
+///
+/// An index asked for a type this leaves out is `u32::MAX`, which no module
+/// validates with: a mistake here is E0900 at the build, not a wrong program.
+fn live_nominals(program: &mir::Program, types: &Types) -> (Vec<bool>, Vec<bool>) {
+    let mut structs = vec![false; types.struct_count()];
+    let mut enums = vec![false; types.enum_count()];
+    let mut seen: std::collections::HashSet<TyId> = std::collections::HashSet::new();
+    let mut work: Vec<TyId> = Vec::new();
+    for f in &program.fns {
+        work.push(f.ret);
+        work.extend(f.locals.iter().map(|l| l.ty));
+        for b in &f.blocks {
+            let operands = b.stmts.iter().flat_map(|s| s.operands()).chain(b.term.operand());
+            for o in operands {
+                if let mir::Operand::Default(ty) = o {
+                    work.push(*ty);
+                }
+            }
+        }
+    }
+    for e in &program.externs {
+        work.push(e.ret);
+        work.extend(e.params.iter().copied());
+    }
+    // A dispatcher is declared with its trait method's signature, and only a
+    // trait something implements has one.
+    for v in program.vtables.iter().filter(|v| !v.entries.is_empty()) {
+        for m in &types.trait_def(v.trait_id).methods {
+            work.push(m.ret);
+            work.extend(m.params.iter().copied());
+        }
+    }
+    for entry in program.vtables.iter().flat_map(|v| v.entries.iter()) {
+        match entry.tag {
+            kite_hir::TypeTag::Struct(s) => {
+                structs[s.index()] = true;
+                work.extend(types.struct_def(s).fields.iter().map(|f| f.ty));
+            }
+            kite_hir::TypeTag::Enum(e) => {
+                enums[e.index()] = true;
+                for v in &types.enum_def(e).variants {
+                    work.extend(v.fields.iter().map(|f| f.ty));
+                }
+            }
+        }
+    }
+    while let Some(ty) = work.pop() {
+        if !seen.insert(ty) {
+            continue;
+        }
+        match types.kind(ty) {
+            TyKind::Struct(s) => {
+                structs[s.index()] = true;
+                work.extend(types.struct_def(*s).fields.iter().map(|f| f.ty));
+            }
+            TyKind::Enum(e) => {
+                enums[e.index()] = true;
+                for v in &types.enum_def(*e).variants {
+                    work.extend(v.fields.iter().map(|f| f.ty));
+                }
+            }
+            TyKind::Slice(t) | TyKind::Optional(t) | TyKind::Fallible(t) => work.push(*t),
+            TyKind::Map(k, v) => work.extend([*k, *v]),
+            TyKind::Tuple(ts) => work.extend(ts.iter().copied()),
+            TyKind::Fn { params, ret } => {
+                work.extend(params.iter().copied());
+                work.push(*ret);
+            }
+            _ => {}
+        }
+    }
+    (structs, enums)
 }
 
 /// Every map shape a program mentions, in a stable order.
@@ -760,7 +853,7 @@ fn pair_values(program: &mir::Program, types: &Types) -> Vec<TyId> {
 }
 
 /// Every slice element type a program mentions, in a stable order.
-fn slice_elements(program: &mir::Program, types: &Types) -> Vec<TyId> {
+fn slice_elements(program: &mir::Program, types: &Types, live: &(Vec<bool>, Vec<bool>)) -> Vec<TyId> {
     let mut seen = Vec::new();
     let note = |ty: TyId, seen: &mut Vec<TyId>| {
         if let TyKind::Slice(elem) = types.kind(ty) {
@@ -775,12 +868,12 @@ fn slice_elements(program: &mir::Program, types: &Types) -> Vec<TyId> {
             note(l.ty, &mut seen);
         }
     }
-    for i in 0..types.struct_count() {
+    for i in (0..types.struct_count()).filter(|&i| live.0[i]) {
         for f in &types.struct_def(kite_hir::StructId(i as u32)).fields {
             note(f.ty, &mut seen);
         }
     }
-    for i in 0..types.enum_count() {
+    for i in (0..types.enum_count()).filter(|&i| live.1[i]) {
         for v in &types.enum_def(kite_hir::EnumId(i as u32)).variants {
             for f in &v.fields {
                 note(f.ty, &mut seen);
@@ -791,7 +884,7 @@ fn slice_elements(program: &mir::Program, types: &Types) -> Vec<TyId> {
 }
 
 /// Every optional payload type a program mentions, in a stable order.
-fn option_payloads(program: &mir::Program, types: &Types) -> Vec<TyId> {
+fn option_payloads(program: &mir::Program, types: &Types, live: &(Vec<bool>, Vec<bool>)) -> Vec<TyId> {
     let mut seen = Vec::new();
     let note = |ty: TyId, seen: &mut Vec<TyId>| {
         if let TyKind::Optional(inner) = types.kind(ty) {
@@ -807,12 +900,12 @@ fn option_payloads(program: &mir::Program, types: &Types) -> Vec<TyId> {
         }
     }
     // A struct or variant field may be optional even when no local is.
-    for i in 0..types.struct_count() {
+    for i in (0..types.struct_count()).filter(|&i| live.0[i]) {
         for f in &types.struct_def(kite_hir::StructId(i as u32)).fields {
             note(f.ty, &mut seen);
         }
     }
-    for i in 0..types.enum_count() {
+    for i in (0..types.enum_count()).filter(|&i| live.1[i]) {
         for v in &types.enum_def(kite_hir::EnumId(i as u32)).variants {
             for f in &v.fields {
                 note(f.ty, &mut seen);
@@ -896,12 +989,27 @@ pub fn compile_with(program: &mir::Program, types: &Types, debug_info: bool) -> 
     fn_types.sort_by_key(|t| t.0);
     envs.sort_by_key(|(f, _)| *f);
 
-    let sig_base = IMPORT_COUNT;
+    // Which host functions the module declares decides where everything
+    // else starts, in the type index space as in the function one: an import's
+    // signature is declared only when the import is, and they come first.
+    let hosts = used_imports(program, types);
+    let sig_base = hosts.declared_count();
     let object_record = sig_base + fn_types.len() as u32;
-    let struct_base = object_record + 1;
-    let mut next = struct_base + types.struct_count() as u32;
+    // Only the structs and enums the code can hold a value of; see
+    // `live_nominals`.
+    let live = live_nominals(program, types);
+    let mut next = object_record + 1;
+    let mut struct_index = Vec::with_capacity(types.struct_count());
+    for &held in &live.0 {
+        struct_index.push(if held { next } else { u32::MAX });
+        next += u32::from(held);
+    }
     let mut enum_base = Vec::with_capacity(types.enum_count());
-    for i in 0..types.enum_count() {
+    for (i, &held) in live.1.iter().enumerate() {
+        if !held {
+            enum_base.push(u32::MAX);
+            continue;
+        }
         enum_base.push(next);
         next += 1 + types.enum_def(kite_hir::EnumId(i as u32)).variants.len() as u32;
     }
@@ -917,7 +1025,7 @@ pub fn compile_with(program: &mir::Program, types: &Types, debug_info: bool) -> 
             .collect(),
         closure_record: std::collections::HashMap::new(),
         env_record: std::collections::HashMap::new(),
-        struct_base,
+        struct_index,
         enum_base,
         option_box: std::collections::HashMap::new(),
         slice_array: std::collections::HashMap::new(),
@@ -929,12 +1037,12 @@ pub fn compile_with(program: &mir::Program, types: &Types, debug_info: bool) -> 
         map_record: std::collections::HashMap::new(),
         eq_cell: 0,
     };
-    let payloads = option_payloads(program, types);
+    let payloads = option_payloads(program, types, &live);
     for p in &payloads {
         layout.option_box.insert(*p, next);
         next += 1;
     }
-    let elements = slice_elements(program, types);
+    let elements = slice_elements(program, types, &live);
     for e in &elements {
         layout.slice_array.insert(*e, next);
         layout.slice_record.insert(*e, next + 1);
@@ -987,14 +1095,19 @@ pub fn compile_with(program: &mir::Program, types: &Types, debug_info: bool) -> 
         layout.eq_cell = next;
         next += 1;
     }
-    let aggregate_count = next - IMPORT_COUNT;
+    let aggregate_count = next - sig_base;
 
     // ---- types -------------------------------------------------------------
+    // The signature of each import the module declares, at the index
+    // `Hosts::at` gives it as a function. Every one of the thirty-one used to
+    // be declared, which was about a hundred bytes of every module.
     let mut type_section = TypeSection::new();
-    for (_, params, results) in &IMPORTS {
-        type_section
-            .ty()
-            .function(params.iter().copied(), results.iter().copied());
+    for (i, (_, params, results)) in IMPORTS.iter().enumerate() {
+        if hosts.declared(i as u32) {
+            type_section
+                .ty()
+                .function(params.iter().copied(), results.iter().copied());
+        }
     }
 
     // Every aggregate goes in one `rec` group: a field may name a type declared
@@ -1023,7 +1136,7 @@ pub fn compile_with(program: &mir::Program, types: &Types, debug_info: bool) -> 
         // than a conditional index space.
         group.push(struct_subtype(vec![tag_field()], None, false));
 
-        for i in 0..types.struct_count() {
+        for i in (0..types.struct_count()).filter(|&i| live.0[i]) {
             let sid = kite_hir::StructId(i as u32);
             let def = types.struct_def(sid);
             let mut fields: Vec<FieldType> = Vec::with_capacity(def.fields.len() + 1);
@@ -1045,7 +1158,7 @@ pub fn compile_with(program: &mir::Program, types: &Types, debug_info: bool) -> 
         // An enum becomes a base record holding just the tag, plus one subtype
         // per variant carrying its payload. A `match` reads the tag, and a
         // payload read casts to the variant it has already established.
-        for i in 0..types.enum_count() {
+        for i in (0..types.enum_count()).filter(|&i| live.1[i]) {
             let eid = kite_hir::EnumId(i as u32);
             let base = layout.enum_base_type(eid);
             let tagged = layout.enum_shift(eid) == 1;
@@ -1306,7 +1419,7 @@ pub fn compile_with(program: &mir::Program, types: &Types, debug_info: bool) -> 
     // would collide function types with every struct after the first.
     // Runtime signatures follow the aggregate group; source-level functions
     // follow those.
-    let runtime_type_base = IMPORT_COUNT + aggregate_count;
+    let runtime_type_base = sig_base + aggregate_count;
     // Which string-runtime functions the module contains decides how many type
     // indices it uses, so it has to be settled before any of them is handed
     // out. `eq::collect` is consulted because a generated deep-equality
@@ -1318,8 +1431,13 @@ pub fn compile_with(program: &mir::Program, types: &Types, debug_info: bool) -> 
     let fn_type_base = runtime_type_base + runtime_count;
     // Dispatchers: one per trait method, taking the receiver as a reference to
     // the tagged root. They live above the user functions in the index space.
+    // A trait nothing implements has none: no value can be a `dyn` of it, and
+    // a call through one is `unreachable` (see `CallVirtual`). `std/json`'s
+    // `Encode` is such a trait in a program that implements it nowhere, and
+    // its dispatcher, and the `Value` enum its signature names, were in every
+    // program that imported the module.
     let mut dispatchers: Vec<Dispatcher> = Vec::new();
-    for v in &program.vtables {
+    for v in program.vtables.iter().filter(|v| !v.entries.is_empty()) {
         let def = types.trait_def(v.trait_id);
         for (m, method) in def.methods.iter().enumerate() {
             let mut params = vec![ValType::Ref(RefType {
@@ -1341,9 +1459,6 @@ pub fn compile_with(program: &mir::Program, types: &Types, debug_info: bool) -> 
             });
         }
     }
-    // Which host functions the module declares decides where its own functions
-    // start, so this has to be settled before any index is handed out.
-    let hosts = used_imports(program, types);
     let string_runtime = strings::StringRuntime::new(hosts.base, string_needed);
     let fn_base = hosts.base + runtime_count;
     let dispatch_base = fn_base + program.fns.len() as u32;
@@ -1507,7 +1622,7 @@ pub fn compile_with(program: &mir::Program, types: &Types, debug_info: bool) -> 
     let mut imports = ImportSection::new();
     for (i, import) in IMPORTS.iter().enumerate() {
         if hosts.declared(i as u32) {
-            imports.import("kite", import.0, EntityType::Function(i as u32));
+            imports.import("kite", import.0, EntityType::Function(hosts.at(i as u32)));
         }
     }
     // One fixed page is used only while a string crosses the JavaScript
@@ -2974,8 +3089,8 @@ impl<'a> Emitter<'a> {
                         func.instruction(&Instruction::Call(self.dispatch_base + i as u32));
                         return self.dispatchers[i].ret != TyId::UNIT;
                     }
-                    // A trait with no implementers has no dispatcher; the
-                    // checker has already reported the call site.
+                    // A trait with no implementers has no dispatcher. No
+                    // value can be a `dyn` of it, so this is never reached.
                     None => {
                         func.instruction(&Instruction::Unreachable);
                         return false;

@@ -467,6 +467,11 @@ expression trees:
    program's own `pub` functions, a closure's lifted body or a vtable.
    Reachability is exact, because a call names its target by index. This is
    what keeps the prelude, which is in every program, out of a `hello world`.
+   Types are not pruned here: the arena keeps every declaration. The Wasm
+   backend declares only the structs and enums a local, a signature, a vtable
+   or a field of one of those can name, a dispatcher only for a trait
+   something implements, and an import's signature only beside the import —
+   so importing a module and calling nothing in it costs no bytes.
 3. **Equality specialisation** — `==` inside a generic function was checked as
    a structural comparison, because nothing was known about the operand. Once
    specialisation has made it concrete, a primitive gets the primitive's own

@@ -1273,6 +1273,36 @@ fn a_long_literal_of_constants_is_built_by_functions_of_bounded_size() {
     assert!(same.size() * 3 < distinct.size(), "{} bytes against {}", same.size(), distinct.size());
 }
 
+/// A type no code can hold a value of is not declared, nor is a trait's
+/// dispatcher when nothing implements it, nor an import's signature when the
+/// import is not declared. A type that only another type holds still is, and
+/// a type a vtable names. Each of these used to be in every module.
+#[test]
+fn only_what_the_code_can_name_is_declared() {
+    let hello = "fn main() {\n  io.print(\"hi\")\n}\n";
+    let base = valid(hello).size();
+    let unused = "struct Unused {\n  a: int\n  b: [str]\n}\n\n\
+        enum Also {\n  One(Unused)\n  Two\n}\n\n\
+        trait Lonely {\n  fn alone(self) -> Also\n}\n\n";
+    assert_eq!(valid(&format!("{}{}", unused, hello)).size(), base);
+    // The import signatures are the types ahead of the `rec` group: one per
+    // function imported, where there were thirty-one.
+    let text = wasmprinter::print_bytes(&valid(hello).module.bytes).unwrap();
+    let ahead = text.lines().take_while(|l| !l.contains("(rec")).filter(|l| l.contains("(type (;"));
+    let imported = text.lines().filter(|l| l.contains("(import \"kite\"") && l.contains("(func"));
+    assert_eq!(ahead.count(), imported.count(), "{}", text);
+    // Held only through another type's field, and through a vtable.
+    let held = valid(
+        "struct Inner {\n  n: int\n}\n\nstruct Outer {\n  inner: [Inner]\n}\n\n\
+         trait Area {\n  fn area(self) -> int\n}\n\nstruct Sq {\n  s: int\n}\n\n\
+         impl Area for Sq {\n  fn area(self) -> int {\n    return self.s * self.s\n  }\n}\n\n\
+         fn total(xs: [dyn Area]) -> int {\n  var t = 0\n  for x in xs {\n    t = t + x.area()\n  }\n  return t\n}\n\n\
+         fn main() {\n  let o = Outer{ inner: [Inner{ n: 1 }] }\n  io.print(o.inner[0].n)\n\
+         \x20 io.print(total([Sq{ s: 3 }]))\n}\n",
+    );
+    assert!(held.size() > base);
+}
+
 /// A stack frame gets a name, which is the half of §16 the map cannot do.
 #[test]
 fn the_module_carries_a_name_section() {
