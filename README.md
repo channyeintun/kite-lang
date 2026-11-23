@@ -101,7 +101,7 @@ the platform table, and how to remove it.
 kitec run     file.kite          compile and run
 kitec run     file.kite --native run as machine code, under the JIT
 kitec check   file.kite          check only
-kitec test    file.kite          run every `test_` function
+kitec test    file.kite          run every `test_` function and doc example
 kitec fmt     file.kite          lay it out the one way
 kitec doc     file.kite          the reference, from the doc comments
 kitec fix     file.kite          apply every machine-applicable suggestion
@@ -125,7 +125,7 @@ handling with `check`.
 **Concurrency.** `async fn` compiles to a state machine in MIR — a starter and
 a resume function — so every backend sees ordinary code and none of them knows
 concurrency exists. `std/task` supplies `both`, `all`, `race`, `sleep`,
-`timeout`, `scope` and `parallel`, all written in Kite over seven compiler
+`timeout`, `scope`, `map` and `parallel`, all written in Kite over seven compiler
 primitives.
 
 ```kite
@@ -272,7 +272,7 @@ kitec build examples/hello.kite --emit wasm --out dist
 
 **A Kite program goes in a page.** `examples/page` is a table of five thousand
 rows. Every keystroke in the filter walks all of them, sorts what survives and
-writes only the cells that changed — in about **3 ms**, from a **28 KB**
+writes only the cells that changed — in about **3 ms**, from a **29 KB**
 module. The markup is HTML, the
 hover and the alignment and the colour of a status are CSS, and Kite holds the
 rows, does the work and writes text and class names. Finding an element and
