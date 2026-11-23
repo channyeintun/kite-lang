@@ -1,0 +1,31 @@
+// A generic block whose methods compare its `K` is wrong for a `K` that
+// cannot be compared, and that is one cause however many calls reach it:
+// it is reported at the first, with the others labelled on it. A function's
+// own parameter is chosen by each call, so each such call is reported.
+fn same<T>(a: T, b: T) -> bool {
+    return a == b
+}
+
+struct W<K> {
+    var m: { K: int }
+}
+
+impl<K> W<K> {
+    fn new() -> W<K> {
+        return W{ m: { } }
+    }
+
+    fn put(var self, k: K) {
+        self.m[k] = 1
+    }
+}
+
+fn main() {
+    var w: W<fn() -> int> = W.new() //~ ERROR E0201
+    let f = || 1
+    w.put(f)
+    w.put(f)
+    io.print(w.m.len())
+    io.print(same(f, f)) //~ ERROR E0201
+    io.print(same(f, f)) //~ ERROR E0201
+}

@@ -803,7 +803,7 @@ pub fn check_recording(
         }
     }
     fns.append(&mut lifted);
-    check_compared_params(&mut facts, resolved, &sigs, &types, diags);
+    check_compared_params(&mut facts, resolved, &sigs, &impl_generics, &types, diags);
 
     let vtables = build_vtables(resolved, &type_ids, &types);
 
@@ -15972,6 +15972,7 @@ fn check_compared_params(
     facts: &mut GenericFacts,
     resolved: &ResolveMap,
     sigs: &[Signature],
+    impl_generics: &std::collections::HashMap<usize, Vec<GenericDef>>,
     types: &Types,
     diags: &mut DiagBag,
 ) {
@@ -16014,7 +16015,26 @@ fn check_compared_params(
     // A default method's body is checked once per block that takes it, and
     // each copy records the calls it makes: the same call, at the same place,
     // choosing the same type, is one mistake however many copies made it.
-    let mut said: std::collections::HashSet<(Span, String)> = std::collections::HashSet::new();
+    //
+    // More than that, a block's parameter given one type is one cause however
+    // many calls reach it: `W<fn() -> int>` makes every method of `impl<K>
+    // W<K>` that compares `K` wrong, and was reported at `W.new()` and again
+    // at each `w.put(f)`, though none of those calls chose `K` — the
+    // receiver's type did. A block's parameter is known by where it is
+    // declared, which its methods share; the first call says it, and the
+    // others in its file are labelled on it. A function's own parameter is
+    // chosen afresh by each call, so each call that chooses badly is a
+    // mistake of its own.
+    struct Report {
+        callee: usize,
+        param: usize,
+        ty: TyId,
+        span: Span,
+        at: Span,
+        others: Vec<(Span, usize)>,
+    }
+    let mut reports: Vec<Report> = Vec::new();
+    let mut by_cause: std::collections::HashMap<(Span, String), usize> = std::collections::HashMap::new();
     for call in &facts.calls {
         for (i, t) in call.targs.iter().enumerate() {
             let Some(at) = facts.compared[call.callee].get(i).copied().flatten() else {
@@ -16023,34 +16043,69 @@ fn check_compared_params(
             if types.is_poisoned(*t) || equatable_given_params(types, *t, &mut Vec::new()) {
                 continue;
             }
-            let name = last_segment(&resolved.fns[call.callee].name).to_string();
-            let param = sigs[call.callee].generics.get(i).map(|g| g.name.clone()).unwrap_or_default();
-            let message = format!(
-                "`{}` compares its `{}` with `==`, and {} cannot be compared",
-                name,
-                param,
-                types.with_article(*t)
-            );
-            if !said.insert((call.span, message.clone())) {
-                continue;
-            }
-            let mut d = Diagnostic::error(codes::E0201, message)
-            .with_primary(call.span, format!("`{}` is {} here", param, types.with_article(*t)))
-            .with_secondary(at, "compared here");
-            d = if types.mentions_host_value(*t) {
-                d.with_note(
-                    "a host object has no structure Kite can see, so there is nothing to \
-                     compare field by field; `js.same(a, b)` asks the host whether two are \
-                     the same object",
-                )
-            } else {
-                d.with_note(
-                    "equality is structural, so every field must itself be equatable; \
-                     functions and trait objects are not",
-                )
+            let block = resolved.fns[call.callee]
+                .owner
+                .map_or(0, |o| impl_generics.get(&o.block_index).map_or(0, |g| g.len()));
+            let declared = match sigs[call.callee].generics.get(i) {
+                Some(g) if i < block => g.span,
+                _ => call.span,
             };
-            diags.push(d);
+            let key = (declared, format!("{}#{}", i, types.name(*t)));
+            match by_cause.get(&key) {
+                Some(&r) => {
+                    let r = &mut reports[r];
+                    if r.span == call.span || r.others.iter().any(|(s, _)| *s == call.span) {
+                        continue;
+                    }
+                    let earlier = (call.span.file.0, call.span.start) < (r.span.file.0, r.span.start);
+                    if earlier {
+                        let old = (r.span, r.callee);
+                        (r.callee, r.param, r.ty, r.span, r.at) = (call.callee, i, *t, call.span, at);
+                        r.others.push(old);
+                    } else {
+                        r.others.push((call.span, call.callee));
+                    }
+                }
+                None => {
+                    by_cause.insert(key, reports.len());
+                    reports.push(Report { callee: call.callee, param: i, ty: *t, span: call.span, at, others: Vec::new() });
+                }
+            }
         }
+    }
+    for r in reports {
+        let name = last_segment(&resolved.fns[r.callee].name).to_string();
+        let param = sigs[r.callee].generics.get(r.param).map(|g| g.name.clone()).unwrap_or_default();
+        let message = format!(
+            "`{}` compares its `{}` with `==`, and {} cannot be compared",
+            name,
+            param,
+            types.with_article(r.ty)
+        );
+        let mut d = Diagnostic::error(codes::E0201, message)
+            .with_primary(r.span, format!("`{}` is {} here", param, types.with_article(r.ty)))
+            .with_secondary(r.at, "compared here");
+        let mut others = r.others;
+        others.sort_by_key(|(s, _)| (s.file.0, s.start));
+        for (s, callee) in others {
+            if s.file == r.span.file {
+                let by = last_segment(&resolved.fns[callee].name);
+                d = d.with_secondary(s, format!("and given to `{}` here", by));
+            }
+        }
+        d = if types.mentions_host_value(r.ty) {
+            d.with_note(
+                "a host object has no structure Kite can see, so there is nothing to \
+                 compare field by field; `js.same(a, b)` asks the host whether two are \
+                 the same object",
+            )
+        } else {
+            d.with_note(
+                "equality is structural, so every field must itself be equatable; \
+                 functions and trait objects are not",
+            )
+        };
+        diags.push(d);
     }
 }
 

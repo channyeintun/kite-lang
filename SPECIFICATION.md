@@ -796,7 +796,11 @@ implementations compares, and a generic type standing for a trait, for a bound
 or as a `dyn`, to what its implementation's methods compare of its own
 arguments. A call the compiler writes counts as one the program writes:
 `io.print(b)` and `"\(b)"` call `b`'s `show`, and a value becoming an `error`
-calls its `message`.
+calls its `message`. An `impl` block's parameter given one such type is one
+mistake however many calls reach it — every method of `impl<K> W<K>` that
+compares `K` shares that `K` — so it is reported once, at the first call, with
+the others labelled; a function's own parameter is chosen by each call, so
+each call that chooses one of the three is reported.
 
 Floating-point `==` follows IEEE-754, so `nan != nan`. The compiler emits a
 warning when both operands of `==` are statically known to be floats and neither

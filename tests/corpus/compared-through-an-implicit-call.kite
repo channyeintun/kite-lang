@@ -63,7 +63,9 @@ fn main() {
     let f = |x: int| -> int { return x }
     io.print(Box{ v: d }) //~ ERROR E0201
     io.print(Box{ v: f }) //~ ERROR E0201
-    let s = "\(Box{ v: f })" //~ ERROR E0201
+    // The same `T` given the same type is one cause: labelled on the report
+    // above, not said again.
+    let s = "\(Box{ v: f })"
     io.print(s)
     io.print(Box{ v: 3 })
     io.print("\(Box{ v: "x" })")
