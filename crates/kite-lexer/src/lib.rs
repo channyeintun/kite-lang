@@ -71,6 +71,7 @@ pub fn tokenize_with_comments(
         pending_newline: false,
         nesting: 0,
         nesting_reported: false,
+        ran_to_end: false,
         diags,
     }
     .run_with_comments()
@@ -111,6 +112,7 @@ pub fn tokenize_range(
         pending_newline: false,
         nesting: strings,
         nesting_reported: strings > 0,
+        ran_to_end: false,
         diags,
     }
     .run()
@@ -142,6 +144,11 @@ struct Lexer<'a> {
     /// the question; a file built to hit the limit would otherwise hit it on
     /// every quote for the rest of the line.
     nesting_reported: bool,
+    /// Whether a block string has already been reported running to the end
+    /// of the input. A string around it — one whose hole it is in — ran to
+    /// the end because it did, so the first report, the innermost, is the
+    /// one mistake.
+    ran_to_end: bool,
     diags: &'a mut DiagBag,
 }
 
@@ -657,6 +664,9 @@ impl<'a> Lexer<'a> {
     /// of the file as its text, so this is the one error the file has: the
     /// parser does not go on to report the braces it swallowed as unclosed.
     fn unterminated_block_string(&mut self, start: usize) {
+        if std::mem::replace(&mut self.ran_to_end, true) {
+            return;
+        }
         let end = (start + 3).min(self.limit);
         let span = Span::new(self.file, start as u32, end as u32);
         self.diags.push(

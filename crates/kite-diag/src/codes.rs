@@ -63,7 +63,13 @@ codes! {
     // ---- lexical ----------------------------------------------------------
     E0001 = "E0001", "unterminated string literal",
         "A string literal was opened but never closed. Kite strings may not \
-         span lines unless written as a triple-quoted block string.";
+         span lines unless written as a triple-quoted block string.\n\n\
+         An unclosed `\"` string ends at the end of its line, and an unclosed \
+         `\"\"\"` at the end of the file, so whatever came after the opening \
+         quote was read as text — a `)` closing a call, the braces closing a \
+         function. That is this one error: nothing it swallowed is reported \
+         missing as well. When strings are nested in holes, the innermost one \
+         that ran to the end of the file is the one reported.";
 
     E0002 = "E0002", "invalid character in source",
         "The lexer found a byte that cannot begin any Kite token.";

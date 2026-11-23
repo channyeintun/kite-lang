@@ -1031,6 +1031,27 @@ fn an_open_block_string_at_the_end_is_one_error() {
     assert_eq!(p.codes(), vec!["E0101"], "{}", p.render());
 }
 
+/// What an unterminated string swallowed is that one mistake too: the `)`
+/// after `io.print("""abc` (it was "expected `)`, found end of file"), the
+/// `)` a `"` string's line ended with, and a hole's `)` taken by a string in
+/// it. Whether the file ends in a line break does not matter: the parser asks
+/// the lexer, where it used to guess from the last token's text, and a
+/// `"""` at the very end looked closed.
+#[test]
+fn what_an_unterminated_string_swallowed_is_not_reported_again() {
+    for src in [
+        "fn main() {\n    io.print(\"\"\"abc\n}\n",
+        "fn main() {\n    io.print(\"abc\n}\n",
+        "fn main() {\n    let y = (1, \"abc\n    io.print(y)\n}\n",
+        "fn main() {\n    io.print(\"a \\(f(\"x) b\")\n}\n",
+        "fn main() {\n    let s = \"\"\"\n        x \\(g(\"\"\"",
+        "fn main() {\n    let s = \"\"\"\n        x \\(g(\"\"\"\n",
+    ] {
+        let p = parse_src(src);
+        assert_eq!(p.codes(), vec!["E0001"], "{:?}\n{}", src, p.render());
+    }
+}
+
 /// Code that is not indented says nothing about where a brace went missing,
 /// and is read as it always was — a `fn` at the margin of an unindented
 /// `impl` is a method.

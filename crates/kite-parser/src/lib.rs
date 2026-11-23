@@ -313,6 +313,14 @@ struct Parser<'a> {
     /// Whether a ceiling has already been reported, so one pathological file
     /// yields one diagnostic rather than one per level on the way out.
     depth_reported: bool,
+    /// Where the string literals the lexer reported unterminated start (its
+    /// `E0001`), and whether one of them is a block string, which read the
+    /// rest of the file as its text. Both are the lexer's knowledge, not a
+    /// guess from the text: what such a string swallowed — a `)` at the end
+    /// of its line, every closer to the end of the file — is that one
+    /// mistake, and the parser does not report it missing a second time.
+    unterminated: std::rc::Rc<[u32]>,
+    swallowed_the_rest: bool,
 }
 
 /// How deep recursive descent may go before it gives up.
@@ -384,7 +392,22 @@ impl<'a> Parser<'a> {
         let breaks = src.bytes().enumerate().filter(|(_, b)| *b == b'\n');
         let line_starts: Vec<u32> =
             std::iter::once(0).chain(breaks.map(|(i, _)| i as u32 + 1)).collect();
-        Parser::with_lines(file, src, tokens, diags, line_starts.into())
+        let mut unterminated = Vec::new();
+        let mut swallowed_the_rest = false;
+        for d in diags.iter().filter(|d| d.code == Some(codes::E0001)) {
+            let Some(at) = d.labels.first().map(|l| l.span).filter(|s| s.file == file) else {
+                continue;
+            };
+            let rest = &src.as_bytes()[(at.start as usize).min(src.len())..];
+            if rest.starts_with(b"\"") {
+                unterminated.push(at.start);
+                swallowed_the_rest |= rest.starts_with(b"\"\"\"");
+            }
+        }
+        let mut parser = Parser::with_lines(file, src, tokens, diags, line_starts.into());
+        parser.unterminated = unterminated.into();
+        parser.swallowed_the_rest = swallowed_the_rest;
+        parser
     }
 
     /// A parser over `tokens`, sharing a table of where the file's lines
@@ -422,6 +445,8 @@ impl<'a> Parser<'a> {
             depth: 0,
             chain: 0,
             depth_reported: false,
+            unterminated: std::rc::Rc::from([]),
+            swallowed_the_rest: false,
         }
     }
 
@@ -716,6 +741,12 @@ impl<'a> Parser<'a> {
         self.panicking = true;
         self.last_error_at = Some(self.pos);
         let found = self.peek();
+        // What an unterminated string swallowed is missing because of it:
+        // the `)` its line ended with, or — for a block string — everything
+        // to the end of the file. The lexer has reported that string.
+        if (found == T::Eof && self.swallowed_the_rest) || self.after_unterminated_string() {
+            return;
+        }
         let span = if found == T::Newline || found == T::Eof {
             // Point at the end of the previous token rather than at an
             // invisible one, so the caret lands where the fix goes.
@@ -1097,13 +1128,13 @@ impl<'a> Parser<'a> {
         true
     }
 
-    /// Whether the last token of the file is a `"""` string with no closing
-    /// delimiter — one that ran to the end of the file.
-    fn ends_in_an_open_block_string(&self) -> bool {
-        let last = self.tokens.iter().rev().find(|t| !matches!(t.kind, T::Newline | T::Eof));
-        let Some(last) = last.filter(|t| t.kind == T::Str) else { return false };
-        let text = &self.src[last.span.start as usize..last.span.end as usize];
-        text.starts_with("\"\"\"") && !(text.len() >= 6 && text.ends_with("\"\"\""))
+    /// Whether the token just consumed is a string literal the lexer
+    /// reported unterminated.
+    fn after_unterminated_string(&self) -> bool {
+        self.pos > 0
+            && self.split.is_none()
+            && self.tokens[self.pos - 1].kind == T::Str
+            && self.unterminated.contains(&self.tokens[self.pos - 1].span.start)
     }
 
     /// Report that `open` was never closed, and start unwinding.
@@ -1134,7 +1165,7 @@ impl<'a> Parser<'a> {
         // A block string that is never closed read the rest of the file, the
         // closing braces with it, and the lexer has said so. The braces are
         // that one mistake, not a second.
-        if declaration.is_none() && !self.in_hole && self.ends_in_an_open_block_string() {
+        if declaration.is_none() && !self.in_hole && self.swallowed_the_rest {
             return;
         }
         let mut d = Diagnostic::error(codes::E0101, "unclosed delimiter").with_primary(
@@ -3461,6 +3492,12 @@ impl<'a> Parser<'a> {
             }
             let open_paren = i + 1;
             let Some(close) = matching_paren(bytes, open_paren) else {
+                // A string that never closed — this one, or one in the hole
+                // — took the `)` with it, and the lexer has reported it.
+                let inside = span.start..span.end;
+                if self.unterminated.iter().any(|at| inside.contains(at)) {
+                    return Some(parts);
+                }
                 self.diags.push(
                     kite_diag::Diagnostic::error(
                         kite_diag::codes::E0100,
@@ -3647,6 +3684,8 @@ impl<'a> Parser<'a> {
         sub.depth = self.depth;
         sub.chain = self.chain;
         sub.depth_reported = self.depth_reported;
+        sub.unterminated = self.unterminated.clone();
+        sub.swallowed_the_rest = self.swallowed_the_rest;
         let span = Span::new(self.file, start as u32, end as u32);
         let expr = match sub.parse_expr() {
             Some(e) => e,
