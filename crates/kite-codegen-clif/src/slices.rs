@@ -19,6 +19,19 @@
 //! exactly where the difference matters: the first `push` onto a slice a
 //! caller handed in copies, and the next hundred thousand go straight in.
 //!
+//! A slice or map in a struct field is written through it by being taken
+//! into a local, changed, and put back (`q.items.push(v)`; §5.4), and the
+//! take would always copy if the local's flag started clear, which made a
+//! loop of pushes through a field quadratic. A field has nowhere to keep a
+//! flag, so it is kept on the object, as `kite-rt`'s `HELD_BIT`: the
+//! write-back sets it when the local owned what it put back, and the next
+//! take reads it as the local's flag. What makes that sound is that every
+//! other read of the field clears it before the reference can go anywhere —
+//! every read but a glance, which keeps nothing and is over before anything
+//! could write in place (`kite_mir::held_reads`). So the bit is set only
+//! while the field is the one holder, and a write that finds it set has
+//! nothing else to be seen through.
+//!
 //! A map is a value in exactly the same way, and has room to spare and a
 //! hash index for the same reason (see `kite-rt`'s maps), so `m[k] = v` and
 //! `m.remove(k)` keep the same flag by the same rule. The VM's map shares
@@ -119,6 +132,9 @@ pub fn escaping_operands(stmt: &mir::Inst) -> Vec<&mir::Operand> {
         | R::ToStr { .. }
         | R::Cast { .. }
         | R::FieldGet { .. }
+        // What a take hands the local is put back by the write-back, which is
+        // the `SetField` that comes next; the take itself keeps nothing.
+        | R::FieldTake { .. }
         | R::TagOf { .. }
         | R::VariantGet { .. }
         | R::MapGet { .. }

@@ -9501,9 +9501,17 @@ impl<'a> Checker<'a> {
                 let read = hir::Expr { kind: ExprKind::Unwrap { value }, ty: *ty, span };
                 (self.copy_of(read, &mut stmts, span), *ty)
             }
+            // Taken rather than read: nothing reads the field again before
+            // the write-back below, so a backend may hand the copy the field's
+            // own slice or map when nothing else holds it, and a loop of
+            // pushes through a field is linear rather than quadratic.
             PlaceRoot::Field { holder, index, ty } => {
                 let base = Box::new(holder.clone());
-                let read = hir::Expr { kind: ExprKind::FieldGet { base, index: *index }, ty: *ty, span };
+                let kind = match self.types.kind(*ty) {
+                    TyKind::Slice(_) | TyKind::Map(..) => ExprKind::FieldTake { base, index: *index },
+                    _ => ExprKind::FieldGet { base, index: *index },
+                };
+                let read = hir::Expr { kind, ty: *ty, span };
                 (self.copy_of(read, &mut stmts, span), *ty)
             }
         };

@@ -664,10 +664,15 @@ fn main() {
 }
 ```
 
-A loop that pushes thousands of times through a field copies the field's slice
-on each push, and one that writes or removes keys through a field copies the
-field's map on each write; for a hot loop, build the slice or map in a `var`
-local and assign it to the field once.
+A write through a field goes straight into the field's slice or map when
+nothing else holds it, so a loop that pushes, writes keys or removes them
+through a field (`q.items.push(v)`, `s.m[k] = v`, in a `var self` method too)
+is as fast as one on a local — a slice on every backend, a map on the VM and
+natively (a Wasm map copies on every write, wherever it is held). A read of
+the field that can keep what it read — into a binding, an argument, a
+capture — makes the next write copy, once; reading a length, an element or a
+key between the writes does not. One level further down, `b.rows[i].push(x)`
+copies that row on each push, as `grid[i].push(x)` does on a local.
 
 ### An empty `[]` or `{}` has nothing to infer from
 

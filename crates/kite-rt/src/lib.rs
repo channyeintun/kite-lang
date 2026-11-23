@@ -102,6 +102,18 @@ mod obj {
 const MARK_BIT: u64 = 1 << 8;
 const REMEMBERED_BIT: u64 = 1 << 9;
 
+/// On a slice or a map: a struct field is the one thing that holds it.
+///
+/// A write through a field (`q.items.push(v)`) takes the field's slice into
+/// a local, changes it and puts it back (§5.4). The compiled code keeps an
+/// owned flag for a local, but a field has nowhere to keep one, so it is kept
+/// on the object: the write-back sets this bit when the local owned what it
+/// put back, the next take reads it as the local's flag, and every read of
+/// the field that could keep what it read clears it first. The object is
+/// copied — a fresh header — wherever a copy is made, so a copy never has
+/// it. See `kite-codegen-clif`'s `slices` module for the whole rule.
+pub const HELD_BIT: u64 = 1 << 10;
+
 /// Header: two words. Word 0 is `kind | gc bits | aux << 32`; word 1 is
 /// kind-specific (a length, a variant, a capture count; for a slice, the
 /// length and the capacity — see [`slice_len`]; for a string, its count of
