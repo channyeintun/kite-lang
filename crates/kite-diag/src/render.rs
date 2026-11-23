@@ -329,7 +329,7 @@ fn windowed(text: &str, labels: &[(usize, usize)]) -> (String, View) {
             // or everything after is one column nearer the edge than its
             // underline is told.
             if col < start && col + w > start {
-                kept.extend(std::iter::repeat(' ').take(col + w - start));
+                kept.extend(std::iter::repeat_n(' ', col + w - start));
             }
         }
         if shown {
