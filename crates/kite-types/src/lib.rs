@@ -3028,6 +3028,17 @@ impl<'a> Checker<'a> {
         // runs of it; what it disproved was removed before it started.
         self.narrowed = entry_narrowed;
         self.error_nonnil = entry_nonnil;
+        // A `for cond` with no `break` is left only where its condition
+        // failed, so what that proves holds after it: `for e == nil { e =
+        // f() }` leaves `e` present. The narrowing a write in the body undid
+        // was dropped before the loop, and the condition runs after the last
+        // write.
+        if let ast::ForHeader::While(c) = &f.header {
+            if !breaks_out(&f.body, f.label.as_ref().map(|l| l.name.as_str())) {
+                let narrowing = self.nil_test(c);
+                self.enter_branch(narrowing, c, false);
+            }
+        }
 
         let result = result?;
         // `for { … }` with nothing that breaks out of it never falls through.
@@ -3138,8 +3149,16 @@ impl<'a> Checker<'a> {
             }
             ast::ForHeader::While(c) => {
                 self.loop_start();
+                let narrowing = self.nil_test(c);
                 let cond = self.condition(c);
+                // The loop is left where the condition failed, and the body
+                // entered where it held, exactly as for an `if`'s two sides:
+                // `for e == nil { … }` runs its body knowing `e` is nil.
+                let tested = self.flow_state();
+                self.enter_branch(narrowing, c, false);
                 self.loop_head();
+                self.set_flow_state(tested);
+                self.enter_branch(narrowing, c, true);
                 let body = self.loop_body(&f.body, sig);
                 (Some(hir::Stmt::While { cond, body, label, span: f.span }), false)
             }

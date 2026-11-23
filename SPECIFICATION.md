@@ -352,8 +352,10 @@ match maybe {
 **Narrowing** is what makes this ergonomic rather than tedious. Testing an
 optional against `nil` narrows it to the unwrapped type on the branch where it
 cannot be absent — in the `else` of `x == nil`, and in the `then` of `x != nil`.
-The same narrowing applies in a `match` arm once an earlier arm has covered
-`nil`. A write to a `var` ends its narrowing unless the value written cannot be
+A `for` condition narrows the same way: its body runs where the condition held,
+and a loop with no `break` is left only where it failed, so `for x == nil { … }`
+leaves `x` present. The same narrowing applies in a `match` arm once an earlier
+arm has covered `nil`. A write to a `var` ends its narrowing unless the value written cannot be
 nil either; inside a loop, that holds for every write the loop's body makes,
 since the body runs again after each of them.
 
@@ -1054,7 +1056,9 @@ The rules:
 > and `v` becomes Clean. A condition proves what logic says it does: `e ==
 > nil` and `!(e != nil)` when they hold, either side of an `&&` that held
 > (the right side included, which runs only then), and either side of an
-> `||` that did not. A `match` guard is a condition too: its arm runs where
+> `||` that did not. A `for` condition is one: the body runs where it held,
+> and a loop with no `break` is left where it did not. A `match` guard is a
+> condition too: its arm runs where
 > it held, and when the arm's pattern is `_` or a bare name, which matches
 > anything, the arms after it are reached only where it did not.
 >

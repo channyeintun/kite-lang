@@ -797,7 +797,10 @@ fn main() {
 
 **Narrowing** unwraps an optional on the branch where it cannot be nil: the
 `else` of `x == nil`, the `then` of `x != nil`, the code after an early return
-guarded by `x == nil`, and a `match` arm once an earlier arm covered `nil`.
+guarded by `x == nil`, the body of `for x != nil { … }` and the code after a
+`for x == nil { … }` with no `break`, and a `match` arm once an earlier arm
+covered `nil`. (A `for` condition that tests an error does the same for the
+taint analysis: `for e == nil { … }` leaves `e` present.)
 
 ```kite
 struct User {
