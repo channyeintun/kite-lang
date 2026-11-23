@@ -265,6 +265,33 @@ fn a_long_map_literal_is_built_in_linear_time() {
     vm_within("map-literal", &src, "200000 1\n", Duration::from_secs(20));
 }
 
+/// A literal of many plain reads of one local is compiled in linear time —
+/// timed here is the compiling, which is where the cost was. Each operand
+/// that names a local is fixed where it stands if a later operand writes
+/// that local (§5.3), and finding that out asked every later operand about
+/// every local: a slice literal of 80,000 reads of `a` took 5.8 s to check,
+/// and these would take minutes. One walk from the last operand back finds
+/// every local a later operand writes.
+#[test]
+fn a_long_literal_of_plain_reads_is_compiled_in_linear_time() {
+    let _turn = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+    let n = 200_000;
+    let slice = format!(
+        "fn main() {{\n  let a = 7\n  let xs = [{}]\n  io.print(xs.len())\n}}\n",
+        vec!["a"; n].join(", ")
+    );
+    let entries: Vec<String> = (0..n / 2).map(|i| format!("{}: a", i)).collect();
+    let map = format!(
+        "fn main() {{\n  let a = 7\n  let m = {{{}}}\n  io.print(m.len())\n}}\n",
+        entries.join(", ")
+    );
+    let started = Instant::now();
+    compiled("plain-reads-slice", &slice, Emit::Check);
+    compiled("plain-reads-map", &map, Emit::Check);
+    let took = started.elapsed();
+    assert!(took < Duration::from_secs(20), "compiling took {:?}", took);
+}
+
 /// Checking is linear in the arms of a generated `match` and in the links of
 /// a field-access chain — the one place here where it is checking that is
 /// timed, since that is where the cost was. Each `match` arm was looked up

@@ -440,30 +440,40 @@ impl Expr {
     /// operand list read a local where it is written (§5.3) without putting
     /// every one of them in a temporary.
     pub fn writes(&self, local: LocalId) -> bool {
+        self.each_write(&mut |l| l == local)
+    }
+
+    /// Calls `f` on each local evaluating this expression can write (see
+    /// [`Self::writes`]), stopping at the first for which it answers true,
+    /// and answers whether it did. One walk gives every local written, which
+    /// an operand list needs for all its operands at once: asking
+    /// [`Self::writes`] of each later operand for each local made a literal
+    /// of plain reads quadratic to lower.
+    pub fn each_write(&self, f: &mut dyn FnMut(LocalId) -> bool) -> bool {
         use ExprKind as E;
-        let any = |es: &[Expr]| es.iter().any(|e| e.writes(local));
+        let any = |es: &[Expr], f: &mut dyn FnMut(LocalId) -> bool| es.iter().any(|e| e.each_write(f));
         match &self.kind {
             E::Int(_) | E::Float(_) | E::Str(_) | E::Bool(_) | E::Local(_) | E::Nil | E::Yield | E::Error => false,
             E::Call { args, .. }
             | E::CallVirtual { args, .. }
             | E::StrOp { args, .. }
             | E::CallBuiltin { args, .. }
-            | E::CallExtern { index: _, args } => any(args),
-            E::ClosureNew { captures, .. } => any(captures),
-            E::CallClosure { callee, args } => callee.writes(local) || any(args),
-            E::StructNew { fields, .. } | E::EnumNew { fields, .. } => any(fields),
-            E::TupleNew { elems } | E::SliceNew { elems } => any(elems),
-            E::MapNew { entries } => any(entries),
+            | E::CallExtern { index: _, args } => any(args, f),
+            E::ClosureNew { captures, .. } => any(captures, f),
+            E::CallClosure { callee, args } => callee.each_write(f) || any(args, f),
+            E::StructNew { fields, .. } | E::EnumNew { fields, .. } => any(fields, f),
+            E::TupleNew { elems } | E::SliceNew { elems } => any(elems, f),
+            E::MapNew { entries } => any(entries, f),
             E::ToDyn { value, .. }
             | E::ToStr { value }
             | E::Cast { value, .. }
             | E::IsNil { value }
             | E::Wrap { value }
             | E::Unwrap { value }
-            | E::Await { value } => value.writes(local),
-            E::Unary { operand, .. } => operand.writes(local),
-            E::Binary { lhs, rhs, .. } => lhs.writes(local) || rhs.writes(local),
-            E::If { cond, then, else_ } => cond.writes(local) || then.writes(local) || else_.writes(local),
+            | E::Await { value } => value.each_write(f),
+            E::Unary { operand, .. } => operand.each_write(f),
+            E::Binary { lhs, rhs, .. } => lhs.each_write(f) || rhs.each_write(f),
+            E::If { cond, then, else_ } => cond.each_write(f) || then.each_write(f) || else_.each_write(f),
             E::FieldGet { base, .. }
             | E::FieldTake { base, .. }
             | E::PairValue { base }
@@ -475,61 +485,61 @@ impl Expr {
             | E::MapLen { base }
             | E::MapKeys { base }
             | E::MapValues { base }
-            | E::SliceLen { base } => base.writes(local),
+            | E::SliceLen { base } => base.each_write(f),
             E::Match { scrutinee, arms } => {
-                scrutinee.writes(local)
-                    || arms.iter().any(|a| a.guard.as_ref().is_some_and(|g| g.writes(local)) || a.body.writes(local))
+                scrutinee.each_write(f)
+                    || arms.iter().any(|a| a.guard.as_ref().is_some_and(|g| g.each_write(f)) || a.body.each_write(f))
             }
-            E::PairNew { value, error } => value.writes(local) || error.writes(local),
+            E::PairNew { value, error } => value.each_write(f) || error.each_write(f),
             E::ErrorNew { message, value, tag, cause } => {
-                message.writes(local) || value.writes(local) || tag.writes(local) || cause.writes(local)
+                message.each_write(f) || value.each_write(f) || tag.each_write(f) || cause.each_write(f)
             }
-            E::MapGet { base, key } => base.writes(local) || key.writes(local),
-            E::Index { base, index } | E::SliceGet { base, index } => base.writes(local) || index.writes(local),
-            E::SliceRange { base, start, end } => base.writes(local) || start.writes(local) || end.writes(local),
-            E::Block(b) => b.writes(local),
+            E::MapGet { base, key } => base.each_write(f) || key.each_write(f),
+            E::Index { base, index } | E::SliceGet { base, index } => base.each_write(f) || index.each_write(f),
+            E::SliceRange { base, start, end } => base.each_write(f) || start.each_write(f) || end.each_write(f),
+            E::Block(b) => b.each_write(f),
         }
     }
 }
 
 impl Block {
-    /// Whether running this block can write `local` (see [`Expr::writes`]).
-    pub fn writes(&self, local: LocalId) -> bool {
-        self.stmts.iter().any(|s| s.writes(local))
+    /// [`Expr::each_write`], for the statements of a block.
+    pub fn each_write(&self, f: &mut dyn FnMut(LocalId) -> bool) -> bool {
+        self.stmts.iter().any(|s| s.each_write(f))
     }
 }
 
 impl Stmt {
-    /// Whether running this statement can write `local` (see [`Expr::writes`]).
-    /// A slice or map changed in place is its local written: they are values.
-    pub fn writes(&self, local: LocalId) -> bool {
+    /// [`Expr::each_write`], for one statement. A slice or map changed in
+    /// place is its local written: they are values.
+    pub fn each_write(&self, f: &mut dyn FnMut(LocalId) -> bool) -> bool {
         match self {
-            Stmt::Let { local: l, init, .. } => *l == local || init.as_ref().is_some_and(|e| e.writes(local)),
+            Stmt::Let { local: l, init, .. } => f(*l) || init.as_ref().is_some_and(|e| e.each_write(f)),
             Stmt::Assign { local: l, value, .. } | Stmt::SlicePush { local: l, value, .. } => {
-                *l == local || value.writes(local)
+                f(*l) || value.each_write(f)
             }
-            Stmt::MapSet { local: l, key, value, .. } => *l == local || key.writes(local) || value.writes(local),
-            Stmt::MapRemove { local: l, key, .. } => *l == local || key.writes(local),
-            Stmt::SetField { base, value, .. } => base.writes(local) || value.writes(local),
+            Stmt::MapSet { local: l, key, value, .. } => f(*l) || key.each_write(f) || value.each_write(f),
+            Stmt::MapRemove { local: l, key, .. } => f(*l) || key.each_write(f),
+            Stmt::SetField { base, value, .. } => base.each_write(f) || value.each_write(f),
             Stmt::SetIndex { base, index, value, .. } => {
-                matches!(base.kind, ExprKind::Local(l) if l == local)
-                    || base.writes(local)
-                    || index.writes(local)
-                    || value.writes(local)
+                matches!(base.kind, ExprKind::Local(l) if f(l))
+                    || base.each_write(f)
+                    || index.each_write(f)
+                    || value.each_write(f)
             }
-            Stmt::ForSlice { var, slice, body, .. } => *var == local || slice.writes(local) || body.writes(local),
+            Stmt::ForSlice { var, slice, body, .. } => f(*var) || slice.each_write(f) || body.each_write(f),
             Stmt::ForRange { var, start, end, body, .. } => {
-                *var == local || start.writes(local) || end.writes(local) || body.writes(local)
+                f(*var) || start.each_write(f) || end.each_write(f) || body.each_write(f)
             }
-            Stmt::Expr(e) => e.writes(local),
-            Stmt::Return { value, .. } => value.as_ref().is_some_and(|e| e.writes(local)),
+            Stmt::Expr(e) => e.each_write(f),
+            Stmt::Return { value, .. } => value.as_ref().is_some_and(|e| e.each_write(f)),
             Stmt::If { cond, then, else_, .. } => {
-                cond.writes(local) || then.writes(local) || else_.as_ref().is_some_and(|b| b.writes(local))
+                cond.each_write(f) || then.each_write(f) || else_.as_ref().is_some_and(|b| b.each_write(f))
             }
-            Stmt::While { cond, body, .. } => cond.writes(local) || body.writes(local),
-            Stmt::Loop { body, .. } => body.writes(local),
+            Stmt::While { cond, body, .. } => cond.each_write(f) || body.each_write(f),
+            Stmt::Loop { body, .. } => body.each_write(f),
             Stmt::Break { .. } | Stmt::Continue { .. } => false,
-            Stmt::Block(b) => b.writes(local),
+            Stmt::Block(b) => b.each_write(f),
         }
     }
 }

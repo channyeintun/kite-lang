@@ -4,7 +4,7 @@ use crate::*;
 use kite_hir::TyId as Ty;
 use kite_hir::{EnumId, StructId, TyKind, Types};
 use kite_hir as hir;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 pub fn lower(program: &hir::Program) -> Program {
     let mut out = Program {
@@ -952,11 +952,26 @@ impl<'a> FnLowerer<'a> {
     /// do: `g(a, match a { _ => { a = 7 } })` passed 7. Such a local is copied
     /// into a temporary where it stands; any other is left as it was, so the
     /// code an ordinary operand list makes does not grow.
+    ///
+    /// Which locals a later operand writes is found in one walk from the
+    /// last operand back, so a list of many plain reads is linear to lower.
     fn operand_refs(&mut self, es: &[&hir::Expr]) -> Vec<Operand> {
+        // By operand: whether some operand after it writes it, for a local.
+        let mut spill = vec![false; es.len()];
+        let mut written: HashSet<hir::LocalId> = HashSet::new();
+        for (i, e) in es.iter().enumerate().rev() {
+            if let hir::ExprKind::Local(l) = e.kind {
+                spill[i] = written.contains(&l);
+            }
+            e.each_write(&mut |l| {
+                written.insert(l);
+                false
+            });
+        }
         let mut out = Vec::with_capacity(es.len());
         for (i, e) in es.iter().enumerate() {
             if let hir::ExprKind::Local(l) = e.kind {
-                if es[i + 1..].iter().any(|later| later.writes(l)) {
+                if spill[i] {
                     let t = self.temp(e.ty);
                     self.assign(t, Rvalue::Use(Operand::Local(Local(l.0))));
                     out.push(Operand::Local(t));
