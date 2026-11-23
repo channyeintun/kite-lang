@@ -45,6 +45,10 @@ use kite_hir::Builtin;
 #[derive(Debug, Default)]
 pub struct Kept {
     by_fn: Vec<Vec<bool>>,
+    /// By function: whether calling it may write in place a slice or map
+    /// that existed before the call, or run code this cannot see. See
+    /// [`Kept::quiet`].
+    stirs: Vec<bool>,
 }
 
 impl Kept {
@@ -53,6 +57,7 @@ impl Kept {
     pub fn of(program: &Program) -> Kept {
         let mut kept = Kept {
             by_fn: program.fns.iter().map(|f| vec![false; f.param_count]).collect(),
+            stirs: stirs(program),
         };
         // The carriers of each parameter: the locals its value can be moved
         // into. They do not depend on what other functions keep.
@@ -88,6 +93,24 @@ impl Kept {
             .and_then(|ps| ps.get(param))
             .copied()
             .unwrap_or(true)
+    }
+
+    /// Whether a call to `callee` is *quiet*: whatever it does, it writes in
+    /// place no slice or map that was there before it was called, and runs
+    /// no code but its own and its callees'. A function that may is one that
+    /// takes a field (`FieldTake`, which is how a local comes to own a slice
+    /// or map it did not make), resumes a frame, renders a value (which can
+    /// reach a `Display` the program wrote), calls a function value, a `dyn`
+    /// method, the host or a builtin that runs code (see
+    /// [`builtin_runs_code`]), or calls one that may. Every other in-place
+    /// write is to a local that owns what it writes, which in such a
+    /// function is only ever something the call made.
+    ///
+    /// A read of a field's slice that only glances may span a quiet call it
+    /// passes the slice to, when the callee keeps nothing of it
+    /// ([`crate::held_reads`]).
+    pub fn quiet(&self, callee: FnId) -> bool {
+        !self.stirs.get(callee.index()).copied().unwrap_or(true)
     }
 
     /// The arguments of a direct call `callee(args)` the callee may keep.
@@ -132,6 +155,127 @@ pub fn builtin_keeps(builtin: Builtin) -> bool {
         | Builtin::TimeNow
         | Builtin::PtrSame
         | Builtin::Require => false,
+    }
+}
+
+/// Whether a builtin may run code of the program's, or suspend so that
+/// other code runs. One by one, with no catch-all.
+pub fn builtin_runs_code(builtin: Builtin) -> bool {
+    match builtin {
+        // Writing a value renders it, which can reach a `Display` the
+        // program wrote; a closure handed on can be called; a suspension
+        // lets every other task run.
+        Builtin::IoPrint
+        | Builtin::IoError
+        | Builtin::TaskSpawn
+        | Builtin::JsFunc
+        | Builtin::TaskWakeAt
+        | Builtin::TaskPark
+        | Builtin::TaskParkOn
+        | Builtin::TaskWaitHost => true,
+        // Numbers and text in, numbers and text out.
+        Builtin::IoReadLine
+        | Builtin::DrawRect
+        | Builtin::DrawRRect
+        | Builtin::DrawFont
+        | Builtin::DrawDRRect
+        | Builtin::DrawAlpha
+        | Builtin::DrawText
+        | Builtin::DrawField
+        | Builtin::DrawImage
+        | Builtin::DrawSemantics
+        | Builtin::TextWidth
+        | Builtin::TextHeight
+        | Builtin::TextFromCode
+        | Builtin::DrawClip
+        | Builtin::DrawUnclip
+        | Builtin::TimeNow
+        | Builtin::PtrSame
+        | Builtin::Require => false,
+    }
+}
+
+/// By function, whether calling it may stir: the complement of
+/// [`Kept::quiet`]. The least fixed point of "stirs", upward from "quiet",
+/// for the reason the module gives for "keeps": a call that stirs does so
+/// through a finite chain of calls ending in one statement that does.
+fn stirs(program: &Program) -> Vec<bool> {
+    let mut stirs = vec![false; program.fns.len()];
+    loop {
+        let mut changed = false;
+        for (fi, f) in program.fns.iter().enumerate() {
+            if stirs[fi] {
+                continue;
+            }
+            let found = f.blocks.iter().flat_map(|b| &b.stmts).any(|s| match s {
+                Inst::Assign { value, .. } => stirs_at(value, &stirs),
+                Inst::SetField { .. }
+                | Inst::SetIndex { .. }
+                | Inst::SlicePush { .. }
+                | Inst::MapSet { .. }
+                | Inst::MapRemove { .. } => false,
+            });
+            if found {
+                stirs[fi] = true;
+                changed = true;
+            }
+        }
+        if !changed {
+            return stirs;
+        }
+    }
+}
+
+/// Whether evaluating `value` may stir, given what is known of each function.
+/// Exhaustive, with no catch-all.
+fn stirs_at(value: &Rvalue, stirs: &[bool]) -> bool {
+    use Rvalue as R;
+    match value {
+        R::Call { callee, .. } => stirs.get(callee.index()).copied().unwrap_or(true),
+        R::CallBuiltin { builtin, .. } => builtin_runs_code(*builtin),
+        R::CallVirtual { .. }
+        | R::CallClosure { .. }
+        | R::CallExtern { .. }
+        | R::ToStr { .. }
+        | R::FieldTake { .. }
+        | R::Await { .. }
+        | R::Yield
+        | R::Owned { .. }
+        | R::Unspill { .. } => true,
+        // A string operation is the runtime's, on text.
+        R::StrOp { .. }
+        | R::Use(_)
+        | R::Binary { .. }
+        | R::Unary { .. }
+        | R::ClosureNew { .. }
+        | R::Cast { .. }
+        | R::StructNew { .. }
+        | R::FieldGet { .. }
+        | R::EnumNew { .. }
+        | R::TagOf { .. }
+        | R::VariantGet { .. }
+        | R::TupleNew { .. }
+        | R::MapNew { .. }
+        | R::MapGet { .. }
+        | R::MapLen { .. }
+        | R::MapKeys { .. }
+        | R::MapValues { .. }
+        | R::SliceNew { .. }
+        | R::IsNil { .. }
+        | R::Wrap { .. }
+        | R::Unwrap { .. }
+        | R::PairNew { .. }
+        | R::PairValue { .. }
+        | R::PairError { .. }
+        | R::ErrorNew { .. }
+        | R::ErrorMessage { .. }
+        | R::ErrorCause { .. }
+        | R::ErrorTag { .. }
+        | R::ErrorAs { .. }
+        | R::IndexGet { .. }
+        | R::SliceLen { .. }
+        | R::SliceGet { .. }
+        | R::SliceRange { .. } => false,
     }
 }
 

@@ -932,6 +932,7 @@ fn define_fn<M: Module>(
         owned.insert(l.index(), flag);
     }
 
+    let glance = mir::held_reads(f, &cx.kept).iter().map(Option::is_some).collect();
     let mut lower = FnLower {
         cx,
         f,
@@ -952,7 +953,7 @@ fn define_fn<M: Module>(
                 })
             })
             .collect(),
-        glance: mir::held_reads(f).iter().map(Option::is_some).collect(),
+        glance,
         blocks,
         rt_refs: HashMap::new(),
         fn_refs: HashMap::new(),

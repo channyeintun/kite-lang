@@ -19,7 +19,7 @@ mod lower;
 pub use async_::frame_move;
 pub use async_::transform as asyncify;
 pub use async_::{DONE as TASK_DONE, VALUE as TASK_VALUE};
-pub use keep::{builtin_keeps, Kept};
+pub use keep::{builtin_keeps, builtin_runs_code, Kept};
 pub use lower::{lower, LITERAL_WINDOW};
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
@@ -453,19 +453,27 @@ pub fn takeable_field(types: &Types, base_ty: TyId, index: u32) -> bool {
 /// `if q.items.len() < n { q.items.push(v) }` reads the field each time round.
 /// So a read is let off when its local is assigned once, read only in the
 /// same block, only by reads that keep nothing and run no program code — a
-/// length, an element, a lookup, a window (which copies), a comparison — and
+/// length, an element, a lookup, a window (which copies), a comparison, or a
+/// quiet call that keeps nothing of it (below) — and
 /// with nothing between the field read and the last of those that could
-/// write a slice or map in place: no call of any kind, no suspension, no
+/// write a slice or map in place: no call but a quiet one, no suspension, no
 /// in-place write, no `FieldTake`. Such a local has stopped being read before
 /// anything could change what it holds, so it holds nothing a write could be
 /// seen through. The state-machine transform's spills and reloads of it
 /// ([`frame_move`]) are not reads: the frame's copy only ever goes back into
 /// the local, which reads nothing before the block reads the field again.
 ///
+/// A direct call is such a read too, when its callee keeps nothing of that
+/// argument and is quiet ([`Kept::quiet`]): nothing it runs can write in
+/// place a slice or map that was there before, so what the local holds is
+/// as unchanged when it returns as after a length — and the callee kept
+/// nothing that could see a later write. So
+/// `if !seen(q.m, w) { q.m[w] = 1 }` does not copy the map each time round.
+///
 /// The bytecode VM's sharing is a reference count, which a local that still
 /// holds the slice would spoil; it empties these locals after their last
 /// read, which is the same fact put to the opposite use.
-pub fn held_reads(func: &Function) -> Vec<Option<(usize, usize)>> {
+pub fn held_reads(func: &Function, kept: &Kept) -> Vec<Option<(usize, usize)>> {
     let n = func.locals.len();
     // Where each local is assigned, if exactly once by a `FieldGet`; `None`
     // once anything rules it out.
@@ -522,8 +530,18 @@ pub fn held_reads(func: &Function) -> Vec<Option<(usize, usize)>> {
                     continue;
                 }
                 let i = l.index();
+                let passed = match s {
+                    Inst::Assign { value: Rvalue::Call { callee, args }, .. } => {
+                        kept.quiet(*callee)
+                            && args.iter().enumerate().all(|(i, a)| {
+                                !matches!(a, Operand::Local(x) if x == l) || !kept.keeps(*callee, i)
+                            })
+                    }
+                    _ => false,
+                };
                 let looks = matches!(s, Inst::Assign { value: Rvalue::Binary { .. }, .. })
-                    || matches!(glance, Some(Operand::Local(g)) if g == l);
+                    || matches!(glance, Some(Operand::Local(g)) if g == l)
+                    || passed;
                 match def[i] {
                     Some((db, ds)) if looks && db == bi && ds < si => last[i] = Some((bi, si)),
                     _ => ruled_out[i] = true,
@@ -544,7 +562,7 @@ pub fn held_reads(func: &Function) -> Vec<Option<(usize, usize)>> {
             let (_, end) = last[i].unwrap_or((bi, si));
             let stmts = &func.blocks[bi].stmts;
             let quiet = stmts[si + 1..end.max(si + 1)].iter().all(|s| match s {
-                Inst::Assign { value, .. } => !may_write_in_place(value),
+                Inst::Assign { value, .. } => !may_write_in_place(value, kept),
                 Inst::SetField { .. } => true,
                 Inst::SetIndex { .. }
                 | Inst::SlicePush { .. }
@@ -559,11 +577,11 @@ pub fn held_reads(func: &Function) -> Vec<Option<(usize, usize)>> {
 /// Whether evaluating `value` could write some slice or map in place, or run
 /// code of the program's that could: see [`held_reads`]. Exhaustive, with no
 /// catch-all, so a new form has to be decided.
-fn may_write_in_place(value: &Rvalue) -> bool {
+fn may_write_in_place(value: &Rvalue, kept: &Kept) -> bool {
     use Rvalue as R;
     match value {
-        R::Call { .. }
-        | R::CallVirtual { .. }
+        R::Call { callee, .. } => !kept.quiet(*callee),
+        R::CallVirtual { .. }
         | R::CallClosure { .. }
         | R::CallBuiltin { .. }
         | R::CallExtern { .. }

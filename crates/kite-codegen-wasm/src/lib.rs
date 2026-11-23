@@ -2410,7 +2410,7 @@ fn compile_fn(
             })
         })
         .collect();
-    let glance: Vec<bool> = mir::held_reads(f).iter().map(Option::is_some).collect();
+    let glance: Vec<bool> = mir::held_reads(f, kept).iter().map(Option::is_some).collect();
     for b in &f.blocks {
         for s in &b.stmts {
             let target = match s {

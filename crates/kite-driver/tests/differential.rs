@@ -3127,7 +3127,155 @@ pub async fn main() {
     // and a closure. None of them may see the write. Its output is also
     // pinned in `EXPECTED`.
     ("passed-slices-are-written-in-place-unseen", CALL_ALIASING),
+    // A field's slice or map passed to a function between writes through
+    // the field: kept by the callee, or passed to one that writes through a
+    // copy of the struct, or through the struct itself two calls down, or
+    // calls a closure, or prints — and passed to readers that do none of
+    // these, in a `var self` method, a nested field and a struct in a slice.
+    // Its output is also pinned in `EXPECTED`.
+    ("passed-fields-are-written-in-place-unseen", PASSED_FIELDS),
 ];
+
+/// See `passed-fields-are-written-in-place-unseen` in [`NATIVE_TARGET`].
+const PASSED_FIELDS: &str = r#"// A field's slice or map passed to a function between writes through the
+// field: whatever the function kept, or saw while it ran, must not see a
+// write that came after it read.
+
+struct Q {
+    var items: [int]
+    var m: { str: int }
+}
+
+struct Box {
+    var q: Q
+}
+
+fn sl(xs: [int]) -> str {
+    return "[" + join_ints(xs, ",") + "]"
+}
+
+fn mp(m: { str: int }) -> str {
+    var parts: [str] = []
+    for k in m.keys() {
+        parts.push("\(k)=\(or_else(m[k], 0))")
+    }
+    return "{" + join(parts, ",") + "}"
+}
+
+fn seen(m: { str: int }, w: str) -> bool {
+    return has_key(m, w)
+}
+
+fn count(xs: [int]) -> int {
+    return xs.len()
+}
+
+fn keep(xs: [int]) -> [int] {
+    return xs
+}
+
+fn keep_map(m: { str: int }) -> { str: int } {
+    return m
+}
+
+// Writes through a copy of the struct while it holds the field's map.
+fn write_through(m: { str: int }, q: Q) -> str {
+    var t = q
+    t.m["w"] = 9
+    t.items.push(9)
+    return mp(m) + " " + mp(t.m)
+}
+
+// Writes through the struct it was given while holding its slice.
+fn push_through(xs: [int], var q: Q) -> str {
+    q.items.push(7)
+    return sl(xs) + " " + sl(q.items)
+}
+
+fn deeper(xs: [int], q: Q) -> str {
+    return push_through(xs, q)
+}
+
+fn via_closure(xs: [int], f: fn() -> int) -> int {
+    return xs.len() + f()
+}
+
+fn printed(xs: [int]) -> int {
+    io.print("printed \(sl(xs))")
+    return xs.len()
+}
+
+impl Q {
+    fn add(var self, w: str) {
+        if !seen(self.m, w) {
+            self.m[w] = self.m.len()
+        }
+        self.items.push(count(self.items))
+    }
+
+    fn add_kept(var self, w: str) -> { str: int } {
+        let k = keep_map(self.m)
+        self.m[w] = 1
+        return k
+    }
+}
+
+fn main() {
+    var q = Q{ items: [1], m: { "a": 1 } }
+    for i in 0..5 {
+        q.add("k\(i % 3)")
+    }
+    io.print("add \(sl(q.items)) \(mp(q.m))")
+
+    let k1 = keep(q.items)
+    q.items.push(100)
+    let k2 = q.add_kept("z")
+    q.m["y"] = 2
+    io.print("kept \(sl(k1)) \(mp(k2)) now \(sl(q.items)) \(mp(q.m))")
+
+    let w1 = write_through(q.m, q)
+    q.m["after"] = 3
+    io.print("write_through \(w1) now \(mp(q.m))")
+
+    let p1 = push_through(q.items, q)
+    q.items.push(200)
+    let p2 = deeper(q.items, q)
+    q.items.push(300)
+    io.print("push_through \(p1) | \(p2) now \(sl(q.items))")
+
+    let n = 5
+    let c1 = via_closure(q.items, || n)
+    q.items.push(400)
+    let c2 = printed(q.items)
+    q.items.push(500)
+    io.print("closure \(c1) \(c2) now \(sl(q.items))")
+
+    var b = Box{ q: Q{ items: [], m: { } } }
+    var log: [int] = []
+    for i in 0..6 {
+        if count(b.q.items) % 2 == 0 {
+            b.q.items.push(i)
+        } else {
+            log.push(count(keep(b.q.items)))
+            b.q.items.push(i * 10)
+        }
+        if !seen(b.q.m, "x\(i % 2)") {
+            b.q.m["x\(i % 2)"] = i
+        }
+    }
+    io.print("box \(sl(b.q.items)) \(sl(log)) \(mp(b.q.m))")
+
+    var qs = [Q{ items: [5], m: { } }]
+    for i in 0..4 {
+        if count(qs[0].items) < 10 {
+            qs[0].items.push(i)
+        }
+        let snap = keep(qs[0].items)
+        qs[0].items[0] = i
+        io.print("qs \(sl(snap)) \(sl(qs[0].items))")
+    }
+}
+"#;
 
 /// See `passed-slices-are-written-in-place-unseen` in [`NATIVE_TARGET`].
 const CALL_ALIASING: &str = r#"use std/task
@@ -5279,6 +5427,7 @@ fn slices_agree_natively_with_a_page_of_nursery() {
         "slices-and-maps-move-across-a-suspension",
         "fields-are-written-in-place-unseen",
         "passed-slices-are-written-in-place-unseen",
+        "passed-fields-are-written-in-place-unseen",
     ] {
         let (_, src) = WASM_TARGET
             .iter()
@@ -7622,6 +7771,20 @@ indirect [1,2] [1,2,3] [1,2,3,4] [1,2,3,4,5]\n\
 loop [0];[0,0];[2,0,1,2];[3,0,1,2,3,4];[5,0,1,2,3,4,5];[7,0,1,2,3,4,5,6,7,8];[8,0,1,2,3,4,5,6,7,8];[11,0,1,2,3,4,5,6,7,8,9,10,11];[11,0,1,2,3,4,5,6,7,8,9,10,11,12];[14,0,1,2,3,4,5,6,7,8,9,10,11,12,13,14];[15,0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16];[17,0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17] [19,0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19]\n\
 task len 2 now [1,2,3]\n\
 task back [1,2,3] now [100,2,3,4]\n\
+"),
+    // What a field's slice or map, and everything that kept it, holds
+    // after it was passed to a function and written through the field.
+    ("passed-fields-are-written-in-place-unseen", PASSED_FIELDS, "add [1,1,2,3,4,5] {a=1,k0=1,k1=2,k2=3}\n\
+kept [1,1,2,3,4,5] {a=1,k0=1,k1=2,k2=3} now [1,1,2,3,4,5,100] {a=1,k0=1,k1=2,k2=3,z=1,y=2}\n\
+write_through {a=1,k0=1,k1=2,k2=3,z=1,y=2} {a=1,k0=1,k1=2,k2=3,z=1,y=2,w=9} now {a=1,k0=1,k1=2,k2=3,z=1,y=2,w=9,after=3}\n\
+push_through [1,1,2,3,4,5,100,9] [1,1,2,3,4,5,100,9,7] | [1,1,2,3,4,5,100,9,7,200] [1,1,2,3,4,5,100,9,7,200,7] now [1,1,2,3,4,5,100,9,7,200,7,300]\n\
+printed [1,1,2,3,4,5,100,9,7,200,7,300,400]\n\
+closure 17 13 now [1,1,2,3,4,5,100,9,7,200,7,300,400,500]\n\
+box [0,10,2,30,4,50] [1,3,5] {x0=0,x1=1}\n\
+qs [5,0] [0,0]\n\
+qs [0,0,1] [1,0,1]\n\
+qs [1,0,1,2] [2,0,1,2]\n\
+qs [2,0,1,2,3] [3,0,1,2,3]\n\
 "),
     // An `Option<error>` that holds a nil error is present: `task.timeout` of
     // a task that finished in time has its result, whatever it is. The VM,

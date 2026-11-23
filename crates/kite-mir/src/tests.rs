@@ -551,12 +551,13 @@ fn nested_and_suspending_long_literals_lower_well_formed() {
 /// A write through a field takes the field, and a read of the field only
 /// glances when what it read is finished with before anything could write
 /// in place: a length read and compared before the push does; a binding
-/// read after a call, or after the push, does not.
+/// read after a call that could run code of the program's, or after the
+/// push, does not.
 #[test]
 fn a_field_read_glances_only_while_nothing_can_write() {
     let b = build(
         "struct Q {\n    var items: [int]\n}\n\n\
-         fn touch() {\n}\n\n\
+         fn touch() {\n    io.print(0)\n}\n\n\
          fn main() {\n    var q = Q{ items: [] }\n\
          \x20   if q.items.len() < 3 {\n        q.items.push(1)\n    }\n\
          \x20   let kept = q.items\n    q.items.push(2)\n    io.print(kept.len())\n\
@@ -579,7 +580,7 @@ fn a_field_read_glances_only_while_nothing_can_write() {
             _ => None,
         })
         .collect();
-    let glances = held_reads(f);
+    let glances = held_reads(f, &Kept::of(&b.mir));
     let glancing: Vec<bool> = reads.iter().map(|l| glances[l.index()].is_some()).collect();
     assert_eq!(glancing, vec![true, false, false], "{}", b.show());
 }
@@ -645,4 +646,39 @@ fn a_parameter_is_kept_unless_nothing_can_keep_it() {
     ] {
         assert!(keeps(name, 0), "`{}` does not keep its parameter", name);
     }
+}
+
+/// A field's map passed to a call glances at it only when the callee keeps
+/// nothing of it and is quiet: one that keeps it, or that writes through a
+/// field itself, or renders a value, ends the field's being the one holder.
+#[test]
+fn a_field_passed_to_a_quiet_reader_only_glances() {
+    let b = build(
+        "struct Q {\n    var m: { str: int }\n}\n\n\
+         fn seen(m: { str: int }) -> bool {\n    return m.len() > 0\n}\n\n\
+         fn deep(m: { str: int }) -> bool {\n    return seen(m)\n}\n\n\
+         fn keep(m: { str: int }) -> { str: int } {\n    return m\n}\n\n\
+         fn stir(m: { str: int }, var q: Q) -> bool {\n    q.m[\"x\"] = 1\n    return m.len() > 0\n}\n\n\
+         fn shows(m: { str: int }, n: int) -> bool {\n    io.print(n)\n    return m.len() > 0\n}\n\n\
+         fn main() {\n    var q = Q{ m: { } }\n\
+         \x20   if seen(q.m) {\n        q.m[\"a\"] = 1\n    }\n\
+         \x20   if deep(q.m) {\n        q.m[\"b\"] = 1\n    }\n\
+         \x20   _ = keep(q.m)\n\
+         \x20   _ = stir(q.m, q)\n\
+         \x20   _ = shows(q.m, 1)\n}\n",
+    );
+    let kept = Kept::of(&b.mir);
+    let f = b.main();
+    let reads: Vec<Local> = f
+        .blocks
+        .iter()
+        .flat_map(|b| &b.stmts)
+        .filter_map(|s| match s {
+            Inst::Assign { dst, value: Rvalue::FieldGet { .. } } => Some(*dst),
+            _ => None,
+        })
+        .collect();
+    let glances = held_reads(f, &kept);
+    let glancing: Vec<bool> = reads.iter().map(|l| glances[l.index()].is_some()).collect();
+    assert_eq!(glancing, vec![true, true, false, false, false], "{}", b.show());
 }

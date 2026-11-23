@@ -673,10 +673,16 @@ A write through a field goes straight into the field's slice or map when
 nothing else holds it, so a loop that pushes, writes keys or removes them
 through a field (`q.items.push(v)`, `s.m[k] = v`, in a `var self` method too)
 is as fast as one on a local, on every backend. A read of
-the field that can keep what it read — into a binding, an argument, a
-capture — makes the next write copy, once; reading a length, an element or a
-key between the writes does not. One level further down, `b.rows[i].push(x)`
-copies that row on each push, as `grid[i].push(x)` does on a local.
+the field that can keep what it read — into a binding, a capture, an
+argument of a function that may keep it — makes the next write copy, once;
+reading a length, an element or a key between the writes does not, and nor
+does passing it to a function that only reads it (`if !seen(q.m, w)`). The
+same holds for a local: handing a slice or map to a function that keeps
+nothing of it leaves the next write in place. What counts as keeping is
+storing, returning, capturing or sending it anywhere, or passing it on to a
+function value, a `dyn` method, the host or a function that keeps it. One
+level further down, `b.rows[i].push(x)` copies that row on each push, as
+`grid[i].push(x)` does on a local.
 
 ### An empty `[]` or `{}` has nothing to infer from
 

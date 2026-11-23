@@ -608,6 +608,55 @@ fn main() {
     );
 }
 
+/// A method that asks a helper about its own field's map or slice between
+/// writes through the field is linear on all three backends. The read of
+/// the field into the helper's argument counted as keeping it, so the next
+/// write through the field copied the whole map: at forty thousand that
+/// took 40 s on the VM. A call to a function that keeps nothing of the
+/// argument, and can write in place nothing that was there before it ran,
+/// only glances at the field now (`kite_mir::held_reads`).
+#[test]
+fn a_field_passed_to_a_reader_is_written_in_place() {
+    let src = r#"fn seen(m: { str: int }, w: str) -> bool {
+    return has_key(m, w)
+}
+
+fn count(xs: [int]) -> int {
+    return xs.len()
+}
+
+struct Set {
+    var m: { str: int }
+    var order: [int]
+}
+
+impl Set {
+    fn add(var self, w: str) {
+        if !seen(self.m, w) {
+            self.m[w] = count(self.order)
+        }
+        self.order.push(count(self.order))
+    }
+}
+
+fn main() {
+    let n = 200000
+    var s = Set{ m: { }, order: [] }
+    for i in 0..n {
+        s.add("k\(i % (n / 2))")
+    }
+    io.print("\(s.m.len()) \(s.order.len()) \(or_else(s.m["k7"], -1))")
+}
+"#;
+    agrees_within(
+        "field-passed-to-a-reader",
+        src,
+        "100000 200000 7\n",
+        Duration::from_secs(20),
+        true,
+    );
+}
+
 /// A deep chain of awaits — a recursive `async fn`, the shape of a recursive
 /// walk — is linear on all three backends. An `await` that had to wait parked
 /// with no target, and every task finishing woke every parked task, so each
