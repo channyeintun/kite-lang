@@ -16397,6 +16397,21 @@ fn params_in(types: &Types, ty: TyId, out: &mut Vec<u32>) {
     }
 }
 
+/// Whether `ty` is the error type or is built from it by a slice, a map, an
+/// optional, a tuple or a function type, as its printed name would show.
+fn built_from_error(types: &Types, ty: TyId) -> bool {
+    match types.kind(ty) {
+        TyKind::Error => true,
+        TyKind::Slice(e) | TyKind::Optional(e) | TyKind::Fallible(e) => built_from_error(types, *e),
+        TyKind::Map(k, v) => built_from_error(types, *k) || built_from_error(types, *v),
+        TyKind::Tuple(es) => es.iter().any(|e| built_from_error(types, *e)),
+        TyKind::Fn { params, ret } => {
+            params.iter().any(|p| built_from_error(types, *p)) || built_from_error(types, *ret)
+        }
+        _ => false,
+    }
+}
+
 /// Whether `==` is defined on a type once its parameters are chosen — taking
 /// each parameter to be something comparable, which the parameter's own
 /// callers are then held to.
@@ -16521,7 +16536,13 @@ fn check_compared_params(
             let Some(at) = facts.compared[call.callee].get(i).copied().flatten() else {
                 continue;
             };
-            if types.is_poisoned(*t) || equatable_given_params(types, *t, &mut Vec::new()) {
+            // A type built from one the parser could not read — the closure
+            // `|x: :| x` is a `fn(<error>) -> <error>` — was reported where
+            // it is written, and is not printed in a message.
+            if types.is_poisoned(*t)
+                || built_from_error(types, *t)
+                || equatable_given_params(types, *t, &mut Vec::new())
+            {
                 continue;
             }
             let block = resolved.fns[call.callee]

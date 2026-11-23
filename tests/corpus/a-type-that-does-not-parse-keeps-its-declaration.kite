@@ -34,6 +34,10 @@ fn later() -> (, error) { //~ ERROR E0100
     return 1, nil
 }
 
+fn same<T>(a: T, b: T) -> bool {
+    return a == b
+}
+
 fn main() {
     var out: [1.5] = [] //~ ERROR E0100
     out.push(1.5)
@@ -49,6 +53,7 @@ fn main() {
     }
     let f = |a: [1.5], b: int| b //~ ERROR E0100
     io.print(f([], 2))
+    io.print(same(f, f))
     let c = Cell{ v: (1, 1) }
     let s = Slot.Full(at: (1, 1))
     match Shape.Dot(at: (1, 2)) {
