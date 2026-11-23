@@ -595,20 +595,20 @@ fn a_damaged_stored_hash_is_an_error_and_never_a_match() {
          \x20 if err != nil { return \"error: \\(err.message())\" }\n\
          \x20 return \"\\(ok)\"\n}\n\
          async fn main() {\n\
-         \x20 let (d, err) = await crypto.derive(\"x\", \"00\", 1)\n\
+         \x20 let (d, err) = await crypto.derive(\"x\", \"00112233445566778899aabbccddeeff\", 1)\n\
          \x20 if err != nil { return }\n\
-         \x20 io.print(await verdict(\"pbkdf2$1$00$\\(d)\"))\n\
+         \x20 io.print(await verdict(\"pbkdf2$1$00112233445566778899aabbccddeeff$\\(d)\"))\n\
          \x20 io.print(await verdict(\"pbkdf2$1$zz$\\(d)\"))\n\
          \x20 io.print(await verdict(\"pbkdf2$1$0$\\(d)\"))\n\
-         \x20 io.print(await verdict(\"pbkdf2$1$00$\\(upper(d))\"))\n\
-         \x20 io.print(await verdict(\"pbkdf2$1$00$\\(d.slice(0, 62))\"))\n\
-         \x20 io.print(await verdict(\"pbkdf2$1$00$zz\\(d.slice(2, 64))\"))\n}\n",
+         \x20 io.print(await verdict(\"pbkdf2$1$00112233445566778899aabbccddeeff$\\(upper(d))\"))\n\
+         \x20 io.print(await verdict(\"pbkdf2$1$00112233445566778899aabbccddeeff$\\(d.slice(0, 62))\"))\n\
+         \x20 io.print(await verdict(\"pbkdf2$1$00112233445566778899aabbccddeeff$zz\\(d.slice(2, 64))\"))\n}\n",
     );
     assert_eq!(
         out,
         "true\n\
-         error: crypto: stored hash's salt is not hex\n\
-         error: crypto: stored hash's salt is not hex\n\
+         error: crypto: stored hash's salt is not 32 hex characters\n\
+         error: crypto: stored hash's salt is not 32 hex characters\n\
          true\n\
          error: crypto: stored hash's digest is not 64 hex characters\n\
          error: crypto: stored hash's digest is not 64 hex characters\n",
