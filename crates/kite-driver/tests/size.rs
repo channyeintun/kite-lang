@@ -44,7 +44,8 @@ fn size_of(name: &str, src: &str) -> usize {
 /// presence rather than use looks like. Only the functions a program can
 /// reach are emitted now; `from_host` and `to_host` stay unconditional
 /// because the module exports `str` and `text` for its JavaScript API, and
-/// those two call them. A string-free program is 735 bytes.
+/// those two call them. A program with an empty `main` is 531 bytes (735
+/// before that change).
 ///
 /// So the floor is roughly twice what it was rather than four times, and the
 /// remainder is the conversion bridge the JavaScript API needs. Budget 1,024,
