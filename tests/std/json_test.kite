@@ -210,6 +210,13 @@ fn checks() -> [error] {
         ))
     let (_, huge_id_err) = Row.decode(parsed("{\"id\": 1e30}"))
     out.push(test.failed(huge_id_err, "Decode refuses an int past the range"))
+    // 2^53 + 1 is whole, so "expected a whole number" would be false of it.
+    let (_, inexact_err) = Row.decode(parsed("{\"id\": 9007199254740993}"))
+    out.push(test.equal_str(
+            if inexact_err == nil { "decoded" } else { inexact_err.message() },
+            "Row.id: a number this large is not exact in JSON; an int past 2^53 is written as a string of its digits",
+            "Decode says why a whole number past 2^53 is refused",
+        ))
     let (row, row_err) = Row.decode(parsed("{\"id\": 42}"))
     out.push(test.ok(row_err, "Decode takes a whole number"))
 

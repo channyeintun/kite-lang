@@ -1295,6 +1295,24 @@ impl<'a> Writer<'a, '_> {
                 let held = self.temp("value");
                 out.push(format!("{}let {} = {}({})", pad, held, reader, source));
                 out.push(format!("{}if {} == nil {{", pad, held));
+                if path_text(p) == "int" {
+                    // A number at or past 2⁵³ is whole, so "expected a whole
+                    // number" would be false of it; it is refused because a
+                    // float cannot say which integer it was.
+                    let n = self.temp("number");
+                    out.push(format!("{}    let {} = {j}.number_of({})", pad, n, source));
+                    out.push(format!("{}    if {} != nil {{", pad, n));
+                    out.push(format!(
+                        "{}        if {} >= 9007199254740992.0 || {} <= -9007199254740992.0 {{",
+                        pad, n, n
+                    ));
+                    out.push(format!(
+                        "{}            return _, errors.new(\"{}: a number this large is not exact in JSON; an int past 2^53 is written as a string of its digits\")",
+                        pad, where_
+                    ));
+                    out.push(format!("{}        }}", pad));
+                    out.push(format!("{}    }}", pad));
+                }
                 out.push(format!(
                     "{}    return _, errors.new(\"{}: expected {}\")",
                     pad, where_, what

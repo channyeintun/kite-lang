@@ -1228,7 +1228,7 @@ character in a string are errors — and each number is the float nearest what
 was written. `int_of` is nil unless the number is whole and below 2⁵³ in
 magnitude (a float holds every integer only there, so `9007199254740993` would
 read as a different number), so `@derive(Decode)` refuses `3.7` for an `int`
-field. `of_int(n) -> Json` is what `@derive(Encode)` writes for an `int`: a
+field, and refuses `9007199254740993` saying it is not exact. `of_int(n) -> Json` is what `@derive(Encode)` writes for an `int`: a
 number inside that range, and outside it the decimal text as a string, which
 `int_of` reads back — so no `int` is silently changed in either direction.
 `parse` stops at 128 levels of nesting, and `stringify` and `pretty` trap past
