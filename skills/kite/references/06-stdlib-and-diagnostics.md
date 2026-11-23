@@ -1576,8 +1576,10 @@ than the word being cut.
 
 UAX #9 rules P2–P3, X1–X10, W1–W7, N0–N2, I1–I2, L1–L2 (not L3, L4, HL1–HL6);
 UAX #14 as of Unicode 15.0, LB1–LB31, with SA treated as AL, CB unimplemented,
-the later LB15a–d, LB20a and LB28a not implemented, and East Asian Width read
-only for LB30's openers; Arabic joining to Presentation Forms-B with the
+the later LB15a–d, LB20a and LB28a not implemented, East Asian Width read
+only for LB30's openers, and a skin tone kept with whatever it follows;
+`is_combining` is every `Mn` and `Me` of Unicode 15.1, and `bidi_class`
+answers NSM from it, but its other classes are a listed subset; Arabic joining to Presentation Forms-B with the
 lam-alef ligature, not HarfBuzz.
 
 ```kite

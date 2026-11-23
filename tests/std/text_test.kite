@@ -290,6 +290,17 @@ fn checks() -> [error] {
     out.push(test.equal_int(text.cell_width("a\u{200c}\u{200e}\u{202e}\u{2060}\u{feff}b"), 2, "format characters take none"))
     out.push(test.equal_int(text.cell_width(text.from_code(0x1F1EF) + acute), 1, "a lone regional indicator is no flag"))
     out.push(test.equal_int(text.cell_width(text.from_code(0x1FAE0)), 2, "the newer emoji are two"))
+    // is_combining is every Mn and Me of Unicode 15.1: it was the marks of
+    // the scripts the bidi table named, and a Bengali nukta measured a column.
+    out.push(test.equal_int(text.cell_width("x\u{9BC}y"), 2, "a nukta takes none"))
+    out.push(test.equal_int(text.clusters("x\u{BCD}y").len(), 2, "a virama stays with its letter"))
+    out.push(test.is_true(text.is_combining(0x0300) && text.is_combining(0x036F) && !text.is_combining(0x0370), "the first range, to its edges"))
+    out.push(test.is_true(text.is_combining(0xE01EF) && !text.is_combining(0xE01F0) && !text.is_combining(0x10FFFF), "the last range, to its edges"))
+    out.push(test.is_true(!text.is_combining(0x093E) && !text.is_combining(0x0915) && !text.is_combining(-1), "a spacing vowel sign, a letter, nothing"))
+    // And bidi_class answers NSM from the same table, but for the five marks
+    // Unicode makes L.
+    out.push(test.is_true(text.bidi_class(0x0711) == text.BidiClass.NSM, "a Syriac mark is NSM"))
+    out.push(test.is_true(text.is_combining(0x0CBF) && text.bidi_class(0x0CBF) == text.BidiClass.L, "a Kannada sign is a mark and L"))
 
     return out
 }
