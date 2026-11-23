@@ -108,7 +108,39 @@ fn checked_in_an_inner_loop(xs: [int]) -> error {
     return nil
 }
 
+// What the body declares goes out of scope at a `break` or `continue`, and
+// is not handed on: a copy taken in the body, of a failure still held
+// outside, has dropped nothing by leaving.
+fn a_copy_left_by_a_break(xs: [int]) {
+    let c = touch(1)
+    for x in xs {
+        let e = c
+        if x > 0 {
+            break
+        }
+        if x < 0 {
+            continue
+        }
+    }
+    if c != nil {
+        io.print(c.message())
+    }
+}
+
+// A condition runs once more after the last iteration, so it is the only
+// way out of a `for cond`: a failure it tests is tested on the way out.
+fn until_the_test_passes() {
+    var err = touch(1)
+    var n = 1
+    for err != nil {
+        n += 1
+        err = touch(n)
+    }
+}
+
 fn main() {
+    a_copy_left_by_a_break([1])
+    until_the_test_passes()
     every_iteration()
     a_while_loop()
     after_a_continue()

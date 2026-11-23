@@ -2855,12 +2855,39 @@ impl<'a> Checker<'a> {
         // Otherwise control also leaves where the header finds nothing more
         // to do — before the first iteration, or after any — and from every
         // `break`.
-        if !runs {
-            let (taint, copies) = edges.head.unwrap_or(entry);
-            self.merge_loop_taint(&taint, &copies);
-            if let Some((taint, copies)) = edges.back {
-                self.merge_loop_taint(&taint, &copies);
+        //
+        // A `for cond` loop's condition runs before every iteration and once
+        // more after the last, so what reaches it from the body's end and
+        // every `continue` is already in the state it was left in, and the
+        // body's end is not itself a way out: `for err != nil { err = g() }`
+        // leaves only once `err` has been tested. Of the body's end only what
+        // it declared is kept, to be reported where the function ends.
+        match (&f.header, edges.head) {
+            (ast::ForHeader::While(_), Some((mut taint, copies))) if !runs => {
+                taint.resize(self.taint.len(), Taint::Clean);
+                for (i, t) in taint.iter_mut().enumerate() {
+                    if self.declared_inside(i as u32, f.span) {
+                        *t = self.taint[i];
+                    }
+                }
+                let inside: Vec<(u32, u32)> = self
+                    .copies
+                    .iter()
+                    .copied()
+                    .filter(|p| self.declared_inside(p.0, f.span) && self.declared_inside(p.1, f.span))
+                    .collect();
+                self.copies = copies;
+                self.copies.extend(inside);
+                self.restore_taint(taint);
             }
+            (_, head) if !runs => {
+                let (taint, copies) = head.unwrap_or(entry);
+                self.merge_loop_taint(&taint, &copies);
+                if let Some((taint, copies)) = edges.back {
+                    self.merge_loop_taint(&taint, &copies);
+                }
+            }
+            _ => {}
         }
         if let Some((taint, copies)) = edges.exit {
             self.merge_loop_taint(&taint, &copies);
@@ -3266,15 +3293,23 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// What a `break` or `continue`, or the body's end, hands on: what is
+    /// declared inside the loop is not, since it goes out of scope on the
+    /// way. An unchecked failure there was reported as it left — unless a
+    /// copy of it outside the loop still holds it, and that copy is what
+    /// is handed on. Handing on the name inside as well made a copy taken
+    /// in the body and left by `break` look dropped after the loop.
     fn join_loop_edge(&mut self, index: usize, back: bool) {
+        let Some(&(region, _)) = self.loops.get(index) else { return };
+        let (taint, copies) = self.state_outside(region);
         let Some(edges) = self.loop_edges.get_mut(index) else { return };
         let slot = if back { &mut edges.back } else { &mut edges.exit };
         let acc = slot.take();
         let here = match acc {
-            None => (self.taint.clone(), self.copies.clone()),
-            Some((taint, copies)) => (
-                self.join_taint(&taint, &self.taint),
-                join_copies((&copies, &taint), (&self.copies, &self.taint)),
+            None => (taint, copies),
+            Some((was, was_copies)) => (
+                self.join_taint(&was, &taint),
+                join_copies((&was_copies, &was), (&copies, &taint)),
             ),
         };
         let edges = &mut self.loop_edges[index];
@@ -3345,6 +3380,15 @@ impl<'a> Checker<'a> {
     /// the header binds for the body is not bound on that way out.
     fn loop_head(&mut self) {
         let Some(&(region, _)) = self.loops.last() else { return };
+        let head = self.state_outside(region);
+        if let Some(edges) = self.loop_edges.last_mut() {
+            edges.head = Some(head);
+        }
+    }
+
+    /// The error state as it is for what is declared outside `region`, with
+    /// everything declared inside it Clean and in no copy.
+    fn state_outside(&self, region: Span) -> ErrorState {
         let mut taint = self.taint.clone();
         for (i, t) in taint.iter_mut().enumerate() {
             if self.declared_inside(i as u32, region) {
@@ -3357,9 +3401,7 @@ impl<'a> Checker<'a> {
             .copied()
             .filter(|p| !self.declared_inside(p.0, region) && !self.declared_inside(p.1, region))
             .collect();
-        if let Some(edges) = self.loop_edges.last_mut() {
-            edges.head = Some((taint, copies));
-        }
+        (taint, copies)
     }
 
     /// Join two taint states at a point where control arrives from either.
