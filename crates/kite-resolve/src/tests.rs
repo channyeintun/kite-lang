@@ -243,3 +243,20 @@ fn an_impl_for_a_builtin_type_says_what_it_is() {
     assert!(text.contains("a built-in type cannot take an `impl`"), "{}", text);
     assert!(!text.contains("no such type"), "{}", text);
 }
+
+/// Nor is a built-in generic type, `Option<int>` or `Task<int>`.
+#[test]
+fn an_impl_for_a_builtin_generic_type_says_what_it_is() {
+    for (ty, name) in [("Option<int>", "Option"), ("Task<int>", "Task")] {
+        let c = run(&format!(
+            "trait Named {{\n    fn name(self) -> str\n}}\n\
+             impl Named for {} {{\n    fn name(self) -> str {{\n        return \"i\"\n    }}\n}}\n",
+            ty
+        ));
+        assert_eq!(c.codes(), vec!["E0204"], "{}", c.render());
+        let text = c.render();
+        assert!(text.contains(&format!("`{}` is not a struct or an enum", name)), "{}", text);
+        assert!(text.contains("a built-in type cannot take an `impl`"), "{}", text);
+        assert!(!text.contains("no such type"), "{}", text);
+    }
+}
