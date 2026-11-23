@@ -252,7 +252,9 @@ provide("net", {{
       request.res.writeHead(500, {{ "content-type": "text/plain; charset=utf-8" }});
       request.res.end("the handler produced a header this host will not send\n");
       REQUESTS.delete(Number(handle));
-      return 0n;
+      // Not 0, which says "already answered": the request was answered, with
+      // a 500, and the program is told it was refused rather than misled.
+      return -1n;
     }}
     request.res.end(body);
     // Answered, so the body, the headers and the socket can go. Holding them

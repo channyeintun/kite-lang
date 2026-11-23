@@ -157,10 +157,11 @@ pub fn status(code: int, body: str) -> Response {
 
 /// The response with one more header line to send, after the ones it has.
 ///
-/// Only [`run`] sends it, and it sends it through [`respond`], so the same
-/// rules hold: a name that is not a token, or a line break or NUL in a value,
-/// is not sent — [`run`] answers 500 instead of putting it on the wire. A
-/// name added twice goes out twice, which is what `Set-Cookie` needs, and a
+/// [`respond`] sends it, after the headers it is given, and [`run`] sends it
+/// through [`respond`], so the same rules hold: a name that is not a token, or
+/// a line break, a control character or a character past U+00FF in a value, is
+/// not sent — `respond` says why, and [`run`] answers 500 instead of putting it
+/// on the wire. A name added twice goes out twice, which is what `Set-Cookie` needs, and a
 /// `Content-Type` here replaces the default `text/plain`. This is not what
 /// [`header`] reads: that is what arrived, and a response built in Kite
 /// arrived from nowhere.
@@ -190,8 +191,9 @@ pub fn json(code: int, body: str) -> Response {
 
 /// A `303 See Other` to `location`: the client goes on to a GET of that
 /// address, whatever the request's method was, which is what an answer to a
-/// form post wants. The location is a header value, so a line break in it makes
-/// [`run`] answer 500 rather than send it.
+/// form post wants. The location is a header value, so a line break or a
+/// character past U+00FF in it makes [`run`] answer 500 rather than send it:
+/// give it a path made with [`encode_component`].
 ///
 /// ```kite
 /// let r = redirect("/done")
@@ -1118,7 +1120,8 @@ extern fn serve_body(request: int) -> str
 extern fn serve_headers(request: int) -> str
 
 /// Answer one request. 1 when the host took it, 0 when that request was
-/// already answered or never existed.
+/// already answered or never existed, and -1 when the host refused the response
+/// and answered 500 itself.
 @host("net")
 extern fn serve_respond(request: int, status: int, body: str, headers: str) -> int
 
@@ -1233,7 +1236,8 @@ pub struct Header {
 /// the host is handed nothing else.
 ///
 /// A name that is not a token, a name or value carrying a carriage return or a
-/// newline, and a value carrying a NUL byte are refused rather than stripped:
+/// newline, and a value carrying a NUL byte, another control character or a
+/// character past U+00FF are refused rather than stripped:
 /// there is no escaping that keeps the meaning, and a header nobody can read is
 /// better than one somebody else wrote. The name is held to what
 /// [`sending_pairs`] holds a request's to — a colon in a name would otherwise
@@ -1250,8 +1254,12 @@ pub fn respond(incoming: Incoming, response: Response, headers: [Header]) -> err
     if refused != nil {
         return refused
     }
-    if serve_respond(incoming.id, response.status, response.body, lines) == 1 {
+    let sent = serve_respond(incoming.id, response.status, response.body, lines)
+    if sent == 1 {
         return nil
+    }
+    if sent < 0 {
+        return errors.new("http.respond: the host would not send that response, and answered 500 in its place")
     }
     return errors.new("http.respond: that request was already answered")
 }
@@ -1279,9 +1287,29 @@ fn header_lines(headers: [Header]) -> (str, error) {
         if has_nul(h.value) {
             return _, errors.new("http.respond: the value of `\(h.name)` contains a NUL byte")
         }
+        if !carriable(h.value) {
+            return _, errors.new(
+                "http.respond: the value of `\(h.name)` contains a control character or one past U+00FF, which a header cannot carry; encode it first, with encode_component",
+            )
+        }
         lines.push("\(h.name): \(h.value)")
     }
     return join(lines, "\n"), nil
+}
+
+/// Whether every character of a value is one a header can carry: a tab, a
+/// printable ASCII character, or one of U+0080 to U+00FF, each one byte on the
+/// wire. The host refuses anything else, and refused the whole response with
+/// it, which `run` could not tell from a request already answered and so ended
+/// the server over a handler's `€`.
+fn carriable(text: str) -> bool {
+    for i in 0..text.len() {
+        let c = text.code_at(i)
+        if (c < 32 && c != 9) || c == 127 || c > 255 {
+            return false
+        }
+    }
+    return true
 }
 
 /// Whether text carries a line break, in any of the three spellings a header

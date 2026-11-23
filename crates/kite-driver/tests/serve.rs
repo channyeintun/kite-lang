@@ -555,6 +555,53 @@ fn run_sends_the_headers_a_handler_added() {
     );
 }
 
+/// A header value the host cannot put on the wire — a character past U+00FF,
+/// or a control character other than a tab — is a 500 for that one caller,
+/// and the server goes on answering.
+///
+/// Node refuses such a value in `writeHead`; the adapter answered 500 and told
+/// the program "already answered", and `run` ended the server on it, so one
+/// handler's `€` in a header stopped every route.
+#[test]
+fn a_header_value_the_host_cannot_carry_does_not_end_the_server() {
+    if !node_available() {
+        eprintln!("skipping: node is not installed");
+        return;
+    }
+    let src = "use std/http\n\
+         fn euro(request: http.Request) -> http.Response {\n\
+         \x20   return http.with_header(http.ok(\"x\"), \"x-price\", \"5\u{20AC}\")\n\
+         }\n\
+         fn bell(request: http.Request) -> http.Response {\n\
+         \x20   return http.redirect(\"/a\u{7}b\")\n\
+         }\n\
+         fn latin(request: http.Request) -> http.Response {\n\
+         \x20   return http.with_header(http.ok(\"latin\"), \"x-name\", \"caf\u{E9}\tok\")\n\
+         }\n\
+         async fn main() {\n\
+         \x20   let (server, err) = await http.open(0)\n\
+         \x20   if err != nil {\n        io.print(err.message())\n        return\n    }\n\
+         \x20   io.print(\"listening \\(http.port_of(server))\")\n\
+         \x20   let routes = [\n\
+         \x20       http.route(\"GET\", \"/euro\", euro),\n\
+         \x20       http.route(\"GET\", \"/bell\", bell),\n\
+         \x20       http.route(\"GET\", \"/latin\", latin),\n\
+         \x20   ]\n\
+         \x20   let (n, rerr) = await http.run(server, routes)\n\
+         \x20   if rerr != nil {\n        io.print(rerr.message())\n    }\n\
+         }\n";
+    let client = client_with(
+        r#"  const e = await fetch(`http://127.0.0.1:${port}/euro`);
+  console.log("euro " + e.status + " " + JSON.stringify(e.headers.get("x-price")));
+  const b = await fetch(`http://127.0.0.1:${port}/bell`, { redirect: "manual" });
+  console.log("bell " + b.status);
+  const l = await fetch(`http://127.0.0.1:${port}/latin`);
+  console.log("latin " + l.status + " " + (await l.text()));"#,
+    );
+    let out = serve_under_node("uncarriable", src, &client);
+    assert_eq!(out, "euro 500 null\nbell 500\nlatin 200 latin\n", "{}", out);
+}
+
 /// While a server waits for requests it costs nothing, and a task's sleep
 /// still comes due.
 ///
