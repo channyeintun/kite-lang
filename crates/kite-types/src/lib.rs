@@ -2162,20 +2162,26 @@ impl<'a> Checker<'a> {
     }
 
     /// A local and every local holding the same failure as it, itself first.
+    ///
+    /// The pairs are read once into a table of neighbours and the group is
+    /// walked over that. Scanning every pair for each member, and the group
+    /// for each find, made a chain of a thousand copies take seconds: the
+    /// cost was cubic in the number of copies of one error.
     fn copies_of(&self, id: u32) -> Vec<u32> {
+        if !self.copies.iter().any(|&(a, b)| a == id || b == id) {
+            return vec![id];
+        }
+        let mut next: std::collections::HashMap<u32, Vec<u32>> = std::collections::HashMap::new();
+        for &(a, b) in &self.copies {
+            next.entry(a).or_default().push(b);
+            next.entry(b).or_default().push(a);
+        }
         let mut group = vec![id];
+        let mut seen: std::collections::HashSet<u32> = std::collections::HashSet::from([id]);
         let mut i = 0;
         while i < group.len() {
-            let x = group[i];
-            for &(a, b) in &self.copies {
-                let other = if a == x {
-                    b
-                } else if b == x {
-                    a
-                } else {
-                    continue;
-                };
-                if !group.contains(&other) {
+            for &other in next.get(&group[i]).map(|v| v.as_slice()).unwrap_or(&[]) {
+                if seen.insert(other) {
                     group.push(other);
                 }
             }
