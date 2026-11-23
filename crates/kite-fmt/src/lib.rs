@@ -169,7 +169,7 @@ pub fn format(src: &str) -> Result<String, FormatError> {
     if src.starts_with(kite_lexer::BYTE_ORDER_MARK) {
         f.out.insert(0, kite_lexer::BYTE_ORDER_MARK);
     }
-    if !faithful(src, &tokens, &f.out) {
+    if !faithful(src, &tokens, &f.out, &f.brackets) {
         return Err(FormatError::Unfaithful);
     }
     Ok(f.out)
@@ -196,7 +196,7 @@ pub fn is_formatted(src: &str) -> Result<bool, FormatError> {
 ///
 /// Any difference is a formatter bug. Refusing costs a file that stays as it
 /// was; not refusing costs a file that no longer means what its author wrote.
-fn faithful(src: &str, tokens: &[Token], out: &str) -> bool {
+fn faithful(src: &str, tokens: &[Token], out: &str, brackets: &HashSet<u32>) -> bool {
     let squeeze = |s: &str| -> String { s.chars().filter(|c| !c.is_whitespace()).collect() };
     if squeeze(src) != squeeze(out) {
         return false;
@@ -208,8 +208,19 @@ fn faithful(src: &str, tokens: &[Token], out: &str) -> bool {
     }
     // The one line break the formatter adds on purpose is the file's last,
     // and a newline before the end of input separates nothing.
-    let meaningful = |tokens: &[Token]| -> Vec<Token> {
-        let mut kept: Vec<Token> = tokens.to_vec();
+    // The other is that a `>=` the parser read as `>` and `=` is written as
+    // the two, which is how `out` lexes it.
+    let meaningful = |tokens: &[Token], split: bool| -> Vec<Token> {
+        let mut kept: Vec<Token> = Vec::with_capacity(tokens.len());
+        for t in tokens {
+            if t.kind == T::Ge && brackets.contains(&t.span.start) && split {
+                let mid = t.span.start + 1;
+                kept.push(Token { kind: T::Gt, span: Span::new(t.span.file, t.span.start, mid) });
+                kept.push(Token { kind: T::Eq, span: Span::new(t.span.file, mid, t.span.end) });
+            } else {
+                kept.push(*t);
+            }
+        }
         if let [.., newline, eof] = kept.as_slice() {
             if newline.kind == T::Newline && eof.kind == T::Eof {
                 kept.remove(kept.len() - 2);
@@ -217,7 +228,7 @@ fn faithful(src: &str, tokens: &[Token], out: &str) -> bool {
         }
         kept
     };
-    let (before, after) = (meaningful(tokens), meaningful(&again));
+    let (before, after) = (meaningful(tokens, true), meaningful(&again, false));
     before.len() == after.len()
         && before.iter().zip(&after).all(|(a, b)| {
             a.kind == b.kind
@@ -421,7 +432,18 @@ impl Formatter<'_> {
             if space || self.would_glue(text, token.kind) {
                 self.out.push(' ');
             }
-            self.out.push_str(text);
+            // `Option<int>=nil` lexes `>=` as one token, and the parser reads
+            // it as the `>` that closes the type and the `=` that assigns.
+            // Written as it came it glued the `=` to the type
+            // (`Option<int>= nil`), and `Option<int> = nil` was a second
+            // layout of the same program that `--check` also passed. It is
+            // written as the two it is, and `faithful` reads it that way.
+            let split = token.kind == T::Ge && bracket;
+            if split {
+                self.out.push_str("> =");
+            } else {
+                self.out.push_str(text);
+            }
 
             if matches!(token.kind, T::LBrace | T::LBracket | T::LParen) {
                 self.depth += 1;
@@ -430,9 +452,13 @@ impl Formatter<'_> {
                 self.closure_params = !self.closure_params && self.is_value_position();
             }
             self.prev2 = self.prev;
-            self.prev = Some(token.kind);
-            self.prev_bracket = bracket;
-            self.prev_text = (token.span.start, token.span.end);
+            self.prev = Some(if split { T::Eq } else { token.kind });
+            self.prev_bracket = bracket && !split;
+            self.prev_text = if split {
+                (token.span.end - 1, token.span.end)
+            } else {
+                (token.span.start, token.span.end)
+            };
             self.prev_end = token.span.end;
         }
         while self.out.ends_with('\n') {

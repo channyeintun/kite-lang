@@ -20,6 +20,27 @@ fn idempotent(src: &str) -> String {
     once
 }
 
+/// `Option<int>=nil` lexes `>=` as one token. It came out `Option<int>= nil`,
+/// and `Option<int> = nil` passed `--check` as well: two layouts of one
+/// program. There is one.
+#[test]
+fn a_type_closing_bracket_does_not_glue_to_the_assignment() {
+    for src in [
+        "fn main() {\n    let z: Option<int>=nil\n}\n",
+        "fn main() {\n    let z: Option<int> =nil\n}\n",
+        "fn main() {\n    let z: Option<int>= nil\n}\n",
+    ] {
+        let out = fmt(src);
+        assert_eq!(out, "fn main() {\n    let z: Option<int> = nil\n}\n", "{:?}", src);
+        assert_eq!(idempotent(src), out);
+    }
+    // Nested brackets were already right and stay so.
+    same("fn main() {\n    let z: Option<Box<int>> = nil\n}\n");
+    assert_eq!(fmt("fn main() {\n    var y: Option<Box<int>>=nil\n}\n"), "fn main() {\n    var y: Option<Box<int>> = nil\n}\n");
+    // A comparison is not a type bracket.
+    same("fn main() {\n    let b = a >= c\n}\n");
+}
+
 #[test]
 fn indentation_is_four_spaces_per_bracket() {
     let out = idempotent("fn main() {\nio.print(1)\n}\n");
@@ -324,14 +345,14 @@ fn a_file_with_lexical_errors_is_refused() {
 fn an_output_that_changes_the_tokens_is_refused() {
     let lex = |src: &str| kite_lexer::tokenize(FileId(0), src, &mut DiagBag::new());
     let src = "let x = a - == b\n";
-    assert!(faithful(src, &lex(src), "let x = a - == b\n"));
+    assert!(faithful(src, &lex(src), "let x = a - == b\n", &HashSet::new()));
     // `-` and `==` glued into `-=` and `=`.
-    assert!(!faithful(src, &lex(src), "let x = a -== b\n"));
+    assert!(!faithful(src, &lex(src), "let x = a -== b\n", &HashSet::new()));
     // A deleted token.
-    assert!(!faithful(src, &lex(src), "let x = a == b\n"));
+    assert!(!faithful(src, &lex(src), "let x = a == b\n", &HashSet::new()));
     // A line break removed, which joins two statements.
     let src = "let a = 1\nlet b = 2\n";
-    assert!(!faithful(src, &lex(src), "let a = 1 let b = 2\n"));
+    assert!(!faithful(src, &lex(src), "let a = 1 let b = 2\n", &HashSet::new()));
 }
 
 /// Blank lines at the top of a file go on the first pass, not the second.
@@ -356,7 +377,7 @@ fn a_comparison_that_looks_like_a_type_keeps_its_spaces() {
     // And a type is tight wherever it is.
     same("fn f<T: Show + Eq>(x: T) -> Option<T> {\n}\n");
     assert_eq!(fmt("fn f < T: Show + Eq >(x: T) {\n}\n"), "fn f<T: Show + Eq>(x: T) {\n}\n");
-    same("fn f() {\n    let a: Option<int>= nil\n}\n");
+    same("fn f() {\n    let a: Option<int> = nil\n}\n");
     same("type B = Box<Box<int>>\n");
 }
 
