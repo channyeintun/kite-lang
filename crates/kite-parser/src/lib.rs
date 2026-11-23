@@ -2815,6 +2815,30 @@ impl<'a> Parser<'a> {
     fn parse_for(&mut self, label: Option<Ident>, start: Span) -> Option<ForStmt> {
         self.bump(); // `for`
 
+        // `for _ in xs` is refused: a walk names what it walks. That used to
+        // be a bare "expected an expression" with nothing to say what to
+        // write instead. The rest of the statement is read, so the body is
+        // not reported again for want of a header.
+        if self.at(T::Underscore) && self.peek_at(1) == T::In {
+            let at = self.span();
+            self.diags.push(
+                Diagnostic::error(codes::E0100, "a `for` loop needs a name for what it walks")
+                    .with_primary(at, "`_` is not a binding on its own")
+                    .with_note(
+                        "name the variable and leave it unread, as in `for item in xs`; `_` \
+                         stands for an element only inside a tuple binding, `for (_, v) in m`",
+                    ),
+            );
+            self.bump();
+            self.bump();
+            self.no_struct_literal += 1;
+            let iter = self.parse_expr();
+            self.no_struct_literal -= 1;
+            iter?;
+            self.parse_block()?;
+            return None;
+        }
+
         let header = if self.at(T::LBrace) {
             ForHeader::Loop
         } else if self.looks_like_for_in() {
