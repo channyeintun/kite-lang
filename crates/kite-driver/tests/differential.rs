@@ -4916,6 +4916,18 @@ const EXPECTED: &[(&str, &str, &str)] = &[
         "[\tx\ny\nz\nw]\n[\tx1\ny]\n",
     ),
     (
+        // A block string whose only line is the closing one has no lines:
+        // the opening break goes and the closing line goes with its
+        // indentation. It was the indentation, eight spaces of it — in a
+        // body and in a module constant alike.
+        "an-empty-block-string-is-empty",
+        "let E = \"\"\"\n    \"\"\"\n\
+         fn main() {\n  let a = \"\"\"\n        \"\"\"\n\
+         \x20 let b = \"\"\"   \n\t\"\"\"\n\
+         \x20 io.print(\"[\\(a)] \\(a.len()) [\\(b)] [\\(E)] \\(E.len())\")\n}\n",
+        "[] 0 [] [] 0\n",
+    ),
+    (
         // A hole is an ordinary expression (§2.4), and that includes a block
         // string: the lexer ended the outer one at the inner one's `"""`.
         "a-block-string-in-a-hole-of-a-block-string",

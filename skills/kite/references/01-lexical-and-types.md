@@ -299,9 +299,11 @@ the opening line is kept verbatim. Spaces or tabs alone after the opening
 one: no line of a block string ends in `\r` unless `\r` is written. Only the
 closing line's own indentation comes off, character for character: a line
 indented less loses what it has, and a tab where that line has spaces stays.
+A `"""` with nothing below it but the indented closing `"""` is `""`.
 (Compilers through 0.1.9 kept a leading newline after `""" ` and a `\r` on
 every line, and stripped any leading whitespace from a line that did not start
-with the closing indentation.)
+with the closing indentation; and they made that empty block string the
+closing line's indentation.)
 
 ```kite
 fn main() {

@@ -14097,14 +14097,17 @@ pub(crate) fn dedent_block(body: &str) -> String {
     let body = body.replace("\r\n", "\n");
     // Spaces after the opening delimiter go with its line break: they cannot
     // be seen, and keeping them kept the break as well.
-    let body = match body.find('\n') {
-        Some(at) if body[..at].chars().all(|c| c == ' ' || c == '\t') => &body[at + 1..],
-        _ => body.as_str(),
+    let (body, opened) = match body.find('\n') {
+        Some(at) if body[..at].chars().all(|c| c == ' ' || c == '\t') => (&body[at + 1..], true),
+        _ => (body.as_str(), false),
     };
     // Everything after the last line break is the closing delimiter's own
-    // indentation.
+    // indentation. When the opening line break was the only one, what is
+    // left is the closing line alone: the string has no lines, and
+    // `"""` above an indented `"""` is "", not the indentation.
     let (text, indent) = match body.rfind('\n') {
         Some(at) => (&body[..at], &body[at + 1..]),
+        None if opened => ("", body),
         None => (body, ""),
     };
     if !indent.chars().all(|c| c == ' ' || c == '\t') {
