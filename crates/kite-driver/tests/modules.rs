@@ -2298,6 +2298,32 @@ fn a_file_of_the_directory_around_is_moved_only_where_that_compiles() {
     let said = p.run(&main).expect_err("two modules that import each other");
     assert!(said.contains("`view.kite` imports `widgets` itself"), "{}", said);
     assert!(!said.contains("move `view.kite`"), "{}", said);
+
+    // The same by the longer path, which reaches `widgets` from the root.
+    p.file(
+        "ui/view.kite",
+        "use ui/widgets\n\npub struct View {\n  pub n: int\n}\n\npub fn top() -> int {\n  return widgets.w().n\n}\n",
+    );
+    let said = p.run(&main).expect_err("two modules that import each other");
+    assert!(said.contains("`view.kite` imports `widgets` itself"), "{}", said);
+
+    // And through a third module: moved, `view` → `helper` → `widgets` →
+    // `view` would be the cycle.
+    let p = Project::new("member-reaches-back");
+    let main = p.file("main.kite", "use ui\n\nfn main() {\n  io.print(ui.top())\n}\n");
+    p.file(
+        "ui/view.kite",
+        "use helper\n\npub struct View {\n  pub n: int\n}\n\npub fn top() -> int {\n  return helper.h()\n}\n",
+    );
+    p.file("ui/helper/h.kite", "use widgets\n\npub fn h() -> int {\n  return widgets.w().n\n}\n");
+    p.file(
+        "ui/widgets/w.kite",
+        "use view\n\npub fn w() -> view.View {\n  return view.View{ n: 3 }\n}\n",
+    );
+    let said = p.run(&main).expect_err("a chain that leads back");
+    let through = "`view.kite` reaches `widgets` through the modules it imports";
+    assert!(said.contains(through), "{}", said);
+    assert!(!said.contains("move `view.kite`"), "{}", said);
 }
 
 /// A block string that never closes reads the rest of the file as its text, so

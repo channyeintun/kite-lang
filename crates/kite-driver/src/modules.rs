@@ -1282,7 +1282,7 @@ impl Loader {
             let origin = found.origin(&self.files);
             if !self.seen.contains_key(&origin) {
                 let refusal =
-                    self.already_a_member(&found, &owner, &segments, &spelling, u.span, sources);
+                    self.already_a_member(&found, &owner, &segments, &spelling, u.span, stack, sources);
                 if let Some(refusal) = refusal {
                     diags.push(refusal);
                     self.unresolved.insert(failed);
@@ -1771,6 +1771,7 @@ impl Loader {
     /// identities, which are paths below the package's root — "remove the
     /// `use src/lib/shape`" and "reach … as `src/lib.…`" in a package whose
     /// `main.kite` is in `src/`, neither of which is code that compiles.
+    #[allow(clippy::too_many_arguments)]
     fn already_a_member(
         &self,
         found: &Found,
@@ -1778,6 +1779,7 @@ impl Loader {
         written: &[&str],
         spelling: &str,
         span: Span,
+        stack: &[Frame],
         sources: &SourceMap,
     ) -> Option<Diagnostic> {
         let Found::Path { at, is_dir, .. } = found else {
@@ -1831,19 +1833,38 @@ impl Loader {
                     // move undoes, and the note says so instead of a recipe
                     // that ends in E0402.
                     let here = owner[inside.len()..].to_string();
+                    // `use widgets`, or the same module by a longer path:
+                    // `use ui/widgets` reaches it from the package's root.
                     let back = self.files.read(&file).ok().is_some_and(|text| {
                         text.lines().any(|line| {
                             let mut words = line.split_whitespace();
-                            words.next() == Some("use") && words.next() == Some(here.as_str())
+                            words.next() == Some("use")
+                                && words.next().is_some_and(|path| {
+                                    path == here || path.ends_with(&format!("/{}", here))
+                                })
                         })
                     });
-                    if back {
+                    // Or through other modules: the chain being loaded left
+                    // the directory by a `use` in this very file, so it leads
+                    // from the file to here whatever directory it is in.
+                    let through = !back
+                        && stack
+                            .iter()
+                            .position(|frame| frame.identity == *other)
+                            .and_then(|k| stack.get(k + 1))
+                            .is_some_and(|next| {
+                                let from = &sources.file(next.entered.file).name;
+                                self.files.canonical(from) == self.files.canonical(&file)
+                            });
+                    if back || through {
+                        let how = if back { "imports" } else { "reaches" };
+                        let by = if back { "itself" } else { "through the modules it imports" };
                         d.with_note(format!(
                             "this module is inside `{0}`, which imports it, so it cannot import \
-                             `{0}` back; and `{1}.kite` imports `{2}` itself, so the two depend on \
+                             `{0}` back; and `{1}.kite` {3} `{2}` {4}, so the two depend on \
                              each other wherever `{1}.kite` is — what both need has to be in a \
                              module that imports neither",
-                            directory, stem, here
+                            directory, stem, here, how, by
                         ))
                     } else {
                         d.with_note(format!(
