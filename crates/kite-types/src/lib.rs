@@ -5596,9 +5596,20 @@ impl<'a> Checker<'a> {
         for (i, span, d) in open_nils {
             let shown = self.types.name(d);
             match self.apply_subst_opt(d, subst) {
-                // The arguments after it fixed an optional: a binding of that
-                // type is a `nil` the call can take.
-                Some(t) if matches!(self.types.kind(t), TyKind::Optional(_)) => {
+                // They fixed something `nil` is not a value of: that is the
+                // mistake, said as it is said anywhere else.
+                Some(t) if !matches!(self.types.kind(t), TyKind::Optional(_) | TyKind::Err) => {
+                    let e = self.expr(&args[i], Some(t));
+                    hargs[i] = Some(e);
+                }
+                // The arguments after it fixed a type `nil` is a value of — an
+                // optional, or `error`. The `nil` still does not wait for them
+                // (only a closure does), so it stays an error, and the call's
+                // placeholder with it: a binding of that type is a `nil` the
+                // call can take. (Accepting it here, where `first(nil, opt)`
+                // is refused, also let a closure that waited on the `nil`
+                // pass with its parameter never typed.)
+                Some(t) => {
                     let name = self.types.name(t);
                     self.diags.push(
                         Diagnostic::error(codes::E0204, "cannot infer a type for `nil`")
@@ -5611,12 +5622,6 @@ impl<'a> Checker<'a> {
                                 name
                             )),
                     );
-                }
-                // They fixed something `nil` is not a value of: that is the
-                // mistake, said as it is said anywhere else.
-                Some(t) => {
-                    let e = self.expr(&args[i], Some(t));
-                    hargs[i] = Some(e);
                 }
                 None => {
                     self.diags.push(

@@ -1,0 +1,25 @@
+// A `nil` for a parameter only a later argument fixes is refused whatever
+// that argument makes it — an optional or an `error`, both types `nil` is a
+// value of — because a `nil` does not wait (only a closure does, §4.5).
+// Accepting it where the later argument was an `error` was a different rule
+// from `first(nil, opt)`'s, and a closure that waited beside it on another
+// parameter then passed with that parameter never typed, and reached code
+// generation as E0901.
+use std/errors
+
+fn same<T>(a: T, b: T) -> int {
+    return 1
+}
+
+fn beside<T, U>(a: T, f: fn(U) -> U, b: T) -> int {
+    return 1
+}
+
+fn main() {
+    let e = errors.new("x")
+    io.print(same(nil, e)) //~ ERROR E0204
+    io.print(beside(nil, |x| x, e)) //~ ERROR E0204
+    if e != nil {
+        io.print(e.message())
+    }
+}
