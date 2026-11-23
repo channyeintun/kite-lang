@@ -1843,6 +1843,39 @@ mod tests {
         assert!(!text.contains("unknown type") && !text.contains("similar type"), "{}", text);
     }
 
+    /// Three notes that now name a fix that compiles: a module's trait
+    /// written as a type is `dyn` *of that path*; a built-in type where a
+    /// `dyn` is wanted is told it meets the trait only as a bound (§9); a
+    /// struct missing the `Hash` a bound wants is told to derive it.
+    #[test]
+    fn notes_about_traits_name_what_compiles() {
+        let note_then_fix = |src: &str, note: &str, fixed: &str| {
+            let c = compile("t.kite", src, Emit::Check);
+            let codes = c.diags.iter().filter(|d| d.severity == kite_diag::Severity::Error).count();
+            assert_eq!(codes, 1, "{}", c.render_diagnostics());
+            assert!(c.render_diagnostics().contains(note), "{}", c.render_diagnostics());
+            let c = compile("t.kite", fixed, Emit::Check);
+            assert!(!c.failed(), "{}", c.render_diagnostics());
+        };
+        note_then_fix(
+            "use std/json\nfn f(x: json.Encode) -> int {\n  return 1\n}\nfn main() {\n}\n",
+            "write `dyn json.Encode` for a trait object",
+            "use std/json\nfn f(x: dyn json.Encode) -> int {\n  return 1\n}\nfn main() {\n}\n",
+        );
+        note_then_fix(
+            "fn main() {\n  let b: dyn Debug = 5\n  io.print(b.debug())\n}\n",
+            "take a `T: Debug` parameter instead",
+            "fn show<T: Debug>(x: T) -> str {\n  return x.debug()\n}\nfn main() {\n  io.print(show(5))\n}\n",
+        );
+        let keyed = "fn keyed<K: Hash, V>(m: {K: V}) -> int {\n  return m.len()\n}\n\
+                     fn main() {\n  io.print(keyed({P{ a: 1 }: 1}))\n}\n";
+        note_then_fix(
+            &format!("struct P {{\n  a: int\n}}\n{}", keyed),
+            "write `@derive(Hash)` above the declaration of `P`",
+            &format!("@derive(Hash)\nstruct P {{\n  a: int\n}}\n{}", keyed),
+        );
+    }
+
     /// A standard-library module written without its `use` is told the
     /// `use`, in one wording for every module and for a type as for a
     /// function; and the program with that `use` added compiles.

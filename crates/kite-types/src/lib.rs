@@ -11380,6 +11380,19 @@ impl<'a> Checker<'a> {
                     _ if self.type_index_of(*t).is_some() && !self.may_implement_here(*t, Some(*bound)) => {
                         d.with_note(self.not_implementable_here(&bn, *t))
                     }
+                    // `Hash` and `Debug` derive: the one line that makes a
+                    // map key of `P` is `@derive(Hash)`, and a bare `impl
+                    // Hash for P` header was not a fix that compiles.
+                    _ if self.type_index_of(*t).is_some() && (bn == "Hash" || bn == "Debug") => {
+                        let method = if bn == "Hash" { "fn hash(self) -> int" } else { "fn debug(self) -> str" };
+                        d.with_note(format!(
+                            "write `@derive({})` above the declaration of `{}`, or `{} {{ {} {{ … }} }}`",
+                            bn,
+                            last_segment(self.types.name(*t).split('<').next().unwrap_or_default()),
+                            self.impl_to_write(&bn, *t),
+                            method
+                        ))
+                    }
                     _ if self.type_index_of(*t).is_some() => {
                         d.with_note(format!("write `{}`", self.impl_to_write(&bn, *t)))
                     }
@@ -14107,6 +14120,21 @@ impl<'a> Checker<'a> {
             d = d.with_secondary(b, format!("`{}` required here", self.types.name(expected)));
         }
         if let TyKind::Dyn(tr) = *self.types.kind(expected) {
+            // §9: a built-in type meets the prelude's bounds and is not a
+            // `dyn` of any trait, so `let b: dyn Debug = 5` is refused by
+            // design; the note says so, and what does take an `int`.
+            if kite_hir::mono::primitive_trait(self.types, found, tr).is_some() {
+                let tn = written_trait(&self.types.trait_def(tr).name);
+                d = d.with_note(format!(
+                    "`{}` meets `{}` as a bound, but a built-in type is not a `dyn` of any \
+                     trait: take a `T: {}` parameter instead, or hold the value in a struct \
+                     that implements `{}`",
+                    self.types.name(found),
+                    tn,
+                    tn,
+                    tn
+                ));
+            }
             if self.type_index_of(found).is_some() {
                 let note = match self.unmet_bound_note(found, tr) {
                     Some(bounded) => bounded,
@@ -15372,12 +15400,14 @@ fn resolve_named_ty(
                         diags.push(
                             Diagnostic::error(
                                 codes::E0204,
-                                format!("`{}` is a trait, not a type", p.name()),
+                                format!("`{}` is a trait, not a type", p.text()),
                             )
                             .with_primary(p.span, "traits name behaviour, not values")
+                            // As written: `mine.Debug` is `dyn mine.Debug`,
+                            // and `dyn Debug` would be the prelude's.
                             .with_note(format!(
                                 "write `dyn {}` for a trait object, or use it as a bound",
-                                p.name()
+                                p.text()
                             )),
                         );
                         TyId::ERROR
