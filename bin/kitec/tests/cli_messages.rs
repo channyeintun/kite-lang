@@ -94,6 +94,20 @@ fn the_commonest_codes_are_explained_in_full() {
         ("E0210", &["`_`", "optional", "guard"][..]),
         ("E0303", &["`main`", "closure"][..]),
         ("E0700", &["`E0701`", "`impl`"][..]),
+        ("E0006", &["64 levels", "ceiling", "generated"][..]),
+        ("E0114", &["`var`", "field", "`var self`", "not a place"][..]),
+        ("E0116", &["warning", "`return`", "binding"][..]),
+        ("E0205", &["extension methods", "`dyn Trait`", "`impl`"][..]),
+        ("E0206", &["`self`", "generic", "bound"][..]),
+        ("E0207", &["`Display`", "slice", "`error`"][..]),
+        ("E0208", &["type argument", "bound", "`impl`"][..]),
+        ("E0209", &["turbofish", "conflicting", "`Stack.empty()`"][..]),
+        ("E0212", &["`bool as int`", "`parse_int`", "warning"][..]),
+        ("E0302", &["`check`", "`_ = f()`", "`defer`", "`let (v, _) = f()`"][..]),
+        ("E0405", &["quoted string", "`verison`", "UTF-8"][..]),
+        ("E0600", &["crypto.equal", "timing", "warning"][..]),
+        ("E0701", &["`Display`", "`Eq`", "by hand"][..]),
+        ("E0702", &["`dyn Trait`", "generic", "by hand"][..]),
     ] {
         let out = kitec(&["--explain", code]);
         assert!(out.status.success(), "{}", code);
@@ -133,7 +147,8 @@ fn a_whole_program_example_and_its_fix_are_what_they_say() {
     // written as a whole explanation of one situation each.
     let exactly = [
         "E0001", "E0002", "E0003", "E0005", "E0101", "E0110", "E0113", "E0115", "E0119", "E0200",
-        "E0201", "E0202", "E0203", "E0210", "E0303", "E0700",
+        "E0201", "E0202", "E0203", "E0210", "E0303", "E0700", "E0006", "E0114", "E0116", "E0205",
+        "E0206", "E0207", "E0208", "E0209", "E0212", "E0302", "E0405", "E0600", "E0701", "E0702",
     ];
     let mut codes = vec!["E0100", "E0111", "E0204", "E0520", "E0521"];
     codes.extend(exactly);
@@ -141,11 +156,34 @@ fn a_whole_program_example_and_its_fix_are_what_they_say() {
         let said = stdout(&kitec(&["--explain", code]));
         let example = block_after(&said, "Example").expect("an example");
         let mut checked = 0;
-        if example.contains("fn main") {
-            let file = dir.join(format!("{}.kite", code));
-            std::fs::write(&file, &example).expect("write");
-            let out = kitec(&["check", file.to_str().unwrap()]);
-            assert!(stderr(&out).contains(&format!("error[{}]", code)), "{}:\n{}", code, stderr(&out));
+        // An example that is a `kite.toml` is the manifest of a package whose
+        // program does nothing: what is checked is whether the manifest reads.
+        let manifest = example.trim_start().starts_with("[package]");
+        let package = |name: &str, toml: &str| {
+            let pkg = dir.join(name);
+            std::fs::create_dir_all(&pkg).expect("package dir");
+            std::fs::write(pkg.join("kite.toml"), toml).expect("write");
+            std::fs::write(pkg.join("main.kite"), "fn main() {\n    io.print(1)\n}\n")
+                .expect("write");
+            kitec(&["check", pkg.join("main.kite").to_str().unwrap()])
+        };
+        if example.contains("fn main") || manifest {
+            let out = if manifest {
+                package(code, &example)
+            } else {
+                let file = dir.join(format!("{}.kite", code));
+                std::fs::write(&file, &example).expect("write");
+                kitec(&["check", file.to_str().unwrap()])
+            };
+            // A warning is the code's own, too: E0116 and E0600 do not stop a build.
+            let said = stderr(&out);
+            assert!(
+                said.contains(&format!("error[{}]", code))
+                    || said.contains(&format!("warning[{}]", code)),
+                "{}:\n{}",
+                code,
+                said
+            );
             if exactly.contains(&code) {
                 let others: Vec<String> = stderr(&out)
                     .lines()
@@ -157,6 +195,12 @@ fn a_whole_program_example_and_its_fix_are_what_they_say() {
             checked += 1;
         }
         if let Some(fix) = block_after(&said, "The fix is") {
+            if manifest {
+                let out = package(&format!("{}_fix", code), &fix);
+                assert!(out.status.success(), "{} fix:\n{}\n{}", code, fix, stderr(&out));
+                checked += 1;
+                continue;
+            }
             // A fix that shows only `main` keeps the example's declarations.
             let only_main =
                 ["fn main", "async fn main"].iter().any(|m| fix.trim_start().starts_with(m));

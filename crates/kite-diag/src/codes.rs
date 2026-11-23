@@ -147,14 +147,25 @@ codes! {
          overflow.";
 
     E0006 = "E0006", "string interpolation nested too deeply",
-        "A string may hold an interpolation, which may hold a string, which \
-         may hold another interpolation. The scanner follows that by calling \
-         itself, so the nesting in the file is stack depth in the compiler, \
-         and three bytes of source buy a level.\n\n\
-         Running out of stack aborts the process rather than reporting \
-         anything — which would mean a file that kills the language server the \
-         moment it is opened — so there is a ceiling instead. No program \
-         written on purpose comes near it.";
+        "A string may hold an interpolation, which may hold a string, which may hold another interpolation. The scanner follows that by calling itself, so the nesting in the file is stack depth in the compiler, and three bytes of source buy a level.\n\
+         \n\
+         Running out of stack aborts the process rather than reporting anything — which would mean a file that kills the language server the moment it is opened — so there is a ceiling instead: 64 levels of `\\(\"…\")` inside one another. No program written on purpose comes near it; a file that does is nearly always generated, or a string that lost its closing quote partway and read the rest of the file as nested holes. The error is reported once, at the string that opened the first level past the ceiling.\n\
+         \n\
+         Example (the line is 66 strings deep, one past the ceiling and a long way past anything readable):\n\
+         \n\
+         \x20   fn main() {\n\
+         \x20       let s = \"\\(\"\\(\"\\(\"\\(\"\\(\"\\(\"\\(\"\\(\"\\(\"\\(\"\\(\"\\(\"\\(\"\\(\"\\(\"\\(\"\\(\"\\(\"\\(\"\\(\"\\(\"\\(\"\\(\"\\(\"\\(\"\\(\"\\(\"\\(\"\\(\"\\(\"\\(\"\\(\"\\(\"\\(\"\\(\"\\(\"\\(\"\\(\"\\(\"\\(\"\\(\"\\(\"\\(\"\\(\"\\(\"\\(\"\\(\"\\(\"\\(\"\\(\"\\(\"\\(\"\\(\"\\(\"\\(\"\\(\"\\(\"\\(\"\\(\"\\(\"\\(\"\\(\"\\(\"\\(\"\\(\"\\(1)\")\")\")\")\")\")\")\")\")\")\")\")\")\")\")\")\")\")\")\")\")\")\")\")\")\")\")\")\")\")\")\")\")\")\")\")\")\")\")\")\")\")\")\")\")\")\")\")\")\")\")\")\")\")\")\")\")\")\")\")\")\")\")\")\")\"\n\
+         \x20       io.print(s)\n\
+         \x20   }\n\
+         \n\
+         The fix is to name the pieces: a `let` per level reads better than any nesting, and it is the same text:\n\
+         \n\
+         \x20   fn main() {\n\
+         \x20       let a = \"\\(1)\"\n\
+         \x20       let b = \"\\(a)\"\n\
+         \x20       let s = \"\\(b)\"\n\
+         \x20       io.print(s)\n\
+         \x20   }";
 
     E0005 = "E0005", "block comments are not supported",
         "Kite's comments are line comments: `//` for a comment, `///` for the documentation of the declaration that follows, and `//!` for the module's own, at the top of its file. There is no block comment. Nested block comments are a recurring source of lexer bugs and every editor has supported toggling line comments for decades.\n\
@@ -388,12 +399,46 @@ codes! {
          \x20   }";
 
     E0114 = "E0114", "cannot assign to immutable binding",
-        "Bindings introduced with `let` are immutable. Use `var` for a binding \
-         that must change.\n\n\
-         Immutability is the default in Kite because it removes the \
-         value-versus-pointer distinction, maps onto WasmGC's per-field \
-         mutability flag, and makes most types automatically shareable across \
-         threads.";
+        "A binding made with `let` is immutable: it names one value for as long as it is in scope, and writing to it, or to anything it holds, is refused. `var` is the binding that changes. Immutability is the default because it removes the value-versus-pointer question (a `let` is never a place something else can change under you), maps onto WasmGC's per-field mutability flag, and makes most types safe to share between tasks. The situations:\n\
+         \n\
+         - Assigning to a `let` binding, `total = 1` or `total += i`. A loop that accumulates is the usual case. The fix offered is `var`, wherever `var` would compile.\n\
+         - Changing a field that is not `var`: `c.n = 2` where the struct says `n: int`. A field is immutable unless the struct marks it `var`, or the value can be rebuilt with `Counter{ ..c, n: 2 }`.\n\
+         - Changing what a `let` holds in place: `xs.push(2)`, `xs[0] = 3` or `m[k] = v` on a `let` slice or map. A slice or a map is a value, so changing its contents changes the binding that holds it.\n\
+         - Changing `self` in a method whose receiver is plain `self`: write `var self`, and the caller must then hold the value in a `var` (which is what makes the change visible where the call is written). Calling a `var self` method on a `let` is the same error.\n\
+         - Assigning inside a loop to a `let` declared without a value (`let x: int`, which may be assigned once). The body could run twice.\n\
+         - Assigning to something that is not a place at all: `f() = 1`, or `a + b = 1`. A place is a name, a field or an element.\n\
+         \n\
+         Example:\n\
+         \n\
+         \x20   struct Counter {\n\
+         \x20       n: int\n\
+         \x20   }\n\
+         \n\
+         \x20   fn main() {\n\
+         \x20       let total = 0\n\
+         \x20       for i in 0..3 {\n\
+         \x20           total += i    // E0114: `total` is a `let`\n\
+         \x20       }\n\
+         \x20       let c = Counter{ n: 1 }\n\
+         \x20       c.n = 2           // E0114: so is a field that is not `var`\n\
+         \x20       io.print(total)\n\
+         \x20   }\n\
+         \n\
+         The fix is `var` on the binding and on the field. Make something `var` only when it has to change; everything else stays a `let`:\n\
+         \n\
+         \x20   struct Counter {\n\
+         \x20       var n: int\n\
+         \x20   }\n\
+         \n\
+         \x20   fn main() {\n\
+         \x20       var total = 0\n\
+         \x20       for i in 0..3 {\n\
+         \x20           total += i\n\
+         \x20       }\n\
+         \x20       var c = Counter{ n: 1 }\n\
+         \x20       c.n = 2\n\
+         \x20       io.print(total + c.n)\n\
+         \x20   }";
 
     E0115 = "E0115", "`break` or `continue` outside a loop",
         "`break` and `continue` only mean something inside a loop, and they are checked against the loop that is *lexically* around them. The situations:\n\
@@ -423,15 +468,43 @@ codes! {
          \x20   }";
 
     E0116 = "E0116", "unreachable code",
-        "This statement follows one that always diverges, so it can never run.\n\n\
-         The same holds for a `match` arm whose every value is taken by the arms \
-         above it. The commonest cause is a name meant as a variant that is not \
-         one — `Dir` where the enum says `Directory` — which is a binding: it \
-         matches everything, and every arm after it is dead. A guarded arm \
-         shadows nothing, because its guard may fail. A literal or a range \
-         inside a range above it (`5` after `1..=9`) is dead the same way, \
-         and so is a range that matches nothing: ends the wrong way round, \
-         `9..=4`, or `5..5`, which leaves out its one value.";
+        "This is a warning, not an error: the program still compiles, but the code it points at can never run, which is nearly always a mistake rather than an intention. The situations:\n\
+         \n\
+         - A statement after one that always leaves: a `return`, a `break` or a `continue`.\n\
+         - A `match` arm whose every value is taken by the arms above it. The commonest cause is a name meant as a variant that is not one: `Down` where the enum is `Dir` and the variant is `Dir.Down`, which is a binding, and a binding matches everything, so every arm after it is dead.\n\
+         - A guarded arm shadows nothing, because its guard may fail.\n\
+         - A literal or a range inside a range above it (`5` after `1..=9`) is dead the same way, and so is a range that matches nothing: ends the wrong way round, `9..=4`, or `5..5`, which leaves out its one value.\n\
+         \n\
+         Example:\n\
+         \n\
+         \x20   enum Dir {\n\
+         \x20       Up\n\
+         \x20       Down\n\
+         \x20   }\n\
+         \n\
+         \x20   fn main() {\n\
+         \x20       let d = Dir.Down\n\
+         \x20       match d {\n\
+         \x20           Dir.Up => io.print(\"up\")\n\
+         \x20           Down => io.print(\"down\")    // a binding: it matches everything\n\
+         \x20           Dir.Down => io.print(\"never\")    // E0116\n\
+         \x20       }\n\
+         \x20   }\n\
+         \n\
+         The fix is to name the variant, so that each arm covers its own value. For a statement that follows a `return`, delete it or move it above:\n\
+         \n\
+         \x20   enum Dir {\n\
+         \x20       Up\n\
+         \x20       Down\n\
+         \x20   }\n\
+         \n\
+         \x20   fn main() {\n\
+         \x20       let d = Dir.Down\n\
+         \x20       match d {\n\
+         \x20           Dir.Up => io.print(\"up\")\n\
+         \x20           Dir.Down => io.print(\"down\")\n\
+         \x20       }\n\
+         \x20   }";
 
     E0117 = "E0117", "statement has no effect",
         "A closure written as a statement is built and thrown away. Nothing \
@@ -688,47 +761,203 @@ codes! {
          \x20   }";
 
     E0205 = "E0205", "no such method, function, or callable value",
-        "A name was called and there is nothing of that name to call here: a \
-         method a type does not have, an associated function that is not one, \
-         or an expression that is not a function at all.\n\n\
-         Kite has no extension methods, so a type's methods are all declared in \
-         the module that declares the type — which is what makes `x.foo()` \
-         answerable by looking in one place. A `dyn Trait` is narrower still: it \
-         exposes its trait's methods and no others, because the concrete type is \
-         not known where the call is written.";
+        "A name was called and there is nothing of that name to call: a method a type does not have, an associated function that is not one, or a value that is not a function at all. Kite has no extension methods, so a type's methods are all declared in the module that declares the type, in an `impl` block. That is what makes `x.foo()` answerable by looking in one place, and what makes the error here a statement about the type rather than about what happens to be imported. The situations:\n\
+         \n\
+         - A method the type does not have: `p.length()` on a struct with no `length`. The note lists what the type does have.\n\
+         - `int`, `float` and `bool` have no methods at all (`(1).abs()` is this error); `str`, slices, maps and `error` have the few their note lists. The things to do with a number are functions in `std/math`.\n\
+         - A `dyn Trait` exposes the methods of its trait and no others, however many the concrete type has, because the concrete type is not known where the call is written.\n\
+         - An associated function called as a method (`p.make()`) or a method called as an associated function (`Point.length()`): the note says which of the two it is.\n\
+         - A call whose callee is a value that is not a function: `let f = 3` and then `f(1)`.\n\
+         \n\
+         Example:\n\
+         \n\
+         \x20   struct Point {\n\
+         \x20       x: int\n\
+         \x20       y: int\n\
+         \x20   }\n\
+         \n\
+         \x20   fn main() {\n\
+         \x20       let p = Point{ x: 3, y: 4 }\n\
+         \x20       io.print(p.length())    // E0205: `Point` has no method `length`\n\
+         \x20   }\n\
+         \n\
+         The fix is to write the method, in an `impl` block of the type, or to spell the name the type has:\n\
+         \n\
+         \x20   struct Point {\n\
+         \x20       x: int\n\
+         \x20       y: int\n\
+         \x20   }\n\
+         \n\
+         \x20   impl Point {\n\
+         \x20       fn length(self) -> int {\n\
+         \x20           return self.x * self.x + self.y * self.y\n\
+         \x20       }\n\
+         \x20   }\n\
+         \n\
+         \x20   fn main() {\n\
+         \x20       let p = Point{ x: 3, y: 4 }\n\
+         \x20       io.print(p.length())\n\
+         \x20   }";
 
     E0206 = "E0206", "trait cannot be a trait object",
-        "A `dyn Trait` dispatches by looking at the value it holds, and the \
-         call has to make sense whichever type that turns out to be. So every \
-         method must take `self` — a method without a receiver has nothing to \
-         dispatch on — must not be generic, because a generic method has a body \
-         per type argument rather than one to call, and must not mention \
-         `Self`, which is a different type behind every `dyn`.\n\n\
-         Such a trait is still a perfectly good bound: `fn f<T: Trait>(x: T)` \
-         knows the type, so every method is callable. Take a type parameter \
-         instead of the trait object, or move what a `dyn` needs into a trait \
-         of its own.";
+        "A `dyn Trait` is a value whose type is known only by what it implements: the call `x.m()` looks at the value at run time and runs that type's `m`. For that to make sense whichever type it turns out to be, every method of the trait has to take `self` (a method without a receiver has nothing to dispatch on), must not be generic (a generic method has a body per type argument, not one body to call), and must not mention `Self` anywhere else (`Self` is a different type behind every `dyn`, so the call could not be checked). A trait that breaks one of those cannot be a trait object. The message names the method and the rule it breaks.\n\
+         \n\
+         Such a trait is still a good bound. In `fn f<T: Trait>(x: T)` the type is known where the function is written, so every method is callable, `Self` included; a bound costs a body per type, where a `dyn` costs a lookup per call. So the situations are the three above, written as `dyn Trait` in a parameter or a return type, or in a slice of them (`[dyn Trait]`).\n\
+         \n\
+         Example:\n\
+         \n\
+         \x20   trait Zero {\n\
+         \x20       fn zero() -> int\n\
+         \x20       fn show(self) -> str\n\
+         \x20   }\n\
+         \n\
+         \x20   struct A {\n\
+         \x20       n: int\n\
+         \x20   }\n\
+         \n\
+         \x20   impl Zero for A {\n\
+         \x20       fn zero() -> int {\n\
+         \x20           return 0\n\
+         \x20       }\n\
+         \x20       fn show(self) -> str {\n\
+         \x20           return \"a\"\n\
+         \x20       }\n\
+         \x20   }\n\
+         \n\
+         \x20   fn describe(z: dyn Zero) -> str {    // E0206: `zero` has no `self`\n\
+         \x20       return z.show()\n\
+         \x20   }\n\
+         \n\
+         \x20   fn main() {\n\
+         \x20       io.print(describe(A{ n: 1 }))\n\
+         \x20   }\n\
+         \n\
+         The fix is a type parameter in place of the trait object (or, if a `dyn` is what is needed, moving the methods that cannot dispatch into a trait of their own, so that the one the `dyn` names is only the methods that can):\n\
+         \n\
+         \x20   trait Zero {\n\
+         \x20       fn zero() -> int\n\
+         \x20       fn show(self) -> str\n\
+         \x20   }\n\
+         \n\
+         \x20   struct A {\n\
+         \x20       n: int\n\
+         \x20   }\n\
+         \n\
+         \x20   impl Zero for A {\n\
+         \x20       fn zero() -> int {\n\
+         \x20           return 0\n\
+         \x20       }\n\
+         \x20       fn show(self) -> str {\n\
+         \x20           return \"a\"\n\
+         \x20       }\n\
+         \x20   }\n\
+         \n\
+         \x20   fn describe<T: Zero>(z: T) -> str {\n\
+         \x20       return z.show()\n\
+         \x20   }\n\
+         \n\
+         \x20   fn main() {\n\
+         \x20       io.print(describe(A{ n: 1 }))\n\
+         \x20   }";
 
     E0207 = "E0207", "value cannot be interpolated",
-        "String interpolation renders `int`, `float`, `bool` and `str`. Any \
-         other type needs a `Display` implementation, which says how it should \
-         appear to a human.\n\n\
-         That is deliberately not derived: how a type presents itself is a \
-         design decision, not a mechanical one.";
+        "String interpolation, `\"\\(x)\"`, renders `int`, `float`, `bool` and `str`. Any other type needs a `Display` implementation, which says how the type appears to a human. That is deliberately not derived: how a type presents itself is a design decision, not a mechanical one (a `Password` whose derived form printed its field is the case where being wrong matters). The situations:\n\
+         \n\
+         - A struct or an enum with no `impl Display`.\n\
+         - A slice or an optional: `\"\\(xs)\"` has no text form either, because there is no one right way to join the pieces. Build the text (`join_ints(xs, \", \")`), or for an optional narrow it first or give it a fallback.\n\
+         - An `error`, which cannot be given an `impl`: interpolate `err.message()` after testing it.\n\
+         \n\
+         `io.print(x)` takes the same types and anything with a `Display`; the interpolation is where a missing one is reported.\n\
+         \n\
+         Example:\n\
+         \n\
+         \x20   struct Point {\n\
+         \x20       x: int\n\
+         \x20       y: int\n\
+         \x20   }\n\
+         \n\
+         \x20   fn main() {\n\
+         \x20       let p = Point{ x: 1, y: 2 }\n\
+         \x20       io.print(\"at \\(p)\")    // E0207: `Point` has no text form\n\
+         \x20   }\n\
+         \n\
+         The fix is an `impl Display`, whose one method returns the text. Then `\"\\(p)\"` and `io.print(p)` both work:\n\
+         \n\
+         \x20   struct Point {\n\
+         \x20       x: int\n\
+         \x20       y: int\n\
+         \x20   }\n\
+         \n\
+         \x20   impl Display for Point {\n\
+         \x20       fn show(self) -> str {\n\
+         \x20           return \"(\\(self.x), \\(self.y))\"\n\
+         \x20       }\n\
+         \x20   }\n\
+         \n\
+         \x20   fn main() {\n\
+         \x20       let p = Point{ x: 1, y: 2 }\n\
+         \x20       io.print(\"at \\(p)\")\n\
+         \x20   }";
 
     E0208 = "E0208", "invalid type parameter",
-        "A type parameter stands for a type the caller chooses. Each must be \
-         named once, and each bound must name a trait.\n\n\
-         A bound is what makes anything possible with the parameter: without \
-         one, nothing is known about the type, so nothing can be done to a \
-         value of it beyond moving it around.";
+        "A type parameter stands for a type the caller chooses, and this code is for the places where what was written does not say one coherently. A parameter has to be named once and every bound has to name a trait; a generic type has to be given as many type arguments as it declares; and every argument has to meet its bounds. Without a bound nothing is known about a type, so nothing can be done to a value of it beyond moving it around; the bound is what makes anything possible. The situations:\n\
+         \n\
+         - A generic type written without its arguments, or with the wrong number: `Box` for `Box<int>`, or `Task<int, str>` (a `Task` takes one).\n\
+         - A type argument that does not satisfy the bound: `total<T: Shape>` called with a slice of a type that has no `impl Shape`. The note says which trait it lacks.\n\
+         - A type parameter declared twice in one list (`<T, T>`), or a bound that is not a trait.\n\
+         - An `impl` that disagrees with its trait about the type's parameters or their bounds, or that is for one instance of a generic type (`impl Named for Box<int>`): an `impl` is for every `Box`, at its own type parameters.\n\
+         \n\
+         Example:\n\
+         \n\
+         \x20   struct Box<T> {\n\
+         \x20       value: T\n\
+         \x20   }\n\
+         \n\
+         \x20   fn main() {\n\
+         \x20       let b: Box = Box{ value: 1 }    // E0208: `Box` needs 1 type argument\n\
+         \x20       io.print(b.value)\n\
+         \x20   }\n\
+         \n\
+         The fix is to say which `Box` (or to let a literal say it, `let b = Box{ value: 1 }`):\n\
+         \n\
+         \x20   struct Box<T> {\n\
+         \x20       value: T\n\
+         \x20   }\n\
+         \n\
+         \x20   fn main() {\n\
+         \x20       let b: Box<int> = Box{ value: 1 }\n\
+         \x20       io.print(b.value)\n\
+         \x20   }";
 
     E0209 = "E0209", "type argument cannot be inferred",
-        "A generic function's type arguments are worked out from the types of \
-         the arguments passed to it. A parameter that appears nowhere in the \
-         parameter list has nothing to infer from.\n\n\
-         Kite has no turbofish. If a parameter cannot be inferred, take a \
-         value of that type, or return a concrete type instead.";
+        "A generic function's type arguments are worked out from the types of the arguments passed to it. When that cannot give each parameter one type, the call is refused rather than guessed, because a guess would pick a different type when someone later adds an argument. Kite has no turbofish (`make::<int>()`), so there is nowhere in a call to write the type; what fixes it is something the compiler can see. The situations:\n\
+         \n\
+         - A parameter that appears in no parameter type: `fn make<T>() -> Option<T>` called as `make()`. Nothing in the call says what `T` is.\n\
+         - Two arguments that disagree about one parameter: `same(1, \"two\")` for `fn same<T>(a: T, b: T)`. The message is `conflicting types`.\n\
+         - A generic enum's variant or a generic type's associated function with nothing to fix its parameter: `Maybe.None`, or `Stack.empty()`.\n\
+         - A closure whose return type nothing fixes.\n\
+         \n\
+         Example:\n\
+         \n\
+         \x20   fn make<T>() -> Option<T> {\n\
+         \x20       return nil\n\
+         \x20   }\n\
+         \n\
+         \x20   fn main() {\n\
+         \x20       let x = make()    // E0209: nothing says what `T` is\n\
+         \x20       io.print(x == nil)\n\
+         \x20   }\n\
+         \n\
+         The fix is a type where the value lands. A binding with a type, `let x: Option<int> = make()`, tells the call what it has to give; or take a value of the type as an argument so the call can read it off, or return a concrete type:\n\
+         \n\
+         \x20   fn make<T>() -> Option<T> {\n\
+         \x20       return nil\n\
+         \x20   }\n\
+         \n\
+         \x20   fn main() {\n\
+         \x20       let x: Option<int> = make()\n\
+         \x20       io.print(x == nil)\n\
+         \x20   }";
 
     E0210 = "E0210", "non-exhaustive match",
         "A `match` has to cover every value its subject can take, because exhaustiveness is what makes adding a variant safe: the compiler then shows every `match` that has to change. The message names a value that no arm covers. What counts as covering:\n\
@@ -785,11 +1014,27 @@ codes! {
          against — write the type.";
 
     E0212 = "E0212", "invalid cast",
-        "`as` converts between `int` and `float`. There is no conversion \
-         between any other pair of types.\n\n\
-         Kite performs no implicit numeric conversion, so a conversion is \
-         always written — which means every place precision can be lost is a \
-         place someone chose.";
+        "`as` converts between `int` and `float`, and between nothing else: not `bool`, not `str`, not an optional, not a struct. Kite performs no implicit numeric conversion, so a conversion is always written, which means every place precision can be lost is a place someone chose. A cast from one type to a type with no conversion is this error. The situations:\n\
+         \n\
+         - `bool as int` (`true as int`): write the choice, `if ok { 1 } else { 0 }`.\n\
+         - `int as str` (`65 as str`): a number goes into a string by interpolation, `\"\\(n)\"`; and a string into a number by `parse_int` or `parse_float`, which answer `Option` because the text may not be a number.\n\
+         - A cast to a type that takes arguments, `3 as Option<int>`: wrap the value in the optional where it is used.\n\
+         \n\
+         A cast that is allowed but loses something is the same code as a warning, not an error: `float as int` discards the fractional part (it truncates toward zero; a value too large for an `int` saturates, and `NaN` gives 0). The program compiles, and the warning is there so that the loss is something the reader has been told about.\n\
+         \n\
+         Example:\n\
+         \n\
+         \x20   fn main() {\n\
+         \x20       let ok = true\n\
+         \x20       io.print(ok as int)    // E0212: `as` converts `int` and `float` only\n\
+         \x20   }\n\
+         \n\
+         The fix is to write what was meant:\n\
+         \n\
+         \x20   fn main() {\n\
+         \x20       let ok = true\n\
+         \x20       io.print(if ok { 1 } else { 0 })\n\
+         \x20   }";
 
     E0213 = "E0213", "type has no identity",
         "`ptr.same` asks whether two names refer to one heap cell. Structs, \
@@ -850,20 +1095,60 @@ codes! {
          the branch where the error is nil, the value becomes readable.";
 
     E0302 = "E0302", "error is never checked",
-        "An `error` binding went out of scope without being inspected, or was \
-         written over while it still held a failure nobody had looked at: \
-         `var e = f()` then `e = nil` drops `f`'s failure as surely as leaving \
-         the block does. Copying it is not inspecting it: after `let e = err` \
-         either name may be inspected, but one of them must be. The `Task` \
-         of an `async fn` that answers with an error is held to the same \
-         rule: it has to be awaited, returned or passed on. A call whose \
-         result holds a failure cannot be deferred: it runs after the \
-         function has returned, so its error has nowhere to go — defer a \
-         function that handles it instead. Silently \
-         dropping errors is the single most common source of production \
-         failures in languages that permit it.\n\n\
-         To propagate, write `check`. To handle it where it happened, test \
-         `err != nil`.";
+        "An `error` is a failure, and a failure has to be looked at. Kite keeps Go's `(T, error)` shape and takes away the habit that makes it unsafe: in Go a program can write `v, _ := f()`, or never test `err`, and carry on with a value from a call that failed. Here the compiler follows every error from where a call hands it over to where it is tested, passed on or returned, and an error that goes out of reach unlooked-at is this one. It is the most common error in the language, and it is almost always right. The situations:\n\
+         \n\
+         - A call written as a statement whose result is an `error` or a `(T, error)`: `save()` on a line of its own. The result is dropped on the spot.\n\
+         - `let (v, err) = f()` and then `err` is never inspected. It is reported where `err` goes out of scope, which is also at each `return`, `break` or `continue` that leaves it behind: checking it on the path that falls through is not enough when an exit above the test takes another way.\n\
+         - `_` in the error slot, `let (v, _) = f()`: the Go habit, spelled out.\n\
+         - A whole call result bound to one name and never looked at: `let e = save()`. Naming it does not buy silence. Only `nil` starts out checked.\n\
+         - Writing over an error that still holds a failure nobody looked at: `var e = f()` then `e = nil`. So does a loop, whose next pass writes over what this one left.\n\
+         - Copying is not inspecting: after `let e = err` either name may be inspected, but one of them must be.\n\
+         - The `Task` of an `async fn` that answers with an error, called and never awaited, returned or passed on; and a `defer` of a call that answers with one, which runs after the function has returned, so its error has nowhere to go. Defer a function that handles its own error instead.\n\
+         \n\
+         What counts as looking: testing it (`err != nil`, `err == nil`), calling `check err` in a function that returns an error, returning or passing it on, or handing it to something that is. Reading the value of a `(T, error)` before that is a different mistake, `E0301`.\n\
+         \n\
+         Example:\n\
+         \n\
+         \x20   fn load() -> (int, error) {\n\
+         \x20       return 1, nil\n\
+         \x20   }\n\
+         \n\
+         \x20   fn save() -> error {\n\
+         \x20       return nil\n\
+         \x20   }\n\
+         \n\
+         \x20   fn main() {\n\
+         \x20       save()                  // E0302: the error is dropped\n\
+         \x20       let (n, err) = load()   // E0302: `err` is never looked at\n\
+         \x20       io.print(\"done\")\n\
+         \x20   }\n\
+         \n\
+         The fix is to deal with each one. In a function that can return an error, `check` passes it on; in `main`, which has nobody to return one to, test it and say what to do. `_ = f()` is the one deliberate way to throw an error away, written so that a reader sees it and `grep` finds it:\n\
+         \n\
+         \x20   fn load() -> (int, error) {\n\
+         \x20       return 1, nil\n\
+         \x20   }\n\
+         \n\
+         \x20   fn save() -> error {\n\
+         \x20       return nil\n\
+         \x20   }\n\
+         \n\
+         \x20   fn run() -> error {\n\
+         \x20       check save()\n\
+         \x20       let (n, err) = load()\n\
+         \x20       check err\n\
+         \x20       io.print(n)\n\
+         \x20       return nil\n\
+         \x20   }\n\
+         \n\
+         \x20   fn main() {\n\
+         \x20       let err = run()\n\
+         \x20       if err != nil {\n\
+         \x20           io.print(err.message())\n\
+         \x20           return\n\
+         \x20       }\n\
+         \x20       _ = save()\n\
+         \x20   }";
 
     E0303 = "E0303", "`check` outside a fallible function",
         "`check err` is the return of an error: if `err` is not nil, the enclosing function returns it. So the function around it has to be able to — its return type is `(T, error)` or `error`. The situations:\n\
@@ -1032,12 +1317,26 @@ codes! {
          one way only.";
 
     E0405 = "E0405", "a `kite.toml` that does not read",
-        "The manifest is what says where a package's dependencies are, so a \
-         build reads it before it can find any of them. One that does not \
-         parse used to be treated as no manifest at all, and the error a \
-         typo in `[package]` produced was `cannot find module` at every `use` \
-         of a dependency — a diagnostic about the wrong file. The manifest is \
-         reported instead, at the line that did not read.";
+        "The manifest, `kite.toml`, says where a package's dependencies are, so a build reads it before it can find any of them. One that does not read is reported at the line where it stops, and is the one error: the `use`s it leaves unresolvable are not reported as well (they used to be, as `cannot find module` at every `use` of a dependency, which is a diagnostic about the wrong file). The reader is a deliberate subset of TOML (tables, inline tables, quoted strings), and what is refused is named in the message. The situations:\n\
+         \n\
+         - Something that is not a quoted string where a string is wanted: `version = 1.0`. Values are `\"…\"` or `'…'`; there are no numbers or arrays.\n\
+         - A key or a table written twice, and a trailing comma in an inline table.\n\
+         - A key the section does not take. `[package]` takes `name` and `version`; a dependency takes `path`, `git`, `tag` and `version`, so a misspelt `verison` is an error rather than a setting dropped without a word.\n\
+         - A dependency without exactly one of `path` and `git`, a `tag` without a `git`, or a `tag` together with a `version`.\n\
+         - A name that cannot be imported: package and dependency names are ASCII letters, digits and `_`, not starting with a digit, because the name is what a `use` writes. `my-app` is refused.\n\
+         - A `version` that is not a version (`1.2.0`, without leading zeros), a target without an `entry`, and a file that is not UTF-8 text.\n\
+         \n\
+         Example, a manifest (everything after `version =` must be a quoted string):\n\
+         \n\
+         \x20   [package]\n\
+         \x20   name = \"app\"\n\
+         \x20   version = 1.0    # E0405: expected a quoted string\n\
+         \n\
+         The fix is to quote it:\n\
+         \n\
+         \x20   [package]\n\
+         \x20   name = \"app\"\n\
+         \x20   version = \"1.0.0\"";
 
     E0402 = "E0402", "module cycle",
         "Modules import each other in a circle, directly or through others. \
@@ -1179,11 +1478,31 @@ codes! {
 
     // ---- cryptography -----------------------------------------------------
     E0600 = "E0600", "comparing a secret with `==`",
-        "Structural equality short-circuits at the first difference, so how \
-         long a comparison takes says how much of a guess was right. That is a \
-         timing oracle, and it is how tokens and signatures are guessed one \
-         character at a time.\n\n\
-         `crypto.equal` compares in time that does not depend on the values.";
+        "This is a warning. Structural equality (`==` on a `str`) stops at the first byte that differs, so how long a comparison takes says how much of a guess was right. That is a timing oracle, and it is how a token, a signature or a digest is guessed one character at a time by someone who can time the replies.\n\
+         \n\
+         `crypto.equal(a, b)` compares in time that does not depend on where the values first differ, and is what to write wherever one side is a secret. The compiler looks only at the shape people write: a comparison with `==` or `!=` that has a call into `std/crypto` as one of its operands. It does not follow a value through a binding, a field or a function, since a check that stopped partway would give confidence it had not earned. So binding the result to a `let` first hides the warning and not the problem.\n\
+         \n\
+         Example:\n\
+         \n\
+         \x20   use std/crypto\n\
+         \n\
+         \x20   fn main() {\n\
+         \x20       let given = \"6f3a\"\n\
+         \x20       if crypto.hex_of(\"secret\") == given {    // E0600: stops at the first difference\n\
+         \x20           io.print(\"ok\")\n\
+         \x20       }\n\
+         \x20   }\n\
+         \n\
+         The fix is the constant-time comparison:\n\
+         \n\
+         \x20   use std/crypto\n\
+         \n\
+         \x20   fn main() {\n\
+         \x20       let given = \"6f3a\"\n\
+         \x20       if crypto.equal(crypto.hex_of(\"secret\"), given) {\n\
+         \x20           io.print(\"ok\")\n\
+         \x20       }\n\
+         \x20   }";
 
     // ---- derivation -------------------------------------------------------
     E0700 = "E0700", "malformed `@derive`",
@@ -1213,24 +1532,86 @@ codes! {
          \x20   }";
 
     E0701 = "E0701", "nothing derives that",
-        "The compiler writes bodies for `Debug`, `Hash`, `Encode` and \
-         `Decode`, and for nothing else.\n\n\
-         `Display` is deliberately absent: a mechanical rendering is wrong \
-         more often than right, and a `Password` whose derived form printed \
-         its field is exactly the case where being wrong matters. `Eq` is \
-         absent because `==` is already structural on every Kite value, so a \
-         derived one would be a second spelling for what the language does \
-         anyway.";
+        "`@derive(…)` has the compiler write a trait's methods from a type's fields. It writes `Debug`, `Hash`, `Encode` and `Decode`, and nothing else; a trait name it cannot write is this error, at the name. The situations:\n\
+         \n\
+         - `Display`. It is absent on purpose: a mechanical rendering is wrong more often than right, and a `Password` whose derived form printed its field is exactly the case where being wrong matters. Write `impl Display` for the type by hand.\n\
+         - `Eq` and its relatives. `==` is already structural on every Kite value, so a derived `Eq` would be a second spelling for what the language does anyway. `Clone` and `Ord` are refused the same way: the compiler writes only the four.\n\
+         - A trait of your own, or any other trait: the compiler knows no body to write for it.\n\
+         - A derived trait that the type also implements by hand (`@derive(Debug)` beside a written `fn debug`): the same method twice.\n\
+         \n\
+         Example:\n\
+         \n\
+         \x20   @derive(Debug, Display)    // E0701: the compiler writes no `Display`\n\
+         \x20   struct Point {\n\
+         \x20       x: int\n\
+         \x20       y: int\n\
+         \x20   }\n\
+         \n\
+         \x20   fn main() {\n\
+         \x20       let p = Point{ x: 1, y: 2 }\n\
+         \x20       io.print(p.x)\n\
+         \x20   }\n\
+         \n\
+         The fix is to derive what can be derived and write the rest:\n\
+         \n\
+         \x20   @derive(Debug)\n\
+         \x20   struct Point {\n\
+         \x20       x: int\n\
+         \x20       y: int\n\
+         \x20   }\n\
+         \n\
+         \x20   impl Display for Point {\n\
+         \x20       fn show(self) -> str {\n\
+         \x20           return \"(\\(self.x), \\(self.y))\"\n\
+         \x20       }\n\
+         \x20   }\n\
+         \n\
+         \x20   fn main() {\n\
+         \x20       let p = Point{ x: 1, y: 2 }\n\
+         \x20       io.print(p)\n\
+         \x20   }";
 
     E0702 = "E0702", "a field the derive cannot write",
-        "A derived body is a walk over a type's fields, so every field has to \
-         be something the walk knows how to handle: a primitive, a slice, a \
-         map, an optional, a tuple, another type that derives the same \
-         trait, or — for `Debug` and `Hash` — one of the type's own \
-         parameters, which the derived `impl` then bounds by the trait. \
-         `Encode` and `Decode` do not derive for a generic type at all.\n\n\
-         Where it does not, write the implementation by hand — the derive is a \
-         convenience, not the only way in.";
+        "A derived body is a walk over a type's fields, so every field has to be something the walk knows how to handle: a primitive, a slice, a map, an optional, a tuple, another type that derives the same trait, or (for `Debug` and `Hash`) one of the type's own parameters, which the derived `impl` then bounds by the trait. The message names the field it stopped at. The situations:\n\
+         \n\
+         - A field whose type has no implementation of that trait: a struct or an enum of your own with neither the `@derive` nor an `impl` written by hand.\n\
+         - A function value (`fn(int) -> int`, which has nothing to show but its type), a `dyn Trait` (the concrete type is hidden, and a walk needs it) and an `error`.\n\
+         - `Encode` or `Decode` on a generic type. Decoding builds a value of a parameter through an associated function that no bound can reach, so those two derive only for a type with no parameters (`Debug` and `Hash` derive for either).\n\
+         \n\
+         Where the derive cannot write a body, write the implementation by hand: the derive is a convenience, not the only way in.\n\
+         \n\
+         Example:\n\
+         \n\
+         \x20   struct Handle {\n\
+         \x20       id: int\n\
+         \x20   }\n\
+         \n\
+         \x20   @derive(Debug)\n\
+         \x20   struct Job {\n\
+         \x20       name: str\n\
+         \x20       handle: Handle    // E0702: `Handle` does not derive `Debug`\n\
+         \x20   }\n\
+         \n\
+         \x20   fn main() {\n\
+         \x20       io.print(1)\n\
+         \x20   }\n\
+         \n\
+         The fix is the derive on the field's type too:\n\
+         \n\
+         \x20   @derive(Debug)\n\
+         \x20   struct Handle {\n\
+         \x20       id: int\n\
+         \x20   }\n\
+         \n\
+         \x20   @derive(Debug)\n\
+         \x20   struct Job {\n\
+         \x20       name: str\n\
+         \x20       handle: Handle\n\
+         \x20   }\n\
+         \n\
+         \x20   fn main() {\n\
+         \x20       io.print(1)\n\
+         \x20   }";
 
     // ---- exclusivity ------------------------------------------------------
     E0800 = "E0800", "one object under two argument names",
