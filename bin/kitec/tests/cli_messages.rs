@@ -89,3 +89,59 @@ fn the_commonest_codes_are_explained_in_full() {
         }
     }
 }
+
+/// The indented block that follows the line starting with `lead`, unindented.
+fn block_after(text: &str, lead: &str) -> Option<String> {
+    let mut out = String::new();
+    for line in text.lines().skip_while(|l| !l.starts_with(lead)).skip(1) {
+        if let Some(code) = line.strip_prefix("    ") {
+            out.push_str(code);
+            out.push('\n');
+        } else if line.trim().is_empty() {
+            out.push('\n');
+        } else {
+            break;
+        }
+    }
+    (!out.trim().is_empty()).then_some(out)
+}
+
+/// An example that is a whole program is checked: it fails with the code it
+/// illustrates, and its fix compiles. E0204's fix called a `len` Kite does not
+/// have, which a reader copying it would have found out the hard way.
+#[test]
+fn a_whole_program_example_and_its_fix_are_what_they_say() {
+    let dir = std::env::temp_dir().join(format!("kitec-explain-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    for code in ["E0100", "E0111", "E0204", "E0520", "E0521"] {
+        let said = stdout(&kitec(&["--explain", code]));
+        let example = block_after(&said, "Example").expect("an example");
+        let mut checked = 0;
+        if example.contains("fn main") {
+            let file = dir.join(format!("{}.kite", code));
+            std::fs::write(&file, &example).expect("write");
+            let out = kitec(&["check", file.to_str().unwrap()]);
+            assert!(stderr(&out).contains(&format!("error[{}]", code)), "{}:\n{}", code, stderr(&out));
+            checked += 1;
+        }
+        if let Some(fix) = block_after(&said, "The fix is") {
+            // A fix that shows only `main` keeps the example's declarations.
+            let only_main =
+                ["fn main", "async fn main"].iter().any(|m| fix.trim_start().starts_with(m));
+            let fix = match example.find("fn main") {
+                Some(at) if only_main => {
+                    format!("{}{}", example[..at].trim_end_matches("async "), fix.trim_start())
+                }
+                _ if fix.contains("fn main") => fix,
+                _ => format!("{}\nfn main() {{}}\n", fix),
+            };
+            let file = dir.join(format!("{}_fix.kite", code));
+            std::fs::write(&file, &fix).expect("write");
+            let out = kitec(&["check", file.to_str().unwrap()]);
+            assert!(out.status.success(), "{} fix:\n{}\n{}", code, fix, stderr(&out));
+            checked += 1;
+        }
+        assert!(checked > 0, "{}: nothing checked", code);
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -361,14 +361,14 @@ codes! {
          \n\
          \x20   fn main() {\n\
          \x20       let xs = []    // E0204: an empty slice has no elements to infer from\n\
-         \x20       io.print(len(xs))\n\
+         \x20       io.print(xs.len())\n\
          \x20   }\n\
          \n\
          The fix is the annotation:\n\
          \n\
          \x20   fn main() {\n\
          \x20       let xs: [int] = []\n\
-         \x20       io.print(len(xs))\n\
+         \x20       io.print(xs.len())\n\
          \x20   }";
 
     E0205 = "E0205", "no such method, function, or callable value",
@@ -656,13 +656,13 @@ codes! {
          it, so that checking the entry alone, which is what an editor \
          does, shows it. A module that imports itself is a cycle of one.\n\
          \n\
-         Example, `a.kite` and `b.kite` in one directory:\n\
+         Example, `a.kite` and `b.kite` in one directory, checking `a.kite`:\n\
          \n\
          \x20   // a.kite\n\
-         \x20   use b\n\
+         \x20   use b    // E0402: the chain is b → a\n\
          \n\
          \x20   // b.kite\n\
-         \x20   use a    // E0402: the chain is b → a\n\
+         \x20   use a    // the import that closes it\n\
          \n\
          Every cycle can be broken by extracting what both modules need \
          into a third module that imports neither, and having both import \
