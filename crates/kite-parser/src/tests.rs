@@ -1013,6 +1013,20 @@ fn braces_left_open_at_the_end_are_one_error() {
     assert!(p.render().contains("3 │     if x > 0 {"), "{}", p.render());
 }
 
+/// A `"""` that is never closed reads the rest of the file, the braces that
+/// close `main` with it. That is one mistake: the lexer's E0001, with a note
+/// about block strings, and not an E0101 for the braces it swallowed too.
+#[test]
+fn an_open_block_string_at_the_end_is_one_error() {
+    let p = parse_src("fn main() {\n    let s = \"\"\"\n        abc\n    io.print(s)\n}\n");
+    assert_eq!(p.codes(), vec!["E0001"], "{}", p.render());
+    assert!(p.render().contains("block string is never closed"), "{}", p.render());
+    assert!(!p.render().contains("may not span lines"), "{}", p.render());
+    // A closed one before the end still leaves an open brace to report.
+    let p = parse_src("fn main() {\n    let s = \"\"\"\n        abc\n        \"\"\"\n");
+    assert_eq!(p.codes(), vec!["E0101"], "{}", p.render());
+}
+
 /// Code that is not indented says nothing about where a brace went missing,
 /// and is read as it always was — a `fn` at the margin of an unindented
 /// `impl` is a method.

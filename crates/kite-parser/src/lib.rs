@@ -1097,6 +1097,15 @@ impl<'a> Parser<'a> {
         true
     }
 
+    /// Whether the last token of the file is a `"""` string with no closing
+    /// delimiter — one that ran to the end of the file.
+    fn ends_in_an_open_block_string(&self) -> bool {
+        let last = self.tokens.iter().rev().find(|t| !matches!(t.kind, T::Newline | T::Eof));
+        let Some(last) = last.filter(|t| t.kind == T::Str) else { return false };
+        let text = &self.src[last.span.start as usize..last.span.end as usize];
+        text.starts_with("\"\"\"") && !(text.len() >= 6 && text.ends_with("\"\"\""))
+    }
+
     /// Report that `open` was never closed, and start unwinding.
     fn report_unclosed(&mut self, open: &Open, declaration: Option<Span>) {
         self.unwinding = true;
@@ -1120,6 +1129,12 @@ impl<'a> Parser<'a> {
         // own — the `fn` after an unclosed `f(1, 2` is where `)` was expected
         // — and it is the same mistake.
         if self.last_error_at == Some(self.pos) {
+            return;
+        }
+        // A block string that is never closed read the rest of the file, the
+        // closing braces with it, and the lexer has said so. The braces are
+        // that one mistake, not a second.
+        if declaration.is_none() && !self.in_hole && self.ends_in_an_open_block_string() {
             return;
         }
         let mut d = Diagnostic::error(codes::E0101, "unclosed delimiter").with_primary(
