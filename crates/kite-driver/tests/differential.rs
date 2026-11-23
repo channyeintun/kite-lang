@@ -4271,13 +4271,15 @@ fn run_on_native_with(name: &str, src: &str, config: kite_codegen_clif::RunConfi
     (String::from_utf8(out).expect("output is valid UTF-8"), stats.minor_collections)
 }
 
-/// The slice programs, natively, under a collector made to run constantly.
+/// The slice and map programs, natively, under a collector made to run
+/// constantly.
 ///
 /// A slice written in place is the collector's business: once it has been
 /// promoted, a young element written into it is reachable only through the
 /// write barrier, and a slice grown past the nursery is born in the old
 /// generation. The default nursery of a megabyte never fills for these
-/// programs, so they run here too with one of a page. The string program is
+/// programs, so they run here too with one of a page. A map is written in
+/// place the same way, and its index moves with it. The string program is
 /// here because a string's character count lives in its header, which must
 /// move with it.
 #[test]
@@ -4290,7 +4292,12 @@ fn slices_agree_natively_with_a_page_of_nursery() {
         return;
     }
     let mut collections = 0;
-    for name in ["slices-are-values", "slices-grow-in-place-natively", "strings-index-by-character"] {
+    for name in [
+        "slices-are-values",
+        "slices-grow-in-place-natively",
+        "strings-index-by-character",
+        "maps-are-indexed-and-keep-their-order",
+    ] {
         let (_, src) = WASM_TARGET
             .iter()
             .chain(NATIVE_TARGET)

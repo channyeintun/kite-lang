@@ -221,7 +221,7 @@ fn map_inserts_lookups_and_removals_are_constant_time() {
     io.print("\(s) \(m.len()) \(t.len())")
 }
 "#;
-    vm_within("map-ops", src, "6250025000 0 50000\n", Duration::from_secs(20));
+    agrees_within("map-ops", src, "6250025000 0 50000\n", Duration::from_secs(20), false);
 }
 
 /// A map literal of two hundred thousand entries is built in linear time:
