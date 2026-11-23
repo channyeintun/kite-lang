@@ -1034,8 +1034,14 @@ somebody decided, on a line a reader can see and `grep` can find.
 
 The analysis is a standard forward dataflow pass over the control-flow graph,
 run after type checking. It is not a borrow checker; it has no notion of
-ownership, aliasing, or lifetimes, and it terminates in a single pass because the
-lattice has height two.
+ownership, aliasing, or lifetimes. A loop body is entered both from before the
+loop and from its own end and every `continue`, so the state at its top is the
+join of all of them, and a failure one iteration leaves unchecked is still
+there when the next writes over it: `var e: error = nil` then
+`for i in 0..3 { e = f(i) }` is `E0302` at the write. A body whose end changes
+nothing is checked once; one that does is checked again from the join, which
+ends because the lattice has height two and a state can only get worse. What
+follows a loop is reached from its top and from every `break`.
 
 In practice:
 

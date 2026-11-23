@@ -441,6 +441,33 @@ fn main() {
 Test it first, or pass it on with `e = errors.wrap(e, "…")`, which reads the
 old value and so carries its obligation into the new one.
 
+**A loop's next iteration is a write too.** The body runs again from its end
+and from every `continue`, so a failure left unchecked in a binding declared
+outside the loop is written over by the next pass, and a `break` carries it out
+to the code after the loop:
+
+```kite fails
+fn f(i: int) -> error {
+    if i == 1 {
+        return errors.new("boom")
+    }
+    return nil
+}
+
+fn main() {
+    var e: error = nil
+    for i in 0..3 {
+        e = f(i) //~ E0302
+    }
+    if e != nil {
+        io.print(e.message())
+    }
+}
+```
+
+Test it inside the body before the next write — `if e != nil { break }` — or
+keep the error inside the loop.
+
 ## `check`
 
 `check err` is exactly, in a `-> (T, error)` function — and so it runs what was
