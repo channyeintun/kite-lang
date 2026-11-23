@@ -1237,7 +1237,9 @@ The rules:
 > binding's failure: the two names share one obligation, met by inspecting
 > either. A value `if` whose branches are each such a binding or `nil` adds
 > no obligation of its own — `let e = if x { c } else { nil }` holds `c`'s
-> failure or nothing, so `c` still answers for it. Reading it — testing it,
+> failure or nothing, so `c` still answers for it; a branch that is a binding
+> holding no failure unread, one already checked or only ever `nil`, brings
+> nothing, as `nil` does. Reading it — testing it,
 > checking it, returning it, taking it apart, passing it on — inspects it, and
 > R3 applies otherwise; a test inspects it wherever it is written, so one in the
 > right operand of `&&` or `||` meets the obligation on every path, though it
@@ -1251,7 +1253,10 @@ The rules:
 > to the name it is bound to, and counting it with `len` is not reading it. A
 > projection `r.0` takes one element of a tuple: its failure goes where it
 > lands, and the others are still owed, so the tuple is settled once each has
-> been taken; taken apart after that, it binds only the failures not yet taken.
+> been taken; taken apart or copied after that, it owes only the failures not
+> yet taken.
+> A chain of them goes down a level at each step: `t.0.0` takes one element of
+> `t.0` and leaves `t.0.1` owed, exactly as `let u = t.0` then `u.0` does.
 > A projection of a tuple no binding holds — `(f(1), f(2)).0`, `pair().0` —
 > leaves nothing that could take the other elements later, so each failure among
 > them is `E0302` at the projection: at its element in a literal, at the call
@@ -1262,7 +1267,14 @@ The rules:
 > against `nil`, which asks only whether a failure is there: where it is nil
 > there is none, and where it is present the optional, narrowed to what it
 > holds, is still Unchecked — `if r == nil { return }` is followed by a test of
-> the error or a destructuring of the pair.
+> the error or a destructuring of the pair. Nor does finding the optional
+> present prove the error in it present, since a task that came in time with a
+> nil `error` gives a present optional: `r.message()` reads only where that
+> second test, `r != nil` on the narrowed `r`, held (`E0301` otherwise). A
+> nil test of a result no binding holds, `if await task.timeout(save(), 10) ==
+> nil`, leaves the failure where nothing can reach it again, and is `E0302`
+> there; a field, entry or element tested in place is still where it was
+> stored.
 
 R1–R5 are about bindings, and R6 and R7 close the shapes they leave open: a
 call written as a statement makes no binding, so nothing in R1–R5 ever sees it,
@@ -1310,7 +1322,8 @@ the join, which ends because the lattice has height two and a state can only get
 worse. What follows a loop is reached from its top and from every `break` —
 except after a `for { }`, which has no header to leave from and is left only by
 `break`, so `for { if err == nil { break } … }` leaves only where `err` was
-tested.
+tested, and one with no `break` has nothing after it: its only ways out are
+the `return`s in its body, each of which answers for what it leaves behind.
 
 In practice:
 
