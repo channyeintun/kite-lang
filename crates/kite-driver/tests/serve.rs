@@ -479,7 +479,7 @@ fn a_response_header_name_must_be_a_token_and_a_value_has_no_nul() {
     let out = serve_under_node("header-names", src, &client);
     assert_eq!(
         out,
-        "cookie null\nbody colon=true nul=true http.respond: `1000` is not a status HTTP sends (100 to 599)\n",
+        "cookie null\nbody colon=true nul=true http.respond: `1000` is not a status HTTP sends (200 to 599)\n",
         "{}",
         out
     );
@@ -808,4 +808,45 @@ fn a_handler_cannot_set_a_header_that_frames_the_message() {
     );
     let out = serve_under_node("framing", src, &client);
     assert_eq!(out, "page 500\nchunked 500\nother 200 real\n", "{}", out);
+}
+
+/// A 1xx is not a final answer, and a 204 or a 304 has no body: `run` answers
+/// 500 to a handler that builds one, instead of sending an interim response
+/// that leaves the connection's next answer paired with the wrong request.
+#[test]
+fn a_final_status_is_200_to_599_and_204_and_304_carry_no_body() {
+    if !node_available() {
+        eprintln!("skipping: node is not installed");
+        return;
+    }
+    let src = "use std/http\n\
+         fn hundred(request: http.Request) -> http.Response {\n\
+         \x20   return http.status(100, \"continue body\")\n\
+         }\n\
+         fn empty(request: http.Request) -> http.Response {\n\
+         \x20   return http.status(204, \"\")\n\
+         }\n\
+         fn full(request: http.Request) -> http.Response {\n\
+         \x20   return http.status(304, \"stale\")\n\
+         }\n\
+         async fn main() {\n\
+         \x20   let (server, err) = await http.open(0)\n\
+         \x20   if err != nil {\n        io.print(err.message())\n        return\n    }\n\
+         \x20   io.print(\"listening \\(http.port_of(server))\")\n\
+         \x20   let routes = [\n\
+         \x20       http.route(\"GET\", \"/100\", hundred),\n\
+         \x20       http.route(\"GET\", \"/204\", empty),\n\
+         \x20       http.route(\"GET\", \"/304\", full),\n\
+         \x20   ]\n\
+         \x20   let (n, rerr) = await http.run(server, routes)\n\
+         \x20   if rerr != nil {\n        io.print(rerr.message())\n    }\n\
+         }\n";
+    let client = client_with(
+        r#"  for (const p of ["/100", "/204", "/304"]) {
+    const r = await fetch(`http://127.0.0.1:${port}${p}`);
+    console.log(p + " " + r.status);
+  }"#,
+    );
+    let out = serve_under_node("final-status", src, &client);
+    assert_eq!(out, "/100 500\n/204 204\n/304 500\n", "{}", out);
 }
