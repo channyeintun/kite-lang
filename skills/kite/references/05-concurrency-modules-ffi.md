@@ -661,7 +661,9 @@ module whose `util` does not exist gets `E0400` rather than whichever `util`
 somebody else loaded first.
 
 `use dep/utils` and `use utils` are two different modules, and every segment is
-honoured when the files are found. Two spellings coexist in one file as long as
+honoured when the files are found — and matched exactly, case included, on
+every system: on macOS `use Util` beside `util.kite` is `E0400` ("is there,
+spelled differently"), as it is on Linux. Two spellings coexist in one file as long as
 one is aliased:
 
 ```kite ignore

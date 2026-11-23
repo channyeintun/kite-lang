@@ -1893,6 +1893,31 @@ fn a_package_only_a_dependency_declares_is_named_without_its_mark() {
     assert!(!said.contains("@b"), "{}", said);
 }
 
+/// A `use` matches a file's or a directory's name exactly, case included, on
+/// every system. Where the file system ignores case — macOS, Windows — `use
+/// Util` loaded `util.kite`, and the program was `cannot find module` on
+/// Linux.
+#[test]
+fn a_use_matches_the_name_on_disk_exactly() {
+    let p = Project::new("case-exact");
+    p.file("util.kite", "pub fn one() -> int {\n  return 1\n}\n");
+    p.file("lib/a.kite", "pub fn two() -> int {\n  return 2\n}\n");
+    let ignores_case = p.dir.join("UTIL.kite").is_file();
+    for (name, uses, call) in
+        [("m1.kite", "use Util", "Util.one()"), ("m2.kite", "use Lib", "Lib.two()")]
+    {
+        let main = p.file(name, &format!("{}\n\nfn main() {{\n  io.print({})\n}}\n", uses, call));
+        let said = p.run(&main).expect_err("not the name on disk");
+        assert!(said.contains("E0400"), "{}", said);
+        if ignores_case {
+            assert!(said.contains("spelled differently"), "{}", said);
+            assert!(!said.contains("no `.kite` file directly in it"), "{}", said);
+        }
+    }
+    let main = p.file("ok.kite", "use util\nuse lib\n\nfn main() {\n  io.print(util.one() + lib.two())\n}\n");
+    assert_eq!(p.run(&main).expect("compiles"), "3\n");
+}
+
 /// A cycle back to the entry file is one error. The closing `use main`
 /// recorded a spelling for a module that does not exist — the entry is not a
 /// module — so `main.base()` behind it said `main` declares nothing public of

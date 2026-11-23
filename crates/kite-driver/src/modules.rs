@@ -366,6 +366,26 @@ fn within(prefix: &str, segments: &[&str]) -> String {
     parts.join("/")
 }
 
+/// Where a `use` was looked for and not found, for its `E0400`.
+#[derive(Default)]
+struct Tried {
+    /// Every path tried, nearest first.
+    places: Vec<PathBuf>,
+    /// What is on disk where one of them differs only in case.
+    miscased: Vec<PathBuf>,
+}
+
+impl Tried {
+    /// Whether `place` was found under another spelling — a directory there
+    /// is not one with no `.kite` file in it.
+    fn is_miscased(&self, place: &Path) -> bool {
+        self.miscased.iter().any(|real| {
+            real.as_os_str().len() == place.as_os_str().len()
+                && real.to_string_lossy().to_lowercase() == place.to_string_lossy().to_lowercase()
+        })
+    }
+}
+
 /// What a module's own `use` lines resolve against.
 #[derive(Clone, Default)]
 struct Scope {
@@ -1265,7 +1285,7 @@ impl Loader {
         // markdown/render` reaches inside the package rather than beside the
         // entry file — and a dependency wins over a sibling of the same name,
         // because what a package depends on is what it said.
-        let mut tried: Vec<PathBuf> = Vec::new();
+        let mut tried = Tried::default();
         if let Some(root) = scope.package.dependencies.get(segments[0]) {
             let dependencies = if self.files.is_dir(root) {
                 self.package_dependencies(root, sources, diags)
@@ -1290,9 +1310,8 @@ impl Loader {
             // `use dep` naming the root fell back to `dep.kite` when the
             // directory held no `.kite` file of its own — a file beside the
             // package, outside it, which the lockfile never hashed.
-            let whole = segments.len() == 1;
             let prefix = &scope.prefix;
-            if let Some(found) = self.found_at(at, prefix, segments, &package, whole, &mut tried) {
+            if let Some(found) = self.found_at(at, prefix, segments, &package, true, &mut tried) {
                 return Some(found);
             }
         } else {
@@ -1302,8 +1321,9 @@ impl Loader {
             // tree `ui/` could not reach `config/` beside it — the example
             // the section is built around did not compile. The nearest match
             // wins, so a module's own `config/` is still its own. The walk
-            // stops at the package's root: the entry file's directory for the
-            // program, the dependency's own for a dependency — which is what
+            // stops at the package's root: its manifest's directory, or the
+            // entry file's, for the program, the dependency's own for a
+            // dependency — which is what
             // keeps a dependency from resolving into the program importing it.
             for (dir, prefix) in self.levels(base, scope) {
                 let mut at = dir.clone();
@@ -1321,7 +1341,8 @@ impl Loader {
                 }
             }
         }
-        let places: Vec<String> = tried.iter().map(|p| format!("`{}`", p.display())).collect();
+        let places: Vec<String> =
+            tried.places.iter().map(|p| format!("`{}`", p.display())).collect();
         let places = match places.split_last() {
             Some((last, [])) => last.clone(),
             Some((last, rest)) => format!("{} and {}", rest.join(", "), last),
@@ -1330,7 +1351,14 @@ impl Loader {
         let mut missing = Diagnostic::error(codes::E0400, format!("cannot find module `{}`", path))
             .with_primary(span, "no such module")
             .with_note(format!("looked for {}", places));
-        for dir in tried.iter().filter(|p| self.files.is_dir(p)) {
+        for real in &tried.miscased {
+            missing = missing.with_note(format!(
+                "`{}` is there, spelled differently: a `use` matches a file or directory's name \
+                 exactly, case included, on every system",
+                real.display()
+            ));
+        }
+        for dir in tried.places.iter().filter(|p| self.files.is_dir(p) && !tried.is_miscased(p)) {
             missing = missing.with_note(format!(
                 "`{}` is a directory with no `.kite` file directly in it, so it is not a module",
                 dir.display()
@@ -1391,19 +1419,22 @@ impl Loader {
     }
 
     /// The module at `at` — the directory, or failing that the `.kite` file
-    /// — or `None`, with both recorded in `tried`. With `directory_only`,
-    /// only the directory: `at` is a package's root, and the file beside it
-    /// is not the package's.
+    /// — or `None`, with both recorded in `tried`. `rooted` says `at` is a
+    /// dependency's root joined with the path's segments after the first;
+    /// otherwise it is a directory joined with all of them. A dependency's
+    /// root itself is the directory only, since the file beside it is not the
+    /// package's.
     fn found_at(
         &self,
         at: PathBuf,
         prefix: &str,
         segments: &[&str],
         package: &Package,
-        directory_only: bool,
-        tried: &mut Vec<PathBuf>,
+        rooted: bool,
+        tried: &mut Tried,
     ) -> Option<Found> {
         let package = package.clone();
+        let written = if rooted { segments.len() - 1 } else { segments.len() };
         // A directory is the canonical form; a single file is the same thing
         // with one file in it, and is what most modules start as.
         //
@@ -1413,21 +1444,86 @@ impl Loader {
         // read, and the first sign was `cannot find` at a name `config.kite`
         // plainly declares.
         if self.files.is_dir(&at) && !self.files.kite_files(&at).is_empty() {
-            let prefix = within(prefix, segments);
-            return Some(Found::Path { at, is_dir: true, package, prefix });
+            match self.miscased(&at, written) {
+                None => {
+                    let prefix = within(prefix, segments);
+                    return Some(Found::Path { at, is_dir: true, package, prefix });
+                }
+                Some(real) => tried.miscased.push(real),
+            }
         }
-        if directory_only {
-            tried.push(at);
+        if rooted && written == 0 {
+            tried.places.push(at);
             return None;
         }
         let as_file = at.with_extension("kite");
         if self.files.is_file(&as_file) {
-            let prefix = within(prefix, &segments[..segments.len() - 1]);
-            return Some(Found::Path { at: as_file, is_dir: false, package, prefix });
+            match self.miscased(&as_file, written) {
+                None => {
+                    let prefix = within(prefix, &segments[..segments.len() - 1]);
+                    return Some(Found::Path { at: as_file, is_dir: false, package, prefix });
+                }
+                Some(real) => tried.miscased.push(real),
+            }
         }
-        tried.push(at);
-        tried.push(as_file);
+        tried.places.push(at);
+        tried.places.push(as_file);
         None
+    }
+
+    /// The path on disk, when the last `written` components of `at` — what a
+    /// `use` wrote, with `.kite` on the last for a file — name entries whose
+    /// names differ from those only in case; `None` when they are exact.
+    ///
+    /// **A `use` matches what is on disk exactly, case included.** Asking
+    /// the file system whether a path exists answers by its own rules, and
+    /// macOS's and Windows's ignore case: `use Util` loaded `util.kite`, and
+    /// `use TEXT` a directory `use text` is refused for, so a program compiled
+    /// there and was `cannot find module` on Linux. The directory's listing
+    /// is compared instead, which is the same answer everywhere. Modules
+    /// handed over by name are exact already.
+    fn miscased(&self, at: &Path, written: usize) -> Option<PathBuf> {
+        if matches!(self.files, Files::Memory(_)) {
+            return None;
+        }
+        let names: Vec<String> = at
+            .components()
+            .rev()
+            .take(written)
+            .map(|c| c.as_os_str().to_string_lossy().to_string())
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect();
+        let mut here = at.to_path_buf();
+        for _ in 0..names.len() {
+            here.pop();
+        }
+        let mut real = here.clone();
+        let mut differs = false;
+        for name in &names {
+            let entries: Vec<String> = match std::fs::read_dir(&here) {
+                Ok(listing) => listing
+                    .filter_map(|e| e.ok().map(|e| e.file_name().to_string_lossy().to_string()))
+                    .collect(),
+                // Not on disk: an editor's buffer, named as it was given.
+                Err(_) => return None,
+            };
+            here.push(name);
+            if entries.iter().any(|e| e == name) {
+                real.push(name);
+                continue;
+            }
+            match entries.iter().find(|e| e.to_lowercase() == name.to_lowercase()) {
+                Some(on_disk) => {
+                    real.push(on_disk);
+                    differs = true;
+                }
+                // Not listed at all: an unsaved buffer inside a saved directory.
+                None => return None,
+            }
+        }
+        differs.then_some(real)
     }
 
     /// The package a module found on a filesystem resolves its own `use`s in:

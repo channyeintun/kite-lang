@@ -2100,7 +2100,10 @@ and with no diagnostic. An alias is a convenience for the file that writes it.
 when they reach one file or directory: `use utils` inside `a/` and `use utils`
 inside `b/` are two modules when each finds a `utils` of its own, and one when
 both find the `utils` beside them, and `use dep/utils` and `use utils` are two
-modules, because every segment is honoured when the files are found. A `use`
+modules, because every segment is honoured when the files are found. A
+segment matches a file's or a directory's name exactly, case included, on
+every system — `use Util` does not find `util.kite`, even where the file
+system ignores case; it is `E0400`, with a note naming what is there. A `use`
 that finds nothing is `E0400` — never answered by some other module that
 happens to be spelled alike. A module's own `use`s are looked for from where
 its source is, too — its real directory, past any symbolic link — so the route
