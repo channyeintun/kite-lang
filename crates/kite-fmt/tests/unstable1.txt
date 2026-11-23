@@ -1,0 +1,6 @@
+fn main() {
+ Box{ v: 4 //
+: 1 }
+    let a: Box //
+<int> = 1
+}

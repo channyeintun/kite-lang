@@ -559,3 +559,23 @@ fn crlf_becomes_lf_inside_block_strings_too() {
     assert!(!out.contains('\r'), "{:?}", out);
     assert_eq!(out, src.replace("\r\n", "\n"));
 }
+
+/// The contract in the crate doc: formatting twice is formatting once, for
+/// every input, or the input is refused. In a declaration that does not parse
+/// the brackets are guessed, and the guess read the layout — a comment before a
+/// line break — so `< int >` came out `<int>` only on the second run, and
+/// `Rect{` came out `Rect {`. Both files are the fuzzer's.
+#[test]
+fn a_file_that_does_not_parse_formats_to_a_fixed_point() {
+    for src in [
+        include_str!("../tests/unstable1.txt"),
+        include_str!("../tests/unstable2.txt"),
+    ] {
+        match format(src) {
+            Ok(once) => assert_eq!(format(&once).as_deref(), Ok(once.as_str()), "{}", once),
+            Err(e) => assert_eq!(e, FormatError::Unstable, "{}", e),
+        }
+    }
+    let once = fmt(include_str!("../tests/unstable1.txt"));
+    assert!(once.contains("<int> = 1"), "{}", once);
+}

@@ -1,0 +1,9 @@
+) -> int {
+) {
+    }
+    fn square(
+) ->// c
+ Rect {
+        return Rect{ width: side,
+ height: side, label: "square" }
+    }
