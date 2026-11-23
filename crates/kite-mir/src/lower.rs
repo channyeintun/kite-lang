@@ -905,8 +905,12 @@ impl<'a> FnLowerer<'a> {
     /// when `order` is empty.
     ///
     /// Each compound field goes into a temporary as it is evaluated, so only
-    /// the evaluation moves; a field that is a plain local is read where it
-    /// stands, which is the same value, since no expression assigns a local.
+    /// the evaluation moves; a field that is a plain local is read when the
+    /// value is built, as [`Self::operand`] reads one for a call's arguments
+    /// too. That is the same value unless a later field assigns the local,
+    /// which only a `match` arm block can do — `Q{ y: a, u: match a { _ =>
+    /// { a = 7 } } }` reads `a` as 7 — and that holds for every operand list
+    /// this lowering builds, not only a reordered one.
     fn operands_in_order(&mut self, fields: &[hir::Expr], order: &[u32]) -> Vec<Operand> {
         if order.is_empty() {
             return fields.iter().map(|a| self.operand(a)).collect();

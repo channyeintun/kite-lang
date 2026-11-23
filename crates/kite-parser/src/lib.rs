@@ -3467,7 +3467,11 @@ impl<'a> Parser<'a> {
         // string with a newline that the same text without one did not.
         if let Some(StrPart::Text(first)) = parts.first_mut() {
             if let Some(at) = text(*first).find('\n') {
-                if text(*first)[..at].chars().all(|c| matches!(c, ' ' | '\t' | '\r')) {
+                // The `\r` of a CRLF break and nothing else: a lone `\r` is
+                // text, as the checker's `dedent_block` reads it.
+                let before = &text(*first)[..at];
+                let before = before.strip_suffix('\r').unwrap_or(before);
+                if before.chars().all(|c| c == ' ' || c == '\t') {
                     first.start += at as u32 + 1;
                 }
             }
