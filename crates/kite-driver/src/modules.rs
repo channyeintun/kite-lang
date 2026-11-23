@@ -993,6 +993,21 @@ impl Loader {
         }
     }
 
+    /// The labels of the packages only a dependency declares, `@` and all,
+    /// that a module was loaded from — what [`shown`] takes out of what a
+    /// diagnostic says.
+    pub fn marked(&self) -> Vec<String> {
+        let mut out: Vec<String> = self
+            .taken
+            .keys()
+            .filter(|identity| identity.starts_with('@'))
+            .map(|identity| identity.split('/').next().unwrap_or(identity).to_string())
+            .collect();
+        out.sort();
+        out.dedup();
+        out
+    }
+
     /// The package a module's own imports resolve under, given the key its
     /// source came from: everything before the last segment.
     fn package_of(key: &str) -> String {
@@ -1628,6 +1643,35 @@ impl Loader {
     }
 }
 
+
+/// `text` as a person reads it: each of `marked` — the `@b` of a package only
+/// a dependency declares — written `b`, as every `use` spells it.
+///
+/// **The `@` is a key, not a name.** It keeps such a package's identities
+/// apart from the program's own modules, and it leaked into every
+/// diagnostic that named one: ``private to module `@b` ``, ``found `@b.T` ``,
+/// an import chain `a → @b`. Nobody writes `@b`. A mark is replaced only as a
+/// whole word, so `@derive` is left alone unless a package is called
+/// `derive`.
+pub fn shown(text: &str, marked: &[String]) -> String {
+    let word = |c: char| c.is_alphanumeric() || c == '_';
+    let mut out = text.to_string();
+    for mark in marked {
+        let mut from = 0;
+        while let Some(at) = out[from..].find(mark.as_str()).map(|i| i + from) {
+            let end = at + mark.len();
+            let before = out[..at].chars().next_back().is_some_and(word);
+            let after = out[end..].chars().next().is_some_and(word);
+            if before || after {
+                from = end;
+                continue;
+            }
+            out.replace_range(at..at + 1, "");
+            from = end - 1;
+        }
+    }
+    out
+}
 
 /// Rewrite a module's declarations to their qualified form.
 ///

@@ -1866,6 +1866,33 @@ fn a_file_checked_on_its_own_resolves_from_its_packages_root() {
     assert!(said.contains("E0400"), "{}", said);
 }
 
+/// A package only a dependency declares is named in a diagnostic as every
+/// `use` spells it. Its identities carry an `@` to keep them apart from the
+/// program's own modules, and the `@` was printed: `private to module @b`.
+#[test]
+fn a_package_only_a_dependency_declares_is_named_without_its_mark() {
+    let p = Project::new("marked-package");
+    p.file("b/kite.toml", "[package]\nname = \"b\"\nversion = \"1.0.0\"\n");
+    p.file("b/m.kite", "fn hid() -> int {\n  return 2\n}\n\npub struct T {\n  pub n: int\n}\n");
+    p.file(
+        "a/kite.toml",
+        "[package]\nname = \"a\"\nversion = \"1.0.0\"\n\n[dependencies]\nb = { path = \"../b\" }\n",
+    );
+    p.file(
+        "a/m.kite",
+        "use b\n\npub fn fa() -> int {\n  let x: int = b.T{ n: 1 }\n  return b.hid() + x\n}\n",
+    );
+    p.file(
+        "app/kite.toml",
+        "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n[dependencies]\na = { path = \"../a\" }\n",
+    );
+    let main = p.file("app/main.kite", "use a\n\nfn main() {\n  io.print(a.fa())\n}\n");
+    let said = p.run(&main).expect_err("private, and a mismatch");
+    assert!(said.contains("private to module `b`"), "{}", said);
+    assert!(said.contains("`b.T`"), "{}", said);
+    assert!(!said.contains("@b"), "{}", said);
+}
+
 /// A cycle back to the entry file is one error. The closing `use main`
 /// recorded a spelling for a module that does not exist — the entry is not a
 /// module — so `main.base()` behind it said `main` declares nothing public of
