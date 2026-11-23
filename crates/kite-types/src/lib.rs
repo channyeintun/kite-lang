@@ -9157,11 +9157,14 @@ impl<'a> Checker<'a> {
         let mut before_wildcard = true;
 
         if m.arms.is_empty() {
-            self.diags.push(
-                Diagnostic::error(codes::E0210, "a `match` needs at least one arm")
-                    .with_primary(m.span, "no arms")
-                    .with_note("an empty match can never produce a value"),
-            );
+            // Arms the parser could not read are not no arms.
+            if !m.unread {
+                self.diags.push(
+                    Diagnostic::error(codes::E0210, "a `match` needs at least one arm")
+                        .with_primary(m.span, "no arms")
+                        .with_note("an empty match can never produce a value"),
+                );
+            }
             return (self.lit(ExprKind::Error, TyId::ERROR, m.span), Flow::Falls);
         }
 
@@ -10720,7 +10723,8 @@ impl<'a> Checker<'a> {
         // A refused pattern was meant to cover something, and what it was
         // meant to cover is anybody's guess, so nothing is said to be missing
         // on top of the mistake already reported.
-        if rejected.iter().any(|r| *r) {
+        // So was an arm the parser could not read.
+        if m.unread || rejected.iter().any(|r| *r) {
             return true;
         }
         let missing = exhaustive::missing_patterns(scrut, &unguarded, self.types);

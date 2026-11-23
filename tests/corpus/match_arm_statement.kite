@@ -1,0 +1,24 @@
+// A statement where a match arm wants an expression is one error, with the
+// block it belongs in as the fix. The arm it spoiled is not reported again
+// as a match with no arms, or as a variant left uncovered.
+enum Step {
+    Skip
+    Stop
+    Go
+}
+
+fn main() {
+    for i in 0..5 {
+        match i {
+            1 => continue, //~ ERROR E0100
+            _ => io.print(i),
+        }
+    }
+    for s in [Step.Skip, Step.Go] {
+        match s {
+            Skip => continue, //~ ERROR E0100
+            Stop => break, //~ ERROR E0100
+            Go => io.print("go"),
+        }
+    }
+}

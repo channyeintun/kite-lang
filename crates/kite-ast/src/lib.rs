@@ -711,6 +711,9 @@ pub struct MatchExpr {
     pub scrutinee: Box<Expr>,
     pub arms: Vec<MatchArm>,
     pub span: Span,
+    /// Some arm could not be read, and the parser has said why. The arms
+    /// left are not the whole match, so what they fail to cover says nothing.
+    pub unread: bool,
 }
 
 #[derive(Debug)]
