@@ -2544,10 +2544,10 @@ impl<'a> Parser<'a> {
             match self.tokens[i].kind {
                 T::LBrace if !end.braces => return None,
                 T::LParen | T::LBracket | T::LBrace if !self.abandoned.contains(&i) => open.push(i),
-                k @ (T::RParen | T::RBracket | T::RBrace) => {
-                    if open.last().is_some_and(|&o| self.tokens[o].kind == opener_of(k)) {
-                        open.pop();
-                    }
+                k @ (T::RParen | T::RBracket | T::RBrace)
+                    if open.last().is_some_and(|&o| self.tokens[o].kind == opener_of(k)) =>
+                {
+                    open.pop();
                 }
                 _ => {}
             }
