@@ -4010,7 +4010,7 @@ impl<'a> Checker<'a> {
             }
             ast::Expr::Index { base, index, span } => self.index_expr(base, index, *span),
             ast::Expr::Cast { expr, ty, span } => self.cast(expr, ty, *span),
-            ast::Expr::Await { expr, span } => self.await_expr(expr, *span),
+            ast::Expr::Await { expr, span } => self.await_expr(expr, *span, expected),
             ast::Expr::Tuple { elems, span } => {
                 if elems.is_empty() {
                     return self.lit(ExprKind::Error, TyId::UNIT, *span);
@@ -4588,8 +4588,15 @@ impl<'a> Checker<'a> {
     /// function that can suspend has to say so in its signature. That is the
     /// whole of the "function colouring" rule, and it is what keeps the
     /// scheduler out of the middle of an ordinary call.
-    fn await_expr(&mut self, inner: &ast::Expr, span: Span) -> hir::Expr {
-        let value = self.expr(inner, None);
+    fn await_expr(&mut self, inner: &ast::Expr, span: Span, expected: Option<TyId>) -> hir::Expr {
+        // What the awaited value is wanted as is what the task is wanted to
+        // carry, so `let o: Option<int> = await gen(nil)` infers as the same
+        // call without `await` does.
+        let wanted = expected.filter(|t| !self.types.is_poisoned(*t)).map(|t| {
+            let task = self.types.task_of(t, span);
+            self.types.struct_ty(task)
+        });
+        let value = self.expr(inner, wanted);
         // A closure is a function of its own, and never an async one — so an
         // `await` in it is outside an async function wherever the closure is
         // written. Letting the enclosing `async fn` answer for it put a

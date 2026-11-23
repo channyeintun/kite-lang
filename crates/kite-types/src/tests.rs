@@ -1465,6 +1465,16 @@ fn awaiting_a_task_gives_the_value_it_produces() {
     assert!(!c.diags.has_errors(), "{}", c.render());
 }
 
+/// What an awaited value is wanted as is what its task is wanted to carry,
+/// so a generic `async fn` infers from the binding as a plain one does. The
+/// expected type stopped at `await`, and `nil` and `[]` could not be typed.
+#[test]
+fn the_expected_type_flows_through_await() {
+    ok("async fn gen<T>(x: T) -> T {\n  return x\n}\n\
+        async fn main() {\n  let o: Option<int> = await gen(nil)\n  let xs: [str] = await gen([])\n\
+        \x20 io.print(o == nil)\n  io.print(xs.len())\n}\n");
+}
+
 /// `task.yield` suspends, so it is subject to the same rule as `await`.
 #[test]
 fn yielding_outside_an_async_function_is_rejected() {
