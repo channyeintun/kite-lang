@@ -1289,10 +1289,12 @@ a map entry or a slice element by index is handed on to that value, exactly
 as passing it to a call is, and is not followed there; read back out into a
 binding, `let e = h.e`, it is an obligation again. A map is not followed
 either: `let m = {1: load(1)}` hands `load`'s failure on to the map, as a struct
-literal does. A slice of failures is a binding like any other, so
-`errs.push(f())` adds `f`'s failure to what `errs` answers for — and a walk over
-one counts as reading all of it, so leaving the walk early, by `break` or
-`return`, drops the failures of the elements it did not reach.
+literal does. Nor is a closure: one that captures a failure, `let g = || e`,
+takes it with it, whether or not it is ever called. A slice of failures is a
+binding like any other, so `errs.push(f())` adds `f`'s failure to what `errs`
+answers for — and a walk over one counts as reading all of it, so leaving the
+walk early, by `break` or `return`, drops the failures of the elements it did
+not reach.
 
 To drop one deliberately, say so:
 

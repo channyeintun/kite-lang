@@ -2837,11 +2837,10 @@ reviewers had open, and a fifth took what a final re-check by seven checkers,
 each claim tried by a skeptic, still confirmed: the error analysis, the types
 and notes, the parser and module loader, the write-in-place analysis, a 205 and
 the documents. Each workstream's merge on `complete-kite` says what is true
-after it. This section
-is the one place that gathers what a program written against v0.1.9 will meet,
-and it is written as that program's author would want it: what stops
-compiling, what runs differently, what the library does now, and what was
-accepted as it is rather than fixed.
+after it. This section is the one place that gathers what a program written
+against v0.1.9 will meet, and it is written as that program's author would want
+it: what stops compiling, what runs differently, what the library does now, and
+what was accepted as it is rather than fixed.
 
 ### Programs that compiled and are now refused
 
@@ -2858,9 +2857,9 @@ accepted as it is rather than fixed.
   the error inside it. A nil test of a temporary optional result,
   `if await task.timeout(save(), 10) == nil`, leaves the failure inside unread
   and is `E0302` at the temporary; `t.0.0` of a nested tuple leaves the error
-  beside it, `t.0.1`, owed. A present optional does not prove the error in it, so after
-  `if r == nil { return }` a `r.message()` is `E0301` until `r != nil` is
-  tested.
+  beside it, `t.0.1`, owed. A present optional does not prove the error in it,
+  so after `if r == nil { return }` a `r.message()` is `E0301` until `r != nil`
+  is tested.
 - **`task.park()` and `task.wait_host()`** outside an `async fn` are `E0521`,
   as `task.yield()` was.
 - **One name, one meaning.** A type with an inherent method and a trait method
@@ -3042,7 +3041,16 @@ Each is stated where a reader of that part looks:
   resolves to, and a module's name in a type's name and in the Wasm name
   section is measured from `kite.toml`.
 - `m = f(m)` copies `m` on every call, on all three backends: a function
-  that changes a slice or map it is given changes its own copy (§3.2).
+  that changes a slice or map it is given changes its own copy (§3.2). A
+  change a level below a field, `b.rows[i].push(x)`, copies that level too.
+- A failure captured by a closure is handed on to the closure, as one stored
+  in a field is, whether or not the closure ever runs (§7.3).
+- `first(nil, 3)` against `first<T>(a: Option<T>, b: T)` is `E0204`: only a
+  closure waits for a later argument to give it a type (§4.5).
+- A derived `Decode` refuses `null` for a slice or map field that is not
+  optional, as for any other field, rather than reading it as empty (§10.4).
+- `task.park()` is woken by every task that finishes, as specified; only an
+  `await` waits on the one task it names (Phase 5).
 - Not bounded yet: the number of diagnostics one file can produce, the native
   compile time of a map literal of tens of thousands of entries, a function
   large enough to abort V8 below `E0902`'s limits, and the Wasm size of a
