@@ -2112,6 +2112,10 @@ Module cycles are an error. Cyclic dependencies make separate compilation,
 incremental rebuilds, and initialisation order all harder, and every cycle can be
 broken by extracting the shared part.
 
+That holds between packages too: a package that depends on itself, directly or
+through others, is an error — `kitec pkg` names the chain (`a -> b -> a`) and
+writes no lockfile.
+
 ---
 
 ## 14. Memory model

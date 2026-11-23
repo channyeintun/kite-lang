@@ -803,6 +803,8 @@ shortcut = "../shortcut"
   else — a misspelt `verison` or a `branch` is an error, not something dropped —
   and a `tag` goes only with `git`.
 - `tag` and `version` are mutually exclusive: a tag pins, a version resolves.
+- Package cycles are an error: `kitec pkg` names the chain (`a -> b -> a`), a package that
+  names itself is one, and no lockfile is written.
 - Names — package and dependency alike — are identifiers: ASCII letters,
   digits and `_`, not starting with a digit, at most 64. The name is written in
   a `use`, so `kite-md` could never be imported, and it becomes a directory
