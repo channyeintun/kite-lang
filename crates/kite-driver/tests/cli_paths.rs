@@ -519,3 +519,19 @@ fn a_module_used_by_its_old_name_says_what_it_is_called_here() {
     assert!(err.contains("cannot find `nothing` in module `errs`"), "{}", err);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// `(f(1), f(2)).0` as a statement is a projection, and its label does not
+/// call it a call.
+#[test]
+fn a_projected_tuple_element_is_not_called_a_call() {
+    let dir = scratch(
+        "projection-label",
+        "t.kite",
+        "fn f(n: int) -> (int, error) {\n    return n, nil\n}\n\nfn main() {\n    (f(1), f(2)).0\n}\n",
+    );
+    let Some((ok, _, err)) = kitec_in(&dir, &["check", "t.kite"]) else { return };
+    assert!(!ok, "{}", err);
+    assert!(err.contains("this tuple element holds a value and an error"), "{}", err);
+    assert!(!err.contains("this call returns"), "{}", err);
+    let _ = std::fs::remove_dir_all(&dir);
+}

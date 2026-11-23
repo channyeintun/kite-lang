@@ -1717,7 +1717,7 @@ impl<'a> Checker<'a> {
                 // that does nothing is not also an error dropped.
                 let inert = !self.types.is_poisoned(expr.ty) && self.inert_statement(e, false);
                 if !inert {
-                    self.dropped_error(&expr);
+                    self.dropped_error(&expr, matches!(e, ast::Expr::Field { name, .. } if name.name.bytes().all(|b| b.is_ascii_digit())));
                 }
                 let flow = if expr.ty == TyId::NEVER { Flow::Diverges } else { Flow::Falls };
                 Some((hir::Stmt::Expr(expr), flow))
@@ -8668,7 +8668,11 @@ impl<'a> Checker<'a> {
     /// somebody made and a reader can see.
     ///
     /// [§7.3]: ../../../SPECIFICATION.md#73-correlated-results-and-taint-analysis
-    fn dropped_error(&mut self, expr: &hir::Expr) {
+    ///
+    /// `projected` is a statement that is a tuple projection, `(f(1), f(2)).0`:
+    /// the element it takes is what is thrown away, and it is no call, so it
+    /// is not called one.
+    fn dropped_error(&mut self, expr: &hir::Expr, projected: bool) {
         let Some(holder) = self.holder(expr.ty) else {
             return;
         };
@@ -8703,6 +8707,13 @@ impl<'a> Checker<'a> {
                 "`await` it and check what it gives, or bind the task and hand it to \
                  something that will, such as `task.all`",
             ),
+        };
+        let what = if projected {
+            what.replace("this call returns", "this tuple element holds")
+                .replace("this call may return", "this tuple element may hold")
+                .replace("this call starts a task", "this tuple element is a task")
+        } else {
+            what.to_string()
         };
         self.diags.push(
             Diagnostic::error(codes::E0302, "error is never checked")
@@ -10622,7 +10633,7 @@ impl<'a> Checker<'a> {
         if discard {
             for (arm, settled) in arms.iter().zip(&inert) {
                 if !settled {
-                    self.dropped_error(&arm.body);
+                    self.dropped_error(&arm.body, false);
                 }
             }
         }
