@@ -72,6 +72,7 @@ pub fn tokenize_with_comments(
         pending_newline: false,
         nesting: 0,
         nesting_reported: false,
+        ran_to_end: false,
         diags,
     }
     .run_with_comments()
@@ -112,6 +113,7 @@ pub fn tokenize_range(
         pending_newline: false,
         nesting: strings,
         nesting_reported: strings > 0,
+        ran_to_end: false,
         diags,
     }
     .run()
@@ -143,6 +145,11 @@ struct Lexer<'a> {
     /// the question; a file built to hit the limit would otherwise hit it on
     /// every quote for the rest of the line.
     nesting_reported: bool,
+    /// Whether a block string has already been reported running to the end
+    /// of the input. A string around it — one whose hole it is in — ran to
+    /// the end because it did, so the first report, the innermost, is the
+    /// one mistake.
+    ran_to_end: bool,
     diags: &'a mut DiagBag,
 }
 
@@ -431,6 +438,29 @@ impl<'a> Lexer<'a> {
         self.pos += 2;
         let digits_start = self.pos;
         self.eat_digits(radix);
+        // A digit or letter outside the radix is part of the literal, not
+        // the start of the next token: `0b102` stopped at the `2` and the
+        // parser saw two numbers side by side, which it reported as a
+        // missing line break pointing at the `2`. The whole run is one bad
+        // literal, reported once where it is.
+        let stray = self.char_at(self.pos).filter(|_| self.suffix_here().is_none());
+        if let Some(c) = stray.filter(|&c| is_ident_continue(Some(c))) {
+            while is_ident_continue(self.char_at(self.pos)) {
+                self.pos += self.char_at(self.pos).map_or(1, char::len_utf8);
+            }
+            let (a, name, digits) = match radix {
+                2 => ("a", "binary", "0 and 1"),
+                8 => ("an", "octal", "0 to 7"),
+                _ => ("a", "hexadecimal", "0 to 9 and A to F"),
+            };
+            self.error_here(
+                codes::E0004,
+                start,
+                "invalid number literal",
+                &format!("`{}` is not {} {} digit; {} {} literal's digits are {}", c, a, name, a, name, digits),
+            );
+            return TokenKind::Int;
+        }
         if self.pos == digits_start {
             self.error_here(
                 codes::E0004,
@@ -470,30 +500,30 @@ impl<'a> Lexer<'a> {
     /// to overflow, and 300 came out as 300.
     /// Returns whether a suffix was found (and reported).
     fn eat_suffix(&mut self) -> bool {
+        let start = self.pos;
+        let Some(s) = self.suffix_here() else { return false };
+        self.pos += s.len();
+        self.error_here(
+            codes::E0004,
+            start,
+            &format!("`{}` is not a Kite type", s),
+            "Kite has one integer, `int`, and one float, `float`; write the number on its own",
+        );
+        true
+    }
+
+    /// The type suffix (`i32`, `f64`, …) that starts at `self.pos`, if one
+    /// does and is not the start of a longer identifier.
+    fn suffix_here(&self) -> Option<&'static str> {
         const SUFFIXES: [&str; 10] = [
             "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64", "f32", "f64",
         ];
-        let start = self.pos;
         let rest = &self.src[self.pos..self.limit];
-        for s in SUFFIXES {
-            if rest.starts_with(s) {
-                let after = self.pos + s.len();
-                // Do not eat the start of a longer identifier.
-                if !is_ident_continue(self.char_at(after)) {
-                    self.pos = after;
-                    self.error_here(
-                        codes::E0004,
-                        start,
-                        &format!("`{}` is not a Kite type", s),
-                        "Kite has one integer, `int`, and one float, `float`; write the number \
-                         on its own",
-                    );
-                    return true;
-                }
-            }
-        }
-        false
+        SUFFIXES
+            .into_iter()
+            .find(|s| rest.starts_with(s) && !is_ident_continue(self.char_at(self.pos + s.len())))
     }
+
 
     /// Whether the delimiter starts at `self.pos`.
     ///
@@ -523,8 +553,11 @@ impl<'a> Lexer<'a> {
                 // it — a block string included — is read as one: its `"""`
                 // is its own, not the end of this one (§2.4: a hole is an
                 // ordinary expression). `\\` is stepped over whole, so the
-                // `(` after an escaped backslash opens nothing; any other
-                // escape is left as it was read before holes were.
+                // `(` after an escaped backslash opens nothing, and so is
+                // `\"`: an escaped quote is text, so it cannot be the first
+                // quote of the closing delimiter — `\""""` is a quote and
+                // then the end. Any other escape is left as it was read
+                // before holes were.
                 if self.bytes[self.pos] == b'\\' && self.pos + 1 < self.limit {
                     match self.bytes[self.pos + 1] {
                         b'(' => {
@@ -532,7 +565,7 @@ impl<'a> Lexer<'a> {
                             self.skip_interpolation();
                             continue;
                         }
-                        b'\\' => self.pos += 1,
+                        b'\\' | b'"' => self.pos += 1,
                         _ => {}
                     }
                 }
@@ -632,6 +665,9 @@ impl<'a> Lexer<'a> {
     /// of the file as its text, so this is the one error the file has: the
     /// parser does not go on to report the braces it swallowed as unclosed.
     fn unterminated_block_string(&mut self, start: usize) {
+        if std::mem::replace(&mut self.ran_to_end, true) {
+            return;
+        }
         let end = (start + 3).min(self.limit);
         let span = Span::new(self.file, start as u32, end as u32);
         self.diags.push(

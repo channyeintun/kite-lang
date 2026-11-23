@@ -196,10 +196,12 @@ impl<'a> Eval<'a> {
             ast::Expr::Int(span) => match parse_int(self.text(*span)) {
                 Some(v) => Some(ConstValue::Int(v)),
                 None => {
-                    self.diags.push(
-                        Diagnostic::error(codes::E0004, "invalid integer literal")
-                            .with_primary(*span, "does not fit in `int`"),
-                    );
+                    if crate::int_overflows(self.text(*span)) {
+                        self.diags.push(
+                            Diagnostic::error(codes::E0004, "invalid integer literal")
+                                .with_primary(*span, "does not fit in `int`"),
+                        );
+                    }
                     None
                 }
             },
@@ -224,8 +226,8 @@ impl<'a> Eval<'a> {
                 for part in parts {
                     match part {
                         ast::StrPart::Text(span) => {
-                            let raw = self.text(*span).to_string();
-                            out.push_str(&decode_escapes_into(&raw, *span, self.diags));
+                            let raw = self.text(*span);
+                            out.push_str(&decode_escapes_into(raw, raw, *span, self.diags));
                         }
                         ast::StrPart::Hole(inner) => match self.eval(inner) {
                             Some(v) => out.push_str(&v.rendered()),
@@ -534,11 +536,11 @@ impl<'a> Eval<'a> {
         if let Some(s) = raw.strip_prefix("\"\"\"") {
             let body = s.strip_suffix("\"\"\"").unwrap_or(s);
             let dedented = crate::dedent_block(body);
-            return decode_escapes_into(&dedented, span, self.diags);
+            return decode_escapes_into(&dedented, raw, span, self.diags);
         }
         let s = raw.strip_prefix('"').unwrap_or(raw);
         let inner = s.strip_suffix('"').unwrap_or(s);
-        decode_escapes_into(inner, span, self.diags)
+        decode_escapes_into(inner, raw, span, self.diags)
     }
 }
 

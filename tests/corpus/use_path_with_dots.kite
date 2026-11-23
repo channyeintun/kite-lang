@@ -1,0 +1,13 @@
+// A `use` path is a name, looked for beside the module and then outward to
+// the package's root (§13.1), so it is never written from the file with `..`
+// or `./`. One error at the lead, with the path to write, and the `use` is
+// kept as that path, so the module's name is not reported unknown as well.
+// Nor is a path that does not lead anywhere reported a second time as E0400.
+
+use ../std/math //~ ERROR E0100
+use ./std/text //~ ERROR E0100
+use ../nowhere/near //~ ERROR E0100
+
+fn main() {
+    io.print(math.abs(-2.0) + text.cell_width("ab") as float)
+}

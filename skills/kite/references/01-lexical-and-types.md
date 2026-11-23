@@ -282,6 +282,9 @@ Details the grammar does not make obvious:
   `1.0` and `0.5`.
 - A `_` separator sits between two digits, in every radix and every part of a
   literal. `1000_`, `0xFF_`, `0x_FF`, `1__0` and `1_.5` are all `E0004`.
+- A digit outside the radix is one `E0004` over the whole literal: `0b102`,
+  `0o8`, `0xFG`. (Compilers through 0.1.9 stopped the literal at that digit and
+  reported `E0100 expected a line break` at it.)
 - An integer literal above `9223372036854775807` is `E0004 integer literal is
   out of range` at compile time, and a float literal too large to be finite
   (`1e999`) is `E0004 float literal is out of range`.
@@ -310,9 +313,13 @@ the opening line is kept verbatim. Spaces or tabs alone after the opening
 one: no line of a block string ends in `\r` unless `\r` is written. Only the
 closing line's own indentation comes off, character for character: a line
 indented less loses what it has, and a tab where that line has spaces stays.
+A `"""` with nothing below it but the indented closing `"""` is `""`. Escapes
+work in a block string, and an escaped quote is text that cannot start the
+closing delimiter: `say \""""` ends `say "`, and `\"""` is three quotes.
 (Compilers through 0.1.9 kept a leading newline after `""" ` and a `\r` on
 every line, and stripped any leading whitespace from a line that did not start
-with the closing indentation.)
+with the closing indentation; they made that empty block string the closing
+line's indentation; and they closed a block string at the `""` after a `\"`.)
 
 ```kite
 fn main() {
@@ -1035,6 +1042,20 @@ fn main() {
 ```kite fails
 fn main() {
     io.print(65 as str) //~ E0212
+}
+```
+
+A `<` after `as int` is a comparison — `if f as int < n {` — so the name after
+`as` takes no type arguments, with one exception: when the `>` that closes them
+is the last thing on the line or in its bracket, as in `3 as Option<int>`, it
+is read as the type, and the cast is the `E0212` it is. (Compilers through
+0.1.9 reported that as `E0100 comparison operators cannot be chained`, or a
+missing expression on the next line.)
+
+```kite fails
+fn main() {
+    let q = 3 as Option<int> //~ E0212
+    io.print("\(q)")
 }
 ```
 
