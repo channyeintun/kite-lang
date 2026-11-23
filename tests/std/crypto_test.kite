@@ -1,0 +1,77 @@
+// std/crypto — the parts that are plain Kite.
+//
+// The digests, the HMACs and the derivation are the host's and are tested
+// under Node in `crates/kite-driver/tests/host.rs`, where a host exists. What
+// is here runs on every backend: converting text to and from the hex of its
+// UTF-8 bytes.
+
+use std/test
+use std/crypto
+
+fn round(text: str) -> str {
+    let (back, err) = crypto.text_of_hex(crypto.hex_of(text))
+    if err != nil {
+        return "error: \(err.message())"
+    }
+    return back
+}
+
+fn refused(hex: str) -> bool {
+    let (_, err) = crypto.text_of_hex(hex)
+    return err != nil
+}
+
+fn checks() -> [error] {
+    var out: [error] = []
+
+    out.push(test.equal_str(crypto.hex_of(""), "", "nothing is nothing"))
+    out.push(test.equal_str(crypto.hex_of("abc"), "616263", "ASCII"))
+    out.push(test.equal_str(crypto.hex_of("\u{0}\u{7f}"), "007f", "the ends of one byte"))
+    out.push(test.equal_str(crypto.hex_of("\u{80}"), "c280", "the first of two"))
+    out.push(test.equal_str(crypto.hex_of("\u{7ff}"), "dfbf", "the last of two"))
+    out.push(test.equal_str(crypto.hex_of("é"), "c3a9", "e acute"))
+    out.push(test.equal_str(crypto.hex_of("\u{800}"), "e0a080", "the first of three"))
+    out.push(test.equal_str(crypto.hex_of("\u{ffff}"), "efbfbf", "the last of three"))
+    out.push(test.equal_str(crypto.hex_of("日本"), "e697a5e69cac", "two CJK characters"))
+    out.push(test.equal_str(crypto.hex_of("\u{10000}"), "f0908080", "the first of four"))
+    out.push(test.equal_str(crypto.hex_of("\u{10ffff}"), "f48fbfbf", "the last of four"))
+    out.push(test.equal_str(crypto.hex_of("😀"), "f09f9880", "an emoji"))
+
+    for text in ["", "a", "héllo wörld", "日本語のテキスト", "😀 and 🧑‍🚀", "\u{0}\u{1}\u{7f}\u{80}\u{7ff}\u{800}\u{ffff}\u{10000}\u{10ffff}"] {
+        out.push(test.equal_str(round(text), text, "a round trip"))
+    }
+    let (upper, upper_err) = crypto.text_of_hex("C3A9")
+    out.push(test.ok(upper_err, "uppercase hex reads"))
+    if upper_err == nil {
+        out.push(test.equal_str(upper, "é", "as the same character"))
+    }
+
+    // What is not UTF-8, and what is not hex, is an error and never a string.
+    out.push(test.is_true(refused("c"), "an odd number of characters"))
+    out.push(test.is_true(refused("zz"), "not hex"))
+    out.push(test.is_true(refused("0g"), "not hex, in the second place"))
+    out.push(test.is_true(refused("80"), "a continuation byte alone"))
+    out.push(test.is_true(refused("c3"), "a two-byte character cut off"))
+    out.push(test.is_true(refused("e0a0"), "a three-byte character cut off"))
+    out.push(test.is_true(refused("f09f98"), "a four-byte character cut off"))
+    out.push(test.is_true(refused("c328"), "a lead followed by an ASCII byte"))
+    out.push(test.is_true(refused("c080"), "an overlong NUL"))
+    out.push(test.is_true(refused("e08080"), "an overlong three-byte form"))
+    out.push(test.is_true(refused("eda080"), "a surrogate"))
+    out.push(test.is_true(refused("f4908080"), "past U+10FFFF"))
+    out.push(test.is_true(refused("f8888080"), "a five-byte lead"))
+    out.push(test.is_true(refused("ff"), "0xff"))
+    out.push(test.is_false(refused("6162"), "and plain text is fine"))
+    return out
+}
+
+fn main() {
+    var failed = 0
+    for e in checks() {
+        if e != nil {
+            io.print("FAILED \(e.message())")
+            failed += 1
+        }
+    }
+    io.print("crypto: \(checks().len() - failed) passed, \(failed) failed")
+}

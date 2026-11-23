@@ -130,6 +130,204 @@ fn hmac_key(key: str) -> str {
     return key
 }
 
+/// HMAC-SHA-384 of `text` under `key`, as hex. An empty key is allowed, as for
+/// [`hmac`].
+pub async fn hmac384(key: str, text: str) -> (str, error) {
+    return await finish(hmac_start("SHA-384", hmac_key(key), text), "hmac384")
+}
+
+/// HMAC-SHA-512 of `text` under `key`, as hex. An empty key is allowed, as for
+/// [`hmac`].
+pub async fn hmac512(key: str, text: str) -> (str, error) {
+    return await finish(hmac_start("SHA-512", hmac_key(key), text), "hmac512")
+}
+
+/// PBKDF2-HMAC-SHA-256 of `password` under a salt and an iteration count the
+/// caller chooses, as 64 hex characters (256 bits).
+///
+/// For agreeing with a derivation made somewhere else — a stored hash from
+/// another system, a protocol that fixes its salt. A new password is stored
+/// with [`password_hash`], which makes its own salt, because a salt that is
+/// passed in is a salt that gets used twice. `salt_hex` is the salt's bytes as
+/// hex (an even number of hex characters, possibly none), and `iterations` is
+/// at least 1; anything else is an error.
+pub async fn derive(password: str, salt_hex: str, iterations: int) -> (str, error) {
+    if iterations < 1 {
+        return _, errors.new("crypto derive: iterations must be at least 1")
+    }
+    let (_, salt_err) = bytes_of_hex(salt_hex)
+    if salt_err != nil {
+        return _, errors.new("crypto derive: the salt is not hex")
+    }
+    return await finish(derive_start(password, salt_hex, iterations), "derive")
+}
+
+/// A random whole number from 0 up to, not including, `below` — every one as
+/// likely as every other.
+///
+/// Drawn from 63 random bits, and a draw from the short end of the range that
+/// would make the low numbers likelier is thrown away and drawn again, so
+/// `random_int(6)` is not a loaded die. A `below` under 2 leaves only 0.
+pub fn random_int(below: int) -> int {
+    if below <= 1 {
+        return 0
+    }
+    let top = 9223372036854775807
+    // How many of the 2^63 draws are left over after the last whole multiple
+    // of `below`: those are the ones that would favour the low numbers.
+    let spare = (top % below + 1) % below
+    var draw = random_63()
+    for draw > top - spare {
+        draw = random_63()
+    }
+    return draw % below
+}
+
+fn random_63() -> int {
+    let hex = random_hex(8)
+    var value = 0
+    for i in 0..hex.len() {
+        var d = hex_value(hex.code_at(i))
+        if i == 0 {
+            // The first digit holds the top four of 64 bits; keep three.
+            d = d % 8
+        }
+        value = value * 16 + d
+    }
+    return value
+}
+
+/// The value of one hex digit, given as its character code, or -1.
+fn hex_value(code: int) -> int {
+    if code >= 48 && code <= 57 {
+        return code - 48
+    }
+    if code >= 97 && code <= 102 {
+        return code - 87
+    }
+    if code >= 65 && code <= 70 {
+        return code - 55
+    }
+    return -1
+}
+
+/// The bytes of `hex`, or an error if it is not an even run of hex digits.
+fn bytes_of_hex(hex: str) -> ([int], error) {
+    if hex.len() % 2 != 0 {
+        return _, errors.new("crypto: hex has an odd number of characters")
+    }
+    var out: [int] = []
+    var i = 0
+    for i < hex.len() {
+        let high = hex_value(hex.code_at(i))
+        let low = hex_value(hex.code_at(i + 1))
+        if high < 0 || low < 0 {
+            return _, errors.new("crypto: not a hex character at \(if high < 0 { i } else { i + 1 })")
+        }
+        out.push(high * 16 + low)
+        i = i + 2
+    }
+    return out, nil
+}
+
+/// The UTF-8 bytes of `text`, as lowercase hex.
+///
+/// The form everything else here takes and gives bytes in: a key to
+/// [`import_key`], a salt to [`derive`], a digest to compare. The text a
+/// program holds is not bytes until it says how, and UTF-8 is how.
+///
+/// ```kite
+/// assert(hex_of("A") == "41", "ASCII")
+/// assert(hex_of("é") == "c3a9", "two bytes")
+/// assert(hex_of("😀") == "f09f9880", "four")
+/// assert(hex_of("") == "", "nothing")
+/// ```
+pub fn hex_of(text: str) -> str {
+    let digits = "0123456789abcdef"
+    var out: [str] = []
+    for i in 0..text.len() {
+        for b in utf8_bytes(text.code_at(i)) {
+            out.push(digits.slice(b / 16, b / 16 + 1))
+            out.push(digits.slice(b % 16, b % 16 + 1))
+        }
+    }
+    return join(out, "")
+}
+
+fn utf8_bytes(code: int) -> [int] {
+    if code < 128 {
+        return [code]
+    }
+    if code < 2048 {
+        return [192 + code / 64, 128 + code % 64]
+    }
+    if code < 65536 {
+        return [224 + code / 4096, 128 + (code / 64) % 64, 128 + code % 64]
+    }
+    return [240 + code / 262144, 128 + (code / 4096) % 64, 128 + (code / 64) % 64, 128 + code % 64]
+}
+
+/// The text whose UTF-8 bytes are `hex` — the inverse of [`hex_of`].
+///
+/// An error, not a damaged string, if `hex` is not an even run of hex digits
+/// or its bytes are not UTF-8: a lone continuation byte, a sequence cut short,
+/// an overlong form, a surrogate, or a value past U+10FFFF.
+///
+/// ```kite
+/// let (back, err) = text_of_hex("f09f9880")
+/// if err != nil {
+///     return
+/// }
+/// assert(back == "😀", "four bytes, one character")
+/// let (_, bad) = text_of_hex("c3")
+/// assert(bad != nil, "a cut-off sequence")
+/// ```
+pub fn text_of_hex(hex: str) -> (str, error) {
+    let (bytes, err) = bytes_of_hex(hex)
+    check err
+    var codes: [int] = []
+    var i = 0
+    for i < bytes.len() {
+        let lead = bytes[i]
+        var more = 0
+        var code = lead
+        var least = 0
+        if lead >= 128 {
+            if lead >= 194 && lead <= 223 {
+                more = 1
+                code = lead - 192
+                least = 128
+            } else if lead >= 224 && lead <= 239 {
+                more = 2
+                code = lead - 224
+                least = 2048
+            } else if lead >= 240 && lead <= 244 {
+                more = 3
+                code = lead - 240
+                least = 65536
+            } else {
+                return _, errors.new("crypto: not UTF-8: byte \(i) cannot start a character")
+            }
+        }
+        if i + more >= bytes.len() {
+            return _, errors.new("crypto: not UTF-8: the character at byte \(i) is cut short")
+        }
+        for k in 1..more + 1 {
+            let next = bytes[i + k]
+            if next < 128 || next > 191 {
+                return _, errors.new("crypto: not UTF-8: byte \(i + k) is not a continuation")
+            }
+            code = code * 64 + (next - 128)
+        }
+        if code < least || code > 1114111 || (code >= 55296 && code <= 57343) {
+            return _, errors.new("crypto: not UTF-8: the character at byte \(i) is not a valid one")
+        }
+        codes.push(code)
+        i = i + more + 1
+    }
+    return from_codes(codes), nil
+}
+
 /// Whether two secrets are the same, in time that does not depend on where
 /// they first differ.
 ///
