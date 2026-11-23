@@ -143,6 +143,13 @@ pub enum Op {
     LoadUnit { dst: Reg },
     LoadNil { dst: Reg },
     IsNil { dst: Reg, obj: Reg },
+    /// An `error` made an `Option<error>`: a nil error becomes a present
+    /// nil, which `is.nil` does not mistake for an absent optional. Every
+    /// other value is moved. See `Value::PresentNil`.
+    WrapErr { dst: Reg, src: Reg },
+    /// The reverse, where an `Option<error>` known to be present is read as
+    /// the `error` it holds.
+    UnwrapErr { dst: Reg, src: Reg },
     NewPair { dst: Reg, value: Reg, error: Reg },
     PairValue { dst: Reg, obj: Reg },
     PairError { dst: Reg, obj: Reg },
@@ -232,8 +239,9 @@ pub enum Op {
     NewTuple { dst: Reg, base: Reg, count: u16 },
     /// Key/value pairs occupy `base .. base + count`, flattened.
     NewMap { dst: Reg, base: Reg, count: u16 },
-    /// Yields an optional: a missing key is a runtime condition.
-    MapGet { dst: Reg, obj: Reg, key: Reg },
+    /// Yields an optional: a missing key is a runtime condition. `err` says
+    /// the values are `error`s, so a nil one found is a present nil.
+    MapGet { dst: Reg, obj: Reg, key: Reg, err: bool },
     MapSet { obj: Reg, key: Reg, src: Reg },
     MapRemove { obj: Reg, key: Reg },
     MapLen { dst: Reg, obj: Reg },
@@ -246,8 +254,8 @@ pub enum Op {
     GetIndex { dst: Reg, obj: Reg, index: Reg },
     SetIndex { obj: Reg, index: Reg, src: Reg },
     SliceLen { dst: Reg, obj: Reg },
-    /// Yields an optional rather than trapping.
-    SliceGet { dst: Reg, obj: Reg, index: Reg },
+    /// Yields an optional rather than trapping; `err` as for `MapGet`.
+    SliceGet { dst: Reg, obj: Reg, index: Reg, err: bool },
     /// `xs[a..b]` — a fresh slice of the half-open window, clamped rather than
     /// trapping.
     SliceRange { dst: Reg, obj: Reg, start: Reg, end: Reg },
@@ -442,6 +450,8 @@ impl fmt::Display for Op {
             LoadUnit { dst } => write!(f, "{:<12} r{}", "load.unit", dst),
             LoadNil { dst } => write!(f, "{:<12} r{}", "load.nil", dst),
             IsNil { dst, obj } => write!(f, "{:<12} r{}, r{}", "is.nil", dst, obj),
+            WrapErr { dst, src } => write!(f, "{:<12} r{}, r{}", "wrap.err", dst, src),
+            UnwrapErr { dst, src } => write!(f, "{:<12} r{}, r{}", "unwrap.err", dst, src),
             NewPair { dst, value, error } => {
                 write!(f, "{:<12} r{}, r{}, r{}", "new.pair", dst, value, error)
             }
@@ -534,8 +544,9 @@ impl fmt::Display for Op {
             NewMap { dst, base, count } => {
                 write!(f, "{:<12} r{}, r{}, {}", "new.map", dst, base, count)
             }
-            MapGet { dst, obj, key } => {
-                write!(f, "{:<12} r{}, r{}, r{}", "map.get", dst, obj, key)
+            MapGet { dst, obj, key, err } => {
+                let name = if err { "map.get.err" } else { "map.get" };
+                write!(f, "{:<12} r{}, r{}, r{}", name, dst, obj, key)
             }
             MapSet { obj, key, src } => {
                 write!(f, "{:<12} r{}, r{}, r{}", "map.set", obj, key, src)
@@ -554,8 +565,9 @@ impl fmt::Display for Op {
                 write!(f, "{:<12} r{}, r{}, r{}", "set.index", obj, index, src)
             }
             SliceLen { dst, obj } => write!(f, "{:<12} r{}, r{}", "len", dst, obj),
-            SliceGet { dst, obj, index } => {
-                write!(f, "{:<12} r{}, r{}, r{}", "slice.get", dst, obj, index)
+            SliceGet { dst, obj, index, err } => {
+                let name = if err { "slice.get.err" } else { "slice.get" };
+                write!(f, "{:<12} r{}, r{}, r{}", name, dst, obj, index)
             }
             SliceRange { dst, obj, start, end } => {
                 write!(f, "{:<12} r{}, r{}, r{}, r{}", "slice.range", dst, obj, start, end)

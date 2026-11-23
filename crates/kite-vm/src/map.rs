@@ -351,6 +351,7 @@ impl Hasher {
         match v {
             Value::Unit => self.word(0),
             Value::Nil => self.word(1),
+            Value::PresentNil => self.word(5),
             Value::Int(i) => self.word(*i as u64),
             Value::Bool(b) => self.word(2 + *b as u64),
             // `-0.0 == 0.0`, so both hash as `0.0`.

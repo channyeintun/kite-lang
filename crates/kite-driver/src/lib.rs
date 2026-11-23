@@ -1210,7 +1210,7 @@ fn run_passes(
         }
         return (String::new(), None, None, None, index);
     }
-    let chunk = kite_codegen_kbc::compile(&mir);
+    let chunk = kite_codegen_kbc::compile(&mir, &hir.types);
     if emit == Emit::Kbc {
         return (chunk.to_string(), Some(chunk), None, None, index);
     }
