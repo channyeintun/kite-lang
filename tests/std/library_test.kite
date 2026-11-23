@@ -248,6 +248,24 @@ fn checks() -> [error] {
         ))
     out.push(test.is_true(errors.wrap(nil, "context") == nil, "wrap passes nil through"))
     out.push(test.is_true(errors.mentions(wrapped, "no such file"), "mentions"))
+    // caused_by walks the chain that mentions reads only the top of.
+    let joined = errors.because("could not start", errors.because("binding", errors.new("port 80 in use")))
+    out.push(test.is_false(errors.mentions(joined, "in use"), "mentions reads the outer message only"))
+    out.push(test.is_true(errors.caused_by(joined, "in use"), "caused_by reads the whole chain"))
+    out.push(test.is_true(errors.caused_by(joined, "could not"), "caused_by reads the outer message too"))
+    out.push(test.is_false(errors.caused_by(joined, "disk"), "caused_by, when nothing says it"))
+    out.push(test.is_false(errors.caused_by(nil, ""), "caused_by of nil"))
+    // join: nil for nothing, the error itself for one, every message for more.
+    let nothing: [error] = []
+    out.push(test.is_true(errors.join(nothing) == nil, "join of none"))
+    out.push(test.is_true(errors.join([nil, nil]) == nil, "join of nils"))
+    let one = errors.new("only")
+    let alone = errors.join([nil, one, nil])
+    out.push(test.equal_str(errors.message_or(alone, "?"), "only", "join of one is that error"))
+    out.push(test.is_true(errors.root(alone) == one, "and the same error, not a copy"))
+    let several = errors.join([errors.new("a is missing"), nil, errors.wrap(errors.new("gone"), "b"), errors.new("c")])
+    out.push(test.equal_str(errors.message_or(several, "?"), "a is missing; b: gone; c", "join of several"))
+    out.push(test.equal_str(errors.message_or(errors.root(several), "?"), "a is missing", "its cause is the first"))
 
     // ---- test ----
     // inf - inf is a NaN, which is within no tolerance, so equal infinities
