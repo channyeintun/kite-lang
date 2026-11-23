@@ -1265,6 +1265,22 @@ fn main() {
          \x20 io.print(ptr.same(a, step(a, true)))\n}\n",
     ),
     (
+        // A `remove` that finds nothing changes nothing (§3.2), identity
+        // included: the VM once made the entries unique before looking, so a
+        // miss gave the variable a fresh copy that `ptr.same` could see.
+        "map-remove-miss-keeps-identity",
+        "struct B {\n  var m: {str: int}\n}\n\
+         fn drop_it(var m: {str: int}, k: str) -> {str: int} {\n  m.remove(k)\n  return m\n}\n\
+         fn main() {\n\
+         \x20 let m = {\"a\": 1}\n  var p = m\n  p.remove(\"absent\")\n\
+         \x20 io.print(ptr.same(m, p))\n\
+         \x20 io.print(ptr.same(m, drop_it(m, \"absent\")))\n\
+         \x20 var b = B{ m: m }\n  b.m.remove(\"absent\")\n  io.print(ptr.same(m, b.m))\n\
+         \x20 let e: {str: int} = {}\n  var q = e\n  q.remove(\"x\")\n  io.print(ptr.same(e, q))\n\
+         \x20 var ms = [m]\n  ms[0].remove(\"absent\")\n  io.print(ptr.same(m, ms[0]))\n\
+         \x20 p.remove(\"a\")\n  io.print(ptr.same(m, p))\n  io.print(m.len())\n  io.print(p.len())\n}\n",
+    ),
+    (
         "tuple-bindings",
         "fn pair() -> (int, str) {\n  return (7, \"seven\")\n}\n\
          fn main() {\n  let (n, name) = pair()\n  io.print(n)\n  io.print(name)\n\

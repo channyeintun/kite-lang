@@ -1433,12 +1433,16 @@ impl<'a> Vm<'a> {
                             found: self.regs[slot].type_name(),
                         });
                     };
-                    let entries = Rc::make_mut(entries);
                     // Removing what is not there is not a mistake — a caller
                     // dropping state for a row that never had any is the
-                    // ordinary case, not a special one.
+                    // ordinary case, not a special one. A miss changes
+                    // nothing, so it is looked for before the entries are
+                    // made unique: copying a shared map on a miss would give
+                    // the variable a fresh identity, and `ptr.same` would see
+                    // a change that native and Wasm (which return the map
+                    // itself on a miss) do not.
                     if let Some(i) = entries.iter().position(|(ek, _)| *ek == k) {
-                        entries.remove(i);
+                        Rc::make_mut(entries).remove(i);
                     }
                 }
 
