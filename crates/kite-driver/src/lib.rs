@@ -681,11 +681,19 @@ fn compile_reading(
     }
     let mut c =
         Compilation { sources, diags, output, chunk, wasm, native, index, inputs, test_fns };
-    // The standard library's own advice is not the user's to act on.
+    // The standard library's own advice is not the user's to act on — also when
+    // one of its files is the entry (`kitec check std/math.kite`), where it is
+    // named by its path and not by `<std/math>`. Told by its text: a file that
+    // is a module's embedded source word for word is that module, and a copy
+    // someone has edited is theirs and is advised like any other file.
     let library: Vec<FileId> = c
         .sources
         .iter()
-        .filter(|(_, name)| name.starts_with('<') && name.ends_with('>'))
+        .filter(|(id, name)| {
+            (name.starts_with('<') && name.ends_with('>'))
+                || modules::STD_MODULES.iter().any(|(_, src)| *src == c.sources.text(*id))
+                || PRELUDE == c.sources.text(*id)
+        })
         .map(|(id, _)| id)
         .collect();
     c.diags.silence_warnings_in(|f| library.contains(&f));
