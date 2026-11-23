@@ -5763,14 +5763,28 @@ impl<'a> Checker<'a> {
                 // to be wrong about: `let f = Rect.square` then `f(2)` is one
                 // mistake, and it is on the first line.
                 if !self.types.is_poisoned(ty) {
-                    self.diags.push(
+                    let mut d =
                         Diagnostic::error(codes::E0205, format!("`{}` is not a function", p.text()))
                             .with_primary(
                                 p.span,
                                 format!("this is {}", self.types.with_article(ty)),
                             )
-                            .with_secondary(decl, "declared here"),
-                    );
+                            .with_secondary(decl, "declared here");
+                    // As a module's constant is told: a local of a prelude
+                    // function's name hides it, and `max(1, 2)` beside `let
+                    // max = 5` most likely meant the function.
+                    let written = p.text();
+                    let prelude_fn = format!("{}.{}", kite_resolve::PRELUDE, written);
+                    if !written.contains('.')
+                        && self.resolved.fns.iter().any(|f| f.owner.is_none() && f.name == prelude_fn)
+                    {
+                        d = d.with_note(format!(
+                            "this local `{0}` hides the prelude's function `{0}`; to call that \
+                             function, rename the local",
+                            written
+                        ));
+                    }
+                    self.diags.push(d);
                 }
                 self.lit(ExprKind::Error, TyId::ERROR, span)
             }

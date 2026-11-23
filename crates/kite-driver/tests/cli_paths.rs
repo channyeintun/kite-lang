@@ -535,3 +535,19 @@ fn a_projected_tuple_element_is_not_called_a_call() {
     assert!(!err.contains("this call returns"), "{}", err);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Calling a local that hides a prelude function says so, as a module's
+/// constant of that name does.
+#[test]
+fn a_local_that_hides_a_prelude_function_says_so() {
+    let dir = scratch(
+        "local-hides",
+        "t.kite",
+        "fn main() {\n    let max = 5\n    let size = 2\n    io.print(max(1, 2))\n    io.print(size(1))\n}\n",
+    );
+    let Some((ok, _, err)) = kitec_in(&dir, &["check", "t.kite"]) else { return };
+    assert!(!ok, "{}", err);
+    assert!(err.contains("this local `max` hides the prelude's function `max`"), "{}", err);
+    assert!(!err.contains("local `size` hides"), "{}", err);
+    let _ = std::fs::remove_dir_all(&dir);
+}
