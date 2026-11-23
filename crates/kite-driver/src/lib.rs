@@ -1528,6 +1528,34 @@ mod tests {
         }
     }
 
+    /// A chain of five thousand aliases — of `int`, and of a struct, which is
+    /// what a literal through the last of them builds — checks and runs in a
+    /// fraction of a second. Each alias's chain was walked afresh from it, and
+    /// each link was found by searching every declared type, so 2,000 took
+    /// seconds and 20,000 over a minute. The bound is generous by two orders
+    /// of magnitude.
+    #[test]
+    fn a_long_chain_of_aliases_checks_quickly() {
+        let n = 5000;
+        let mut src = String::from("type A0 = int\nstruct S {\n  v: int\n}\ntype B0 = S\n");
+        for i in 1..n {
+            src.push_str(&format!("type A{} = A{}\ntype B{} = B{}\n", i, i - 1, i, i - 1));
+        }
+        src.push_str(&format!(
+            "fn main() {{\n  let x: A{} = 3\n  let s = B{}{{ v: x }}\n  io.print(s.v)\n}}\n",
+            n - 1,
+            n - 1
+        ));
+        let started = std::time::Instant::now();
+        let c = compile("aliases.kite", &src, Emit::Check);
+        assert!(!c.failed(), "{}", c.render_diagnostics());
+        let mut out = Vec::new();
+        c.run(&mut out).expect("runs");
+        let took = started.elapsed();
+        assert_eq!(String::from_utf8(out).expect("UTF-8"), "3\n");
+        assert!(took < std::time::Duration::from_secs(20), "checking took {:?}", took);
+    }
+
     /// An `else if` chain hundreds of links long dumps in about the time it
     /// takes to write the dump: 300 links took half a minute, and 400 nearly
     /// a minute and a half, when every byte passed through one indenting
