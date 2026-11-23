@@ -11575,7 +11575,15 @@ impl<'a> Checker<'a> {
         // "exactly zero?" and a tolerance would answer a different one. The
         // lint fired on every such guard in `std/math`, which is how a warning
         // teaches people to stop reading warnings.
-        let literal = |e: &hir::Expr| matches!(e.kind, ExprKind::Float(_));
+        // `-1.0` is a literal too: the language has no negative literals, so
+        // a minus sign on one is how a negative one is spelled.
+        let literal = |e: &hir::Expr| match &e.kind {
+            ExprKind::Float(_) => true,
+            ExprKind::Unary { op: hir::UnOp::NegFloat, operand } => {
+                matches!(operand.kind, ExprKind::Float(_))
+            }
+            _ => false,
+        };
         if matches!(hop, H::EqFloat | H::NeFloat) && !literal(&l) && !literal(&r) {
             self.diags.push(
                 Diagnostic::warning(codes::E0201, "comparing floats for exact equality")

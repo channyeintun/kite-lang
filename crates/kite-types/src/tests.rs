@@ -177,6 +177,11 @@ fn float_equality_against_a_literal_is_deliberate() {
     assert!(!c.has("E0201"), "{}", c.render());
     let flipped = body("  let a = 1.0\n  let e = 0.0 == a");
     assert!(!flipped.has("E0201"), "{}", flipped.render());
+    // A negative literal is a literal: there is no other way to write one.
+    let negative = body("  let a = 1.0\n  let e = a == -1.0\n  let f = -2.5 != a");
+    assert!(!negative.has("E0201"), "{}", negative.render());
+    let computed = body("  let a = 1.0\n  let e = a == -a");
+    assert!(computed.has("E0201"), "{}", computed.render());
 }
 
 #[test]
