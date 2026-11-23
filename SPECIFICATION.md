@@ -2136,9 +2136,16 @@ A literal index distinguishes elements, so `f(xs[0], xs[1])` is accepted and
 `f(xs[i], xs[j])` is not — the compiler cannot show that `i` and `j` differ, and
 the call is wrong on the run where they do not.
 
-Only reference types participate — a struct or a `dyn Trait`. Slices, maps and
-tuples are copy-on-write values, so a `var [T]` parameter is the callee's own
-copy and two of them cannot interfere.
+Only reference types participate — a struct or a `dyn Trait` — and the values
+that hold one. Slices, maps, tuples and optionals are copy-on-write values, so a
+`var [T]` parameter is the callee's own copy, and two `var [int]` parameters
+cannot interfere. But the copy is shallow: two copies of one `[Account]` hold
+the same accounts, so `sweep(xs, xs)` with two `var [Account]` parameters is
+`E0800`, and so is `settle(xs, xs[0])`. A generic parameter is judged by what
+the call passes it, so `transfer<T: Ledger>(a, a, 50)` is the same error. A call
+through a function value is checked against the function when a `let` names
+it; otherwise every reference it is passed counts as written, because a
+function type does not say which of its parameters are `var`.
 
 **This is not borrowing.** There is no ownership, no move, no lifetime, and
 nothing to annotate. A borrow checker exists to replace a collector, which is

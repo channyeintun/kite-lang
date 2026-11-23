@@ -955,9 +955,18 @@ argument of the same call may name it.** Precisely:
 - **A literal index distinguishes elements**: `f(xs[0], xs[1])` is accepted and
   `f(xs[i], xs[j])` is rejected, because the compiler cannot show `i != j` and
   the call is wrong on the run where they are equal.
-- Only **reference types** participate — structs and `dyn` values. Slices, maps
-  and tuples are copy-on-write, so a `var [T]` parameter is the callee's own
-  copy.
+- Only **reference types** participate — structs and `dyn` values — and the
+  slices, maps, tuples and optionals that hold them. Those are copy-on-write,
+  so a `var [T]` parameter is the callee's own copy, but the copy is shallow:
+  `sweep(xs, xs)` with two `var [Account]` parameters is rejected, and two
+  `var [int]` are not.
+- A **generic** parameter is judged by the argument: `move<T: Ledger>(a, a, 50)`
+  is rejected as `transfer(a, a, 50)` is.
+- A call through a **function value** is checked against the function when a
+  `let` names it (`let f = transfer` then `f(a, a, 50)` is rejected). Through
+  any other function value — a parameter `f: fn(Account, Account, int)` — every
+  reference counts as written, since a function type does not say which
+  parameters are `var`: `f(a, a, 1)` is rejected even if `f` only reads.
 
 ```kite
 struct Account {
