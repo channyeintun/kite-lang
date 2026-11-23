@@ -898,6 +898,12 @@ interpolation already renders. What it cannot do is *align*.
 `pad(s, width)` `pad_left` `centre` `ellipsis(s, width)` `fixed(x, places)`
 `percent(part, whole)` `grouped(n)` `row(cells, widths)`
 
+Widths are **characters** (`s.len()`), not terminal columns: an ideograph or
+emoji counts one and draws two, a combining mark counts one and draws none, so
+CJK and emoji columns come out ragged, and `ellipsis` can cut an accent off its
+letter. `text.cell_width` counts columns; fmt does not use it, so that padding
+a number does not pull std/text's tables into every program.
+
 `fixed` writes the float's own digits, as many places as asked for, and rounds
 its exact value half away from zero: `fixed(2.125, 2)` is `2.13`, and
 `fixed(2.005, 2)` is `2.00`, because the float written `2.005` is a little
