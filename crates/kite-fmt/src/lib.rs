@@ -48,6 +48,10 @@ pub enum FormatError {
     /// in. That is a bug in the formatter, and it is caught here rather than
     /// written over someone's file.
     Unfaithful,
+    /// Brackets nested deeper than `MAX_DEPTH`. Indentation is four spaces per
+    /// level, so the output grows with the square of the depth: 3,000 nested
+    /// blocks are 36 KB in and 36 MB out.
+    TooDeep { limit: usize },
 }
 
 impl fmt::Display for FormatError {
@@ -58,6 +62,12 @@ impl fmt::Display for FormatError {
                 "cannot format a file with lexical errors; the first is at {}:{}: {}",
                 line, col, message
             ),
+            FormatError::TooDeep { limit } => write!(
+                f,
+                "cannot format a file nested more than {} brackets deep \
+                 (the compiler refuses expressions nested past 256 too)",
+                limit
+            ),
             FormatError::Unfaithful => f.write_str(
                 "the formatter could not lay this file out without changing what it says; \
                  it has been left as it was (this is a bug in `kitec fmt`)",
@@ -67,6 +77,29 @@ impl fmt::Display for FormatError {
 }
 
 impl std::error::Error for FormatError {}
+
+/// How deep brackets may nest before the formatter refuses. The parser stops
+/// at 256 levels of expression (E0102), so no file that compiles is near this;
+/// the slack is for the declarations around the expressions, which the parser
+/// does not count. Without a cap the indentation alone is quadratic in depth,
+/// and the language server runs this on every formatting request.
+const MAX_DEPTH: usize = 320;
+
+/// The deepest the brackets of `tokens` nest, however unbalanced the file is.
+fn nesting(tokens: &[Token]) -> usize {
+    let (mut depth, mut deepest) = (0usize, 0usize);
+    for token in tokens {
+        match token.kind {
+            T::LBrace | T::LBracket | T::LParen => {
+                depth += 1;
+                deepest = deepest.max(depth);
+            }
+            T::RBrace | T::RBracket | T::RParen => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+    }
+    deepest
+}
 
 /// Format a file's text.
 ///
@@ -91,6 +124,9 @@ pub fn format(src: &str) -> Result<String, FormatError> {
             line: at.line,
             col: at.col,
         });
+    }
+    if nesting(&tokens) > MAX_DEPTH {
+        return Err(FormatError::TooDeep { limit: MAX_DEPTH });
     }
     // The parser knows which `<` and `>` are type brackets and which `{`
     // opens a struct literal. Inside a declaration that does not parse, the

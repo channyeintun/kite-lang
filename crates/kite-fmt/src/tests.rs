@@ -494,3 +494,30 @@ fn a_literal_starting_a_line_is_tight_in_a_broken_file_too() {
     let broken = format!("{}fn g( {{\n", good);
     assert!(fmt(&broken).starts_with(good), "{}", fmt(&broken));
 }
+
+/// Indentation is four spaces per open bracket, so a file nested n deep came
+/// back n^2 large: 3,000 nested blocks, 36 KB in, 36 MB out. Past the
+/// compiler's own nesting ceiling the file is refused instead, and the ceiling
+/// itself still formats.
+#[test]
+fn absurd_nesting_is_refused_not_expanded() {
+    let nested = |n: usize| {
+        let mut src = String::from("fn main() {\n");
+        for _ in 0..n {
+            src.push_str("if true {\n");
+        }
+        for _ in 0..n {
+            src.push_str("}\n");
+        }
+        src.push_str("}\n");
+        src
+    };
+    let err = format(&nested(3000)).expect_err("3000 levels must be refused");
+    assert!(matches!(err, FormatError::TooDeep { .. }), "{:?}", err);
+    assert!(err.to_string().contains("nested more than"), "{}", err);
+    // An unbalanced file is counted the same way, so a run of `{` cannot slip by.
+    assert!(matches!(format(&"{".repeat(5000)), Err(FormatError::TooDeep { .. })));
+    // Ordinary nesting is still laid out.
+    let out = format(&nested(60)).expect("60 levels is within the ceiling");
+    assert!(out.len() < 60 * 4 * 70 * 2, "{}", out.len());
+}
