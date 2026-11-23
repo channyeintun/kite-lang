@@ -174,6 +174,13 @@ fn checks() -> [error] {
     out.push(test.equal_str(pad_start("7", 6, "ab"), "ababa7", "and repeated to reach it"))
     out.push(test.equal_str(pad_start("7", 4, ""), "7", "an empty filler pads nothing"))
 
+    // ---- debug_str ----
+    out.push(test.equal_str(debug_str("say \"hi\"\n\t\\"), "\"say \\\"hi\\\"\\n\\t\\\\\"", "the escapes put back"))
+    out.push(test.equal_str(debug_str("a\rb"), "\"a\\rb\"", "a carriage return is written"))
+    out.push(test.equal_str(debug_str("a\u{0}b\u{7f}c"), "\"a\\u{0}b\\u{7f}c\"", "NUL and DEL"))
+    out.push(test.equal_str(debug_str("\u{1b}\u{85}\u{2028}\u{2029}"), "\"\\u{1b}\\u{85}\\u{2028}\\u{2029}\"", "ESC, NEL, and the separators"))
+    out.push(test.equal_str(debug_str("é中"), "\"é中\"", "printable text is left alone"))
+
     // ---- numbers ----
     out.push(test.equal_int(abs(-3), 3, "abs"))
     out.push(test.equal_int(min(2, 5), 2, "min"))

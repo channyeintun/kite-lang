@@ -1340,27 +1340,50 @@ pub fn hash_str(text: str) -> int {
 /// A string as it would be written in source: quoted, with the escapes put
 /// back. What `@derive(Debug)` uses for a `str` field, so a value containing a
 /// comma or a brace cannot be mistaken for structure.
+///
+/// Every character that would move a cursor or hide in a log is written as an
+/// escape — `\n`, `\r`, `\t`, and `\u{..}` for the other controls, DEL, the C1
+/// controls and the line and paragraph separators — so one value is one line
+/// of output.
+///
+/// ```kite
+/// assert(debug_str("a\rb") == "\"a\\rb\"", "a carriage return is written, not sent")
+/// ```
 pub fn debug_str(text: str) -> str {
     var out = "\""
     for i in 0..text.len() {
-        let c = text.slice(i, i + 1)
-        if c == "\"" {
+        let code = text.code_at(i)
+        if code == 0x22 {
             out = out + "\\\""
+        } else if code == 0x5C {
+            out = out + "\\\\"
+        } else if code == 0x0A {
+            out = out + "\\n"
+        } else if code == 0x0D {
+            out = out + "\\r"
+        } else if code == 0x09 {
+            out = out + "\\t"
+        } else if code < 0x20 || (code >= 0x7F && code <= 0x9F) || code == 0x2028 || code == 0x2029 {
+            out = out + "\\u{" + hex_digits(code) + "}"
         } else {
-            if c == "\\" {
-                out = out + "\\\\"
-            } else {
-                if c == "\n" {
-                    out = out + "\\n"
-                } else {
-                    if c == "\t" {
-                        out = out + "\\t"
-                    } else {
-                        out = out + c
-                    }
-                }
-            }
+            out = out + text.slice(i, i + 1)
         }
     }
     return out + "\""
+}
+
+/// `n`, which is not negative, in lowercase hexadecimal.
+fn hex_digits(n: int) -> str {
+    let digits = "0123456789abcdef"
+    var rest = n
+    var out = ""
+    for {
+        let d = rest % 16
+        out = digits.slice(d, d + 1) + out
+        rest = rest / 16
+        if rest == 0 {
+            break
+        }
+    }
+    return out
 }
