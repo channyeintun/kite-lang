@@ -1792,8 +1792,42 @@ fn a_file_checked_on_its_own_resolves_from_its_packages_root() {
     let bad = p.file("ui/bad.kite", "use config\n\nfn main() {\n  config.hidden()\n}\n");
     let said = p.run(&bad).expect_err("private");
     assert!(said.contains("private to module `config`"), "{}", said);
-    // Without a manifest the entry's own directory is the root, as before.
+    // Without a manifest the entry's own directory is the root, as it was.
     std::fs::remove_file(p.dir.join("kite.toml")).expect("remove");
     let said = p.run(&ui).expect_err("no package above");
     assert!(said.contains("E0400"), "{}", said);
+}
+
+/// A cycle back to the entry file is one error. The closing `use main`
+/// recorded a spelling for a module that does not exist — the entry is not a
+/// module — so `main.base()` behind it said `main` declares nothing public of
+/// a name it declares `pub`.
+#[test]
+fn a_cycle_back_to_the_entry_is_one_error() {
+    let p = Project::new("entry-cycle-once");
+    p.file("helper/h.kite", "use main\n\npub fn f() -> int {\n  return main.base() + 1\n}\n");
+    let main = p.file(
+        "main.kite",
+        "use helper\n\npub fn base() -> int {\n  return 1\n}\n\nfn main() {\n  io.print(helper.f())\n}\n",
+    );
+    let said = p.run(&main).expect_err("a cycle");
+    assert!(said.contains("E0402"), "{}", said);
+    assert!(!said.contains("E0111"), "{}", said);
+    assert!(said.contains("1 previous error"), "{}", said);
+}
+
+/// A module that imports itself is told so, and to delete the line — not
+/// handed an empty chain and advice to extract a third module.
+#[test]
+fn a_module_that_imports_itself_is_told_so() {
+    let p = Project::new("self-import");
+    let entry = p.file("selfentry.kite", "use selfentry\n\nfn main() {\n  io.print(1)\n}\n");
+    let said = p.run(&entry).expect_err("a cycle of one");
+    assert!(said.contains("module `selfentry` imports itself"), "{}", said);
+    assert!(said.contains("remove this `use`"), "{}", said);
+    assert!(!said.contains("the chain is"), "{}", said);
+    p.file("ui/a.kite", "use ui\n\npub fn f() -> int {\n  return 1\n}\n");
+    let main = p.file("main.kite", "use ui\n\nfn main() {\n  io.print(ui.f())\n}\n");
+    let said = p.run(&main).expect_err("a cycle of one");
+    assert!(said.contains("module `ui` imports itself"), "{}", said);
 }

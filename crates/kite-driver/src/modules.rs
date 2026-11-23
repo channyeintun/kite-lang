@@ -554,6 +554,29 @@ fn cycle(stack: &[Frame], at: usize, identity: &str, closing: Span, sources: &So
     let named = |frames: &[Frame]| -> Vec<String> {
         frames.iter().filter(|f| !f.identity.is_empty()).map(|f| f.identity.clone()).collect()
     };
+    // **A module importing itself is not a chain to extract from.** It was
+    // reported as one, with the chain empty for the entry file — `the chain
+    // is  — extract the shared part` — and as `ui` for a file of `ui/`
+    // writing `use ui`. The fix is to delete the line.
+    if at + 1 == stack.len() {
+        let name = if stack[at].identity.is_empty() {
+            sources
+                .file(closing.file)
+                .name
+                .file_stem()
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or_else(|| "the entry file".to_string())
+        } else {
+            stack[at].identity.clone()
+        };
+        return Diagnostic::error(codes::E0402, format!("module `{}` imports itself", name))
+            .with_primary(closing, "this imports the module it is written in")
+            .with_note(format!(
+                "what `{}` declares is already in scope in its own files, unqualified — remove \
+                 this `use`",
+                name.trim_start_matches('@')
+            ));
+    }
     if at == 0 && stack[0].identity.is_empty() && stack.len() > 1 {
         let entry = sources
             .file(stack[1].entered.file)
@@ -1136,6 +1159,14 @@ impl Loader {
 
             if let Some(at) = stack.iter().position(|frame| frame.origin == origin) {
                 diags.push(cycle(stack, at, &identity, u.span, sources));
+                // The entry file is not a module, so a `use` of it named a
+                // module that does not exist, and every `main.base()` behind
+                // it was a second error — ``main` declares nothing public``
+                // of a name it declares `pub`. Reported once, as the cycle.
+                if stack[at].identity.is_empty() {
+                    self.aliases.remove(&(owner.clone(), spelling.clone()));
+                    self.unresolved.insert(failed);
+                }
                 continue;
             }
             // The same source reached twice is the ordinary case — two files

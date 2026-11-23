@@ -682,7 +682,10 @@ codes! {
          `use` that closes the cycle, except when the cycle leads back to \
          the entry file: then it sits on the entry's own `use` that began \
          it, so that checking the entry alone, which is what an editor \
-         does, shows it. A module that imports itself is a cycle of one.\n\
+         does, shows it. A module that imports itself — a file of `ui/` \
+         writing `use ui`, or a file naming itself — is a cycle of one, \
+         and the message says it imports itself: delete that `use`, since \
+         what a module declares is already in scope in its own files.\n\
          \n\
          Example, `a.kite` and `b.kite` in one directory, checking `a.kite`:\n\
          \n\

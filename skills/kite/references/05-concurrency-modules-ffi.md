@@ -768,7 +768,7 @@ when the member is near one of their builtins: `io.prnt` is ``cannot find
 | `E0400` | Module not found. Lists every directory and `.kite` file it looked for, nearest first. Also used for `use std/<not-a-std-module>`, and then lists the whole standard library. |
 | `E0401` | The item is not `pub`, so it is visible only inside its own module. Applies to functions, types (in expressions, signatures and `impl` headers), traits (implementing one from outside), enum variants, struct fields, methods and associated functions — and to a `pub type` alias of a type that is not `pub`, refused where the alias is. |
 | `E0406` | An `impl` outside its type's module: an extension method, or an imported trait implemented for an imported type. |
-| `E0402` | Import cycle. The diagnostic prints the chain (`a → b`). Extract the shared part into a third module. |
+| `E0402` | Import cycle. The diagnostic prints the chain (`a → b`). Extract the shared part into a third module. A module that imports itself (`use ui` in a file of `ui/`) is "imports itself": delete the `use`. |
 | `E0403` | Reserved standard-library name (above). |
 | `E0404` | One module spelling two modules alike — give one an alias — or two packages of one name reached from two different places, or one file reached as two modules: a file of a directory module imported on its own (`use shape` inside `lib/`, or `use lib/shape` beside `use lib`) — or one module reached as part of two packages. |
 | `E0405` | A `kite.toml` that does not read. Reported at the offending line; a build no longer treats a broken manifest as no manifest. |
