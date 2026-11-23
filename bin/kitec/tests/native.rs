@@ -223,6 +223,31 @@ fn a_host_declaration_that_lies_is_refused_like_the_vm_refuses_it() {
     assert_eq!(native.status.code(), Some(1));
     assert_eq!(text(&native.stdout), text(&vm.stdout));
     assert_eq!(text(&native.stderr), text(&vm.stderr));
-    assert!(text(&native.stderr).contains("`fs.read` received a `not a str`"));
+    let said = "`fs.read_text` declares parameter 1 as int, and the host reads str";
+    assert!(text(&native.stderr).contains(said), "{}", text(&native.stderr));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A declared parameter the host does not read is refused on both, in the
+/// same words. It was ignored, so `temp_path(42)` ran and the `42` went
+/// nowhere.
+#[test]
+fn a_host_declaration_with_a_parameter_too_many_is_refused_on_both() {
+    if !native_here() {
+        return;
+    }
+    let (dir, file) = program(
+        "extra",
+        "@host(\"fs\")\nextern fn temp_path(extra: int) -> str\n\n\
+         fn main() {\n    io.print(\"before\")\n    io.print(temp_path(42))\n}\n",
+    );
+    let vm = kitec(&["run"], &file);
+    let native = kitec(&["run", "--native"], &file);
+    assert_eq!(vm.status.code(), Some(1));
+    assert_eq!(native.status.code(), Some(1));
+    assert_eq!(text(&native.stdout), text(&vm.stdout));
+    assert_eq!(text(&native.stderr), text(&vm.stderr));
+    let said = "`fs.temp_path` is declared with 1 parameter, and the host reads 0";
+    assert!(text(&vm.stderr).contains(said), "{}", text(&vm.stderr));
     let _ = std::fs::remove_dir_all(&dir);
 }

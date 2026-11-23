@@ -152,7 +152,7 @@ fn main() {
 | `err.message()` on any error | Needs `err` proved non-nil first, or `E0301`. And `io.print(err)` is `E0200` — print `err.message()`. |
 | `?` propagates | `check err`, a statement on its own line. In a non-fallible function — including `main` — it is `E0303`; test the error there instead. |
 | `panic` / `recover`, try/catch | Traps (index out of range, divide by zero, failed `assert`) are **not catchable**. No unwinding, no handler. |
-| A name imported anywhere is in scope everywhere | A module reaches only what it `use`s; `use` paths are relative to the importing file's directory; imports are always qualified, with no wildcard. |
+| A name imported anywhere is in scope everywhere | A module reaches only what it `use`s; a `use` path is looked for beside the importing module, then in each enclosing directory up to the package's root; imports are always qualified, with no wildcard. |
 | Files in one directory see each other | Only in a directory some `use` **names** — those files share one namespace and never import each other. **The file you hand `kitec` is a one-file module, and the directory it sits in is not a module at all**: a sibling `words.kite` is invisible until `use words`, then it is `words.greeting()`. `kitec` compiles the entry plus what its `use`s reach, transitively, and nothing else in the tree. |
 | Calling an `async fn` starts running it | It only **queues**. Nothing in the body runs until something awaits the `Task<T>`. Concurrency is two calls, then two awaits. |
 | `map(xs, \|n\| n * 2)` | `E0209` — nothing fixes `map`'s result type. Annotate: `map(xs, \|n: int\| n * 2)`. `filter` needs no annotation. |

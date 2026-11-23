@@ -15,8 +15,10 @@ The deltas that will catch you out, in the order you will hit them:
 4. **The file you hand `kitec` is a one-file module.** The directory it sits in
    is *not* a module: a sibling `.kite` file is reachable only through a `use`,
    exactly like any other module (§4).
-5. **`use` paths are relative to the importing file's own directory**, not to
-   the project root.
+5. **A `use` path is looked for beside the importing module, then outward**:
+   in its own directory first, then each enclosing one, stopping at the
+   package's root (the entry file's directory, or the dependency's own). The
+   nearest wins, so sibling directory modules reach each other.
 6. **A module is where its source is**, so `util` inside `a/` and `util` inside
    `b/` are two modules, and so are `dep/utils` and `utils` — but the standard
    library's twenty names, `io`, `draw`, `ptr` and `prelude` are reserved on
@@ -452,9 +454,13 @@ with no rewrite.
 
 ## 4. Modules
 
-**A module is a directory, or a single `.kite` file.** Every `.kite` file in a
+**A module is a directory, or a single `.kite` file.** `use x` takes `x/` when
+it holds a `.kite` file directly, and `x.kite` otherwise — a `config/` of data
+files beside `config.kite` does not hide it. Every `.kite` file in a
 module directory contributes to one namespace; the files are read in sorted
-order and there are no per-file imports of siblings. Neither form is a module
+order and there are no per-file imports of siblings — `use shape` written
+inside `lib/` is `E0404`, since `shape.kite` is already part of `lib`, and so
+is `use lib/shape` beside `use lib`. Neither form is a module
 until a `use` names it — a `.kite` file nothing imports is never compiled.
 
 **The file you hand `kitec` is a one-file module, and the directory it sits in
@@ -518,12 +524,22 @@ fn main() {
 }
 ```
 
-### Paths are relative to the importing file's directory
+### Paths are looked for beside the importer, then outward
 
-Not to the project root, and not to the entry file. A file at `src/a/x.kite`
-writing `use config` is asking for `src/a/config/` or `src/a/config.kite`. The
-`E0400` diagnostic prints both paths it tried, which is the fastest way to see
-this.
+A file at `src/a/x.kite` writing `use config` is asking for `src/a/config/` or
+`src/a/config.kite` first, then `src/config/` or `src/config.kite` — each
+enclosing directory in turn, nearest first, and **no further than the
+package's root**: the entry file's directory for the program (here `src/`),
+the dependency's own directory for a module inside a dependency. A directory
+module is measured from its own directory, so `src/ui/app.kite` writing `use
+config` finds `src/ui/config/` if there is one and `src/config/` beside `ui/`
+otherwise — which is how two sibling directory modules import each other. A
+dependency never walks out into the program that imports it.
+
+Whichever place it is found from, the module is where its source is: `use
+config` written in `src/ui/` and in `src/main.kite` reach the one module, with
+one set of types. The `E0400` diagnostic lists every place it tried, nearest
+first, which is the fastest way to see where it looked.
 
 The one exception is the first segment: if it names a declared dependency, the
 path roots there instead (§5).
@@ -598,11 +614,16 @@ An alias is the same: after `use std/math as m`, `m.floor(1.5)` resolves and
 expression or a pattern with a payload — is one of the asking module's own
 enums' variants, or the prelude's. Another module's variants are written
 qualified, `shapes.Shape.Circle`, imported or not. (A bare *unit* variant in a
-`match` arm is still read against the scrutinee's own enum.)
+`match` arm is still read against the scrutinee's own enum — unless that enum
+is another module's private one, which is `E0401` however the variant is
+spelled.)
 
 ### Imports are always qualified
 
-There is no wildcard import and no way to bring a bare name into scope.
+There is no wildcard import and no way to bring a bare name into scope. There
+is no `pub use` either — a module's imports are not exported, and `pub use x`
+is one `E0100` at the `pub` (the `use` still imports `x` for that module).
+`pub` cannot be written on an enum variant: a variant is as visible as its enum.
 `config.load` always says where `load` came from. Types are qualified too:
 `let one: inventory.Item = inventory.item("spare", 5, 1)`.
 
@@ -685,12 +706,13 @@ dependency whose module is named after any of the reserved names is
 unreachable; rename it. (`use std/prelude` is `E0400`: the prelude is ambient,
 not a module you import.)
 
-### `E0111` blames the module even when the module is fine
+### `E0111` says which: the module, or the member
 
-The caret lands on the module segment and the message is `cannot find 'dom'` in
-both cases: `dom` was never imported, **and** `dom` was imported and the
-*member* does not exist. A misspelled function therefore reads like a broken
-import, and the `use` line is the wrong place to look first.
+When `dom` was never imported, the caret lands on `dom` and the message is
+`cannot find 'dom'`. When `dom` was imported and the *member* does not exist,
+the message is ``cannot find `tag_of` in module `dom` ``, the caret is on the
+member, and a note names the nearest `pub` member when one is close — so a
+misspelled function reads as a misspelled function, not a broken import.
 
 ```kite fails
 use std/dom
@@ -719,22 +741,24 @@ fn main() {
 }
 ```
 
-Same for a user module: with `use m`, where `m` exports `one` and not `two`,
-`m.two()` is `cannot find 'm'` with the caret on `m`. Check the member against
-the module's `pub fn` list before you touch the import.
+Same for a user module: with `use m`, where `m` exports `one`, `m.on()` is
+``cannot find `on` in module `m` `` with the caret on `on` and the note "a
+similar name is in `m`: `one`". And for the modules in scope without a `use`
+when the member is near one of their builtins: `io.prnt` is ``cannot find
+`prnt` in module `io` `` with the note naming `print`.
 
 ### The other module codes
 
 | Code | Meaning |
 |---|---|
-| `E0400` | Module not found. Prints the directory and the `.kite` file it looked for. Also used for `use std/<not-a-std-module>`, and then lists the whole standard library. |
-| `E0401` | The item is not `pub`, so it is visible only inside its own module. Applies to functions, types (in expressions and in signatures), enum variants, struct fields, methods and associated functions. |
+| `E0400` | Module not found. Lists every directory and `.kite` file it looked for, nearest first. Also used for `use std/<not-a-std-module>`, and then lists the whole standard library. |
+| `E0401` | The item is not `pub`, so it is visible only inside its own module. Applies to functions, types (in expressions, signatures and `impl` headers), traits (implementing one from outside), enum variants, struct fields, methods and associated functions — and to a `pub type` alias of a type that is not `pub`, refused where the alias is. |
 | `E0406` | An `impl` outside its type's module: an extension method, or an imported trait implemented for an imported type. |
 | `E0402` | Import cycle. The diagnostic prints the chain (`a → b`). Extract the shared part into a third module. |
 | `E0403` | Reserved standard-library name (above). |
-| `E0404` | One module spelling two modules alike — give one an alias — or two packages of one name reached from two different places. |
+| `E0404` | One module spelling two modules alike — give one an alias — or two packages of one name reached from two different places, or one file reached as two modules: a file of a directory module imported on its own (`use shape` inside `lib/`, or `use lib/shape` beside `use lib`). |
 | `E0405` | A `kite.toml` that does not read. Reported at the offending line; a build no longer treats a broken manifest as no manifest. |
-| `E0111` | A qualified name whose module this module never imported — **or** an unknown member of one it did (above). |
+| `E0111` | A qualified name whose module this module never imported — **or** an unknown member of one it did, reported at the member (above). |
 
 **An unmarked field makes a `pub struct` opaque outside its module**
 (SPECIFICATION.md §4.3, §15.4): reading or writing it, building the struct with a
@@ -940,9 +964,20 @@ argument of the same call may name it.** Precisely:
 - **A literal index distinguishes elements**: `f(xs[0], xs[1])` is accepted and
   `f(xs[i], xs[j])` is rejected, because the compiler cannot show `i != j` and
   the call is wrong on the run where they are equal.
-- Only **reference types** participate — structs and `dyn` values. Slices, maps
-  and tuples are copy-on-write, so a `var [T]` parameter is the callee's own
-  copy.
+- Only **reference types** participate — structs and `dyn` values — and the
+  slices, maps, tuples and optionals that hold them. Those are copy-on-write,
+  so a `var [T]` parameter is the callee's own copy, but the copy is shallow:
+  `sweep(xs, xs)` with two `var [Account]` parameters is rejected, and two
+  `var [int]` are not.
+- A **generic** parameter is judged by the argument: `move<T: Ledger>(a, a, 50)`
+  is rejected as `transfer(a, a, 50)` is.
+- A call through a **function value** is checked against the function when a
+  `let` names it (`let f = transfer` then `f(a, a, 50)` is rejected). Through
+  any other function value — a parameter `f: fn(Account, Account, int)` — the
+  call is **not checked**, since a function type does not say which parameters
+  are `var`: `f(a, a, 1)` compiles, and is the §14.1 bug when `f` is
+  `transfer`. Do not hand a function with two `var` parameters around as a
+  value.
 
 ```kite
 struct Account {
@@ -1041,7 +1076,9 @@ IDL without JavaScript glue — so Kite defines the boundary explicitly.
 A host reference. On the web it lowers to `externref`. Asked for an artefact
 that cannot hold one, the compiler refuses rather than inventing a
 representation: `--emit kbc`, `--emit native` and `run --native` all report
-**`E0204`** — "`JsValue` is a host object, and this target has no host". Three
+**`E0204`** — "`JsValue` is a host object, and this target has no host" — once
+for the program, at its own first function holding one, with a note counting
+the rest (most of them inside `std/js`). Three
 paths deliberately do not: `kitec check` (a web program is valid Kite and must
 keep checking in an editor), and plain `kitec run` and `kitec build`, which
 trap at the first host call instead — see the end of this section.
@@ -1111,6 +1148,14 @@ fn main() {
 `extern` is direct, monomorphic and checked at the call. `std/fs`, `std/http`,
 `std/socket` and `std/crypto` are built from it. Drawing does not use it at all
 — the drawing calls are compiler builtins.
+
+A host answers with one value when it is called, so an `extern fn` cannot
+return `(T, error)` (`E0204`) and cannot be `async` (`E0100`); the Kite function
+wrapping it makes the `error`, or waits. Where `kitec run` answers a host
+itself (`@host("fs")`, on the VM and natively), a declaration whose parameters
+are not exactly what the host reads — one too many included — or whose result
+is not what it answers traps before the call, in the same words on both:
+``error: `fs.read_text` declares parameter 1 as int, and the host reads str``.
 
 A program that `check`s fine will still **trap at run time under a host that
 supplies no such namespace**, and traps are not catchable:

@@ -214,11 +214,20 @@ impl DiagBag {
 
     /// Order by source position so output is deterministic regardless of the
     /// order passes happened to discover problems.
-    pub fn sort(&mut self, _sources: &SourceMap) {
+    ///
+    /// **A manifest's errors come first.** A `kite.toml` is read before any
+    /// module, but added to the sources after the entry file, so the `E0405`
+    /// that a broken one is came last — under the `cannot find module` it
+    /// caused at every `use` of a dependency, which reads as the program
+    /// being wrong. The cause is said before what it caused.
+    pub fn sort(&mut self, sources: &SourceMap) {
         self.diagnostics.sort_by_key(|d| {
             d.primary_span()
-                .map(|s| (s.file.0, s.start, s.end))
-                .unwrap_or((u32::MAX, u32::MAX, u32::MAX))
+                .map(|s| {
+                    let manifest = sources.file(s.file).name.extension().is_some_and(|e| e == "toml");
+                    (!manifest, s.file.0, s.start, s.end)
+                })
+                .unwrap_or((true, u32::MAX, u32::MAX, u32::MAX))
         });
     }
 

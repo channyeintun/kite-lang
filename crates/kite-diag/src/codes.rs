@@ -412,7 +412,13 @@ codes! {
          The same code reports two packages of one name reached from two \
          different places. A package's name means one thing across the whole \
          program — `kitec pkg` refuses the same manifests for the same \
-         reason — so the manifests naming it must agree on where it is.";
+         reason — so the manifests naming it must agree on where it is.\n\n\
+         And it reports one file reached as two modules. Every `.kite` file \
+         in a module directory is part of that module, so `use shape` written \
+         inside `lib/`, or `use lib/shape` beside `use lib`, would compile \
+         `shape.kite` a second time as a module of its own, and each of its \
+         types would become two. Inside `lib`, its declarations are already \
+         in scope unqualified; elsewhere, write `lib.…`.";
 
     E0405 = "E0405", "a `kite.toml` that does not read",
         "The manifest is what says where a package's dependencies are, so a \
@@ -500,8 +506,15 @@ codes! {
          unsafe — Kite collects, so the memory is real either way — and the \
          program is silently wrong.\n\n\
          Two arguments name the same object when one path is a prefix of the \
-         other, so `f(o, o.inner)` counts as well as `f(a, a)`. Pass distinct \
-         objects, or take one `var` parameter and return the second result.\n\n\
+         other, so `f(o, o.inner)` counts as well as `f(a, a)`. A slice, map, \
+         tuple or optional of structs counts too: it is copied on write, but \
+         shallowly, so two copies hold the same structs. A generic parameter \
+         is judged by the argument passed to it. A call through a function \
+         value is checked when the call or a `let` says which function it is; \
+         through any other, it is not, because a function type does not say \
+         which parameters are `var`. \
+         Pass distinct objects, or take one `var` parameter and return the \
+         second result.\n\n\
          This sees one call site. Aliasing arranged elsewhere — two fields \
          holding one reference — is not detected, and needs no detection to be \
          memory-safe; Kite has no borrowing and no lifetimes, and this rule is \

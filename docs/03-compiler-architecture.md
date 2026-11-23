@@ -246,8 +246,9 @@ survived rather than the text on disk.
 ### 3.3 Modules
 
 Loading is `kite-driver`'s, not the resolver's. Starting from the entry file's
-`use` lines, it finds each module — a sibling directory or a single `.kite`
-file, a dependency the package's `kite.toml` names, a standard library module,
+`use` lines, it finds each module — a directory or a single `.kite` file,
+looked for beside the importer and then in each enclosing directory up to its
+package's root, a dependency the package's `kite.toml` names, a standard library module,
 or a source a host handed over (the playground, a bundler) — and follows that
 module's own imports, reporting a cycle as `E0402`. An editor's unsaved buffer
 is not handed over as a module: the files are found exactly as on disk, and

@@ -862,6 +862,25 @@ fn a_host_object_is_refused_off_the_web() {
     assert!(text.contains("has no host"), "{}", text);
 }
 
+/// One cause, one error. It was one `E0204` per function holding a
+/// `JsValue` — 37 for a program that touched `std/js` once, nearly all of
+/// them inside `<std/js>` — and the one that is the program's own is the one
+/// reported, with the rest counted.
+#[test]
+fn a_program_reaching_std_js_off_the_web_is_one_error() {
+    let src = "use std/js\n\nfn main() {\n  let g = js.global(\"globalThis\")\n\
+               \x20 io.print(js.kind_of(g))\n  io.print(js.same(g, g))\n}\n";
+    for emit in [Emit::Kbc, Emit::Native] {
+        let c = compile(Path::new("offweb.kite"), src, emit);
+        assert!(c.failed(), "no host off the web");
+        let text = c.render_diagnostics();
+        assert_eq!(text.matches("error[E0204]").count(), 1, "{}", text);
+        assert!(text.contains("used in `main`"), "the program's own use: {}", text);
+        assert!(text.contains("offweb.kite:3:1"), "{}", text);
+        assert!(text.contains("other functions the program reaches hold one too"), "{}", text);
+    }
+}
+
 // ---- std/js ----------------------------------------------------------------
 
 /// `std/js` needs no host of its own: the `js` group is supplied by the

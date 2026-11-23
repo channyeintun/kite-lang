@@ -16,7 +16,7 @@
 use kite_ast::*;
 use kite_diag::{codes, DiagBag, Diagnostic};
 use kite_span::Span;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// What a name refers to.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -287,6 +287,40 @@ pub enum BuiltinFn {
 /// that spelling (`E0403`).
 pub const BUILTIN_MODULES: &[&str] = &["io", "errors", "draw", "text", "task", "time", "ptr", "js"];
 
+/// Every dotted path [`BuiltinFn::from_path`] answers — what a misspelled
+/// `io.prnt` is compared against, since no `use` brought `io` and no item of
+/// the program declares `print`.
+pub const BUILTIN_PATHS: &[&str] = &[
+    "io.print",
+    "io.error",
+    "io.read_line",
+    "errors.new",
+    "errors.because",
+    "draw.rect",
+    "draw.rrect",
+    "draw.text",
+    "draw.font",
+    "draw.drrect",
+    "draw.alpha",
+    "text.width",
+    "text.height",
+    "text.from_code",
+    "draw.field",
+    "draw.image",
+    "draw.semantics",
+    "draw.clip",
+    "draw.unclip",
+    "task.yield",
+    "task.wake_at",
+    "task.park",
+    "task.wait_host",
+    "task.finished",
+    "task.get",
+    "time.now",
+    "ptr.same",
+    "js.func",
+];
+
 impl BuiltinFn {
     pub fn from_path(path: &str) -> Option<BuiltinFn> {
         match path {
@@ -441,9 +475,23 @@ pub struct Modules {
     /// names.
     /// Keyed by `(declaring module, alias)`; see `Loader::aliases`.
     pub aliases: HashMap<(String, String), String>,
+    /// Spellings whose `use` was refused or found nothing, keyed the same
+    /// way. That `use` has its error; a name qualified by one of these is not
+    /// a second — see [`Modules::is_unresolved`].
+    pub unresolved: HashSet<(String, String)>,
 }
 
 impl Modules {
+    /// Whether `head`, written in `asking`, is the spelling of a `use` that
+    /// already failed.
+    ///
+    /// `config.Config` after a `use config` that was `E0400` was a second
+    /// error for the same cause — ``unknown type `config.Config` ``, asking
+    /// whether the module was imported, under the line that imports it.
+    pub fn is_unresolved(&self, asking: &str, head: &str) -> bool {
+        self.unresolved.contains(&(asking.to_string(), head.to_string()))
+    }
+
     pub fn of(&self, item: usize) -> &str {
         self.of_item.get(item).map(|s| s.as_str()).unwrap_or("")
     }
@@ -1211,6 +1259,22 @@ fn collect_functions(file: &SourceFile, map: &mut ResolveMap, diags: &mut DiagBa
                     },
                 };
 
+                // **An `impl` header names its type and its trait**, and a
+                // type or trait that is not `pub` cannot be named outside its
+                // module at all (§4.3). Every other position held to that, and
+                // this one did not: `impl Probe for m.Secret` gave a private
+                // type a method from outside, and `impl t.Secret for Mine`
+                // implemented a private trait. The methods are still
+                // registered, so the calls to them say nothing more.
+                if let Some(d) = private_in_header(map, &module, written, &imp.self_ty) {
+                    diags.push(d);
+                }
+                if let (Some(tp), Some(t)) = (&imp.trait_path, trait_index) {
+                    if let Some(d) = private_in_header(map, &module, t, tp) {
+                        diags.push(d);
+                    }
+                }
+
                 // Coherence (§8.2, §10.2): an inherent `impl` is written where
                 // its type is declared, and a trait's where the trait or the
                 // type is. The methods are still registered, so a call to one
@@ -1563,6 +1627,13 @@ impl<'a> FnResolver<'a> {
         self.map.const_by_name_in(&self.module, name)
     }
 
+    /// Whether `head` is how this module spelled a `use` that was already
+    /// reported, so what it qualifies is not reported again. A local of that
+    /// name is not one: it was looked up first.
+    fn failed_use(&self, head: &str) -> bool {
+        self.lookup(head).is_none() && self.map.modules.is_unresolved(&self.module, head)
+    }
+
     /// Reject reaching into another module for something it did not mark
     /// `pub`. Two levels of visibility, exactly as the specification says.
     fn check_visible(&mut self, res: Res, span: Span, name: &str) {
@@ -1576,7 +1647,15 @@ impl<'a> FnResolver<'a> {
                 (self.map.modules.of(c.decl_index), c.is_pub, c.span, "constant")
             }
             Res::Type(i) | Res::Variant(i, _) => {
-                let t = &self.map.types[i as usize];
+                // Named through an alias, the alias is what was named, and
+                // whether it may be is the alias's to say. The type it stood
+                // for was asked instead, so a literal through a `pub` alias
+                // said the alias was private.
+                let named = match self.map.type_by_name_in(&self.module, name) {
+                    Some(a) if self.map.types[a as usize].kind == TypeKind::Alias => a,
+                    _ => i,
+                };
+                let t = &self.map.types[named as usize];
                 (self.map.modules.of(t.decl_index), t.is_pub, t.span, t.kind.describe())
             }
             _ => return,
@@ -1993,6 +2072,9 @@ impl<'a> FnResolver<'a> {
     /// Resolve the head of a variant or struct pattern.
     fn resolve_pattern_path(&mut self, path: &TypePath) {
         let name = path.name();
+        if path.segments.len() >= 2 && self.failed_use(&path.segments[0].name) {
+            return;
+        }
 
         if path.segments.len() >= 2 {
             // `Shape.Circle`, or `ui.Align.Start` — everything but the last
@@ -2095,6 +2177,10 @@ impl<'a> FnResolver<'a> {
                     self.map.uses.insert(*span, res);
                     return;
                 }
+                if let Some(d) = self.missing_member(base, name) {
+                    self.diags.push(d);
+                    return;
+                }
                 self.expr(base)
             }
             Expr::Index { base, index, .. } => {
@@ -2168,6 +2254,62 @@ impl<'a> FnResolver<'a> {
         }
     }
 
+    /// The `E0111` for `m.name` where `m` is a module this one imported and
+    /// `name` is nothing in it.
+    ///
+    /// The path fell through to being read as a field of a value called `m`,
+    /// so a misspelled member — `m.on()` for `m.one()` — said ``cannot find
+    /// `m` ``, with the caret on a module the first line imports, and no
+    /// similar name: the one diagnostic most likely to send someone to fix
+    /// the import rather than the member.
+    ///
+    /// The modules in scope without a `use` — `io.prnt` — are the same
+    /// mistake, and said the same way when one of their builtins is near.
+    fn missing_member(&self, base: &Expr, name: &Ident) -> Option<Diagnostic> {
+        let Expr::Path(p) = base else { return None };
+        if !p.is_simple() || self.lookup(&p.text()).is_some() {
+            return None;
+        }
+        let spelled = p.text();
+        let imported = self.map.modules.aliases.get(&(self.module.clone(), spelled.clone()));
+        let builtin = BUILTIN_MODULES.contains(&spelled.as_str());
+        let module = match imported {
+            Some(module) => module.clone(),
+            None if builtin => spelled.clone(),
+            None => return None,
+        };
+        let prefix = format!("{}.", module);
+        let mut names: Vec<&str> = Vec::new();
+        if imported.is_some() {
+            names.extend(self.map.fns.iter().filter(|f| f.is_pub).map(|f| f.name.as_str()));
+            names.extend(self.map.consts.iter().filter(|c| c.is_pub).map(|c| c.name.as_str()));
+            names.extend(self.map.types.iter().filter(|t| t.is_pub).map(|t| t.name.as_str()));
+        }
+        if builtin {
+            names.extend(BUILTIN_PATHS.iter().copied());
+        }
+        let members: Vec<&str> = names.into_iter().filter_map(|n| n.strip_prefix(&prefix)).collect();
+        // Not imported, and nothing near among the builtins: `text.trim`
+        // without `use std/text` is a missing `use`, which this would not say.
+        if imported.is_none() && nearest(&name.name, &members).is_none() {
+            return None;
+        }
+        let shown = module.trim_start_matches('@');
+        let mut d = Diagnostic::error(
+            codes::E0111,
+            format!("cannot find `{}` in module `{}`", name.name, spelled),
+        )
+        .with_primary(name.span, format!("`{}` declares nothing public of this name", shown));
+        d = match nearest(&name.name, &members) {
+            Some(near) => d.with_note(format!("a similar name is in `{}`: `{}`", spelled, near)),
+            None => d.with_note(format!(
+                "`{}` is imported here; only what it marks `pub` can be reached from outside it",
+                spelled
+            )),
+        };
+        Some(d)
+    }
+
     /// Try to read `base.name` as a static path rather than a field access.
     ///
     /// Returns `None` when the head names a local, which always wins — a field
@@ -2222,6 +2364,7 @@ impl<'a> FnResolver<'a> {
                 self.check_visible(Res::Type(ti), path.span, &path.text());
                 self.map.uses.insert(path.span, Res::Type(ti));
             }
+            None if path.segments.len() > 1 && self.failed_use(&path.segments[0].name) => {}
             None => {
                 let mut d =
                     Diagnostic::error(codes::E0204, format!("unknown type `{}`", path.name()))
@@ -2271,10 +2414,12 @@ impl<'a> FnResolver<'a> {
                 self.map.uses.insert(p.span, Res::Type(ti));
                 return;
             }
-            self.diags.push(
-                Diagnostic::error(codes::E0111, format!("cannot find `{}`", text))
-                    .with_primary(p.span, "not found in this scope"),
-            );
+            if !self.failed_use(&p.segments[0].name) {
+                self.diags.push(
+                    Diagnostic::error(codes::E0111, format!("cannot find `{}`", text))
+                        .with_primary(p.span, "not found in this scope"),
+                );
+            }
             return;
         }
 
@@ -2311,6 +2456,9 @@ impl<'a> FnResolver<'a> {
             self.map.uses.insert(p.span, Res::Type(ti));
             return;
         }
+        if self.failed_use(name) {
+            return;
+        }
 
         let mut d = Diagnostic::error(codes::E0111, format!("cannot find `{}`", name))
             .with_primary(p.span, "not found in this scope");
@@ -2345,6 +2493,26 @@ impl<'a> FnResolver<'a> {
 const SELF_OUTSIDE_AN_IMPL: &str = "`Self` names a type inside an `impl` block, the one the block is \
      for; in a trait's default method it is whichever type implements the trait, which is \
      known only by the trait's methods, so reach it through one of those";
+
+/// The `E0401` for an `impl` header in `module` naming `named` as written at
+/// `header`, when that is another module's declaration not marked `pub`.
+fn private_in_header(map: &ResolveMap, module: &str, named: u32, header: &TypePath) -> Option<Diagnostic> {
+    let decl = &map.types[named as usize];
+    let home = map.modules.of(decl.decl_index);
+    if decl.is_pub || home.is_empty() || home == PRELUDE || home == module {
+        return None;
+    }
+    let what = decl.kind.describe();
+    Some(
+        Diagnostic::error(codes::E0401, format!("`{}` is private to module `{}`", header.text(), home))
+            .with_primary(header.span, "not visible here")
+            .with_secondary(decl.span, format!("this {} is not marked `pub`", what))
+            .with_note(
+                "unmarked declarations are visible only within their own module, and an `impl` \
+                 header names its type and its trait",
+            ),
+    )
+}
 
 /// An `impl` header naming something that is not a struct or an enum: an
 /// alias of one, such as `type Id = int`, or a trait. Either was accepted and

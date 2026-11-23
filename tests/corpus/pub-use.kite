@@ -1,0 +1,11 @@
+// There is no `pub use`: a module's imports are its own. It is one error, at
+// the `pub`, and the `use` still imports, so nothing below it cascades. It was
+// three `expected a declaration` errors for the one word.
+
+pub use std/math //~ ERROR E0100
+
+fn main() {
+    io.print(math.floor(1.5))
+}
+
+pub use std/json //~ ERROR E0100

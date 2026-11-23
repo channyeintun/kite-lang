@@ -2665,6 +2665,15 @@ program is flat — where all modules share a directory and every import
 resolves — so nothing is affected today, but the gap is real and unspelled.
 Nesting or a declared dependency is the answer until there is a syntax for it.
 
+*Later:* no syntax was needed. A `use` is looked for beside the importing
+module's own files first, then in each enclosing directory outward, stopping at
+the package's root — the entry file's directory, or the dependency's own — and
+the nearest match wins. So `ui/` reaches `config/` beside it, §13.1's own tree
+compiles and is a test, a module's own nested `config/` still comes first, and
+a dependency still cannot resolve into the program that imports it. A module is
+still where its source is: `use config` from `ui/` and from the entry reach the
+one module.
+
 §13.1 was amended twice with this: it defined a module as a directory and never
 mentioned the single-file form that nearly every module actually is, and it did
 not say that a `use` is required to reach one.
@@ -2735,7 +2744,10 @@ module's own spelling, or one of the compiler's where it wrote none.
 `pub` applies to, but nothing says what a private variant of a public enum
 means, or what `pub use` would export; the compiler refuses both spellings, and
 inventing either semantics here would be the specification being written by
-the implementation.
+the implementation. *Later:* §4.3 was amended instead. `pub` applies to
+functions, types, struct fields, traits and trait methods; a variant is exactly
+as visible as its enum; there is no `pub use`, and writing one is a single
+error at the `pub` rather than three, with the `use` still importing.
 
 **Exit criterion:** every finding reproduced by a test that fails without its
 fix — `tests/modules.rs`, `cli_paths.rs`, `bundle.rs`, and the unit tests of the
@@ -2805,8 +2817,8 @@ none.
 | 26 — Specification gaps | ✅ subslices, `enumerate` and pair-destructuring over a slice, doc-comment tests, a name section and source map, `js.func` at any shape, `check` in a bare-`error` function, a calling convention for any function-typed value, errors that carry their value, modules identified by their whole path; `[N]T` struck from the specification and `--a11y` removed |
 | 27 — `std/window` | 🟡 the module is built and tested — window events, timers, both storages, the address bar, history, the wall clock — and `std/time` gained a portable calendar under it. ❌ the two applications cannot import it until a compiler carrying it is published |
 | 28 — Packages from a bundler | ✅ `vite-plugin-kite` and the WebAssembly `kitec` read `kite.toml` and compile what it declares; provided modules are keyed by their whole path and a package resolves its own imports inside itself; a one-file module reads its imports from its own directory; `kitec run` sees modules |
-| 29 — Imports are the boundary | ✅ a qualified name resolves only in a module that imported it, and the entry file is reachable from nowhere. ❌ two sibling *directory* modules still cannot import each other by any spelling — exposed by this, not caused by it |
-| 30 — The boundary, reviewed | ✅ a module is where its source is; each package's dependencies are its own; the entry file and bare variants are gated too; `bundle`, `test`, `pkg` and the option parser do what they say. ❌ `pub` on an enum variant and `pub use`, which §4.3 names and nothing defines |
+| 29 — Imports are the boundary | ✅ a qualified name resolves only in a module that imported it, and the entry file is reachable from nowhere; a `use` is looked for outward from the importer as far as its package's root, so sibling directory modules import each other |
+| 30 — The boundary, reviewed | ✅ a module is where its source is; each package's dependencies are its own; the entry file and bare variants are gated too; `bundle`, `test`, `pkg` and the option parser do what they say. §4.3 no longer names `pub` on an enum variant or `pub use`: a variant is as visible as its enum, there is no `pub use`, and each is refused with one diagnostic |
 
 More than a thousand tests: unit tests per crate, an annotated compile-fail
 corpus, a differential corpus that runs every program on **three** backends and

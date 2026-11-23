@@ -37,14 +37,22 @@
 //! value semantics already settle them:
 //!
 //! - **Slices and maps are copy-on-write values.** A `var [T]` parameter is the
-//!   callee's own copy; a push inside is invisible to the caller, so two slice
-//!   arguments cannot interfere.
+//!   callee's own copy; a push inside is invisible to the caller. But the copy
+//!   is shallow, so a slice of structs carries the same structs, and
+//!   `from[0].balance = 0` through one `var [Account]` lands in the other. A
+//!   slice, map, tuple or optional holding a reference therefore takes part
+//!   exactly as the reference would.
 //! - **`for x in xs` iterates a snapshot.** Growing `xs` in the body is defined
 //!   and terminating, so iteration needs no loan on what it walks.
 //!
 //! A call through `dyn Trait` is checked as well: the implementation is not
 //! known here, so a parameter counts as written when any row of the trait's
-//! vtable declares it `var`.
+//! vtable declares it `var`. A call through a function value is checked
+//! against the function when the call or a `let` binding says which one it
+//! is. Any other function value is not checked: a function type does not say
+//! which parameters are `var`, and counting each as written refused ordinary
+//! read-only callbacks — `better(xs[i], xs[best])` — while a value passed on
+//! one call further escaped the check all the same.
 
 use kite_diag::{codes, DiagBag, Diagnostic};
 use kite_hir::{self as hir, ExprKind, LocalId, Stmt, TyId, TyKind, Types};
@@ -62,6 +70,7 @@ pub fn check(program: &hir::Program, diags: &mut DiagBag) {
             diags,
             aliases: HashMap::new(),
             reported: HashSet::new(),
+            functions: HashMap::new(),
         };
         cx.block(&func.body);
     }
@@ -79,6 +88,11 @@ struct Checker<'a> {
     /// Calls already reported. A deferred call is emitted at every exit, and
     /// one mistake is one diagnostic.
     reported: HashSet<Span>,
+    /// `let` locals bound to a function value whose function is known — `let
+    /// f = transfer` — with how many captures it takes ahead of its
+    /// parameters. A `let` is never assigned again, so a call through it
+    /// reaches that function.
+    functions: HashMap<LocalId, (hir::FnId, usize)>,
 }
 
 /// One parameter of whatever the call reaches. Flattened out of `hir::Local`
@@ -204,14 +218,24 @@ fn overlaps(a: &Place, b: &Place) -> bool {
 }
 
 /// Types whose mutation is visible through another name: those passed by
-/// reference. Slices, maps and tuples are copy-on-write values, and the
-/// primitives are copied outright, so none of them can carry a write across.
+/// reference, and those holding one. The primitives are copied outright.
 ///
-/// A generic parameter is left out on purpose. The pass runs before
-/// monomorphisation, where `T` is not yet known to be a struct, and reporting
-/// per-instantiation would mean the same source line diagnosed several times.
+/// **A copy-on-write value is copied shallowly.** Slices, maps, tuples and
+/// optionals were left out as values, so `sweep(xs, xs)` with two `var
+/// [Account]` parameters was accepted — and each is a copy of one slice of
+/// the *same* accounts, so a write to `from[0].balance` was a write to
+/// `to[0].balance`. They take part when what they hold does.
+///
+/// An enum is not reached into: its payload is bound by a pattern, and a
+/// pattern's bindings cannot be written through.
 fn is_reference(ty: TyId, types: &Types) -> bool {
-    matches!(types.kind(ty), TyKind::Struct(_) | TyKind::Dyn(_))
+    match types.kind(ty) {
+        TyKind::Struct(_) | TyKind::Dyn(_) => true,
+        TyKind::Slice(inner) | TyKind::Optional(inner) => is_reference(*inner, types),
+        TyKind::Map(key, value) => is_reference(*key, types) || is_reference(*value, types),
+        TyKind::Tuple(elems) => elems.iter().any(|e| is_reference(*e, types)),
+        _ => false,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -230,6 +254,11 @@ impl Checker<'_> {
             Stmt::Let { local, init, .. } => {
                 if let Some(e) = init {
                     self.expr(e);
+                    if let ExprKind::ClosureNew { func, captures, .. } = &e.kind {
+                        if !self.func.local(*local).mutable {
+                            self.functions.insert(*local, (*func, captures.len()));
+                        }
+                    }
                     // A hidden local stands for what it was bound to.
                     if self.func.local(*local).synthetic {
                         let types = &self.program.types;
@@ -318,6 +347,7 @@ impl Checker<'_> {
             diags: &mut *self.diags,
             aliases,
             reported: std::mem::take(&mut self.reported),
+            functions: HashMap::new(),
         };
         cx.block(&lifted.body);
         self.reported = cx.reported;
@@ -329,6 +359,7 @@ impl Checker<'_> {
             ExprKind::CallVirtual { trait_id, method, args, .. } => {
                 self.call_virtual(*trait_id, *method, args, expr.span)
             }
+            ExprKind::CallClosure { callee, args } => self.call_value(callee, args, expr.span),
             _ => {}
         }
 
@@ -485,6 +516,42 @@ impl Checker<'_> {
         self.check_args(&params, args, call_span);
     }
 
+    /// A call through a function value.
+    ///
+    /// It was not checked at all, so `let f = transfer` and then `f(a, a, 50)`
+    /// was the §14.1 bug with one line added. Where the function is known —
+    /// written in the call, or the value of a `let` — its parameters are
+    /// checked as a direct call's are.
+    ///
+    /// **Where it is not, the call is not checked.** A function type does not
+    /// say which parameters are `var`. Counting every reference as written
+    /// refused the ordinary read-only callback — a `better: fn(Player,
+    /// Player) -> bool` called as `better(xs[i], xs[best])` — with a note
+    /// whose fix, call it by name, a higher-order function cannot take; and
+    /// it bought little, since `apply(transfer, a, a)` passes the one object
+    /// to `apply` under two names and the call inside sees two.
+    fn call_value(&mut self, callee: &hir::Expr, args: &[hir::Expr], call_span: Span) {
+        let known = match &callee.kind {
+            ExprKind::ClosureNew { func, captures, .. } => Some((*func, captures.len())),
+            ExprKind::Local(id) => self.functions.get(id).copied(),
+            _ => None,
+        };
+        let params: Vec<Param> = match known {
+            Some((func, captured)) => {
+                let Some(target) = self.program.fns.get(func.index()) else { return };
+                if target.param_count != captured + args.len() {
+                    return;
+                }
+                target.params()[captured..]
+                    .iter()
+                    .map(|p| Param { name: p.name.clone(), ty: p.ty, mutable: p.mutable })
+                    .collect()
+            }
+            None => return,
+        };
+        self.check_args(&params, args, call_span);
+    }
+
     /// One call: collect the arguments that name something, then compare them
     /// pairwise. Cost is quadratic in the number of reference-typed arguments,
     /// which in practice is two or three.
@@ -495,7 +562,12 @@ impl Checker<'_> {
         let types = &self.program.types;
         let mut named: Vec<(Place, &Param, Span)> = Vec::new();
         for (arg, param) in args.iter().zip(params) {
-            if !is_reference(param.ty, types) {
+            // A generic parameter is judged by what this call passes it. The
+            // function is checked once, before monomorphisation, where `T` is
+            // not yet known to be a struct — but the call is written with
+            // concrete arguments, and `transfer(a, a, 50)` is the same bug
+            // whether `transfer` takes `Account` or `T: Ledger`.
+            if !is_reference(param.ty, types) && !is_reference(arg.ty, types) {
                 continue;
             }
             if let Some(place) = place_of(arg, types, self.func, &self.aliases) {

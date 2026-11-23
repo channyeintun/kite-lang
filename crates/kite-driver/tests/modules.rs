@@ -104,6 +104,130 @@ fn a_module_may_declare_a_type_of_the_same_name_as_the_program() {
     assert_eq!(p.run(&main).expect("compiles"), "here 0\n");
 }
 
+/// A bare unit pattern is read against the scrutinee's enum (§9.3), and a
+/// private enum's variants are as private as the enum, bare or qualified. The
+/// bare spelling matched `Draft` from outside while `state.Phase.Draft` was
+/// `E0401`; a public enum's bare unit variant still matches.
+#[test]
+fn a_private_enums_bare_unit_variant_cannot_be_matched_from_outside() {
+    let p = Project::new("bare-private-variant");
+    p.file(
+        "state.kite",
+        "enum Phase {\n  Draft\n  Live\n}\n\npub enum Open {\n  Yes\n  No\n}\n\n\
+         pub struct Doc {\n  phase: Phase\n}\n\n\
+         pub fn draft() -> Doc {\n  return Doc{ phase: Draft }\n}\n\n\
+         pub fn phase_of(d: Doc) -> Phase {\n  return d.phase\n}\n\n\
+         pub fn open() -> Open {\n  return Yes\n}\n",
+    );
+    let main = p.file(
+        "main.kite",
+        "use state\n\nfn main() {\n  match state.phase_of(state.draft()) {\n\
+         \x20   Draft => io.print(\"draft\"),\n    _ => io.print(\"other\"),\n  }\n}\n",
+    );
+    let said = p.run(&main).expect_err("`Phase` is private").replace('\\', "/");
+    assert!(said.contains("E0401"), "{}", said);
+    assert!(said.contains("`state.Phase` is private to module `state`"), "{}", said);
+    assert!(said.contains("main.kite:5:5"), "at the pattern: {}", said);
+    assert_eq!(said.matches("error[").count(), 1, "one cause, one error: {}", said);
+
+    let main = p.file(
+        "main.kite",
+        "use state\n\nfn main() {\n  match state.open() {\n\
+         \x20   Yes => io.print(\"yes\"),\n    No => io.print(\"no\"),\n  }\n}\n",
+    );
+    assert_eq!(p.run(&main).expect("a public enum's variant"), "yes\n");
+}
+
+/// An `impl` header names its type and its trait, and a private one cannot be
+/// named outside its module (§4.3). Both headers were accepted, while every
+/// other position naming `m.Secret` was `E0401`.
+#[test]
+fn an_impl_header_cannot_name_a_private_type_or_trait() {
+    let p = Project::new("private-in-header");
+    p.file(
+        "m.kite",
+        "struct Secret {\n  n: int\n}\n\ntrait Hidden {\n  fn reveal(self) -> int\n}\n\n\
+         pub fn make() -> Secret {\n  return Secret{ n: 1 }\n}\n",
+    );
+    let main = p.file(
+        "main.kite",
+        "use m\n\ntrait Probe {\n  fn tag(self) -> str\n}\n\n\
+         impl Probe for m.Secret {\n  fn tag(self) -> str {\n    return \"x\"\n  }\n}\n\n\
+         struct Mine {\n  n: int\n}\n\n\
+         impl m.Hidden for Mine {\n  fn reveal(self) -> int {\n    return 1\n  }\n}\n\n\
+         fn main() {\n  io.print(m.make().tag())\n  io.print(Mine{ n: 1 }.reveal())\n}\n",
+    );
+    let said = p.run(&main).expect_err("both are private").replace('\\', "/");
+    assert!(said.contains("`m.Secret` is private to module `m`"), "{}", said);
+    assert!(said.contains("main.kite:7:16"), "at the type in the header: {}", said);
+    assert!(said.contains("`m.Hidden` is private to module `m`"), "{}", said);
+    assert!(said.contains("main.kite:17:6"), "at the trait in the header: {}", said);
+    assert_eq!(said.matches("error[").count(), 2, "one cause, one error each: {}", said);
+}
+
+/// A `pub` alias does not export the private type it names: it is refused
+/// where it is declared. It was usable in a signature, and a literal through
+/// it said ``m.Door` is private`` — of a `pub` alias — with a second `E0401`.
+#[test]
+fn a_pub_alias_cannot_name_a_private_type() {
+    let p = Project::new("pub-alias-private");
+    p.file(
+        "m.kite",
+        "struct Also {\n  pub n: int\n}\n\npub type Door = Also\npub type Doors = [Also]\n\n\
+         pub struct Open {\n  pub n: int\n}\n\npub type Gate = Open\n",
+    );
+    let main = p.file(
+        "main.kite",
+        "use m\n\nfn take(a: m.Door) -> int {\n  return a.n\n}\n\n\
+         fn main() {\n  io.print(take(m.Door{ n: 3 }))\n  io.print(m.Gate{ n: 4 }.n)\n}\n",
+    );
+    let said = p.run(&main).expect_err("`Also` is private").replace('\\', "/");
+    assert!(said.contains("a `pub` alias cannot name `Also`"), "{}", said);
+    assert!(said.contains("m.kite:5:17"), "at the alias: {}", said);
+    assert!(said.contains("m.kite:6:19"), "inside a slice too: {}", said);
+    assert!(!said.contains("main.kite"), "nothing at the uses: {}", said);
+    assert_eq!(said.matches("error[").count(), 2, "{}", said);
+
+    // A `pub` alias of a `pub` type is that type, by either name.
+    let main = p.file("main.kite", "use m\n\nfn main() {\n  io.print(m.Gate{ n: 4 }.n)\n}\n");
+    p.file("m.kite", "pub struct Open {\n  pub n: int\n}\n\npub type Gate = Open\n");
+    assert_eq!(p.run(&main).expect("compiles"), "4\n");
+}
+
+/// A misspelled member of an imported module is reported at the member, with
+/// the name it probably meant. It was ``cannot find `m` `` with the caret on
+/// `m` — a module the first line imports — and no suggestion.
+#[test]
+fn a_misspelled_member_is_not_reported_as_a_missing_module() {
+    let p = Project::new("misspelled-member");
+    p.file("m.kite", "pub fn one() -> int {\n  return 1\n}\n\nfn onf() -> int {\n  return 2\n}\n");
+    let main = p.file("main.kite", "use m as mm\n\nfn main() {\n  io.print(mm.on())\n}\n");
+    let said = p.run(&main).expect_err("no `on` in `m`").replace('\\', "/");
+    assert!(said.contains("cannot find `on` in module `mm`"), "{}", said);
+    assert!(said.contains("main.kite:4:15"), "at the member: {}", said);
+    // The private `onf` is as near, and not a name that would compile.
+    assert!(said.contains("a similar name is in `mm`: `one`"), "{}", said);
+    assert_eq!(said.matches("error[").count(), 1, "{}", said);
+}
+
+/// The same for a module in scope without a `use`: `io.prnt` said
+/// ``cannot find `io` ``. One whose member is not near a builtin — `text.trim`
+/// with no `use std/text` — is a missing `use`, and is not told it is a typo.
+#[test]
+fn a_misspelled_builtin_is_not_reported_as_a_missing_module() {
+    let p = Project::new("misspelled-builtin");
+    let main = p.file("main.kite", "fn main() {\n  io.prnt(\"x\")\n}\n");
+    let said = p.run(&main).expect_err("no `io.prnt`").replace('\\', "/");
+    assert!(said.contains("cannot find `prnt` in module `io`"), "{}", said);
+    assert!(said.contains("main.kite:2:6"), "at the member: {}", said);
+    assert!(said.contains("a similar name is in `io`: `print`"), "{}", said);
+    assert_eq!(said.matches("error[").count(), 1, "{}", said);
+
+    let main = p.file("main.kite", "fn main() {\n  io.print(text.trim(\" x \"))\n}\n");
+    let said = p.run(&main).expect_err("`std/text` is not imported");
+    assert!(!said.contains("in module `text`"), "{}", said);
+}
+
 #[test]
 fn an_unmarked_declaration_is_private_to_its_module() {
     let p = Project::new("private");
@@ -767,7 +891,9 @@ fn an_application_util_and_a_dependencys_util_are_two_modules() {
     let p = Project::new("app-and-dep-util");
     p.file("md/kite.toml", "[package]\nname = \"md\"\nversion = \"1.0.0\"\n");
     p.file("md/md.kite", "use util\n\npub fn render() -> str {\n  return util.me()\n}\n");
-    p.file("md/util.kite", "pub fn me() -> str {\n  return \"md-util\"\n}\n");
+    // In a directory of its own: `use md` reads every `.kite` file directly
+    // in `md/`, and a file of a module cannot also be a module by itself.
+    p.file("md/util/util.kite", "pub fn me() -> str {\n  return \"md-util\"\n}\n");
     p.file(
         "app/kite.toml",
         "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n\
@@ -792,6 +918,218 @@ fn a_nested_module_of_the_same_spelling_is_not_a_cycle() {
     p.file("lib/x/x.kite", "pub fn leaf() -> str {\n  return \"leaf\"\n}\n");
     let main = p.file("main.kite", "use x\n\nfn main() {\n  io.print(x.top())\n}\n");
     assert_eq!(p.run(&main).expect("compiles"), "leaf\n");
+}
+
+// ---- a `use` is looked for outward, as far as the package's root -------------
+
+/// §13.1's own tree: `ui/` imports `config/` beside it. A module resolved
+/// `use` only from its own directory, so the example the section is built
+/// around was `cannot find module config` at `ui/app.kite`.
+#[test]
+fn the_specifications_tree_compiles() {
+    let p = Project::new("spec-tree");
+    p.file("kite.toml", "[package]\nname = \"myapp\"\nversion = \"0.1.0\"\n");
+    p.file("src/money.kite", "pub fn cents(n: int) -> int {\n  return n * 100\n}\n");
+    p.file(
+        "src/config/load.kite",
+        "pub fn load(path: str) -> (Config, error) {\n  return Config{ name: path }, nil\n}\n",
+    );
+    p.file("src/config/schema.kite", "pub struct Config {\n  pub name: str\n}\n");
+    p.file(
+        "src/ui/app.kite",
+        "use config\nuse money\n\npub struct App {\n  pub config: config.Config\n}\n\n\
+         pub fn run(a: App) {\n  io.print(\"\\(a.config.name) \\(money.cents(2))\")\n}\n",
+    );
+    p.file("src/ui/theme.kite", "pub fn dark() -> bool {\n  return true\n}\n");
+    let main = p.file(
+        "src/main.kite",
+        "use config\nuse money\nuse ui\n\n\
+         fn main() {\n  let err = start()\n  if err != nil {\n\
+         \x20   io.print(\"cannot start: \\(err.message())\")\n  }\n}\n\n\
+         fn start() -> error {\n  let (cfg, err) = config.load(\"app.toml\")\n  check err\n\
+         \x20 ui.run(ui.App{ config: cfg })\n  return nil\n}\n",
+    );
+    // One `config`, reached from two places: `main`'s `cfg` is the type
+    // `ui.App` holds.
+    assert_eq!(p.run(&main).expect("compiles"), "app.toml 200\n");
+}
+
+/// The nearest wins: a directory module's own `util/` over the `util.kite`
+/// beside it, and a one-file module's own neighbour over one further out.
+#[test]
+fn the_nearest_module_of_a_spelling_wins() {
+    let p = Project::new("nearest");
+    p.file("util.kite", "pub fn name() -> str {\n  return \"outer\"\n}\n");
+    p.file("a/a.kite", "use util\n\npub fn go() -> str {\n  return util.name()\n}\n");
+    p.file("a/util/util.kite", "pub fn name() -> str {\n  return \"a's own\"\n}\n");
+    p.file("b/b.kite", "use util\n\npub fn go() -> str {\n  return util.name()\n}\n");
+    let main = p.file(
+        "main.kite",
+        "use a\nuse b\nuse util\n\n\
+         fn main() {\n  io.print(a.go())\n  io.print(b.go())\n  io.print(util.name())\n}\n",
+    );
+    assert_eq!(p.run(&main).expect("compiles"), "a's own\nouter\nouter\n");
+}
+
+/// A directory is a module when it holds a `.kite` file. A `config/` holding
+/// only data beside `config.kite` was taken for an empty module, and the
+/// first sign was `cannot find` at a name `config.kite` declares.
+#[test]
+fn a_directory_without_kite_files_does_not_hide_the_file_beside_it() {
+    let p = Project::new("data-dir");
+    p.file("config/app.toml", "name = \"demo\"\n");
+    p.file("config.kite", "pub fn name() -> str {\n  return \"demo\"\n}\n");
+    let main = p.file("main.kite", "use config\n\nfn main() {\n  io.print(config.name())\n}\n");
+    assert_eq!(p.run(&main).expect("compiles"), "demo\n");
+
+    // With no `config.kite`, nothing answers, and the note says why the
+    // directory did not.
+    std::fs::remove_file(p.dir.join("config.kite")).expect("remove");
+    let said = p.run(&main).expect_err("no module `config`").replace('\\', "/");
+    assert!(said.contains("cannot find module `config`"), "{}", said);
+    assert!(said.contains("is a directory with no `.kite` file directly in it"), "{}", said);
+}
+
+/// A `use` that finds nothing says every place it looked, nearest first.
+#[test]
+fn a_missing_module_names_every_place_it_was_looked_for() {
+    let p = Project::new("looked-everywhere");
+    p.file("a/b/b.kite", "use gone\n\npub fn go() -> int {\n  return 1\n}\n");
+    let main = p.file("main.kite", "use a/b\n\nfn main() {\n  io.print(b.go())\n}\n");
+    let said = p.run(&main).expect_err("no `gone` anywhere").replace('\\', "/");
+    assert!(said.contains("cannot find module `gone`"), "{}", said);
+    for place in ["a/b/gone`", "a/b/gone.kite`", "/a/gone`", "/a/gone.kite`"] {
+        assert!(said.contains(place), "{} is not among the places: {}", place, said);
+    }
+    let root = format!("{}/gone.kite`", p.dir.display()).replace('\\', "/");
+    assert!(said.contains(&root), "the entry's directory is the last place: {}", said);
+}
+
+/// The walk stops at a package's root. A dependency kept inside the program's
+/// own tree is still a package of its own, and its `use helper` does not reach
+/// the program's `helper.kite` a directory further out.
+#[test]
+fn a_dependency_inside_the_program_does_not_walk_out_into_it() {
+    let p = Project::new("dep-inside");
+    p.file(
+        "kite.toml",
+        "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n\
+         [dependencies]\nkx = { path = \"src/vendored/kx\" }\n",
+    );
+    p.file("src/vendored/kx/kite.toml", "[package]\nname = \"kx\"\nversion = \"1.0.0\"\n");
+    p.file(
+        "src/vendored/kx/greet.kite",
+        "use helper\n\npub fn hello() -> str {\n  return helper.who()\n}\n",
+    );
+    p.file("src/helper.kite", "pub fn who() -> str {\n  return \"the application\"\n}\n");
+    let main = p.file(
+        "src/main.kite",
+        "use helper\nuse kx/greet\n\nfn main() {\n  io.print(greet.hello())\n}\n",
+    );
+    let said = p.run(&main).expect_err("the package has no helper");
+    assert!(said.contains("cannot find module `helper`"), "{}", said);
+    assert!(said.contains("greet.kite"), "the error is in the package: {}", said);
+}
+
+/// Inside a dependency, its directory modules reach each other as the
+/// program's do.
+#[test]
+fn a_dependencys_directory_modules_reach_each_other() {
+    let p = Project::new("dep-directory-siblings");
+    p.file("md/kite.toml", "[package]\nname = \"md\"\nversion = \"1.0.0\"\n");
+    p.file("md/parse/parse.kite", "pub fn word() -> str {\n  return \"parsed\"\n}\n");
+    p.file(
+        "md/render/render.kite",
+        "use parse\n\npub fn html() -> str {\n  return \"<p>\\(parse.word())</p>\"\n}\n",
+    );
+    p.file(
+        "app/kite.toml",
+        "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n[dependencies]\nmd = { path = \"../md\" }\n",
+    );
+    let main = p.file(
+        "app/main.kite",
+        "use md/render\n\nfn main() {\n  io.print(render.html())\n}\n",
+    );
+    assert_eq!(p.run(&main).expect("compiles"), "<p>parsed</p>\n");
+}
+
+/// Two directory modules that reach each other by the walk are a cycle, as
+/// any two modules that import each other are.
+#[test]
+fn sibling_directory_modules_importing_each_other_are_a_cycle() {
+    let p = Project::new("sibling-cycle");
+    p.file("one/a.kite", "use two\n\npub fn a() -> int {\n  return two.b()\n}\n");
+    p.file("two/b.kite", "use one\n\npub fn b() -> int {\n  return 2\n}\n");
+    let main = p.file("main.kite", "use one\n\nfn main() {\n  io.print(one.a())\n}\n");
+    let said = p.run(&main).expect_err("a cycle");
+    assert!(said.contains("E0402"), "{}", said);
+}
+
+/// Handed over by name, a module inside a package walks outward to the
+/// package's own modules and stops there.
+#[test]
+fn a_provided_module_walks_out_as_far_as_its_package() {
+    let mut provided = std::collections::HashMap::new();
+    provided.insert(
+        "kitex/sub/doc".to_string(),
+        "use helper\n\npub fn who() -> str {\n  return helper.who()\n}\n".to_string(),
+    );
+    provided.insert(
+        "kitex/helper".to_string(),
+        "pub fn who() -> str {\n  return \"the package\"\n}\n".to_string(),
+    );
+    let src = "use kitex/sub/doc\n\nfn main() {\n  io.print(doc.who())\n}\n";
+    let c = kite_driver::compile_provided("main.kite", src, Emit::Check, false, provided.clone());
+    assert!(!c.failed(), "{}", c.render_diagnostics());
+    let mut out = Vec::new();
+    c.run(&mut out).expect("the program runs");
+    assert_eq!(String::from_utf8(out).expect("utf-8"), "the package\n");
+
+    // Without the package's own, the application's is not the answer.
+    provided.remove("kitex/helper");
+    provided.insert(
+        "helper".to_string(),
+        "pub fn who() -> str {\n  return \"the application\"\n}\n".to_string(),
+    );
+    let c = kite_driver::compile_provided("main.kite", src, Emit::Check, false, provided);
+    assert!(c.failed(), "a package reached the application's `helper`");
+    assert!(c.render_diagnostics().contains("cannot find module `helper`"));
+}
+
+/// One file is one module. A file of a directory module importing its own
+/// sibling loaded that sibling a second time as a module of its own, and one
+/// declaration became two types: ``expected `lib/shape.Pt`, found `lib.Pt` ``.
+#[test]
+fn a_file_of_a_directory_module_cannot_import_its_sibling() {
+    let p = Project::new("own-sibling");
+    p.file("lib/shape.kite", "pub struct Pt {\n  pub x: int\n}\n");
+    p.file(
+        "lib/use_it.kite",
+        "use shape\n\npub fn origin() -> Pt {\n  return Pt{ x: 0 }\n}\n",
+    );
+    let main = p.file("main.kite", "use lib\n\nfn main() {\n  io.print(lib.origin().x)\n}\n");
+    let said = p.run(&main).expect_err("the sibling is part of `lib`").replace('\\', "/");
+    assert!(said.contains("E0404"), "{}", said);
+    assert!(said.contains("lib/shape.kite` is already part of the module `lib`"), "{}", said);
+    assert!(said.contains("lib/use_it.kite:1:1"), "at the `use`: {}", said);
+}
+
+/// The same from outside, in either order: `use lib/shape` beside `use lib`.
+#[test]
+fn a_file_of_a_directory_module_cannot_be_imported_on_its_own() {
+    let p = Project::new("member-alone");
+    p.file("lib/shape.kite", "pub struct Pt {\n  pub x: int\n}\n");
+    p.file("lib/make.kite", "pub fn origin() -> Pt {\n  return Pt{ x: 0 }\n}\n");
+    for uses in ["use lib\nuse lib/shape\n", "use lib/shape\nuse lib\n"] {
+        let main = p.file(
+            "main.kite",
+            &format!("{}\nfn main() {{\n  io.print(lib.origin().x)\n}}\n", uses),
+        );
+        let said = p.run(&main).expect_err("one file, two modules").replace('\\', "/");
+        assert!(said.contains("E0404"), "{}", said);
+        assert!(said.contains("is already"), "{}", said);
+        assert!(said.contains("main.kite:2:1"), "at the second `use`: {}", said);
+    }
 }
 
 /// A diagnostic names a module by where it is, so two `util`s are told apart
@@ -933,6 +1271,11 @@ fn a_manifest_that_does_not_read_is_reported_at_its_line() {
     // And the `use` it broke says so, where an editor showing only the
     // file's own diagnostics shows it.
     assert!(said.contains("kite.toml` did not read (E0405)"), "{}", said);
+    // The cause first, and nothing after it but the `use` it broke: the
+    // manifest's error came last, under a `cannot find` at `a.hello`.
+    let (manifest, missing) = (said.find("E0405").unwrap(), said.find("E0400").unwrap());
+    assert!(manifest < missing, "the manifest is said first: {}", said);
+    assert!(!said.contains("E0111"), "`a.hello` is not a second error: {}", said);
 }
 
 /// A directory module checked on its own, as an editor renaming a name its
@@ -949,7 +1292,9 @@ fn a_directory_module_checked_whole_finds_every_files_uses() {
         "config/schema.kite",
         "pub fn port() -> int {\n  return helper() + helper()\n}\n",
     );
-    p.file("config/util.kite", "pub fn base() -> int {\n  return 40\n}\n");
+    // Beside the module rather than inside it: a file inside `config/` is
+    // part of `config`, and cannot be imported as a module of its own.
+    p.file("util.kite", "pub fn base() -> int {\n  return 40\n}\n");
     let c = kite_driver::check_module(p.dir.join("config"), kite_driver::modules::Files::Disk);
     assert!(!c.failed(), "{}", c.render_diagnostics());
     let helper = c
@@ -1213,7 +1558,7 @@ fn a_program_module_may_share_a_name_with_a_package_it_never_declared() {
     p.file("a/a.kite", "use b\n\npub fn hello() -> str {\n  return \"a+\" + b.name()\n}\n");
     p.file("b/kite.toml", "[package]\nname = \"b\"\nversion = \"1.0.0\"\n");
     p.file("b/b.kite", "use util\n\npub fn name() -> str {\n  return util.who()\n}\n");
-    p.file("b/util.kite", "pub fn who() -> str {\n  return \"from b\"\n}\n");
+    p.file("b/util/util.kite", "pub fn who() -> str {\n  return \"from b\"\n}\n");
     let manifest =
         "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n[dependencies]\na = { path = \"../a\" }\n";
     p.file("app/kite.toml", manifest);

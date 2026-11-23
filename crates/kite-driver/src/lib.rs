@@ -848,7 +848,8 @@ fn run_passes(
     // Resolution and checking still run after a syntax error — the parser
     // recovers, so later passes can report their own findings on the parts that
     // did parse. Code generation does not, because its input would be poisoned.
-    let module_map = kite_resolve::Modules { of_item: item_modules, aliases };
+    let unresolved = std::mem::take(&mut loader.unresolved);
+    let module_map = kite_resolve::Modules { of_item: item_modules, aliases, unresolved };
     let resolved = kite_resolve::resolve_modules(&ast, module_map, diags);
     let mut solved = kite_types::Solved::default();
     let mut hir = kite_types::check_recording(&ast, &resolved, sources, diags, release, &mut solved);
@@ -1015,24 +1016,43 @@ fn run_passes(
     // stop type-checking in an editor. Running one on the bytecode VM fails at
     // its first host call, which already says which function had no host.
     if matches!(emit, Emit::Native | Emit::Kbc) {
+        // **One cause, one error.** It was one per function holding a
+        // `JsValue`, so a program touching `std/js` once was 37 of them,
+        // nearly all inside `<std/js>`, which nobody can change. The target
+        // is the cause; reported once, at the program's own first use where
+        // there is one, with the rest counted.
         let gaps = host_types_used(&mir, &hir.types);
-        let refused = !gaps.is_empty();
-        for gap in gaps {
-            diags.push(
-                Diagnostic::error(
-                    kite_diag::codes::E0204,
-                    "`JsValue` is a host object, and this target has no host",
-                )
-                .with_primary(gap.span, format!("used in `{}`", gap.function))
-                .with_note(
-                    "a `JsValue` is a reference the JavaScript engine owns. There is \
-                     nothing outside a browser for one to refer to, so it is refused \
-                     here rather than lowered to a number that would mean nothing",
-                )
-                .with_note("build for the web: `--emit wasm`"),
+        let in_std = |gap: &HostTypeUse| sources.file(gap.span.file).name.to_string_lossy().starts_with('<');
+        if let Some(first) = gaps.iter().find(|g| !in_std(g)).or(gaps.first()) {
+            let mut d = Diagnostic::error(
+                kite_diag::codes::E0204,
+                "`JsValue` is a host object, and this target has no host",
+            )
+            .with_primary(first.span, format!("used in `{}`", first.function))
+            .with_note(
+                "a `JsValue` is a reference the JavaScript engine owns. There is \
+                 nothing outside a browser for one to refer to, so it is refused \
+                 here rather than lowered to a number that would mean nothing",
             );
-        }
-        if refused {
+            if gaps.len() > 1 {
+                let others: Vec<String> = gaps
+                    .iter()
+                    .filter(|g| g.function != first.function)
+                    .take(3)
+                    .map(|g| format!("`{}`", g.function))
+                    .collect();
+                let more = gaps.len() - 1 - others.len();
+                let tail = if more > 0 { format!(" and {} more", more) } else { String::new() };
+                d = d.with_note(format!(
+                    "{} other function{} the program reaches hold{} one too: {}{}",
+                    gaps.len() - 1,
+                    if gaps.len() == 2 { "" } else { "s" },
+                    if gaps.len() == 2 { "s" } else { "" },
+                    others.join(", "),
+                    tail
+                ));
+            }
+            diags.push(d.with_note("build for the web: `--emit wasm`"));
             return (String::new(), None, None, None, index);
         }
     }

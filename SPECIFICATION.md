@@ -481,8 +481,10 @@ folding it would have had to pick one.
 - **Unmarked** — visible within the declaring module (a directory).
 - **`pub`** — visible to anything that imports the module.
 
-`pub` applies to modules, functions, types, struct fields, enum variants, traits,
-and trait methods. A `pub struct` with unmarked fields is an opaque type: callers
+`pub` applies to functions, types, struct fields, traits and trait methods. A
+variant is exactly as visible as its enum, and cannot be marked on its own. There
+is no `pub use`: a module's imports are its own (§13.1) and are not exported, so
+`pub` on a `use` is an error. A `pub struct` with unmarked fields is an opaque type: callers
 can hold it and pass it, but cannot read, construct, or destructure it — not
 with a literal, not with a `..base` update, not in a pattern.
 
@@ -490,7 +492,10 @@ Methods and associated functions in an `impl` block are unmarked, and so
 private to the module, unless they say `pub`. The methods of a trait
 implementation are as visible as the trait. A type that is not `pub` cannot be
 named outside its module at all — not in an expression, and not in a signature,
-a field or an annotation either. Each of these is `E0401`.
+a field, an annotation or an `impl` header either, and a trait that is not
+`pub` cannot be implemented outside its module. Nor can a `pub` alias name a
+type that is not: an alias is the type it names everywhere (§3.4), so it would
+be a way to name it. Each of these is `E0401`.
 
 ```kite
 pub struct Connection {
@@ -1609,6 +1614,14 @@ shows what actually ran, and a derived method is not privileged over a written
 one. Deriving something a type already implements by hand is an error rather
 than a silent replacement.
 
+So a derived method is exactly as visible as a written one would be: the
+methods of a trait implementation are as visible as the trait (§4.3), and the
+derivable traits are public. Deriving `Decode` is writing a public constructor
+— any module holding a document can build the type, private fields and all —
+and deriving `Encode` or `Debug` publishes every field's value. An opaque type
+(§4.3), whose point is that its fields are its module's own, should not derive
+them.
+
 The walk handles primitives, slices, maps, optionals, tuples, and other types
 that derive the same trait. Where it cannot go — a function field, a `dyn
 Trait` — it says which field stopped it and what would fix it, and the
@@ -1901,10 +1914,15 @@ lowering, so adopting it later is a compiler change with no language change.
 
 A **module** is a directory, or a single `.kite` file. Every `.kite` file in a
 module directory contributes to the same namespace — within one there are no
-per-file imports of siblings and no header/implementation split.
+per-file imports of siblings and no header/implementation split. A file is part
+of one module only: `use shape` written inside `lib/`, or `use lib/shape` in a
+program that also has `use lib`, is `E0404`, because `shape.kite` is already
+part of `lib` and would otherwise be compiled twice, as two modules whose types
+are two types.
 
-`use x` takes the directory `x/` when there is one and the file `x.kite`
-otherwise. The directory is the general form; a file is the one-file case, and
+`use x` takes the directory `x/` when there is one holding a `.kite` file,
+and the file `x.kite` otherwise — a directory of data, `config/` holding only
+`app.toml`, is not a module and does not hide the `config.kite` beside it. The directory is the general form; a file is the one-file case, and
 is what most modules are and what nearly all of them start as.
 
 ```
@@ -1943,6 +1961,17 @@ fn start() -> error {
 }
 ```
 
+**A `use` path is looked for beside the module that writes it, then
+outward.** The first place is the importing module's own directory — the
+directory a one-file module sits in, or a directory module itself — and then
+each directory enclosing it in turn, stopping at the root of the package the
+importing module belongs to: the entry file's directory for the program, the
+dependency's own directory for a module inside a dependency. The nearest match
+wins. So `ui/app.kite` above writing `use config` finds `ui/config/` if `ui`
+has one of its own and `config/` beside `ui/` otherwise, and a dependency never
+resolves a `use` into the program that imports it. A `use` that matches
+nowhere is `E0400`, and its note lists every place that was tried.
+
 **Neither form is a module until a `use` names it.** A `.kite` file nothing
 imports is not compiled, and two files sharing a directory share nothing by
 virtue of sitting there: `main.kite` above cannot see what `money.kite`
@@ -1970,7 +1999,8 @@ and with no diagnostic. An alias is a convenience for the file that writes it.
 
 **A module is where its source is.** Two `use` lines reach one module exactly
 when they reach one file or directory: `use utils` inside `a/` and `use utils`
-inside `b/` are two modules, and `use dep/utils` and `use utils` are two
+inside `b/` are two modules when each finds a `utils` of its own, and one when
+both find the `utils` beside them, and `use dep/utils` and `use utils` are two
 modules, because every segment is honoured when the files are found. A `use`
 that finds nothing is `E0400` — never answered by some other module that
 happens to be spelled alike. A first segment naming one of the importing
@@ -2139,9 +2169,17 @@ A literal index distinguishes elements, so `f(xs[0], xs[1])` is accepted and
 `f(xs[i], xs[j])` is not — the compiler cannot show that `i` and `j` differ, and
 the call is wrong on the run where they do not.
 
-Only reference types participate — a struct or a `dyn Trait`. Slices, maps and
-tuples are copy-on-write values, so a `var [T]` parameter is the callee's own
-copy and two of them cannot interfere.
+Only reference types participate — a struct or a `dyn Trait` — and the values
+that hold one. Slices, maps, tuples and optionals are copy-on-write values, so a
+`var [T]` parameter is the callee's own copy, and two `var [int]` parameters
+cannot interfere. But the copy is shallow: two copies of one `[Account]` hold
+the same accounts, so `sweep(xs, xs)` with two `var [Account]` parameters is
+`E0800`, and so is `settle(xs, xs[0])`. A generic parameter is judged by what
+the call passes it, so `transfer<T: Ledger>(a, a, 50)` is the same error. A call
+through a function value is checked against the function when a `let` names
+it. Through any other function value — a parameter `f: fn(Account, Account,
+int)` — the call is not checked, because a function type does not say which of
+its parameters are `var`, and most such values only read.
 
 **This is not borrowing.** There is no ownership, no move, no lifetime, and
 nothing to annotate. A borrow checker exists to replace a collector, which is
@@ -2221,9 +2259,14 @@ needs no `extern`.
 
 A runtime that answers a host function itself — the bytecode VM and the native
 runtime both answer `@host("fs")` — holds the declaration to what it reads and
-returns. A parameter declared as other than what the host reads, or a result
-declared as other than what it answers, is a trap before the call is made, in
-the same words on both.
+returns. A parameter declared as other than what the host reads, a parameter
+the host does not read at all, or a result declared as other than what it
+answers, is a trap before the call is made, in the same words on both. What no
+host could answer is refused before anything runs: a host call answers with
+one value when it is made, so an `extern fn` returns neither `(T, error)`
+(`E0204`) nor a task — it cannot be `async` (`E0100`). The Kite function
+wrapping a declaration is the one that turns the host's answer into an
+`error`, or waits.
 
 **`std/js` declares nothing.** It is a fixed set of about thirty primitives
 through which any host object can be reached:

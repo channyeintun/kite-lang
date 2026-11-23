@@ -389,6 +389,24 @@ pub fn check_recording(
             }
             if let Some(r) = &e.ret {
                 check_host_type(ret, r.span(), &types, diags);
+                // **A host answers with one value.** `-> (int, error)` was read
+                // as `-> int` — its value type — and the `error` half was
+                // never there, so a caller's `check` tested a nil the host
+                // could not have sent.
+                if r.is_fallible() {
+                    diags.push(
+                        Diagnostic::error(
+                            codes::E0204,
+                            "a host function cannot return `(T, error)`",
+                        )
+                        .with_primary(r.span(), "a host answers with one value")
+                        .with_note(
+                            "a failure the host reports comes back inside that value, and the \
+                             Kite function wrapping the declaration makes it an `error` — as \
+                             `std/fs` does",
+                        ),
+                    );
+                }
             }
             extern_of_sig.push(Some(externs.len() as u32));
             externs.push(hir::ExternDef {
@@ -6559,6 +6577,12 @@ impl<'a> Checker<'a> {
         if decl.is_pub || module == self.module {
             return true;
         }
+        // An implementation written in this module of a trait it cannot see
+        // was refused at its header (E0401), which is the cause; the calls to
+        // its methods are not a second one.
+        if self.resolved.module_of_fn(fn_index) == self.module {
+            return false;
+        }
         let already = self
             .diags
             .iter()
@@ -9943,6 +9967,7 @@ impl<'a> Checker<'a> {
             // it is one the reader can see.
             ast::Pattern::Binding(name) if self.unit_variant_of(scrut, &name.name).is_some() => {
                 let (ti, vi) = self.unit_variant_of(scrut, &name.name).expect("just checked");
+                self.check_bare_variant(ti, &name.name, name.span);
                 self.variant_pattern(ti, vi, None, scrut, name.span)
             }
 
@@ -10389,6 +10414,34 @@ impl<'a> Checker<'a> {
             }
             ast::Pattern::Error(_) => hir::Pattern::Wildcard,
         }
+    }
+
+    /// A bare unit pattern is read against the scrutinee's enum (§9.3), and
+    /// that enum may be another module's — but not a private one.
+    ///
+    /// The pattern found its variant by the scrutinee's type, and nothing
+    /// asked whether the asking module could see that type: a bare `Draft`
+    /// matched a variant of another module's private enum, which
+    /// `state.Phase.Draft` in the same place is `E0401` for. A variant is
+    /// exactly as visible as its enum. It is still taken as that variant after
+    /// the error, so the arms after it are not reported as unreachable behind
+    /// a catch-all.
+    fn check_bare_variant(&mut self, ti: u32, name: &str, span: Span) {
+        let decl = self.resolved.type_decl(ti);
+        let module = self.resolved.module_of_item(decl.decl_index).to_string();
+        if decl.is_pub || module == self.module || module == kite_resolve::PRELUDE {
+            return;
+        }
+        let (shown, enum_span) = (decl.name.trim_start_matches('@').to_string(), decl.span);
+        self.diags.push(
+            Diagnostic::error(codes::E0401, format!("`{}` is private to module `{}`", shown, module))
+                .with_primary(span, format!("`{}` is a variant of `{}`, not visible here", name, shown))
+                .with_secondary(enum_span, "this enum is not marked `pub`")
+                .with_note(
+                    "unmarked declarations are visible only within their own module, and an \
+                     enum's variants are exactly as visible as the enum",
+                ),
+        );
     }
 
     /// The declaration index and variant index of a unit variant with this
@@ -12847,6 +12900,36 @@ fn expand_aliases(
                     continue;
                 }
             }
+            // **A `pub` alias does not export what it names.** An alias is
+            // the type it names everywhere (§3.4), so `pub type Door = Also`
+            // with `Also` private was a way to name `Also` outside its
+            // module, which §4.3 says nothing may do; a signature took it, and
+            // a literal said `m.Door` was private although it is `pub`.
+            // Refused here, where the alias is, rather than at every use.
+            if alias.is_pub && !module.is_empty() && module != kite_resolve::PRELUDE {
+                walk_named_types(&alias.ty, &mut |p: &ast::TypePath| {
+                    let Some(j) = resolved.type_by_name_in(module, &p.text()) else { return };
+                    let named = &resolved.types[j as usize];
+                    if named.is_pub || resolved.module_of_item(named.decl_index) != module {
+                        return;
+                    }
+                    diags.push(
+                        Diagnostic::error(
+                            codes::E0401,
+                            format!("a `pub` alias cannot name `{}`, which is not `pub`", p.text()),
+                        )
+                        .with_primary(p.span, "private to this module")
+                        .with_secondary(
+                            named.span,
+                            format!("this {} is not marked `pub`", named.kind.describe()),
+                        )
+                        .with_note(
+                            "an alias is the type it names everywhere, so this would name it \
+                             outside the module; mark that `pub`, or leave the alias unmarked",
+                        ),
+                    );
+                });
+            }
             // Every alias this one names is expanded, so this one can be.
             let ty = resolve_named_ty(&alias.ty, resolved, module, type_ids, &[], types, diags);
             type_ids[i] = Some(TypeTarget::Alias(ty));
@@ -13066,6 +13149,13 @@ fn resolve_named_ty(
                         named_ty(other, types)
                     }
                 },
+                // A `use` that failed has its error; the types it would
+                // have brought are not each another.
+                None if p.segments.len() > 1
+                    && resolved.modules.is_unresolved(module, &p.segments[0].name) =>
+                {
+                    TyId::ERROR
+                }
                 None => resolve_ty(t, types, diags),
             }
         }

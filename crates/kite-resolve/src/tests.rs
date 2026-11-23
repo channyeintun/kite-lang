@@ -215,6 +215,17 @@ fn every_builtin_module_is_listed() {
         assert_eq!(BuiltinFn::from_path(path).map(|b| b.path()), Some(path), "{}", path);
     }
     assert!(heads.len() > 20, "found {:?}", heads);
+    let dotted: Vec<&str> = table
+        .lines()
+        .filter_map(|line| line.trim().strip_prefix('"').and_then(|l| l.split_once('"')))
+        .map(|(path, _)| path)
+        .filter(|path| path.contains('.'))
+        .collect();
+    let mut listed = BUILTIN_PATHS.to_vec();
+    let mut answered = dotted.clone();
+    listed.sort_unstable();
+    answered.sort_unstable();
+    assert_eq!(listed, answered, "BUILTIN_PATHS is every dotted path from_path answers");
     for head in heads {
         assert!(BUILTIN_MODULES.contains(&head), "`{}` is not in BUILTIN_MODULES", head);
     }

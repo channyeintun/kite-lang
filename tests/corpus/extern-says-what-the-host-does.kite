@@ -1,0 +1,13 @@
+// An `extern` declaration is held to what it says. A host answers with one
+// value when it is called: `-> (int, error)` was read as `-> int`, and an
+// `async` in front was dropped, so the call was not a task.
+
+@host("fs")
+extern fn path_kind(path: str) -> (int, error) //~ ERROR E0204
+
+@host("fs")
+async extern fn remove_path(path: str) -> str //~ ERROR E0100
+
+fn main() {
+    io.print(remove_path("/nowhere").len())
+}

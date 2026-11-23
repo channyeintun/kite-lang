@@ -1,0 +1,82 @@
+// Three ways §14.1's bug got past E0800. A copy-on-write value is copied
+// shallowly, so two `var` slices of one slice of structs hold the same
+// structs; a generic parameter is the struct it is passed; and a call through
+// a function value known to be `transfer` is a call to `transfer`.
+
+struct Account {
+    var balance: int
+}
+
+trait Ledger {
+    fn add(var self, n: int)
+}
+
+impl Ledger for Account {
+    fn add(var self, n: int) {
+        self.balance = self.balance + n
+    }
+}
+
+fn sweep(var from: [Account], var to: [Account]) {
+    let amount = from[0].balance
+    to[0].balance = to[0].balance + amount
+    from[0].balance = 0
+}
+
+fn settle(var from: [Account], into: Account) -> int {
+    from[0].balance = 0
+    return into.balance
+}
+
+fn tally(from: [int], var into: [int]) {
+}
+
+fn move<T: Ledger>(var from: T, var to: T, amount: int) {
+    from.add(0 - amount)
+    to.add(amount)
+}
+
+fn transfer(var from: Account, var to: Account, amount: int) {
+    from.balance = from.balance - amount
+    to.balance = to.balance + amount
+}
+
+fn read(from: Account, to: Account) -> int {
+    return from.balance + to.balance
+}
+
+// A function value that is not known is not checked: its type does not say
+// which parameters are `var`, and most such values only read.
+fn best(xs: [Account], better: fn(Account, Account) -> bool) -> int {
+    var at = 0
+    for i in 1..xs.len() {
+        if better(xs[i], xs[at]) {
+            at = i
+        }
+    }
+    return at
+}
+
+fn main() {
+    let xs = [Account{ balance: 100 }]
+    let ys = [Account{ balance: 0 }]
+    sweep(xs, ys)
+    sweep(xs, xs) //~ ERROR E0800
+    io.print(settle(xs, xs[0])) //~ ERROR E0800
+    // A slice of numbers holds no references: two copies of it are two.
+    let ns = [1, 2]
+    tally(ns, ns)
+
+    let a = Account{ balance: 100 }
+    let b = Account{ balance: 0 }
+    move(a, b, 50)
+    move(a, a, 50) //~ ERROR E0800
+
+    let f = transfer
+    f(a, b, 50)
+    f(a, a, 50) //~ ERROR E0800
+    // Known to be `read`, whose parameters are not `var`.
+    let r = read
+    io.print(r(a, a))
+    io.print(best(xs, |p: Account, q: Account| p.balance > q.balance))
+}

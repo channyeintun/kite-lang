@@ -880,7 +880,7 @@ fn a_dependencys_import_is_not_answered_by_an_application_buffer() {
     p.file("md/kite.toml", "[package]\nname = \"md\"\nversion = \"1.0.0\"\n");
     p.file("md/md.kite", "use util\n\npub fn render() -> util.Thing {\n    return util.make()\n}\n");
     p.file(
-        "md/util.kite",
+        "md/util/util.kite",
         "pub struct Thing {\n    pub v: int\n}\n\npub fn make() -> Thing {\n    return Thing{ v: 7 }\n}\n",
     );
     p.file(
@@ -1351,7 +1351,9 @@ fn a_manifest_that_does_not_read_is_published_under_its_own_uri() {
     // Closed unsaved, the disk's manifest is what is read again.
     let reply = s.handle("textDocument/didClose", &at(&manifest, 0, 0));
     let published: Vec<Json> = reply.notifications.into_iter().map(|(_, p)| p).collect();
-    assert_eq!(codes_for(&published, &main).map(|c| c.len()), Some(2), "{:?}", published);
+    // The `use` it broke, and nothing for `a.hello` under it: a failed `use`
+    // is one error.
+    assert_eq!(codes_for(&published, &main), Some(vec!["E0400".to_string()]), "{:?}", published);
     assert_eq!(codes_for(&published, &manifest), Some(vec!["E0405".to_string()]));
     // Mended on disk, the manifest's list is cleared.
     p.file("app/kite.toml", good);

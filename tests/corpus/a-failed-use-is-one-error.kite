@@ -1,0 +1,23 @@
+// A `use` that finds nothing is one error, at the `use`. What it would have
+// brought — a function, a type, a variant — is not each another error: it
+// was `unknown type` and `cannot find` under the line that imports it.
+
+use std/nope //~ ERROR E0400
+use gone //~ ERROR E0400
+
+struct Holder {
+    cfg: gone.Config
+}
+
+fn pick(k: nope.Kind) -> int {
+    return match k {
+        nope.Kind.A => 1,
+        _ => 2,
+    }
+}
+
+fn main() {
+    io.print(gone.load("app.toml"))
+    let h = Holder{ cfg: gone.default() }
+    io.print(nope.answer)
+}
