@@ -6665,12 +6665,97 @@ impl<'a> Checker<'a> {
     /// The bounds a generic struct or enum declares, held against the type
     /// arguments of a value being built.
     fn check_type_bounds(&mut self, ti: u32, ty: TyId, span: Span) {
+        self.check_keyed_args(ty, span);
         let Some(defs) = self.type_generics.get(ti as usize).cloned() else { return };
         if defs.iter().all(|g| g.bounds.is_empty()) {
             return;
         }
         let args = self.receiver_args(ty);
         self.check_bounds(&defs, &args, span);
+    }
+
+    /// A generic type whose field is a map keyed by one of its parameters
+    /// compares that parameter's argument, so a value built with a function
+    /// or a `dyn` there is refused as the map written out would be (§5.2).
+    /// A key type that mentions a parameter is taken on trust where the
+    /// field is declared; this is where whoever chose the argument is held
+    /// to it — the value's builder, or, for an argument that is a generic
+    /// function's own parameter, that function's callers. `W<fn() -> int>`
+    /// otherwise kept one closure as two keys on the VM and natively, and
+    /// trapped in Wasm.
+    ///
+    /// Only the type's own fields are looked at: a field of another generic
+    /// type holds a value that was built, and held to this, where it was.
+    fn check_keyed_args(&mut self, ty: TyId, span: Span) {
+        let args = self.receiver_args(ty);
+        if args.is_empty() {
+            return;
+        }
+        let fields: Vec<TyId> = match *self.types.kind(ty) {
+            TyKind::Struct(s) => match self.types.struct_origin_of(s) {
+                Some((t, _)) => self.types.struct_def(t).fields.iter().map(|f| f.ty).collect(),
+                None => return,
+            },
+            TyKind::Enum(e) => match self.types.enum_origin_of(e) {
+                Some((t, _)) => self
+                    .types
+                    .enum_def(t)
+                    .variants
+                    .iter()
+                    .flat_map(|v| v.fields.iter().map(|f| f.ty))
+                    .collect(),
+                None => return,
+            },
+            _ => return,
+        };
+        let mut keys = Vec::new();
+        for f in fields {
+            self.keys_in(f, &mut keys);
+        }
+        for k in keys {
+            let key = self.types.substitute(k, &args);
+            if self.types.is_poisoned(key) {
+                continue;
+            }
+            if !equatable_given_params(self.types, key, &mut Vec::new()) {
+                let (name, key_name) = (self.types.name(ty), self.types.name(key));
+                self.diags.push(
+                    Diagnostic::error(
+                        codes::E0201,
+                        format!("`{}` holds a map keyed by `{}`, which cannot be a map key", name, key_name),
+                    )
+                    .with_primary(
+                        span,
+                        format!("a map compares its keys with `==`, which `{}` does not have", key_name),
+                    )
+                    .with_note(
+                        "equality is structural, so every field must itself be equatable; \
+                         functions and trait objects are not",
+                    ),
+                );
+                return;
+            }
+            self.note_compared(key, span);
+        }
+    }
+
+    /// The key types of the maps a field type holds that mention a
+    /// parameter, looking through slices, optionals, tuples and maps.
+    fn keys_in(&self, ty: TyId, out: &mut Vec<TyId>) {
+        match self.types.kind(ty).clone() {
+            TyKind::Map(k, v) => {
+                let mut params = Vec::new();
+                params_in(self.types, k, &mut params);
+                if !params.is_empty() {
+                    out.push(k);
+                }
+                self.keys_in(k, out);
+                self.keys_in(v, out);
+            }
+            TyKind::Slice(e) | TyKind::Optional(e) => self.keys_in(e, out),
+            TyKind::Tuple(es) => es.into_iter().for_each(|e| self.keys_in(e, out)),
+            _ => {}
+        }
     }
 
     /// How many of a method's type parameters its `impl` block declares —

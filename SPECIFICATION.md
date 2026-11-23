@@ -723,7 +723,9 @@ one: `found == 5` is true exactly when `found` is present and five.
 value holding one ([E0201](#16-diagnostics)): a function has no identity to
 compare, a trait object is a record made where it was converted, and a host
 object has no structure Kite can see. A map compares its keys, so the same three
-cannot be keys. A generic function that compares its `T` with `==` is held to
+cannot be keys — nor be the argument of a generic type whose field is a map
+keyed by that parameter: `struct W<K> { m: {K: int} }` cannot be built as a
+`W<fn() -> int>`. A generic function that compares its `T` with `==` is held to
 that at every call — `T` may not be chosen as one of the three — and so is a
 generic function that passes its own parameter on to one that compares it. A
 trait's generic method called through a bound is held to what any of its

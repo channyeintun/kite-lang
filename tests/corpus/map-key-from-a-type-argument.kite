@@ -1,0 +1,30 @@
+// A map compares its keys, so a function or a trait object cannot be one
+// (§5.2) — and that holds when the key type is a generic type's argument.
+// `W<fn() -> int>` used to be accepted: the VM and native code kept one
+// closure as two keys, and Wasm trapped.
+
+struct W<K> {
+    var m: { K: int }
+}
+
+enum E<K> {
+    Has(m: { K: int })
+    No
+}
+
+fn mk<K>() -> W<K> {
+    return W{ m: { } }
+}
+
+fn main() {
+    var w: W<fn() -> int> = W{ m: { } } //~ ERROR E0201
+    io.print(w.m.len())
+    let d: W<dyn Display> = W{ m: { } } //~ ERROR E0201
+    io.print(d.m.len())
+    let e: E<fn() -> int> = E.Has(m: { }) //~ ERROR E0201
+    _ = e
+    let v: W<fn() -> int> = mk() //~ ERROR E0201
+    io.print(v.m.len())
+    let fine: W<str> = mk()
+    io.print(fine.m.len())
+}
