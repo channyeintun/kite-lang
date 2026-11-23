@@ -1176,7 +1176,7 @@ error[E0302]: `err` is not checked before this `return`
   │     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `err` goes out of scope here unchecked
   │
   = note: silently dropping errors is the single most common source of production failures in languages that permit it
-  = note: to propagate, write `check` on its own line; to handle it here, test `err != nil`
+  = note: handle it here: test `err != nil`
 
 error[E0301]: `parsed` is used before its error is checked
   ┌─ titles.kite:3:25
@@ -1186,7 +1186,7 @@ error[E0301]: `parsed` is used before its error is checked
 3 │     return json.text_or(parsed, "title", "untitled")
   │                         ^^^^^^ used here while still tainted
   │
-  = note: check it first: write `check err`, or test `err != nil`
+  = note: test `err != nil` first, and read it where that is false
   = note: in Go the value on a failure path is the zero value and flows onward looking valid; in Kite there is no value on that path at all
 ```
 

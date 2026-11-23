@@ -1971,8 +1971,12 @@ impl<'a> Checker<'a> {
         // and is not reported.
         // A copy of the failure still unchecked under another name has not
         // been dropped: that name carries it.
+        // A value that could not be checked has had its mistake reported, and
+        // may well have read the old one: `e = errors.wrap(e, "…")` without
+        // `use std/errors` is one mistake, not a second E0302 as well.
         if !compound && self.may_hold_failure(local_ty) {
             if self.taint[slot] == Taint::Unchecked
+                && !matches!(value.kind, ExprKind::Error)
                 && !self.locals[slot].synthetic
                 && !self.carried_elsewhere(local_id, |_| false)
                 && self.reported_unchecked.insert(local_id)
@@ -4632,10 +4636,11 @@ impl<'a> Checker<'a> {
                     .with_secondary(decl, "this value is only valid when the error is nil")
                     .with_primary(p.span, "used here while still tainted");
                     if let Some(e) = err_name {
-                        d = d.with_note(format!(
-                            "check it first: write `check {}`, or test `{} != nil`",
-                            e, e
-                        ));
+                        d = d.with_note(if self.may_check() {
+                            format!("check it first: write `check {}`, or test `{} != nil`", e, e)
+                        } else {
+                            format!("test `{} != nil` first, and read it where that is false", e)
+                        });
                     }
                     d = d.with_note(
                         "in Go the value on a failure path is the zero value and flows onward \
@@ -7828,16 +7833,21 @@ impl<'a> Checker<'a> {
         let Some(holder) = self.holder(expr.ty) else {
             return;
         };
+        let test = "bind it and test it — `let err = …` then `if err != nil { … }`";
+        let check_or_test = if self.may_check() {
+            format!("write `check` to propagate it, or {}", test)
+        } else {
+            test.to_string()
+        };
         let (what, fix) = match holder {
-            Holder::Error => (
-                "this call returns an error, and it is thrown away",
-                "write `check` to propagate it, or bind it and test it — \
-                 `let err = …` then `if err != nil { … }`",
-            ),
+            Holder::Error => ("this call returns an error, and it is thrown away", check_or_test.as_str()),
             Holder::Pair => (
                 "this call returns a value and an error, and both are thrown away",
-                "write `check` to propagate it, or bind it and test it — \
-                 `let err = …` then `if err != nil { … }`",
+                if self.may_check() {
+                    "write `let (value, err) = …` and then `check err`, or test `err != nil`"
+                } else {
+                    "write `let (value, err) = …` and then test `err != nil`"
+                },
             ),
             Holder::Many => (
                 "this call returns errors, and they are thrown away",
@@ -8125,10 +8135,15 @@ impl<'a> Checker<'a> {
                  production failures in languages that permit it",
             );
             let d = match holder {
-                Holder::Error => d.with_note(
-                    "to propagate, write `check` on its own line; to handle it here, \
-                     test `err != nil`",
-                ),
+                Holder::Error if self.may_check() => d.with_note(format!(
+                    "to propagate, write `check {}` on its own line; to handle it here, \
+                     test `{} != nil`",
+                    name, name
+                )),
+                Holder::Error => d.with_note(format!(
+                    "handle it here: test `{} != nil`",
+                    name
+                )),
                 Holder::Pair => d.with_note(
                     "take the result apart where it is bound — `let (value, err) = …` — \
                      and then check `err`",
@@ -8148,6 +8163,35 @@ impl<'a> Checker<'a> {
                 )),
             };
             self.diags.push(d);
+        }
+    }
+
+    /// Whether `check` compiles where the checker is: in a body that answers
+    /// with an error. A note naming `check` in `main` named a fix that is
+    /// E0303.
+    fn may_check(&self) -> bool {
+        let (fallible, ret) = match &self.closure_sig {
+            Some(s) => (s.fallible, s.ret),
+            None => (self.sigs[self.fn_index].fallible, self.sigs[self.fn_index].ret),
+        };
+        fallible || ret == TyId::ERR
+    }
+
+    /// How a note spells `errors.wrap`: as written where this module imports
+    /// `std/errors`, and with the import it needs where it does not — the
+    /// bare spelling was E0111 when copied.
+    fn wrap_spelled(&self, name: &str) -> String {
+        let wrap = format!("`{} = errors.wrap({}, \"…\")`", name, name);
+        let imported = self
+            .resolved
+            .modules
+            .aliases
+            .get(&(self.module.clone(), "errors".to_string()))
+            .is_some_and(|m| m == "errors");
+        if imported {
+            wrap
+        } else {
+            format!("{} after `use std/errors`", wrap)
         }
     }
 
@@ -8181,11 +8225,18 @@ impl<'a> Checker<'a> {
                 "test `{} != nil` before the write, and check the error it holds",
                 name
             )),
-            Holder::Error => d.with_note(format!(
-                "test `{} != nil` or `check {}` before the write; to pass it on instead, \
-                 write `{} = errors.wrap({}, \"…\")`",
-                name, name, name, name
-            )),
+            Holder::Error => {
+                let test = if self.may_check() {
+                    format!("test `{} != nil` or `check {}`", name, name)
+                } else {
+                    format!("test `{} != nil`", name)
+                };
+                d.with_note(format!(
+                    "{} before the write; to pass it on instead, write {}",
+                    test,
+                    self.wrap_spelled(name)
+                ))
+            }
         };
         self.diags.push(d);
     }

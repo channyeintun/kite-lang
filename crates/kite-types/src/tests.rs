@@ -2249,3 +2249,39 @@ fn self_names_the_blocks_type_in_a_literal_and_a_path() {
     assert_eq!(c.codes(), vec!["E0204"], "{}", c.render());
     assert!(c.render().contains("known only by the trait's methods"), "{}", c.render());
 }
+
+/// An E0302 or E0301 note names only fixes that compile where it is shown:
+/// `check` where the body answers with an error and not in `main`, the
+/// binding's own name, and the import `errors.wrap` needs. A value that
+/// could not be checked is one mistake, not a second E0302 at the write.
+#[test]
+fn error_notes_name_fixes_that_compile_here() {
+    let c = body(
+        "var e = errors.new(\"x\")\n  e = errors.new(\"y\")\n  if e != nil {\n    io.print(e.message())\n  }",
+    );
+    assert_eq!(c.codes(), vec!["E0302"], "{}", c.render());
+    let text = c.render();
+    assert!(!text.contains("check e"), "{}", text);
+    assert!(text.contains("`e = errors.wrap(e, \"…\")` after `use std/errors`"), "{}", text);
+
+    let c = body("let e = errors.new(\"x\")\n  io.print(1)");
+    let text = c.render();
+    assert!(text.contains("test `e != nil`") && !text.contains("`check"), "{}", text);
+
+    let c = run("fn f() -> (int, error) {\n  return 1, nil\n}\n\
+        fn g() -> error {\n  let (v, oops) = f()\n  io.print(v)\n  return nil\n}\n\
+        fn main() {\n  _ = g()\n}\n");
+    let text = c.render();
+    assert!(text.contains("write `check oops`"), "{}", text);
+    assert!(text.contains("to propagate, write `check oops` on its own line"), "{}", text);
+
+    let c = run("fn f() -> (int, error) {\n  return 1, nil\n}\n\
+        fn main() {\n  let (v, oops) = f()\n  io.print(v)\n}\n");
+    let text = c.render();
+    assert!(!text.contains("`check"), "{}", text);
+
+    let c = body(
+        "var e = errors.new(\"x\")\n  e = errors.wrap(e, \"y\")\n  if e != nil {\n    io.print(e.message())\n  }",
+    );
+    assert_eq!(c.codes(), vec!["E0111"], "{}", c.render());
+}
