@@ -364,3 +364,25 @@ fn a_body_cut_short_after_a_return_is_not_unreachable_code() {
     let codes: Vec<&str> = result.diags.iter().filter_map(|d| d.code.map(|c| c.0)).collect();
     assert_eq!(codes, vec!["E0101"], "{}", result.render_diagnostics());
 }
+
+/// A character Kite does not have is one diagnostic, from the lexer through
+/// the type checker: a `;` is read as the line break it stood for, so the
+/// statement after it on the line is declared, and a run of `?` is one
+/// report, with nothing said about the gap it leaves.
+///
+/// Here rather than in `tests/corpus`: `kitec fmt` refuses a file with a
+/// lexical error, and the tree's Kite is always formatted.
+#[test]
+fn a_character_kite_does_not_have_is_one_diagnostic() {
+    let cases = [
+        "fn main() {\n    let a = 1; let b = 2\n    io.print(a + b)\n}\n",
+        "fn main() {\n    let a = 1;\n    io.print(a)\n}\n",
+        "fn main() {\n    let m = {\"a\": 1}\n    io.print(m[\"a\"] ?? 0)\n}\n",
+        "fn main() {\n    let a = 1 $ 2\n    io.print(a)\n}\n",
+    ];
+    for src in cases {
+        let result = compile(Path::new("t.kite"), src, Emit::Check);
+        let errors: Vec<String> = actual(&result).into_values().flatten().collect();
+        assert_eq!(errors, vec!["E0002".to_string()], "{}\n{}", src, result.render_diagnostics());
+    }
+}

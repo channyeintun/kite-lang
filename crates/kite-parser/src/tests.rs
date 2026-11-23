@@ -1625,3 +1625,25 @@ fn pub_above_a_variant_is_refused_as_pub_on_a_variant() {
         assert_eq!(e.variants.len(), 2, "{:?}", src);
     }
 }
+
+/// A `;` is one report, and read as the line break it stood for: the
+/// statement after it on the line is there, and nothing more is said.
+#[test]
+fn a_semicolon_is_one_report_and_ends_the_statement() {
+    let p = parse_src("fn main() {\n    let a = 1; let b = 2\n    io.print(a + b)\n}\n");
+    assert_eq!(p.codes(), vec!["E0002"], "{}", p.render());
+    let main = &p.fns()[0];
+    assert_eq!(main.body.stmts.len(), 3, "{:?}", main.body.stmts);
+    assert!(matches!(main.body.stmts[1], Stmt::Let(_)));
+}
+
+/// A run of a character Kite does not have is one report, and the gap it
+/// leaves is not a second one.
+#[test]
+fn a_run_of_invalid_characters_is_one_report() {
+    let p = parse_src("fn main() {\n    let m = {\"a\": 1}\n    io.print(m[\"a\"] ?? 0)\n}\n");
+    assert_eq!(p.codes(), vec!["E0002"], "{}", p.render());
+    assert!(p.render().contains("`??`"), "{}", p.render());
+    let p = parse_src("fn main() {\n    let a = 1 $ 2\n    io.print(a)\n}\n");
+    assert_eq!(p.codes(), vec!["E0002"], "{}", p.render());
+}

@@ -334,6 +334,11 @@ struct Parser<'a> {
     /// mistake, and the parser does not report it missing a second time.
     unterminated: std::rc::Rc<[u32]>,
     swallowed_the_rest: bool,
+    /// Where the characters the lexer skipped as no part of any token (its
+    /// `E0002`) start. A syntax error at the token after one is the gap it
+    /// left — `m["a"] ?? 0` is two values side by side once the `??` is
+    /// gone — and is that one mistake, already reported.
+    skipped: std::rc::Rc<[u32]>,
     /// The depth at which a statement written as a `match` arm is being read
     /// (see [`Parser::parse_arm_statement`]): there a `,` ends it as a line
     /// break would, and the arm takes the `,`.
@@ -421,8 +426,15 @@ impl<'a> Parser<'a> {
                 swallowed_the_rest |= rest.starts_with(b"\"\"\"");
             }
         }
+        let skipped: Vec<u32> = diags
+            .iter()
+            .filter(|d| d.code == Some(codes::E0002))
+            .filter_map(|d| d.labels.first().map(|l| l.span).filter(|s| s.file == file))
+            .map(|s| s.start)
+            .collect();
         let mut parser = Parser::with_lines(file, src, tokens, diags, line_starts.into());
         parser.unterminated = unterminated.into();
+        parser.skipped = skipped.into();
         parser.swallowed_the_rest = swallowed_the_rest;
         parser
     }
@@ -464,6 +476,7 @@ impl<'a> Parser<'a> {
             depth_reported: false,
             unterminated: std::rc::Rc::from([]),
             swallowed_the_rest: false,
+            skipped: std::rc::Rc::from([]),
             arm_statement: None,
         }
     }
@@ -762,7 +775,10 @@ impl<'a> Parser<'a> {
         // What an unterminated string swallowed is missing because of it:
         // the `)` its line ended with, or — for a block string — everything
         // to the end of the file. The lexer has reported that string.
-        if (found == T::Eof && self.swallowed_the_rest) || self.after_unterminated_string() {
+        if (found == T::Eof && self.swallowed_the_rest)
+            || self.after_unterminated_string()
+            || self.after_skipped_character()
+        {
             return;
         }
         let span = if found == T::Newline || found == T::Eof {
@@ -1145,6 +1161,19 @@ impl<'a> Parser<'a> {
         let at = self.span();
         self.report_unclosed(open, Some(at));
         true
+    }
+
+    /// Whether the lexer skipped a character just before the token here:
+    /// after the token before it, or at the start of the input.
+    fn after_skipped_character(&self) -> bool {
+        if self.skipped.is_empty() {
+            return false;
+        }
+        let from = if self.pos == 0 { 0 } else { self.tokens[self.pos - 1].span.end };
+        let to = self.span().start.max(from);
+        // A line break the lexer made of a `;` starts where the next token
+        // does, after the `;` it stands for.
+        self.skipped.iter().any(|&at| at >= from && at <= to)
     }
 
     /// Whether the token just consumed is a string literal the lexer
@@ -2206,7 +2235,7 @@ impl<'a> Parser<'a> {
     /// A comma missing at the end of a line is reported there, where it
     /// goes, rather than at the start of the next.
     fn missing_comma(&mut self, between: &str, certain: bool, note: Option<&str>) {
-        if self.panicking || self.unwinding {
+        if self.panicking || self.unwinding || self.after_skipped_character() {
             return;
         }
         self.last_error_at = Some(self.pos);
@@ -4071,6 +4100,7 @@ impl<'a> Parser<'a> {
         sub.chain = self.chain;
         sub.depth_reported = self.depth_reported;
         sub.unterminated = self.unterminated.clone();
+        sub.skipped = self.skipped.clone();
         sub.swallowed_the_rest = self.swallowed_the_rest;
         let span = Span::new(self.file, start as u32, end as u32);
         let expr = match sub.parse_expr() {

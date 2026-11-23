@@ -86,12 +86,12 @@ codes! {
     E0002 = "E0002", "invalid character in source",
         "The lexer found a character that cannot begin any Kite token. It skips the character and reports it where it stands. The ones that come in by habit:\n\
          \n\
-         - `;`. Kite has no semicolons: a statement ends at its line break (§3), so the `;` is deleted.\n\
+         - `;`. Kite has no semicolons: a statement ends at its line break (§3), so the `;` is read as one, and what follows it on the line is the next statement.\n\
          - `#` for a comment. Write `//`.\n\
          - `?`, `~`, a backtick and `\\`. None is an operator or a delimiter in Kite.\n\
          - A character that only looks like one: a curly quote in place of `\"`, an en dash in place of `-`. These arrive by copy and paste from a document or a web page; retype them.\n\
          \n\
-         An identifier may use any Unicode letter, so a name in another script is not this error. A parse error beside it — `expected a line break` after a stray character in the middle of a line — is the gap the skipped character left; removing the character removes both.\n\
+         An identifier may use any Unicode letter, so a name in another script is not this error. A run of one character, such as `??`, is one report. The gap a skipped character leaves — `let a = 1 $ 2` is two values side by side once the `$` is gone — is not reported again: removing the character is the whole fix.\n\
          \n\
          Example:\n\
          \n\
