@@ -553,7 +553,7 @@ fn run_doc_tests(
     src: &str,
     docs: &[kite_driver::doctest::DocTest],
 ) -> (usize, usize) {
-    let (augmented, names) = kite_driver::doctest::augment(src, docs);
+    let (augmented, names, remap) = kite_driver::doctest::augment_mapped(src, docs);
     // **Never a release build**, whatever `--release` said. An example fails
     // by trapping — an `assert` that did not hold — and a release build drops
     // `assert`, so under `--release` every example with a wrong claim in it
@@ -561,14 +561,15 @@ fn run_doc_tests(
     // by returning an error rather than by asserting.
     let compiled = kite_driver::compile_with(path, &augmented, Emit::Kbc, false);
     if compiled.failed() {
-        // The diagnostics point into the augmented source, whose line numbers
-        // are not the file's past the first fence. So the fences are named by
-        // where they opened and the diagnostics are printed under them, rather
-        // than pretending to a location the reader could click.
+        // Every fence is named by where it opened, since one compilation
+        // fails for all of them. The diagnostics are moved back from the
+        // augmented source to the file, so each points at the line it was
+        // written on — an editor or a terminal can jump to it.
         for d in docs {
             let _ = writeln!(out, "FAILED   {}:{} (doc example)", path, d.line);
         }
-        let _ = write!(out, "{}", compiled.render_diagnostics());
+        let shown = kite_driver::doctest::render_diagnostics(&compiled, path, src, &remap);
+        let _ = write!(out, "{}", shown);
         return (docs.len(), docs.len());
     }
 

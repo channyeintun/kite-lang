@@ -269,6 +269,23 @@ fn kitec_fix_finishes_the_job_and_reports_what_is_left() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// An error inside a doc example is reported at the line of the `///` comment
+/// it was written on. The example is compiled appended to its module, and the
+/// span used to be printed as the line it landed on there: line 12 of an
+/// eight-line file.
+#[test]
+fn an_error_in_a_doc_example_points_at_the_line_it_was_written_on() {
+    let src = "/// Doubles.\n///\n/// ```kite\n/// let y: int = \"s\"\n/// ```\npub fn double(n: int) -> int {\n    return n * 2\n}\n";
+    let dir = scratch("doc-error-line", "t.kite", src);
+    let Some((ok, out, err)) = kitec_in(&dir, &["test", "t.kite"]) else { return };
+    assert!(!ok, "{}{}", out, err);
+    let shown = format!("{}{}", out, err);
+    assert!(shown.contains("t.kite:4:18"), "the fence's own line and column: {}", shown);
+    assert!(shown.contains("4 │ /// let y: int = \"s\""), "the real line is shown: {}", shown);
+    assert!(!shown.contains("t.kite:12"), "no line past the file's end: {}", shown);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// Every option is listed under `OPTIONS:`, together. Two changes merged into
 /// the help at once left a sentence in the middle of the list, and `--update`,
 /// `--explain`, `--version` and `--help` below it, cut off from the rest.
