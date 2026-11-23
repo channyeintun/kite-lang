@@ -160,11 +160,49 @@ fn edge_checks() -> [error] {
     return out
 }
 
+fn sign_checks() -> [error] {
+    var out: [error] = []
+    // -0.0 is not below zero, so `x < 0.0` let it through abs unchanged, and
+    // the `int` cast that trunc ends in has no -0 to give back.
+    out.push(same(math.abs(-0.0), 0.0, "abs(-0)"))
+    out.push(same(math.abs(nan()), nan(), "abs(NaN)"))
+    out.push(same(math.abs(-inf()), inf(), "abs(-inf)"))
+    out.push(same(math.trunc(-0.5), -0.0, "trunc(-0.5)"))
+    out.push(same(math.trunc(-0.0), -0.0, "trunc(-0)"))
+    out.push(same(math.trunc(0.5), 0.0, "trunc(0.5)"))
+    out.push(same(math.round(-0.4), -0.0, "round(-0.4)"))
+    out.push(same(math.round(-0.49999999999999994), -0.0, "round just above minus a half"))
+    out.push(same(math.ceil(-0.5), -0.0, "ceil(-0.5)"))
+    out.push(same(math.floor(-0.0), -0.0, "floor(-0)"))
+    out.push(same(math.floor(0.5), 0.0, "floor(0.5)"))
+    out.push(same(math.floor(-0.5), -1.0, "floor(-0.5)"))
+    out.push(same(math.ceil(0.5), 1.0, "ceil(0.5)"))
+    // One NaN rule, whichever side the NaN is on: it is carried. min(nan, 1)
+    // was 1.0 and min(1, nan) a NaN; clamp turned a NaN into `low`.
+    out.push(same(math.min(nan(), 1.0), nan(), "min(NaN, 1)"))
+    out.push(same(math.min(1.0, nan()), nan(), "min(1, NaN)"))
+    out.push(same(math.max(nan(), 1.0), nan(), "max(NaN, 1)"))
+    out.push(same(math.max(1.0, nan()), nan(), "max(1, NaN)"))
+    out.push(same(math.clamp(nan(), 0.0, 1.0), nan(), "clamp(NaN, 0, 1)"))
+    out.push(same(math.min(0.0, -0.0), -0.0, "min(0, -0)"))
+    out.push(same(math.min(-0.0, 0.0), -0.0, "min(-0, 0)"))
+    out.push(same(math.max(-0.0, 0.0), 0.0, "max(-0, 0)"))
+    out.push(same(math.max(0.0, -0.0), 0.0, "max(0, -0)"))
+    out.push(same(math.min(2.0, 3.0), 2.0, "min"))
+    out.push(same(math.max(2.0, 3.0), 3.0, "max"))
+    out.push(same(math.min(-inf(), 3.0), -inf(), "min(-inf, 3)"))
+    out.push(same(math.clamp(-5.0, 0.0, 1.0), 0.0, "clamp below"))
+    out.push(same(math.hypot(inf(), nan()), inf(), "hypot(inf, NaN)"))
+    out.push(same(math.hypot(nan(), 1.0), nan(), "hypot(NaN, 1)"))
+    return out
+}
+
 fn main() {
     var results: [error] = []
     results = concat(results, pow_checks())
     results = concat(results, exp_checks())
     results = concat(results, edge_checks())
+    results = concat(results, sign_checks())
     var failed = 0
     for e in results {
         if e != nil {

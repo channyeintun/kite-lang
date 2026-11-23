@@ -3,27 +3,71 @@
 // Written in Kite, like the rest of the standard library. Nothing here needs
 // compiler support, which is the test a standard library should have to pass.
 
+/// The distance from zero, which is never negative: `abs(-0.0)` is 0.0.
+///
+/// ```kite
+/// assert(1.0 / abs(-0.0) > 0.0, "abs(-0.0) is +0.0")
+/// ```
+///
+/// `x <= 0.0` rather than `x < 0.0`, because -0.0 is not below zero and so
+/// came back as itself; `0.0 - -0.0` is +0.0.
 pub fn abs(x: float) -> float {
-    if x < 0.0 {
+    if x <= 0.0 {
         return 0.0 - x
     }
     return x
 }
 
+/// The smaller of two floats. A NaN in either is the answer, whichever side
+/// it is on, and -0.0 is smaller than 0.0: IEEE 754's `minimum`.
+///
+/// ```kite
+/// assert(!(min(0.0 / 0.0, 1.0) >= 0.0), "a NaN is carried through")
+/// assert(!(min(1.0, 0.0 / 0.0) >= 0.0), "from either side")
+/// assert(1.0 / min(0.0, -0.0) < 0.0, "-0.0 is the smaller zero")
+/// ```
+///
+/// Returning `b` whenever `a < b` is false, as this did, made the answer
+/// depend on which argument the NaN was: `min(nan, 1.0)` was 1.0 and
+/// `min(1.0, nan)` a NaN. Carrying it is the choice that cannot hide one.
 pub fn min(a: float, b: float) -> float {
     if a < b {
         return a
     }
-    return b
+    if b < a {
+        return b
+    }
+    // Equal, or unordered because one is a NaN. Of two equal zeros the
+    // negative one is the smaller; only dividing by it tells -0.0 apart.
+    if a >= b {
+        if 1.0 / a < 0.0 {
+            return a
+        }
+        return b
+    }
+    return a + b
 }
 
+/// The larger of two floats. A NaN in either is the answer, and 0.0 is
+/// larger than -0.0: IEEE 754's `maximum`, the mirror of [`min`].
 pub fn max(a: float, b: float) -> float {
     if a > b {
         return a
     }
-    return b
+    if b > a {
+        return b
+    }
+    if a >= b {
+        if 1.0 / a > 0.0 {
+            return a
+        }
+        return b
+    }
+    return a + b
 }
 
+/// `x` held within `[low, high]`. A NaN stays a NaN rather than becoming
+/// `low`, since [`min`] and [`max`] carry it.
 pub fn clamp(x: float, low: float, high: float) -> float {
     return min(max(x, low), high)
 }
@@ -35,11 +79,25 @@ pub fn clamp(x: float, low: float, high: float) -> float {
 /// the cast saturates: `trunc(1e20)` used to answer 9223372036854775808. Such a
 /// value is its own truncation, and so is an infinity or a NaN, so they are
 /// handed back untouched and only what fits goes through the cast.
+///
+/// An `int` has no -0, so a negative number that truncates to zero came back
+/// +0.0 from the cast. It keeps its sign, as in C and IEEE 754, and so do
+/// `floor`, `ceil` and `round`, which start here: `ceil(-0.5)` is -0.0.
+///
+/// ```kite
+/// assert(1.0 / trunc(-0.5) < 0.0, "trunc(-0.5) is -0.0")
+/// assert(1.0 / round(-0.4) < 0.0, "round(-0.4) is -0.0")
+/// ```
 pub fn trunc(x: float) -> float {
     if !(abs(x) < two_52()) {
         return x
     }
-    return (x as int) as float
+    let t = (x as int) as float
+    if t == 0.0 {
+        // Zero with `x`'s sign: -0.4 · 0 is -0.0.
+        return x * 0.0
+    }
+    return t
 }
 
 /// 2⁵², the magnitude from which every float is a whole number: the spacing
@@ -384,6 +442,11 @@ pub fn wrapping_add(a: int, b: int) -> int {
 pub fn hypot(x: float, y: float) -> float {
     let a = abs(x)
     let b = abs(y)
+    // An infinite side makes the hypotenuse infinite even beside a NaN, as
+    // C99 has it; `max` would carry the NaN.
+    if a > max_float() || b > max_float() {
+        return 1.0 / 0.0
+    }
     let big = max(a, b)
     if !(big < big * 2.0) {
         // Zero, an infinity, or a NaN: nothing to scale.
