@@ -657,6 +657,61 @@ fn main() {
     );
 }
 
+/// `toml.parse` is linear in the shapes that were quadratic: forty thousand
+/// sections, forty thousand dotted keys under one table, one inline table of
+/// forty thousand keys, and — linear already, kept so — forty thousand plain
+/// keys in one section. The document was nested `Toml` while it was read,
+/// and a map is a value, so placing a key rebuilt every table on its path,
+/// the root's included: this program took 51 s on Wasm and minutes natively.
+/// It is read into flat tables written in place now, and nested once at the
+/// end. Natively and on Wasm only: the debug VM's constant, a quarter of a
+/// millisecond a section, leaves no bound that both a linear run meets and
+/// the old one misses by a margin; its output is the differential suite's.
+#[test]
+fn toml_parse_is_linear_in_sections_dotted_keys_and_inline_tables() {
+    let src = r#"use std/toml
+
+fn count(text: str, path: str) -> int {
+    let (doc, err) = toml.parse(text)
+    if err != nil {
+        io.print(err.message())
+        return -1
+    }
+    return toml.keys_at(doc, path).len()
+}
+
+fn main() {
+    let n = 40000
+    var sections: [str] = []
+    var dotted: [str] = ["[d]"]
+    var inline: [str] = ["t = { "]
+    var plain: [str] = ["[p]"]
+    for i in 0..n {
+        sections.push("[s\(i)]\na = \(i)")
+        dotted.push("e.k\(i) = \(i)")
+        inline.push("k\(i) = \(i), ")
+        plain.push("k\(i) = \"v\(i)\"")
+    }
+    inline.push("last = 0 }")
+    let a = count(join(sections, "\n"), "")
+    let b = count(join(dotted, "\n"), "d.e")
+    let c = count(join(inline, ""), "t")
+    let d = count(join(plain, "\n"), "p")
+    io.print("\(a) \(b) \(c) \(d)")
+}
+"#;
+    let _turn = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+    let expected = "40000 40000 40001 40000\n";
+    if let Some((out, took)) = on_native("toml-at-scale", src) {
+        assert_eq!(out, expected, "the native backend");
+        assert!(took < Duration::from_secs(30), "the native backend took {:?}", took);
+    }
+    if let Some((out, took)) = on_wasm("toml-at-scale", src) {
+        assert_eq!(out, expected, "wasm");
+        assert!(took < Duration::from_secs(10), "wasm took {:?}", took);
+    }
+}
+
 /// A deep chain of awaits — a recursive `async fn`, the shape of a recursive
 /// walk — is linear on all three backends. An `await` that had to wait parked
 /// with no target, and every task finishing woke every parked task, so each

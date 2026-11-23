@@ -3136,6 +3136,578 @@ pub async fn main() {
     ("passed-fields-are-written-in-place-unseen", PASSED_FIELDS),
 ];
 
+/// See `toml-reads-what-it-read` in [`EXPECTED`]. Each document's parse is
+/// written out in full: keys in their order with their lengths, values with
+/// their types, then `toml.emit`'s text of it.
+const TOML_DOCUMENTS: &str = r##"use std/toml
+
+fn dump(v: toml.Toml) -> str {
+    return match v {
+        toml.Toml.Bool(b) => if b { "T" } else { "F" }
+        toml.Toml.Int(n) => "I\(n)"
+        toml.Toml.Float(f) => "D\(f)"
+        toml.Toml.Text(s) => "S" + "\(s.len())" + ":" + s
+        toml.Toml.Array(items) => dump_items(items)
+        toml.Toml.Table(t) => dump_table(t)
+    }
+}
+
+fn dump_items(items: [toml.Toml]) -> str {
+    var out: [str] = []
+    for item in items {
+        out.push(dump(item))
+    }
+    return "[" + join(out, ",") + "]"
+}
+
+fn dump_table(t: { str: toml.Toml }) -> str {
+    var out: [str] = []
+    for (k, v) in t {
+        out.push("\(k.len())" + ":" + k + "=" + dump(v))
+    }
+    return "{" + join(out, ",") + "}"
+}
+
+fn main() {
+    let docs = ["", "# just a comment\n", "a = 1", "a = 1\r\nb = 2\r\n", "a = 1 # trailing\nb = 'x' # y", "\"quoted key\" = 1\n'lit key' = 2\nbare-key_1 = 3", "a.b.c = 1\na.b.d = 2\na.e = 3", "a . b = 1", "\"a.b\".c = 1", "[t]\nx = 1\n[t.u]\ny = 2\n[v]\nz = 3", "[a.b.c]\nx = 1\n[a]\ny = 2", "[a]\n[a]", "[a]\nb = 1\n[a.b]", "[a.b]\n[a]\n[a.b]", "[[fruit]]\nname = \"apple\"\n[fruit.physical]\ncolor = \"red\"\n[[fruit.variety]]\nname = \"red delicious\"\n[[fruit.variety]]\nname = \"granny\"\n[[fruit]]\nname = \"banana\"\n[[fruit.variety]]\nname = \"plantain\"", "[[a]]\n[a]", "[a]\n[[a]]", "a = [1]\n[[a]]", "a = 1\n[a]", "a = {}\n[a]", "a = { b = 1 }\n[a.c]", "a = { b = 1 }\na.c = 2", "[a]\nb.c = 1\n[a.b]", "[a]\nb.c = 1\n[a.b.d]\nx = 1", "a.b = 1\n[a]\nc = 2", "[x]\na.b = 1\n[y]\n[x.a]", "[x]\na.b = 1\n[x.a.c]", "a.b = 1\na = 2", "a = 2\na.b = 1", "a = 1\na = 2", "[[a]]\nb.c = 1\n[[a]]\nb.c = 2", "[[a]]\nx = 1\n[a.b]\ny = 2\n[[a]]\n[a.b]\nz = 3", "[[a.b]]\n[[a.b]]\n[a]\nc = 1", "[[a]]\n[[a.b]]\nx = 1\n[[a]]\n[[a.b]]\ny = 2", "[a]\n[[a.b]]\nc = 1\nd.e = 2", "a = [[1, 2], [\"x\"], [{ b = 1 }]]\n[[a]]", "a = []\n[[a]]", "t = { a = 1, b.c = 2, b.d = 3 }", "t = { a = 1, a = 2 }", "t = { a = { b = 1 }, a.c = 2 }", "t = { a.b = 1, a = 2 }", "t = { a = [1], a.b = 2 }", "t = { }", "t = {a=1}", "t = { a = 1, }", "t = { a = 1", "t = { a = 1 b = 2 }", "a = [\n 1,\n 2, # c\n]", "a = [1,,2]", "a = [", "a = ]", "s = \"tab\\there\\n\\u00e9\\U0001F600 \\\\ \\\"\"", "s = 'C:\\\\no\\\\escape'", "s = \"\"\"\nline1\nline2 \\\n   folded\"\"\"", "s = '''\nraw \\n\nx'''", "s = \"\\x\"", "s = \"open", "s = \"\"\"open", "s = '''open", "s = \"a\nb\"", "n = [0, -1, +2, 1_000, 0xdead_BEEF, 0o755, 0b1101, -0]", "f = [1.0, -3.5e2, 6.02E23, 1e-3, 0.1]", "n = 1__0", "n = _1", "n = 1_", "n = 0x", "n = 00", "n = 9223372036854775808", "n = -9223372036854775808", "f = 1.", "f = .5", "f = inf", "f = nan", "f = 1e", "b = [true, false]", "b = True", "d = [1979-05-27, 07:32:00, 1979-05-27T07:32:00Z, 1979-05-27 07:32:00.999-07:00, 1979-05-27T00:32:00.5]", "d = 1979-13-27", "d = 1979-05-27T25:00:00", "= 1", "a", "a b = 1", "a = 1 2", "[a", "[[a]", "[a]]", "[]", "[ a . b ]\nx=1", "a.= 1", ".a = 1", "a.. b = 1", "\"\" = 1", "'' = 2", "a = \"\u{1}\"", "a = 1\u{7f}", "[k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k]", "[k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k]\nx = 1", "k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k = 1", "a = [[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]", "a = [[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]", "[k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k]\nj.j.j.j.j.j.j.j.j.j.j.j.j.j.j.j.j.j.j.j.j.j.j.j.j.j.j.j.j = 1", "t = { a = { a = { a = { a = { a = { a = { a = { a = { a = { a = { a = { a = { a = { a = { a = { a = { a = { a = { a = { a = { a = { a = { a = { a = { a = { a = { a = { a = { a = { a = { a = { a = { a = { a = { a = { a = { a = { a = { a = { a = { a = { a = { a = { a = { a = { a = { a = { a = { a = { a = { a = { a = { a = { a = { a = { a = { a = { a = { a = { a = { a = { a = { a = { a = { a = { a = { a = { a = { a = { a = 1 } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } }", "[a.\"b.c\".'d']\nx = 1", "[ \"x\" ]\n[\"x\".y]", "[a]\nb = 1\n[c]\nd = 2\n[a.e]\nf = 3", "x.y.z = 1\nx.y.w = 2\n[x.v]\nq = 1", "[s1]\na = 1\n[s2]\na = 2\n[s1.t]\nb = 1", "name = \"kite\"\n[package]\nname = \"x\"\nversion = \"0.1.0\"\n[dependencies]\nfoo = { version = \"1\", path = \"../foo\" }\nbar = \"2\"", "[a]\nx = 1\n\n\n   [b]   # comment\n   y = 2", "a = 1\n\t[b]\n\tc = 2", "[a]b = 1", "a = 1 # comment with \"quote", "[[a]]\nb = { c = 1 }\n[a.b.d]", "[[a]]\n[a.b]\n[[a.b.c]]\nx = 1\n[[a.b.c]]\nx = 2", "a = { b = [ { c = 1 } ] }\n[a.b]"]
+    for d in docs {
+        let (doc, err) = toml.parse(d)
+        if err != nil {
+            io.print("E " + err.message())
+        } else {
+            io.print("O " + dump(doc))
+            io.print("M " + toml.emit(doc))
+        }
+    }
+}
+"##;
+
+const TOML_DOCUMENTS_READ: &str = r##"O {}
+M 
+O {}
+M 
+O {1:a=I1}
+M a = 1
+
+O {1:a=I1,1:b=I2}
+M a = 1
+b = 2
+
+O {1:a=I1,1:b=S1:x}
+M a = 1
+b = "x"
+
+O {10:quoted key=I1,7:lit key=I2,10:bare-key_1=I3}
+M "quoted key" = 1
+"lit key" = 2
+bare-key_1 = 3
+
+O {1:a={1:b={1:c=I1,1:d=I2},1:e=I3}}
+M 
+[a]
+e = 3
+
+[a.b]
+c = 1
+d = 2
+
+O {1:a={1:b=I1}}
+M 
+[a]
+b = 1
+
+O {3:a.b={1:c=I1}}
+M 
+["a.b"]
+c = 1
+
+O {1:t={1:x=I1,1:u={1:y=I2}},1:v={1:z=I3}}
+M 
+[t]
+x = 1
+
+[t.u]
+y = 2
+
+[v]
+z = 3
+
+O {1:a={1:b={1:c={1:x=I1}},1:y=I2}}
+M 
+[a]
+y = 2
+
+[a.b]
+
+[a.b.c]
+x = 1
+
+E toml: `[a]` defines a table that is already defined
+E toml: `a.b` is already a value, not a table
+E toml: `[a.b]` defines a table that is already defined
+O {5:fruit=[{4:name=S5:apple,8:physical={5:color=S3:red},7:variety=[{4:name=S13:red delicious},{4:name=S6:granny}]},{4:name=S6:banana,7:variety=[{4:name=S8:plantain}]}]}
+M 
+[[fruit]]
+name = "apple"
+
+[fruit.physical]
+color = "red"
+
+[[fruit.variety]]
+name = "red delicious"
+
+[[fruit.variety]]
+name = "granny"
+
+[[fruit]]
+name = "banana"
+
+[[fruit.variety]]
+name = "plantain"
+
+E toml: `a` is an array of tables, not a table
+E toml: `a` is a table, not an array of tables
+E toml: `a` is already a value; an array written with `[…]` cannot be appended to
+E toml: `a` is already a value, not a table
+E toml: `a` is already a value, not a table
+E toml: `a` is already a value, not a table
+E toml: `a` is already a value, not a table
+E toml: `[a.b]` defines a table that is already defined
+O {1:a={1:b={1:c=I1,1:d={1:x=I1}}}}
+M 
+[a]
+
+[a.b]
+c = 1
+
+[a.b.d]
+x = 1
+
+E toml: `[a]` defines a table that is already defined
+E toml: `[x.a]` defines a table that is already defined
+O {1:x={1:a={1:b=I1,1:c={}}}}
+M 
+[x]
+
+[x.a]
+b = 1
+
+[x.a.c]
+
+E toml: `a` is set twice
+E toml: `a` is already a value, not a table
+E toml: `a` is set twice
+O {1:a=[{1:b={1:c=I1}},{1:b={1:c=I2}}]}
+M 
+[[a]]
+
+[a.b]
+c = 1
+
+[[a]]
+
+[a.b]
+c = 2
+
+O {1:a=[{1:x=I1,1:b={1:y=I2}},{1:b={1:z=I3}}]}
+M 
+[[a]]
+x = 1
+
+[a.b]
+y = 2
+
+[[a]]
+
+[a.b]
+z = 3
+
+O {1:a={1:b=[{},{}],1:c=I1}}
+M 
+[a]
+c = 1
+
+[[a.b]]
+
+[[a.b]]
+
+O {1:a=[{1:b=[{1:x=I1}]},{1:b=[{1:y=I2}]}]}
+M 
+[[a]]
+
+[[a.b]]
+x = 1
+
+[[a]]
+
+[[a.b]]
+y = 2
+
+O {1:a={1:b=[{1:c=I1,1:d={1:e=I2}}]}}
+M 
+[a]
+
+[[a.b]]
+c = 1
+
+[a.b.d]
+e = 2
+
+E toml: `a` is already a value; an array written with `[…]` cannot be appended to
+E toml: `a` is already a value; an array written with `[…]` cannot be appended to
+O {1:t={1:a=I1,1:b={1:c=I2,1:d=I3}}}
+M 
+[t]
+a = 1
+
+[t.b]
+c = 2
+d = 3
+
+E toml: `a` is set twice
+E toml: `a` is already a value, not a table
+E toml: `a` is set twice
+E toml: `a` is already a value, not a table
+O {1:t={}}
+M 
+[t]
+
+O {1:t={1:a=I1}}
+M 
+[t]
+a = 1
+
+E toml: expected a key at 13
+E toml: expected `,` or `}` at 11
+E toml: `1 b = 2` is not a number
+O {1:a=[I1,I2]}
+M a = [1, 2]
+
+E toml: expected a value at 7
+E toml: unterminated array at 4
+E toml: expected a value at 4
+O {1:s=S15:tab	here
+é😀 \ "}
+M s = "tab\there\né😀 \\ \""
+
+O {1:s=S14:C:\\no\\escape}
+M s = "C:\\\\no\\\\escape"
+
+O {1:s=S18:line1
+line2 folded}
+M s = "line1\nline2 folded"
+
+O {1:s=S8:raw \n
+x}
+M s = "raw \\n\nx"
+
+E toml: unknown escape `\x` at 5
+E toml: unterminated string at 4
+E toml: unterminated multi-line string at 7
+E toml: unterminated multi-line string at 7
+E toml: newline in a single-line string at 6
+O {1:n=[I0,I-1,I2,I1000,I3735928559,I493,I13,I0]}
+M n = [0, -1, 2, 1000, 3735928559, 493, 13, 0]
+
+O {1:f=[D1.0,D-350.0,D6.02e+23,D0.001,D0.1]}
+M f = [1.0, -350.0, 6.02e+23, 0.001, 0.1]
+
+E toml: `1__0` is not a number
+E toml: `_1` is not a number
+E toml: `1_` is not a number
+E toml: `0x` is not a number
+E toml: `00` starts with a zero, which only `0` itself may
+E toml: `9223372036854775808` does not fit in an int
+O {1:n=I-9223372036854775808}
+M n = -9223372036854775808
+
+E toml: `1.` needs a digit after its point
+E toml: `.5` is not a number
+E toml: `inf` has no value in Kite
+E toml: `nan` has no value in Kite
+E toml: `1e` needs digits in its exponent
+O {1:b=[T,F]}
+M b = [true, false]
+
+E toml: `True` is not a number
+O {1:d=[S10:1979-05-27,S8:07:32:00,S20:1979-05-27T07:32:00Z,S29:1979-05-27 07:32:00.999-07:00,S21:1979-05-27T00:32:00.5]}
+M d = [1979-05-27, 07:32:00, 1979-05-27T07:32:00Z, 1979-05-27 07:32:00.999-07:00, 1979-05-27T00:32:00.5]
+
+E toml: `1979-13-27` is not a date or a time TOML can write
+E toml: `1979-05-27T25:00:00` is not a date or a time TOML can write
+E toml: expected a key at 0
+E toml: expected `=` at 1
+E toml: expected `=` at 2
+E toml: `1 2` is not a number
+E toml: expected `]` at 2
+E toml: expected `]` at 4
+E toml: unexpected text at 3
+E toml: expected a key at 1
+O {1:a={1:b={1:x=I1}}}
+M 
+[a]
+
+[a.b]
+x = 1
+
+E toml: expected a key at 2
+E toml: expected a key at 0
+E toml: expected a key at 2
+O {0:=I1}
+M "" = 1
+
+O {0:=I2}
+M "" = 2
+
+E toml: a control character in a string must be escaped, at 5
+E toml: unexpected control character at 5
+E toml: nested deeper than 128 at 0
+E toml: nested deeper than 128 at 258
+E toml: nested deeper than 128 at 0
+E toml: nested deeper than 128 at 131
+O {1:a=[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]}
+M a = [[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]
+
+E toml: nested deeper than 128 at 202
+O {1:t={1:a={1:a={1:a={1:a={1:a={1:a={1:a={1:a={1:a={1:a={1:a={1:a={1:a={1:a={1:a={1:a={1:a={1:a={1:a={1:a={1:a={1:a={1:a={1:a={1:a={1:a={1:a={1:a={1:a={1:a={1:a={1:a={1:a={1:a={1:a={1:a={1:a={1:a={1:a={1:a={1:a={1:a={1:a={1:a={1:a={1:a={1:a={1:a={1:a={1:a={1:a={1:a={1:a={1:a={1:a={1:a={1:a={1:a={1:a={1:a={1:a={1:a={1:a={1:a={1:a={1:a={1:a={1:a={1:a={1:a=I1}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}
+M 
+[t]
+
+[t.a]
+
+[t.a.a]
+
+[t.a.a.a]
+
+[t.a.a.a.a]
+
+[t.a.a.a.a.a]
+
+[t.a.a.a.a.a.a]
+
+[t.a.a.a.a.a.a.a]
+
+[t.a.a.a.a.a.a.a.a]
+
+[t.a.a.a.a.a.a.a.a.a]
+
+[t.a.a.a.a.a.a.a.a.a.a]
+
+[t.a.a.a.a.a.a.a.a.a.a.a]
+
+[t.a.a.a.a.a.a.a.a.a.a.a.a]
+
+[t.a.a.a.a.a.a.a.a.a.a.a.a.a]
+
+[t.a.a.a.a.a.a.a.a.a.a.a.a.a.a]
+
+[t.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a]
+
+[t.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a]
+
+[t.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a]
+
+[t.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a]
+
+[t.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a]
+
+[t.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a]
+
+[t.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a]
+
+[t.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a]
+
+[t.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a]
+
+[t.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a]
+
+[t.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a]
+
+[t.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a]
+
+[t.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a]
+
+[t.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a]
+
+[t.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a]
+
+[t.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a]
+
+[t.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a]
+
+[t.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a]
+
+[t.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a]
+
+[t.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a]
+
+[t.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a]
+
+[t.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a]
+
+[t.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a]
+
+[t.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a]
+
+[t.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a]
+
+[t.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a]
+
+[t.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a]
+
+[t.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a]
+
+[t.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a]
+
+[t.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a]
+
+[t.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a]
+
+[t.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a]
+
+[t.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a]
+
+[t.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a]
+
+[t.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a]
+
+[t.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a]
+
+[t.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a]
+
+[t.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a]
+
+[t.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a]
+
+[t.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a]
+
+[t.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a]
+
+[t.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a]
+
+[t.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a]
+
+[t.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a]
+
+[t.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a]
+
+[t.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a]
+
+[t.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a]
+
+[t.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a]
+
+[t.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a]
+
+[t.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a]
+
+[t.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a]
+
+[t.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a]
+
+[t.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a]
+
+[t.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a]
+
+[t.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a]
+a = 1
+
+O {1:a={3:b.c={1:d={1:x=I1}}}}
+M 
+[a]
+
+[a."b.c"]
+
+[a."b.c".d]
+x = 1
+
+O {1:x={1:y={}}}
+M 
+[x]
+
+[x.y]
+
+O {1:a={1:b=I1,1:e={1:f=I3}},1:c={1:d=I2}}
+M 
+[a]
+b = 1
+
+[a.e]
+f = 3
+
+[c]
+d = 2
+
+O {1:x={1:y={1:z=I1,1:w=I2},1:v={1:q=I1}}}
+M 
+[x]
+
+[x.y]
+z = 1
+w = 2
+
+[x.v]
+q = 1
+
+O {2:s1={1:a=I1,1:t={1:b=I1}},2:s2={1:a=I2}}
+M 
+[s1]
+a = 1
+
+[s1.t]
+b = 1
+
+[s2]
+a = 2
+
+O {4:name=S4:kite,7:package={4:name=S1:x,7:version=S5:0.1.0},12:dependencies={3:foo={7:version=S1:1,4:path=S6:../foo},3:bar=S1:2}}
+M name = "kite"
+
+[package]
+name = "x"
+version = "0.1.0"
+
+[dependencies]
+bar = "2"
+
+[dependencies.foo]
+version = "1"
+path = "../foo"
+
+O {1:a={1:x=I1},1:b={1:y=I2}}
+M 
+[a]
+x = 1
+
+[b]
+y = 2
+
+O {1:a=I1,1:b={1:c=I2}}
+M a = 1
+
+[b]
+c = 2
+
+E toml: unexpected text at 3
+O {1:a=I1}
+M a = 1
+
+E toml: `a.b` is already a value, not a table
+O {1:a=[{1:b={1:c=[{1:x=I1},{1:x=I2}]}}]}
+M 
+[[a]]
+
+[a.b]
+
+[[a.b.c]]
+x = 1
+
+[[a.b.c]]
+x = 2
+
+E toml: `a` is already a value, not a table
+"##;
+
 /// See `passed-fields-are-written-in-place-unseen` in [`NATIVE_TARGET`].
 const PASSED_FIELDS: &str = r#"// A field's slice or map passed to a function between writes through the
 // field: whatever the function kept, or saw while it ran, must not see a
@@ -7786,6 +8358,11 @@ qs [0,0,1] [1,0,1]\n\
 qs [1,0,1,2] [2,0,1,2]\n\
 qs [2,0,1,2,3] [3,0,1,2,3]\n\
 "),
+    // What `toml.parse` makes of a hundred and fifteen documents — every
+    // form the module reads, every rule about how a table comes to exist, and
+    // every error it reports — pinned to what it answered while it still
+    // built the document as nested `Toml`, before it read into flat tables.
+    ("toml-reads-what-it-read", TOML_DOCUMENTS, TOML_DOCUMENTS_READ),
     // An `Option<error>` that holds a nil error is present: `task.timeout` of
     // a task that finished in time has its result, whatever it is. The VM,
     // which does not box an optional's payload, read every one of these as
