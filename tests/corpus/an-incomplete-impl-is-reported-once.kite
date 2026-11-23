@@ -1,0 +1,56 @@
+// A trait impl that is written counts as an impl, complete or not. What it
+// leaves out is reported once, at the block; printing the type, a bound, a
+// `dyn`, an `error` slot, `T.is` and a call of the missing method add
+// nothing, and no note says to write the block that is already there.
+
+struct P {
+    a: int
+}
+
+impl Display for P { //~ ERROR E0200
+}
+
+trait Shape {
+    fn area(self) -> int
+}
+
+impl Shape for P { //~ ERROR E0200
+}
+
+struct Oops {
+    code: int
+}
+
+impl Error for Oops { //~ ERROR E0200
+}
+
+fn sh<T: Display>(x: T) -> str {
+    return x.show()
+}
+
+fn area<T: Shape>(x: T) -> int {
+    return x.area()
+}
+
+fn fail() -> (int, error) {
+    return 0, Oops{ code: 1 }
+}
+
+fn main() {
+    let p = P{ a: 1 }
+    io.print(p)
+    io.print("\(p)")
+    io.print(sh(p))
+    io.print(area(p))
+    io.print(p.area())
+    let d: dyn Display = p
+    io.print(d)
+    let s: dyn Shape = p
+    io.print(s.area())
+    let (v, e) = fail()
+    if e != nil {
+        io.print(Oops.is(e))
+        return
+    }
+    io.print(v)
+}

@@ -7272,6 +7272,11 @@ impl<'a> Checker<'a> {
         }
 
         let Some(fn_index) = found else {
+            // A method the type's own `impl` of a trait leaves out was
+            // reported at that block, and that report stops the build.
+            if self.impl_lacks(ti, &name.name) {
+                return self.lit(ExprKind::Error, TyId::ERROR, span);
+            }
             let type_name = self.resolved.type_decl(ti).name.clone();
             let mut d = Diagnostic::error(
                 codes::E0205,
@@ -8632,7 +8637,7 @@ impl<'a> Checker<'a> {
         let (Some(ti), Some(tri)) = (self.type_index_of(ty), self.trait_index_of(tr)) else {
             return false;
         };
-        if !self.resolved.implements(ti, tri) {
+        if !self.has_impl(ti, tri) {
             return false;
         }
         let Some(defs) = self
@@ -8657,6 +8662,31 @@ impl<'a> Checker<'a> {
             }
         }
         true
+    }
+
+    /// Whether the program has an `impl` block of a trait for a type.
+    ///
+    /// The resolver knows a block by its methods, so an empty one — every
+    /// method of the trait missing — was no implementation at all, and the
+    /// one mistake was told again by whatever asked: `io.print`, a bound, a
+    /// `dyn`, each with a note to write the block that is already there. A
+    /// block that exists counts, complete or not: what it lacks is reported
+    /// once, at the block, and that report stops the build.
+    fn has_impl(&self, ti: u32, tri: u32) -> bool {
+        self.resolved.implements(ti, tri) || self.trait_impls.contains_key(&(ti, tri))
+    }
+
+    /// Whether an `impl` block for the type `ti` is of a trait that
+    /// declares `method` — asked where the type has no such method, so the
+    /// block is one that leaves it out, which `check_impls` has reported.
+    fn impl_lacks(&self, ti: u32, method: &str) -> bool {
+        self.trait_impls.keys().any(|&(t, tri)| {
+            t == ti
+                && matches!(
+                    self.type_ids.get(tri as usize),
+                    Some(Some(TypeTarget::Trait(tr))) if self.types.trait_def(*tr).method(method).is_some()
+                )
+        })
     }
 
     /// Whether a trait is `Share`, the one bound nobody implements.
@@ -11690,7 +11720,7 @@ impl<'a> Checker<'a> {
                         }
                     }
                     _ if self.type_index_of(*t).is_some_and(|ti| {
-                        self.trait_index_of(*bound).is_some_and(|tri| self.resolved.implements(ti, tri))
+                        self.trait_index_of(*bound).is_some_and(|tri| self.has_impl(ti, tri))
                     }) =>
                     {
                         match self.unmet_impl_bound(*t, *bound) {
@@ -14302,7 +14332,15 @@ impl<'a> Checker<'a> {
         if !self.type_implements(v.ty, tr) {
             return None;
         }
-        let show = self.display_method(v.ty)?;
+        // An `impl Display` with no `show` in it was reported where it is
+        // written, and that report stops the build: it is not also told that
+        // the type cannot be printed.
+        let Some(show) = self.display_method(v.ty) else {
+            let block = self.type_index_of(v.ty).zip(self.trait_index_of(tr));
+            return block
+                .is_some_and(|b| self.trait_impls.contains_key(&b))
+                .then_some(hir::Expr { span, kind: ExprKind::Error, ty: TyId::STR });
+        };
         let targs = self.receiver_args(v.ty);
         // The call is the compiler's, not the program's, but it runs the same
         // body `p.show()` would, so it is held to what that body compares as
@@ -14469,6 +14507,18 @@ impl<'a> Checker<'a> {
         // comparing it would print `expected [<error>]` for the mistake that
         // was reported where `Foo` was written.
         if self.mentions_error(found) || self.mentions_error(expected) {
+            return;
+        }
+        // An `impl Error` with no `message` in it was reported at the block,
+        // and the value is not then also told it is no `error`, with a note
+        // to write the block that is there.
+        if expected == TyId::ERR
+            && self.error_method(found).is_none()
+            && self
+                .type_index_of(found)
+                .zip(self.error_trait().and_then(|tr| self.trait_index_of(tr)))
+                .is_some_and(|b| self.trait_impls.contains_key(&b))
+        {
             return;
         }
         // A `(T, error)` written as a type is a tuple, and a fallible call's
