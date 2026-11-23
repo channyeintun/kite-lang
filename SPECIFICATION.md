@@ -134,7 +134,9 @@ A ` ```kite ` fence is compiled and run by `kitec test`, alongside the file's
 `test_…` functions. It is appended to the module it was written in, so
 everything the comment documents is in scope with no import to get wrong; a
 fence that declares a type or a function lands at file scope and is checked by
-compiling. `kitec test` and `kitec doc` take one file: a file of a directory
+compiling — it is not run, so an `assert` inside a function it declares is
+never evaluated; a fence holds declarations or statements, not both. `kitec
+test` and `kitec doc` take one file: a file of a directory
 module tested on its own is compiled as that file alone, so its fences and
 `test_…` functions do not see what its sibling files declare — a directory
 module's tests that need them belong in a test file that imports the module.
@@ -219,7 +221,8 @@ with `(` or `[` starts a statement of its own — `(g)()` is a call — so it is
 never an index into, or a call on, the line above. Two leading tokens work the
 other way: a line that begins with `.` continues the line above, so a method
 chain may put each call on a line of its own, and a line that begins with
-`else` belongs to the `if` whose `}` ends the line above. `>` and `>>`
+`else` belongs to the `if` whose `}` ends the line above; a line that begins
+with `)` or `]` closes what the line above left open. `>` and `>>`
 continue a line as the other operators do, and the `>` that closes
 `Option<int>` ends one; `return` is not an operator, and a line ending in it
 ends there.
