@@ -15327,9 +15327,12 @@ fn resolve_named_ty(
                         // was accepted.
                         match resolved.missing_type_member(module, &p.segments, codes::E0204) {
                             Some(d) => diags.push(d),
-                            None => {
-                                resolve_ty(t, types, diags);
-                            }
+                            None => match std_type_unimported(p, resolved, module) {
+                                Some(d) => diags.push(d),
+                                None => {
+                                    resolve_ty(t, types, diags);
+                                }
+                            },
                         }
                     }
                     TyId::ERROR
@@ -15411,7 +15414,13 @@ fn resolve_named_ty(
                         diags.push(d);
                         TyId::ERROR
                     }
-                    None => resolve_ty(t, types, diags),
+                    None => match std_type_unimported(p, resolved, module) {
+                        Some(d) => {
+                            diags.push(d);
+                            TyId::ERROR
+                        }
+                        None => resolve_ty(t, types, diags),
+                    },
                 },
             }
         }
@@ -15498,6 +15507,29 @@ fn resolve_named_ty(
         },
         other => resolve_ty(other, types, diags),
     }
+}
+
+/// The `E0204` for `json.Json` written with no `use std/json`: the
+/// qualifier is a standard-library module the file did not import, and that
+/// module declares the type. It says the `use` to add, in the words the
+/// `E0111` for `json.parse` uses.
+fn std_type_unimported(p: &ast::TypePath, resolved: &ResolveMap, module: &str) -> Option<Diagnostic> {
+    let [head, member] = &p.segments[..] else { return None };
+    let has = resolved.modules.std_declares?;
+    if !has(&head.name, &member.name) || resolved.imported_as(module, &head.name).is_some() {
+        return None;
+    }
+    Some(
+        Diagnostic::error(codes::E0204, format!("unknown type `{}`", p.text()))
+            .with_primary(p.span, "no type of this name is in scope")
+            .with_note(format!(
+                "`{}` is in the standard library's `{}` module, which this file does not \
+                 import: add `use std/{}`",
+                p.text(),
+                head.name,
+                head.name
+            )),
+    )
 }
 
 /// A map compares its keys with `==`, so a key type is one `==` is defined

@@ -891,7 +891,12 @@ fn run_passes(
     // recovers, so later passes can report their own findings on the parts that
     // did parse. Code generation does not, because its input would be poisoned.
     let unresolved = std::mem::take(&mut loader.unresolved);
-    let module_map = kite_resolve::Modules { of_item: item_modules, aliases, unresolved };
+    let module_map = kite_resolve::Modules {
+        of_item: item_modules,
+        aliases,
+        unresolved,
+        std_declares: Some(modules::std_declares),
+    };
     let resolved = kite_resolve::resolve_modules(&ast, module_map, diags);
     let mut solved = kite_types::Solved::default();
     let mut hir = kite_types::check_recording(&ast, &resolved, sources, diags, release, &mut solved);
@@ -1836,6 +1841,33 @@ mod tests {
         let text = c.render_diagnostics();
         assert!(text.contains("`int` does not take type arguments"), "{}", text);
         assert!(!text.contains("unknown type") && !text.contains("similar type"), "{}", text);
+    }
+
+    /// A standard-library module written without its `use` is told the
+    /// `use`, in one wording for every module and for a type as for a
+    /// function; and the program with that `use` added compiles.
+    #[test]
+    fn a_std_module_used_without_its_use_says_which_use() {
+        for (module, member) in [("errors", "wrap(e, \"x\")"), ("json", "parse(\"1\")"), ("text", "clusters(\"ab\")")] {
+            let body = format!(
+                "fn f() -> error {{\n  return errors.new(\"boom\")\n}}\nfn main() {{\n  let e = f()\n  if e != nil {{\n    \
+                 io.print(e.message())\n  }}\n  _ = {}.{}\n}}\n",
+                module, member
+            );
+            let c = compile("t.kite", &body, Emit::Check);
+            let text = c.render_diagnostics();
+            let codes: Vec<&str> = c.diags.iter().filter_map(|d| d.code.map(|x| x.0)).collect();
+            assert_eq!(codes, vec!["E0111"], "{}", text);
+            assert!(
+                text.contains(&format!("which this file does not import: add `use std/{}`", module)),
+                "{}",
+                text
+            );
+            let c = compile("t.kite", &format!("use std/{}\n{}", module, body), Emit::Check);
+            assert!(!c.failed(), "{}", c.render_diagnostics());
+        }
+        let c = compile("t.kite", "fn f(j: json.Json) {\n}\nfn main() {\n}\n", Emit::Check);
+        assert!(c.render_diagnostics().contains("add `use std/json`"), "{}", c.render_diagnostics());
     }
 
     /// A note never says to write an `impl` the orphan rule refuses:
