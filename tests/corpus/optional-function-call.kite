@@ -1,0 +1,10 @@
+// An `Option<fn(…)>` is called only where it is proved present; there it is
+// the function it holds.
+
+fn main() {
+    let f: Option<fn(int) -> int> = |a: int| a + 1
+    io.print(f(1)) //~ ERROR E0205
+    if f != nil {
+        io.print(f(41))
+    }
+}

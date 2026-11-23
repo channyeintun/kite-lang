@@ -1,0 +1,58 @@
+// A type has one method of each name across all of its `impl` blocks, trait
+// implementations and the defaults they take included. A call used to find
+// whichever block came first in the file, so swapping two blocks changed what
+// a program printed, and nothing said so.
+
+trait A {
+    fn go(self) -> str
+}
+
+trait B {
+    fn go(self) -> str
+}
+
+trait Named {
+    fn name(self) -> str {
+        return "named"
+    }
+}
+
+struct S {
+    n: int
+}
+
+impl B for S {
+    fn go(self) -> str {
+        return "B"
+    }
+}
+
+impl A for S {
+    fn go(self) -> str { //~ ERROR E0112
+        return "A"
+    }
+}
+
+impl S {
+    fn name(self) -> str {
+        return "inherent"
+    }
+}
+
+impl Named for S { } //~ ERROR E0112
+
+impl Display for S {
+    fn show(self) -> str {
+        return "display"
+    }
+}
+
+impl S {
+    fn show(self) -> str { //~ ERROR E0112
+        return "inherent"
+    }
+}
+
+fn main() {
+    io.print(S{ n: 1 }.go())
+}

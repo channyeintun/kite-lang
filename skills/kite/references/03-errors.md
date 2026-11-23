@@ -847,6 +847,9 @@ fn main() {
 `T.as(err)` returns `Option<T>`, spelled `Option<T>` — there is no `?T` syntax;
 `?` is not even a Kite token. Narrow it with `if hit != nil { … }`.
 
+Only a type that implements `Error` has `is` and `as`: on any other,
+`Plain.is(err)` is `E0205`, since no error can carry it.
+
 For a generic error type, each specialisation is its own type: write the one you
 want on the binding, `let w: Option<Wrapped<int>> = Wrapped.as(err)`. A bare
 `Wrapped.as(err)`, and `Wrapped.is(err)`, cannot say which, and are `E0209`.

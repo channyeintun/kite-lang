@@ -39,13 +39,41 @@ pub struct Unbounded {
     pub why: Refusal,
 }
 
+/// A built-in value that a copy of a generic function converts to a `dyn`.
+///
+/// `int`, `float`, `bool` and `str` meet the prelude's `Display`, `Debug` and
+/// `Hash` as bounds ([`primitive_trait`]), so `fn wrap<T: Display>(x: T) ->
+/// dyn Display` checks, and is fine for a struct. A `dyn` dispatches through
+/// its type's table row, which a primitive does not have, so the copy for
+/// `int` is the first place the mistake can be seen; lowering it anyway
+/// crashed the native backend and emitted an invalid Wasm module.
+#[derive(Clone, Debug)]
+pub struct NoTable {
+    /// The conversion, in the template's body.
+    pub span: kite_span::Span,
+    pub ty: TyId,
+    pub trait_id: TraitId,
+    /// The copy that converts, by its specialised name, and the function that
+    /// asked for that copy.
+    pub copy: String,
+    pub asked_by: Option<String>,
+}
+
+/// Why monomorphisation stopped.
+#[derive(Clone, Debug)]
+pub enum Refused {
+    Unbounded(Unbounded),
+    NoTable(NoTable),
+}
+
 /// Specialise every generic function for the argument sets its callers use, and
 /// drop the templates.
 ///
 /// Fails when a generic function recurses at an ever larger type — `depth([x],
-/// n - 1)` inside `depth<T>` — which has no finite set of copies. The program
-/// is left half-rewritten then, and must not be lowered.
-pub fn monomorphise(program: &mut Program) -> Result<(), Unbounded> {
+/// n - 1)` inside `depth<T>` — which has no finite set of copies, or when a
+/// copy converts a built-in value to a `dyn` ([`NoTable`]). The program is
+/// left half-rewritten then, and must not be lowered.
+pub fn monomorphise(program: &mut Program) -> Result<(), Refused> {
     // A trait a `dyn` cannot hold is reached only through bounds, and every
     // call through a bound is a direct call by the end of this pass. Its
     // table would be dead weight at best; at worst a backend would type a
@@ -79,11 +107,15 @@ pub fn monomorphise(program: &mut Program) -> Result<(), Unbounded> {
     let mut lineage: Vec<Option<(u32, usize)>> = vec![None; out.len()];
     let mut pending: Vec<usize> = (0..out.len()).collect();
     let mut unbounded: Option<Unbounded> = None;
+    let mut no_table: Option<NoTable> = None;
     let mut rows: Vec<(TraitId, VTableEntry)> = Vec::new();
 
     while let Some(index) = pending.pop() {
         if let Some(u) = unbounded {
-            return Err(u);
+            return Err(Refused::Unbounded(u));
+        }
+        if let Some(n) = no_table {
+            return Err(Refused::NoTable(n));
         }
         // Take the body so the walk does not borrow `out` while `out` grows.
         let mut body = std::mem::take(&mut out[index].body);
@@ -98,6 +130,7 @@ pub fn monomorphise(program: &mut Program) -> Result<(), Unbounded> {
                 current: index,
                 pending: &mut pending,
                 unbounded: &mut unbounded,
+                no_table: &mut no_table,
                 vtables,
                 rows: &mut rows,
             };
@@ -106,7 +139,10 @@ pub fn monomorphise(program: &mut Program) -> Result<(), Unbounded> {
         out[index].body = body;
     }
     if let Some(u) = unbounded {
-        return Err(u);
+        return Err(Refused::Unbounded(u));
+    }
+    if let Some(n) = no_table {
+        return Err(Refused::NoTable(n));
     }
 
     if let Some(e) = entry {
@@ -157,6 +193,8 @@ struct Mono<'a> {
     pending: &'a mut Vec<usize>,
     /// Set by the first specialisation refused; the walk stops there.
     unbounded: &'a mut Option<Unbounded>,
+    /// Set by the first built-in value converted to a `dyn`; likewise.
+    no_table: &'a mut Option<NoTable>,
     /// The tables the checker built, over the declared functions.
     vtables: &'a [VTable],
     /// Rows for specialisations of generic types that became a `dyn`, over
@@ -264,13 +302,28 @@ impl Mono<'_> {
         // to that type's method — and becomes one here, before the forms
         // below renumber or specialise it like any other.
         if let ExprKind::CallVirtual { trait_id, method, args, targs } = &mut e.kind {
-            if let Some((callee, all)) = self.devirtualise(*trait_id, *method, args, targs) {
+            if let Some(kind) = self.primitive_method(*trait_id, args) {
+                e.kind = kind;
+            } else if let Some((callee, all)) = self.devirtualise(*trait_id, *method, args, targs) {
                 let args = std::mem::take(args);
                 e.kind = ExprKind::Call { callee, args, targs: all };
             }
         }
         if let ExprKind::ToDyn { value, trait_id } = &e.kind {
-            self.dispatch_row(*trait_id, value.ty);
+            if matches!(self.types.kind(value.ty), TyKind::Int | TyKind::Float | TyKind::Bool | TyKind::Str) {
+                if self.no_table.is_none() {
+                    let asked_by = self.lineage[self.current].map(|(_, by)| self.out[by].name.clone());
+                    *self.no_table = Some(NoTable {
+                        span: e.span,
+                        ty: value.ty,
+                        trait_id: *trait_id,
+                        copy: self.out[self.current].name.clone(),
+                        asked_by,
+                    });
+                }
+            } else {
+                self.dispatch_row(*trait_id, value.ty);
+            }
         }
         // A value converted into an `error` carries its type's tag. Inside a
         // generic function the value may be a `T: Error`, whose tag the
@@ -318,7 +371,55 @@ impl Mono<'_> {
     }
 }
 
+/// The prelude trait a built-in type satisfies as a bound, by its bare name.
+///
+/// `int`, `float`, `bool` and `str` are `Display`, `Debug` and `Hash` (§10.4,
+/// §11): each already has the answer those traits ask for — interpolation is
+/// `Display`, and `@derive` hashes and renders a primitive field through the
+/// prelude's `hash_int`, `debug_str` and the rest. Without this the
+/// specification's own `Cache<K: Hash, V>` could not have a `str` key. Only
+/// as a bound: a `dyn Display` holds a type with a table row, which a
+/// primitive does not have.
+pub fn primitive_trait(types: &Types, ty: TyId, tr: TraitId) -> Option<&'static str> {
+    if !matches!(types.kind(ty), TyKind::Int | TyKind::Float | TyKind::Bool | TyKind::Str) {
+        return None;
+    }
+    match types.trait_def(tr).name.as_str() {
+        "prelude.Display" => Some("Display"),
+        "prelude.Debug" => Some("Debug"),
+        "prelude.Hash" => Some("Hash"),
+        _ => None,
+    }
+}
+
 impl Mono<'_> {
+    /// A call through a bound whose receiver turned out to be a built-in type:
+    /// what a derived body does with a field of that type, which is also what
+    /// interpolation does with it. See [`primitive_trait`].
+    fn primitive_method(&self, trait_id: TraitId, args: &mut Vec<Expr>) -> Option<ExprKind> {
+        let receiver = args.first()?;
+        let trait_name = primitive_trait(self.types, receiver.ty, trait_id)?;
+        let kind = self.types.kind(receiver.ty).clone();
+        let prelude = |name: &str| {
+            let name = format!("prelude.{}", name);
+            self.fns.iter().position(|f| f.name == name).map(|i| FnId(i as u32))
+        };
+        let call = |callee: Option<FnId>, args: &mut Vec<Expr>| {
+            callee.map(|callee| ExprKind::Call { callee, args: std::mem::take(args), targs: Vec::new() })
+        };
+        match (trait_name, kind) {
+            ("Display", TyKind::Str) => Some(args.remove(0).kind),
+            ("Display", _) | ("Debug", TyKind::Int | TyKind::Float | TyKind::Bool) => {
+                Some(ExprKind::ToStr { value: Box::new(args.remove(0)) })
+            }
+            ("Debug", _) => call(prelude("debug_str"), args),
+            (_, TyKind::Int) => call(prelude("hash_int"), args),
+            (_, TyKind::Float) => call(prelude("hash_float"), args),
+            (_, TyKind::Bool) => call(prelude("hash_bool"), args),
+            (_, _) => call(prelude("hash_str"), args),
+        }
+    }
+
     /// The run-time identity of a nominal type, its declaration's, and the
     /// arguments it was specialised with.
     fn identity(&self, ty: TyId) -> Option<(TypeTag, TypeTag, Vec<TyId>)> {
@@ -1126,7 +1227,9 @@ mod tests {
         p.fns.push(main);
         p.entry = Some(FnId(1));
 
-        let err = monomorphise(&mut p).expect_err("an unbounded instantiation");
+        let Err(Refused::Unbounded(err)) = monomorphise(&mut p) else {
+            panic!("an unbounded instantiation")
+        };
         assert_eq!(err.template, "depth");
         assert_eq!(err.why, Refusal::Runaway);
     }

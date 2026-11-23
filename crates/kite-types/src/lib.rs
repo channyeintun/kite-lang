@@ -513,12 +513,14 @@ pub fn check_recording(
     let const_table = consts::evaluate(file, resolved, sources, diags);
     check_const_annotations(file, resolved, &const_table, &type_ids, &mut types, diags);
 
-    // A default method no block takes is checked once all the same, against
-    // what every implementation has in common: `Self` is a parameter of its
-    // own, after the trait's and the method's, bounded by the trait. Its
-    // signature is numbered after every function's, as its locals are in
-    // `ResolveMap::defaults`. The signature was read already, where the
-    // trait's methods were; what it would report again is dropped.
+    // Every default method is checked once on its own, against what every
+    // implementation has in common: `Self` is a parameter of its own, after
+    // the trait's and the method's, bounded by the trait (§8.2, §10.1). That
+    // check is the one that reports, so a mistake is said once however many
+    // blocks take the method, and it names `Self`. Its signature is numbered
+    // after every function's, as its locals are in `ResolveMap::defaults`.
+    // The signature was read already, where the trait's methods were; what
+    // it would report again is dropped.
     for d in &resolved.defaults {
         let ast::Item::Trait(tr) = &file.items[d.item_index] else {
             unreachable!("a default body belongs to a trait")
@@ -568,11 +570,13 @@ pub fn check_recording(
         calls: Vec::new(),
         bound_calls: Vec::new(),
     };
-    // What each default method's copies have reported, by the method. A
-    // default is checked once per block that takes it, `Self` being that
-    // block's type, and a mistake that is not about the type was reported
-    // once per `impl`.
-    let mut default_reports: std::collections::HashMap<(usize, usize), std::collections::HashSet<DiagKey>> =
+    // What each default method's copies have reported, by the method. A copy
+    // per block that takes the default is what runs, `Self` being that
+    // block's type, but the check on its own above is what reports: what a
+    // copy says is set aside, and said only if that check found nothing,
+    // which it cannot when it is the stricter of the two — kept so that a
+    // mistake no check reported can never reach a backend.
+    let mut default_reports: std::collections::HashMap<(usize, usize), Vec<Diagnostic>> =
         std::collections::HashMap::new();
     for i in 0..sigs.len() {
         let unowned = i.checked_sub(resolved.fns.len()).map(|k| &resolved.defaults[k]);
@@ -646,6 +650,16 @@ pub fn check_recording(
                 &sigs[i],
                 m.self_param.is_some(),
             );
+            let copies = default_reports.remove(&(d.item_index, d.method_index)).unwrap_or_default();
+            if !diags.iter().skip(reported).any(|x| x.severity == kite_diag::Severity::Error) {
+                let mut seen: std::collections::HashSet<DiagKey> = std::collections::HashSet::new();
+                for x in copies {
+                    let key = (x.code.map(|c| c.0), x.message.clone(), x.primary_span());
+                    if x.severity == kite_diag::Severity::Error && seen.insert(key) {
+                        diags.push(x);
+                    }
+                }
+            }
             continue;
         }
         let sig = &resolved.fns[i];
@@ -751,8 +765,12 @@ pub fn check_recording(
         // are collected here and appended once all declarations are checked.
         lifted.append(&mut checker.lifted);
         if let Some(o) = sig.owner.filter(|o| o.is_default) {
-            let seen = default_reports.entry((o.impl_index, o.method_index)).or_default();
-            keep_first_reports(diags, reported, seen);
+            let mut all = diags.take();
+            let said = all.split_off(reported);
+            for d in all {
+                diags.push(d);
+            }
+            default_reports.entry((o.impl_index, o.method_index)).or_default().extend(said);
         }
     }
     fns.append(&mut lifted);
@@ -1364,8 +1382,8 @@ impl<'a> Checker<'a> {
     // ---- functions --------------------------------------------------------
 
     /// The locals the resolver found in the body being checked: a
-    /// function's, or those of a default method no block takes, which are
-    /// numbered after every function's (`ResolveMap::defaults`).
+    /// function's, or those of a default method checked on its own, which
+    /// are numbered after every function's (`ResolveMap::defaults`).
     fn local_infos(&self) -> &'a [kite_resolve::LocalInfo] {
         match self.resolved.locals.get(self.fn_index) {
             Some(infos) => infos,
@@ -1374,7 +1392,7 @@ impl<'a> Checker<'a> {
     }
 
     /// The name of the function being checked, or of the trait whose default
-    /// method it is when no block takes that method.
+    /// method it is when that is checked on its own.
     fn body_name(&self) -> &'a str {
         match self.resolved.fns.get(self.fn_index) {
             Some(f) => &f.name,
@@ -3992,7 +4010,7 @@ impl<'a> Checker<'a> {
             }
             ast::Expr::Index { base, index, span } => self.index_expr(base, index, *span),
             ast::Expr::Cast { expr, ty, span } => self.cast(expr, ty, *span),
-            ast::Expr::Await { expr, span } => self.await_expr(expr, *span),
+            ast::Expr::Await { expr, span } => self.await_expr(expr, *span, expected),
             ast::Expr::Tuple { elems, span } => {
                 if elems.is_empty() {
                     return self.lit(ExprKind::Error, TyId::UNIT, *span);
@@ -4570,8 +4588,15 @@ impl<'a> Checker<'a> {
     /// function that can suspend has to say so in its signature. That is the
     /// whole of the "function colouring" rule, and it is what keeps the
     /// scheduler out of the middle of an ordinary call.
-    fn await_expr(&mut self, inner: &ast::Expr, span: Span) -> hir::Expr {
-        let value = self.expr(inner, None);
+    fn await_expr(&mut self, inner: &ast::Expr, span: Span, expected: Option<TyId>) -> hir::Expr {
+        // What the awaited value is wanted as is what the task is wanted to
+        // carry, so `let o: Option<int> = await gen(nil)` infers as the same
+        // call without `await` does.
+        let wanted = expected.filter(|t| !self.types.is_poisoned(*t)).map(|t| {
+            let task = self.types.task_of(t, span);
+            self.types.struct_ty(task)
+        });
+        let value = self.expr(inner, wanted);
         // A closure is a function of its own, and never an async one — so an
         // `await` in it is outside an async function wherever the closure is
         // written. Letting the enclosing `async fn` answer for it put a
@@ -4831,6 +4856,33 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// A call of a value that should be a function: `handlers[0](e)`,
+    /// `pick()(3)`, or a binding narrowed out of an `Option<fn(…)>`.
+    fn call_value(&mut self, value: hir::Expr, args: &[ast::Expr], span: Span) -> hir::Expr {
+        let TyKind::Fn { params: sig_params, ret } = self.types.kind(value.ty).clone() else {
+            self.diags.push(
+                Diagnostic::error(codes::E0205, "this is not a function")
+                    .with_primary(value.span, format!("this is {}", self.types.with_article(value.ty)))
+                    .with_note("only a value whose type is a `fn(…)` can be called"),
+            );
+            return self.lit(ExprKind::Error, TyId::ERROR, span);
+        };
+        if args.len() != sig_params.len() {
+            self.arity_error("this function", args.len(), sig_params.len(), span, None);
+        }
+        let mut hargs = Vec::with_capacity(args.len());
+        for (i, a) in args.iter().enumerate() {
+            let want = sig_params.get(i).copied();
+            let e = self.expr(a, want);
+            let e = self.coerce(e, want);
+            if let Some(w) = want {
+                self.expect_ty(e.ty, w, e.span, None);
+            }
+            hargs.push(e);
+        }
+        hir::Expr { kind: ExprKind::CallClosure { callee: Box::new(value), args: hargs }, ty: ret, span }
+    }
+
     fn call(
         &mut self,
         callee: &ast::Expr,
@@ -4901,35 +4953,7 @@ impl<'a> Checker<'a> {
             if self.types.is_poisoned(value.ty) {
                 return self.lit(ExprKind::Error, TyId::ERROR, span);
             }
-            let TyKind::Fn { params: sig_params, ret } = self.types.kind(value.ty).clone() else {
-                self.diags.push(
-                    Diagnostic::error(codes::E0205, "this is not a function")
-                        .with_primary(
-                            value.span,
-                            format!("this is {}", self.types.with_article(value.ty)),
-                        )
-                        .with_note("only a value whose type is a `fn(…)` can be called"),
-                );
-                return self.lit(ExprKind::Error, TyId::ERROR, span);
-            };
-            if args.len() != sig_params.len() {
-                self.arity_error("this function", args.len(), sig_params.len(), span, None);
-            }
-            let mut hargs = Vec::with_capacity(args.len());
-            for (i, a) in args.iter().enumerate() {
-                let want = sig_params.get(i).copied();
-                let e = self.expr(a, want);
-                let e = self.coerce(e, want);
-                if let Some(w) = want {
-                    self.expect_ty(e.ty, w, e.span, None);
-                }
-                hargs.push(e);
-            }
-            return hir::Expr {
-                kind: ExprKind::CallClosure { callee: Box::new(value), args: hargs },
-                ty: ret,
-                span,
-            };
+            return self.call_value(value, args, span);
         };
 
         match self.resolved.lookup_use(p.span) {
@@ -4984,6 +5008,17 @@ impl<'a> Checker<'a> {
                         ty: ret,
                         span,
                     };
+                }
+                // An `Option<fn(…)>` proved present here is the function it
+                // holds, as it is when read: `if f != nil { f(41) }`. The type
+                // looked at was the declared one, so it was "not a function".
+                if let TyKind::Optional(inner) = *self.types.kind(ty) {
+                    if matches!(self.types.kind(inner), TyKind::Fn { .. }) {
+                        let value = self.expr(callee, None);
+                        if matches!(self.types.kind(value.ty), TyKind::Fn { .. }) {
+                            return self.call_value(value, args, span);
+                        }
+                    }
                 }
                 // A local whose initialiser was already reported has no type
                 // to be wrong about: `let f = Rect.square` then `f(2)` is one
@@ -5177,6 +5212,20 @@ impl<'a> Checker<'a> {
             BuiltinFn::TaskYield => {
                 if !args.is_empty() {
                     self.arity_error("task.yield", args.len(), 0, span, None);
+                }
+                // A closure is never async, wherever it is written — the same
+                // rule, and the same reason, as for `await` in `await_expr`.
+                if let Some(closure) = self.closure_span {
+                    self.diags.push(
+                        Diagnostic::error(codes::E0521, "`task.yield` inside a closure")
+                            .with_primary(span, "this would suspend the closure")
+                            .with_secondary(closure, "a closure cannot be `async`")
+                            .with_note(
+                                "yield in the enclosing `async fn`, before or after the \
+                                 closure runs",
+                            ),
+                    );
+                    return self.lit(ExprKind::Error, TyId::ERROR, span);
                 }
                 if !self.sigs[self.fn_index].is_async {
                     self.diags.push(
@@ -5622,6 +5671,7 @@ impl<'a> Checker<'a> {
                     }
                     if !self.types.is_printable(e.ty) && !self.types.is_poisoned(e.ty) {
                         let article = self.types.with_article(e.ty);
+                        let fix = self.display_fix(e.ty);
                         self.diags.push(
                             Diagnostic::error(
                                 codes::E0200,
@@ -5639,10 +5689,7 @@ impl<'a> Checker<'a> {
                                     name
                                 ),
                             )
-                            .with_note(format!(
-                                "write `{} {{ fn show(self) -> str {{ … }} }}`",
-                                self.impl_to_write("Display", e.ty)
-                            )),
+                            .with_note(fix),
                         );
                     }
                     hargs.push(e);
@@ -5973,11 +6020,36 @@ impl<'a> Checker<'a> {
             let Some(def) = def else {
                 return self.lit(ExprKind::Error, TyId::ERROR, span);
             };
-            let found = def
+            let declaring: Vec<kite_hir::TraitId> = def
                 .bounds
                 .iter()
-                .find(|tr| self.types.trait_def(**tr).method(&name.name).is_some())
-                .copied();
+                .filter(|tr| self.types.trait_def(**tr).method(&name.name).is_some())
+                .copied()
+                .collect();
+            // Two bounds declaring the name is two methods of it reachable on
+            // one type, as two blocks giving a type the same name is (§8.2);
+            // the first bound written used to win.
+            if let [a, b, ..] = declaring[..] {
+                let (a, b) = (self.types.trait_def(a), self.types.trait_def(b));
+                let mut d = Diagnostic::error(
+                    codes::E0112,
+                    format!("`{}` is ambiguous on `{}`", name.name, def.name),
+                )
+                .with_primary(name.span, format!("both `{}` and `{}` declare `{}`", a.name, b.name, name.name))
+                .with_secondary(def.span, "this parameter is declared here");
+                if let Some((_, m)) = a.method(&name.name) {
+                    d = d.with_secondary(m.span, format!("`{}.{}`", a.name, name.name));
+                }
+                if let Some((_, m)) = b.method(&name.name) {
+                    d = d.with_secondary(m.span, format!("`{}.{}`", b.name, name.name));
+                }
+                self.diags.push(d.with_note(
+                    "a type has one method of each name, so no type can implement both; \
+                     bound the parameter by only one of them",
+                ));
+                return self.lit(ExprKind::Error, TyId::ERROR, span);
+            }
+            let found = declaring.first().copied();
             match found {
                 Some(tr) => return self.virtual_call(base, receiver, tr, name, args, span),
                 None => {
@@ -6028,7 +6100,8 @@ impl<'a> Checker<'a> {
         // method/field distinction to preserve here — a field of function type
         // *is* what a handler or a callback looks like, and `(r.handle)(x)`
         // would be punctuation standing in for nothing.
-        if self.resolved.method_on(ti, &name.name).is_none() {
+        let found = self.resolved.method_on(ti, &name.name);
+        if found.is_none() {
             if let TyKind::Struct(sid) = *self.types.kind(receiver.ty) {
                 let field = self
                     .types
@@ -6066,7 +6139,7 @@ impl<'a> Checker<'a> {
             }
         }
 
-        let Some(fn_index) = self.resolved.method_on(ti, &name.name) else {
+        let Some(fn_index) = found else {
             let type_name = self.resolved.type_decl(ti).name.clone();
             let mut d = Diagnostic::error(
                 codes::E0205,
@@ -6708,6 +6781,43 @@ impl<'a> Checker<'a> {
             );
             return self.lit(ExprKind::Error, TyId::ERROR, span);
         }
+        // Only a type that implements `Error` is ever carried by one, so for
+        // any other `is` was always false and `as` always nil — which is what
+        // a forgotten `impl Error`, or the wrong type named, looked like.
+        if let Some(tr) = self.error_trait() {
+            if !self.type_implements(ty, tr) {
+                let name = self.types.name(ty);
+                // A bounded `impl Error` is there already, and is told which
+                // argument misses its bound rather than to be written again.
+                let fix = match self.unmet_impl_bound(ty, tr) {
+                    Some((param, arg, bound)) => format!(
+                        "`{}` implements `Error` only where `{}: {}`, and `{}` is not one",
+                        name,
+                        param,
+                        last_segment(&self.types.trait_def(bound).name),
+                        self.types.name(arg)
+                    ),
+                    None => format!(
+                        "write `{} {{ fn message(self) -> str {{ … }} }}`, or name the type \
+                         the error was made from",
+                        self.impl_to_write("Error", ty)
+                    ),
+                };
+                self.diags.push(
+                    Diagnostic::error(
+                        codes::E0205,
+                        format!("`{}` has no `{}`: it does not implement `Error`", name, method_name),
+                    )
+                    .with_primary(p_span, "no error can carry this type")
+                    .with_note(
+                        "`is` and `as` ask which failure an error was, and only a type that \
+                         implements `Error` can be one",
+                    )
+                    .with_note(fix),
+                );
+                return self.lit(ExprKind::Error, TyId::ERROR, span);
+            }
+        }
 
         // A nil error carries tag zero and no type's tag is zero, so this is
         // false rather than a trap — which is what lets it be written without
@@ -7086,7 +7196,9 @@ impl<'a> Checker<'a> {
     /// Whether a concrete value may stand where a trait object is wanted.
     fn coerces_to_dyn(&mut self, found: TyId, expected: TyId) -> bool {
         let TyKind::Dyn(tr) = *self.types.kind(expected) else { return false };
-        self.type_implements(found, tr)
+        // A built-in type meets the prelude's bounds, but has no table row
+        // for a `dyn` to dispatch through.
+        kite_hir::mono::primitive_trait(self.types, found, tr).is_none() && self.type_implements(found, tr)
     }
 
     /// Whether a type implements a trait.
@@ -7097,9 +7209,13 @@ impl<'a> Checker<'a> {
     /// that may itself be bounded: after `impl<T: Show> Named for Box<T>`, a
     /// `Box<int>` is not `Named` at all, and a call that treated it as one
     /// reached a body calling `show` on an `int`.
+    /// A built-in type is the prelude's `Display`, `Debug` and `Hash`.
     fn type_implements(&mut self, ty: TyId, tr: hir::TraitId) -> bool {
         if let TyKind::Param { index, .. } = *self.types.kind(ty) {
             return self.generic_defs.get(index as usize).is_some_and(|d| d.bounds.contains(&tr));
+        }
+        if kite_hir::mono::primitive_trait(self.types, ty, tr).is_some() {
+            return true;
         }
         let (Some(ti), Some(tri)) = (self.type_index_of(ty), self.trait_index_of(tr)) else {
             return false;
@@ -9273,6 +9389,10 @@ impl<'a> Checker<'a> {
         match (self.types.kind(declared).clone(), self.types.kind(actual).clone()) {
             (TyKind::Slice(d), TyKind::Slice(a)) => self.unify(d, a, generics, subst, span),
             (TyKind::Optional(d), TyKind::Optional(a)) => self.unify(d, a, generics, subst, span),
+            // `fn() -> (T, error)` against `fn() -> (int, error)`: the
+            // fallibility form is a type of its own, so it is descended into
+            // like any other, or a `retry` helper could never be called.
+            (TyKind::Fallible(d), TyKind::Fallible(a)) => self.unify(d, a, generics, subst, span),
             // A `T` argument for an `Option<T>` parameter solves through the
             // same subsumption that lets the value be passed at all.
             (TyKind::Optional(d), _) => self.unify(d, actual, generics, subst, span),
@@ -9558,6 +9678,7 @@ impl<'a> Checker<'a> {
                 d = match *self.types.kind(*t) {
                     // A parameter is known only by its bounds, so the fix is
                     // to say more about it where it is declared.
+                    TyKind::Param { .. } if tn == "Self" => d.with_note(SELF_IN_A_DEFAULT),
                     TyKind::Param { index, .. } => {
                         match self.generic_defs.get(index as usize).map(|d| d.span) {
                             Some(decl) => d
@@ -9570,11 +9691,21 @@ impl<'a> Checker<'a> {
                         self.trait_index_of(*bound).is_some_and(|tri| self.resolved.implements(ti, tri))
                     }) =>
                     {
-                        d.with_note(format!(
-                            "`{}` implements `{}` only where its type arguments meet the \
-                             bounds of that `impl`",
-                            tn, bn
-                        ))
+                        match self.unmet_impl_bound(*t, *bound) {
+                            Some((param, arg, unmet)) => d.with_note(format!(
+                                "`{}` implements `{}` only where `{}: {}`, and `{}` is not one",
+                                tn,
+                                bn,
+                                param,
+                                self.types.trait_def(unmet).name,
+                                self.types.name(arg)
+                            )),
+                            None => d.with_note(format!(
+                                "`{}` implements `{}` only where its type arguments meet the \
+                                 bounds of that `impl`",
+                                tn, bn
+                            )),
+                        }
                     }
                     // An `impl` names a struct or an enum, so for anything
                     // else — a trait object included — suggesting one would
@@ -11530,6 +11661,71 @@ impl<'a> Checker<'a> {
         })
     }
 
+    /// What a note says to do about a type that has no text form, so that
+    /// `io.print` and interpolation say the same, and say something that
+    /// compiles. A struct whose `impl Display` is bounded used to be told to
+    /// write the `impl` it already had, and a slice an `impl` no slice can
+    /// have.
+    fn display_fix(&mut self, ty: TyId) -> String {
+        let name = self.types.name(ty);
+        match *self.types.kind(ty) {
+            // Neither of these can be given an `impl`: a parameter is known by
+            // its bounds, and a trait object by its trait.
+            TyKind::Param { .. } if name == "Self" => return SELF_IN_A_DEFAULT.to_string(),
+            TyKind::Param { .. } => return format!("add the bound: `{}: Display`", name),
+            TyKind::Dyn(_) => {
+                return format!(
+                    "{} shows only what its trait declares; call one of its methods, or \
+                     make the trait `Display` itself and hold a `dyn Display`",
+                    self.types.with_article(ty)
+                )
+            }
+            _ => {}
+        }
+        if self.type_index_of(ty).is_none() {
+            return format!(
+                "{} cannot be given an `impl`; render its parts, or hold it in a struct \
+                 that implements `Display`",
+                self.types.with_article(ty)
+            );
+        }
+        if let Some(tr) = self.display_trait() {
+            if let Some((param, arg, bound)) = self.unmet_impl_bound(ty, tr) {
+                return format!(
+                    "`{}` implements `Display` only where `{}: {}`, and `{}` is not one",
+                    name,
+                    param,
+                    last_segment(&self.types.trait_def(bound).name),
+                    self.types.name(arg)
+                );
+            }
+        }
+        format!("write `{} {{ fn show(self) -> str {{ … }} }}`", self.impl_to_write("Display", ty))
+    }
+
+    /// The first bound of the `impl` through which `ty` would implement `tr`
+    /// that `ty`'s type arguments do not meet: the block's parameter, the
+    /// argument standing for it, and the bound.
+    fn unmet_impl_bound(&mut self, ty: TyId, tr: hir::TraitId) -> Option<(String, TyId, hir::TraitId)> {
+        let (ti, tri) = (self.type_index_of(ty)?, self.trait_index_of(tr)?);
+        let block = *self.trait_impls.get(&(ti, tri))?;
+        let defs = self.impl_generics.get(&block)?.clone();
+        let args = self.receiver_args(ty);
+        for (g, a) in defs.iter().zip(args) {
+            for b in &g.bounds {
+                let held = if self.is_share_bound(*b) {
+                    self.share_given_params(a)
+                } else {
+                    self.type_implements(a, *b)
+                };
+                if !held {
+                    return Some((g.name.clone(), a, *b));
+                }
+            }
+        }
+        None
+    }
+
     /// A value as text. Primitives render themselves; anything else needs
     /// `Display`.
     fn render(&mut self, v: hir::Expr) -> hir::Expr {
@@ -11553,20 +11749,7 @@ impl<'a> Checker<'a> {
                 "`int`, `float`, `bool` and `str` render themselves. Anything else needs \
                  `Display`",
             );
-        d = match *self.types.kind(v.ty) {
-            // Neither of these can be given an `impl`: a parameter is known by
-            // its bounds, and a trait object by its trait.
-            TyKind::Param { .. } => d.with_note(format!("add the bound: `{}: Display`", name)),
-            TyKind::Dyn(_) => d.with_note(format!(
-                "{} shows only what its trait declares; call one of its methods, or \
-                 make the trait `Display` itself and hold a `dyn Display`",
-                self.types.with_article(v.ty)
-            )),
-            _ => d.with_note(format!(
-                "write `{} {{ fn show(self) -> str {{ … }} }}`",
-                self.impl_to_write("Display", v.ty)
-            )),
-        };
+        d = d.with_note(self.display_fix(v.ty));
         self.diags.push(d);
         hir::Expr { span: v.span, kind: ExprKind::Error, ty: TyId::STR }
     }
@@ -11658,6 +11841,20 @@ impl<'a> Checker<'a> {
                 kind: ExprKind::Wrap { value: Box::new(e) },
                 ty: want,
             },
+            // A value that converts to the optional's inner type stands for
+            // it too, converted then wrapped: an `S` where an
+            // `Option<dyn T>` is wanted, as where a `dyn T` is.
+            TyKind::Optional(inner) if matches!(self.types.kind(inner), TyKind::Dyn(_)) => {
+                let converted = self.coerce(e, Some(inner));
+                if converted.ty != inner {
+                    return converted;
+                }
+                hir::Expr {
+                    span: converted.span,
+                    kind: ExprKind::Wrap { value: Box::new(converted) },
+                    ty: want,
+                }
+            }
             // A concrete value becoming a trait object. Nothing about the value
             // changes; the node records that dispatch is now dynamic.
             TyKind::Dyn(tr) if self.coerces_to_dyn(e.ty, want) => {
@@ -12369,23 +12566,12 @@ fn check_impls(
 /// where it points.
 type DiagKey = (Option<&'static str>, String, Option<Span>);
 
-/// Drop what a default method's copy reported after `from` that an earlier
-/// copy of the same method reported already, and remember the rest. A
-/// mistake that depends on the implementing type — `self.x` where one `impl`
-/// is for a type without an `x` — reads differently for each, and is kept.
-fn keep_first_reports(
-    diags: &mut DiagBag,
-    from: usize,
-    seen: &mut std::collections::HashSet<DiagKey>,
-) {
-    let all = diags.take();
-    for (i, d) in all.into_iter().enumerate() {
-        let key = (d.code.map(|c| c.0), d.message.clone(), d.primary_span());
-        if i < from || seen.insert(key) {
-            diags.push(d);
-        }
-    }
-}
+/// The note for a default method that asks of `Self` what its trait does not
+/// declare. A `Self` cannot be given a bound the way a `T` can — a trait has
+/// no supertraits and no `where` — so "add the bound" would not compile.
+const SELF_IN_A_DEFAULT: &str = "a default method knows `Self` only by its trait's methods; \
+     write this method in each `impl`, where the type is known, or have the trait declare \
+     what the default needs";
 
 /// An `impl` is for its type at the block's own parameters, in order:
 /// `impl<A, B> Named for Pair<A, B>`, or a type without any.

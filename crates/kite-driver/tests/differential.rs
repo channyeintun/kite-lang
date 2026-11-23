@@ -5089,6 +5089,301 @@ fn main() {
 "#,
         "5 3\n8 9\n1 true\n",
     ),
+    // A type parameter inside a fallible function type is solved by the
+    // argument. Inference stopped at `-> (T, error)`, so neither helper could
+    // be called at all.
+    (
+        "parameters-solve-through-fallible-functions",
+        r#"struct Job<T> {
+  run: fn() -> (T, error)
+}
+fn seven() -> (int, error) {
+  return 7, nil
+}
+fn label(n: int) -> (str, error) {
+  return "n\(n)", nil
+}
+fn retry<T>(g: fn() -> (T, error)) -> (T, error) {
+  let (v, err) = g()
+  check err
+  return v, nil
+}
+fn each<T, U>(xs: [T], g: fn(T) -> (U, error)) -> ([U], error) {
+  var out: [U] = []
+  for x in xs {
+    let (v, err) = g(x)
+    check err
+    out.push(v)
+  }
+  return out, nil
+}
+fn main() {
+  let (a, e1) = retry(seven)
+  if e1 == nil {
+    io.print(a)
+  }
+  let (xs, e2) = each([1, 2], label)
+  if e2 == nil {
+    io.print(xs[1])
+  }
+  let job = Job{ run: seven }
+  let (b, e3) = retry(job.run)
+  if e3 == nil {
+    io.print(b + 1)
+  }
+}
+"#,
+        "7\nn2\n8\n",
+    ),
+    // A default method knows `Self` only by the trait's methods, so its
+    // `self.hi()` is the implementation's `hi` — directly, through a bound and
+    // through a `dyn`. It used to see an inherent `hi` too, and run it; a type
+    // can no longer have both (E0112).
+    (
+        "a-default-calls-the-traits-own-methods",
+        r#"trait Greet {
+  fn hi(self) -> str
+  fn twice(self) -> str {
+    return self.hi() + self.hi()
+  }
+}
+struct P {
+  n: int
+}
+impl Greet for P {
+  fn hi(self) -> str {
+    return "[greet \(self.n)]"
+  }
+}
+struct Q {
+  n: int
+}
+impl Greet for Q {
+  fn hi(self) -> str {
+    return "[q]"
+  }
+}
+fn twice_of<T: Greet>(x: T) -> str {
+  return x.twice()
+}
+fn main() {
+  let d: dyn Greet = P{ n: 1 }
+  io.print(d.twice())
+  io.print(P{ n: 2 }.twice())
+  io.print(twice_of(P{ n: 5 }))
+  let all: [dyn Greet] = [P{ n: 6 }, Q{ n: 0 }]
+  for g in all {
+    io.print(g.twice())
+  }
+}
+"#,
+        "[greet 1][greet 1]\n[greet 2][greet 2]\n[greet 5][greet 5]\n\
+         [greet 6][greet 6]\n[q][q]\n",
+    ),
+    // An `Option<fn(…)>` proved present is the function it holds, so it can
+    // be called as written, after an `if` or an early return. The call
+    // looked at the declared type and said it was not a function.
+    (
+        "a-narrowed-optional-function-is-called",
+        r#"fn run(f: Option<fn(int) -> int>, x: int) -> int {
+  if f == nil {
+    return -1
+  }
+  return f(x)
+}
+fn main() {
+  let f: Option<fn(int) -> int> = |a: int| a + 1
+  if f != nil {
+    io.print(f(41))
+  }
+  io.print(run(|a: int| a * 2, 4))
+  io.print(run(nil, 4))
+}
+"#,
+        "42\n8\n-1\n",
+    ),
+    // A concrete value converts to `dyn T` and is wrapped where an
+    // `Option<dyn T>` is wanted, as a `T` is where an `Option<T>` is: a
+    // binding, a return, an argument, a field and a slice element.
+    (
+        "a-value-becomes-an-optional-trait-object",
+        r#"trait T {
+  fn a(self) -> int
+}
+
+struct S {
+  n: int
+}
+
+impl T for S {
+  fn a(self) -> int {
+    return self.n
+  }
+}
+
+struct Slot {
+  held: Option<dyn T>
+}
+
+fn pick(on: bool) -> Option<dyn T> {
+  if on {
+    return S{ n: 2 }
+  }
+  return nil
+}
+
+fn take(x: Option<dyn T>) -> int {
+  if x == nil {
+    return 0
+  }
+  return x.a()
+}
+
+fn main() {
+  let s: Option<dyn T> = S{ n: 1 }
+  if s != nil {
+    io.print(s.a())
+  }
+  let p = pick(true)
+  if p != nil {
+    io.print(p.a())
+  }
+  io.print(pick(false) == nil)
+  io.print(take(S{ n: 3 }))
+  let slot = Slot{ held: S{ n: 4 } }
+  io.print(take(slot.held))
+  var xs: [Option<dyn T>] = [S{ n: 5 }, nil]
+  xs.push(S{ n: 6 })
+  io.print(take(xs[0]) + take(xs[1]) + take(xs[2]))
+}
+"#,
+        "1\n2\ntrue\n3\n4\n11\n",
+    ),
+    // `@derive(Debug, Hash)` on a generic type: a parameter no field reaches
+    // takes no bound, one a field reaches is walked through its own method,
+    // and a recursive generic enum and a field of a generic derived type
+    // walk too. Every generic type was refused.
+    (
+        "a-generic-type-derives-debug-and-hash",
+        r#"@derive(Debug, Hash)
+struct Tagged<T> {
+  id: int
+}
+
+@derive(Debug, Hash)
+struct Pair<A, B: Display> {
+  a: A
+  b: [B]
+  note: Option<A>
+}
+
+@derive(Debug, Hash)
+enum Tree<T> {
+  Leaf(T)
+  Node(left: Tree<T>, right: Tree<T>)
+}
+
+@derive(Debug)
+struct Holder {
+  p: Pair<int, str>
+}
+
+fn main() {
+  let t: Tagged<fn()> = Tagged{ id: 3 }
+  io.print(t.debug())
+  let u: Tagged<str> = Tagged{ id: 3 }
+  io.print(t.hash() == u.hash())
+  let p = Pair{ a: 1, b: ["x", "y"], note: nil }
+  io.print(p.debug())
+  io.print(p.hash() == Pair{ a: 1, b: ["x", "y"], note: nil }.hash())
+  io.print(p.hash() == Pair{ a: 2, b: ["x", "y"], note: nil }.hash())
+  let tree = Node(left: Leaf("a"), right: Node(left: Leaf("b"), right: Leaf("c")))
+  io.print(tree.debug())
+  io.print(Holder{ p: p }.debug())
+}
+"#,
+        "Tagged{ id: 3 }\ntrue\nPair{ a: 1, b: [\"x\", \"y\"], note: nil }\ntrue\nfalse\nNode(left: Leaf(\"a\"), right: Node(left: Leaf(\"b\"), right: Leaf(\"c\")))\nHolder{ p: Pair{ a: 1, b: [\"x\", \"y\"], note: nil } }\n",
+    ),
+    // The built-in types meet the prelude's `Display`, `Debug` and `Hash`
+    // bounds, and a call through one is what `@derive` and interpolation do
+    // with a field of that type. They met none, so the specification's own
+    // `Cache<K: Hash, V>` could not have a `str` key.
+    (
+        "primitives-meet-the-prelude-bounds",
+        r#"pub struct Cache<K: Hash, V> {
+  var entries: {K: V}
+  capacity: int
+}
+
+impl<K: Hash, V> Cache<K, V> {
+  pub fn get(self, key: K) -> Option<V> {
+    return self.entries[key]
+  }
+
+  pub fn slot(self, key: K) -> int {
+    return key.hash() % self.capacity
+  }
+}
+
+struct S<T> {
+  v: T
+}
+
+impl<T: Display> Display for S<T> {
+  fn show(self) -> str {
+    return "S(\(self.v))"
+  }
+}
+
+fn tell<T: Display>(x: T) -> str {
+  return "\(x)|" + x.show()
+}
+
+fn dbg<T: Debug>(x: T) -> str {
+  return x.debug()
+}
+
+fn h<T: Hash>(x: T) -> int {
+  return x.hash()
+}
+
+@derive(Hash, Debug)
+struct Row {
+  i: int
+  f: float
+  b: bool
+  s: str
+}
+
+fn main() {
+  let c = Cache{ entries: {"a": 1}, capacity: 7 }
+  io.print(c.get("a") == 1)
+  io.print(c.slot("a") == hash_str("a") % 7)
+  let n = Cache{ entries: {3: "x"}, capacity: 5 }
+  io.print(n.slot(3) == hash_int(3) % 5)
+  io.print(tell(3))
+  io.print(tell(2.5))
+  io.print(tell(true))
+  io.print(tell("s"))
+  io.print(S{ v: 1 })
+  io.print(S{ v: "two" })
+  io.print(dbg(3))
+  io.print(dbg(1.5))
+  io.print(dbg(false))
+  io.print(dbg("a\"b"))
+  let r = Row{ i: 4, f: 0.5, b: true, s: "q" }
+  io.print(r.debug() == "Row{ i: \(dbg(4)), f: \(dbg(0.5)), b: \(dbg(true)), s: \(dbg("q")) }")
+  var want = hash_seed()
+  want = hash_combine(want, h(4))
+  want = hash_combine(want, h(0.5))
+  want = hash_combine(want, h(true))
+  want = hash_combine(want, h("q"))
+  io.print(r.hash() == want)
+  io.print(h(0.0) == h(-0.0))
+}
+"#,
+        "true\ntrue\ntrue\n3|3\n2.5|2.5\ntrue|true\ns|s\nS(1)\nS(two)\n3\n1.5\nfalse\n\"a\\\"b\"\ntrue\ntrue\ntrue\n",
+    ),
 ];
 
 #[test]

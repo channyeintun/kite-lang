@@ -121,7 +121,8 @@ fn main() {
 ```
 
 The fix is `async fn main()`. `E0521` also fires on `task.yield()` in a
-non-`async` function, for the same reason.
+non-`async` function, for the same reason, and on `await` or `task.yield()`
+inside a closure, even one written in an `async fn`: a closure is never async.
 
 `await` is a **prefix unary operator that binds tighter than any binary
 operator**: `await f() + 1` parses as `(await f()) + 1`.

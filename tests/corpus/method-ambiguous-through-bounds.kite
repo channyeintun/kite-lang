@@ -1,0 +1,19 @@
+// Two bounds that both declare a method are two methods of that name on one
+// type. The first bound written used to win, silently.
+
+trait A {
+    fn go(self) -> str
+}
+
+trait B {
+    fn go(self) -> str
+    fn stop(self) -> str
+}
+
+fn via_both<T: A + B>(x: T) -> str {
+    return x.go() + x.stop() //~ ERROR E0112
+}
+
+fn main() {
+    io.print(1)
+}

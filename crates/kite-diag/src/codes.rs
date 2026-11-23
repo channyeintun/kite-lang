@@ -140,7 +140,11 @@ codes! {
     E0112 = "E0112", "duplicate definition",
         "Two items in the same scope share a name. Shadowing is permitted in a \
          nested scope, but not in the same one, where it is almost always a \
-         typo.";
+         typo.\n\nA type's methods are one scope across all of its `impl` blocks, \
+         trait implementations included, so an inherent method and a trait's of \
+         the same name, or two traits', are a clash too: `x.m()` must name one \
+         method, not whichever block came first. Likewise a type parameter \
+         bounded by two traits that both declare `m`.";
 
     E0113 = "E0113", "wrong number of arguments",
         "Kite has no default arguments, no variadics, and no overloading, so \
@@ -478,8 +482,10 @@ codes! {
     E0702 = "E0702", "a field the derive cannot write",
         "A derived body is a walk over a type's fields, so every field has to \
          be something the walk knows how to handle: a primitive, a slice, a \
-         map, an optional, a tuple, or another type that derives the same \
-         trait.\n\n\
+         map, an optional, a tuple, another type that derives the same \
+         trait, or — for `Debug` and `Hash` — one of the type's own \
+         parameters, which the derived `impl` then bounds by the trait. \
+         `Encode` and `Decode` do not derive for a generic type at all.\n\n\
          Where it does not, write the implementation by hand — the derive is a \
          convenience, not the only way in.";
 

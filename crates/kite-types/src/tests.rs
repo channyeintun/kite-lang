@@ -1465,6 +1465,16 @@ fn awaiting_a_task_gives_the_value_it_produces() {
     assert!(!c.diags.has_errors(), "{}", c.render());
 }
 
+/// What an awaited value is wanted as is what its task is wanted to carry,
+/// so a generic `async fn` infers from the binding as a plain one does. The
+/// expected type stopped at `await`, and `nil` and `[]` could not be typed.
+#[test]
+fn the_expected_type_flows_through_await() {
+    ok("async fn gen<T>(x: T) -> T {\n  return x\n}\n\
+        async fn main() {\n  let o: Option<int> = await gen(nil)\n  let xs: [str] = await gen([])\n\
+        \x20 io.print(o == nil)\n  io.print(xs.len())\n}\n");
+}
+
 /// `task.yield` suspends, so it is subject to the same rule as `await`.
 #[test]
 fn yielding_outside_an_async_function_is_rejected() {
@@ -2090,6 +2100,27 @@ fn a_default_method_reports_each_mistake_once() {
         impl T for Q {\n  fn a(self) -> int {\n    return 2\n  }\n}\n\
         fn main() {\n  io.print(P{ n: 1 }.b() && Q{ n: 2 }.b())\n}\n");
     assert_eq!(c.codes(), vec!["E0201"], "{}", c.render());
+}
+
+/// A default method taken by blocks is held to what the trait declares, as
+/// one no block takes is (§8.2): `Self` is known only by the trait's methods.
+/// Each copy used to be checked with `Self` read as its block's type, so a
+/// default could call that type's inherent methods and read its fields, and
+/// a mistake naming the type was said once per `impl`, `S` then `R`.
+#[test]
+fn a_taken_default_knows_self_only_by_the_trait() {
+    let c = run("trait T {\n  fn a(self) -> int\n  fn b(self) -> int {\n    return self.secret()\n  }\n\
+        \x20 fn c(self) -> int {\n    return self.n\n  }\n}\n\
+        struct S {\n  n: int\n}\nstruct R {\n  n: int\n}\n\
+        impl S {\n  fn secret(self) -> int {\n    return 100\n  }\n}\n\
+        impl R {\n  fn secret(self) -> int {\n    return 200\n  }\n}\n\
+        impl T for S {\n  fn a(self) -> int {\n    return 1\n  }\n}\n\
+        impl T for R {\n  fn a(self) -> int {\n    return 2\n  }\n}\n\
+        fn main() {\n  io.print(S{ n: 1 }.b() + R{ n: 2 }.c())\n}\n");
+    assert_eq!(c.codes(), vec!["E0205", "E0200"], "{}", c.render());
+    let text = c.render();
+    assert!(text.contains("`Self` has no method `secret`"), "{}", text);
+    assert!(text.contains("`Self` has no fields"), "{}", text);
 }
 
 /// A default no block takes — the trait has no `impl`, or every one writes

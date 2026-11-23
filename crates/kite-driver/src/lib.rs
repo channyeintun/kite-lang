@@ -947,9 +947,16 @@ fn run_passes(
     // A function that calls itself at an ever larger type asks for a copy per
     // level, forever; monomorphisation refuses rather than stopping partway
     // and handing on calls into copies it never made.
-    if let Err(u) = kite_hir::mono::monomorphise(&mut hir) {
-        diags.push(unbounded_instantiation("function", &u.template, u.span, u.why));
-        return (String::new(), None, None, None, index);
+    match kite_hir::mono::monomorphise(&mut hir) {
+        Ok(()) => {}
+        Err(kite_hir::mono::Refused::Unbounded(u)) => {
+            diags.push(unbounded_instantiation("function", &u.template, u.span, u.why));
+            return (String::new(), None, None, None, index);
+        }
+        Err(kite_hir::mono::Refused::NoTable(n)) => {
+            diags.push(no_table(&hir.types, &n));
+            return (String::new(), None, None, None, index);
+        }
     }
     if let Some((name, span, why)) = hir.types.unbounded_instantiation() {
         diags.push(unbounded_instantiation("type", name, span, why));
@@ -1175,6 +1182,33 @@ fn run_passes(
 /// because what a finite program asks for is past what the compiler makes.
 /// Only the first is a claim about the program's recursion, so only it makes
 /// one.
+/// A copy of a generic function that converts a built-in value to a `dyn`:
+/// the value meets the bound, but has no table row for a `dyn` to dispatch
+/// through. See [`kite_hir::mono::NoTable`].
+fn no_table(types: &kite_hir::Types, n: &kite_hir::mono::NoTable) -> Diagnostic {
+    let ty = types.name(n.ty);
+    let full = &types.trait_def(n.trait_id).name;
+    let tr = full.rsplit('.').next().unwrap_or(full);
+    let mut d = Diagnostic::error(
+        kite_diag::codes::E0200,
+        format!("`{}` cannot be held as a `dyn {}`", ty, tr),
+    )
+    .with_primary(n.span, format!("in `{}`, this is {} made a `dyn {}`", n.copy, types.with_article(n.ty), tr));
+    if let Some(by) = &n.asked_by {
+        d = d.with_note(format!("`{}` is the copy `{}` asks for", n.copy, by));
+    }
+    d.with_note(format!(
+        "`{}` meets `{}` as a bound, but a `dyn` holds a value of a type with methods of its \
+         own, and a built-in type has none",
+        ty, tr
+    ))
+    .with_note(format!(
+        "keep the value as the type parameter rather than a `dyn`, or pass a struct that \
+         implements `{}` and holds the `{}`",
+        tr, ty
+    ))
+}
+
 fn unbounded_instantiation(what: &str, name: &str, span: Span, why: kite_hir::Refusal) -> Diagnostic {
     use kite_hir::Refusal;
     let specialised = "generics are specialised: every set of type arguments gets its own copy";
@@ -1572,6 +1606,81 @@ mod tests {
         let took = started.elapsed();
         assert!(c.starts_with("SourceFile {\n"), "{}", &c[..c.len().min(200)]);
         assert!(took < std::time::Duration::from_secs(20), "the dump took {:?}", took);
+    }
+
+    /// The built-in types meet the prelude's `Display`, `Debug` and `Hash` as
+    /// bounds and nowhere else; and a type whose `impl Display` is bounded is
+    /// told which bound its arguments miss, not to write the `impl` it has.
+    #[test]
+    fn primitives_meet_prelude_bounds_and_notes_name_the_unmet_one() {
+        let codes = |c: &Compilation| -> Vec<&'static str> {
+            c.diags.iter().filter_map(|d| d.code.map(|x| x.0)).collect()
+        };
+        let c = compile(
+            "t.kite",
+            "struct Cache<K: Hash, V> {\n  var entries: {K: V}\n  capacity: int\n}\n\
+             fn tell<T: Display>(x: T) -> str {\n  return \"\\(x)\"\n}\n\
+             fn dbg<T: Debug>(x: T) -> str {\n  return x.debug()\n}\n\
+             fn main() {\n  let c = Cache{ entries: {\"a\": 1}, capacity: 3 }\n  io.print(c.capacity)\n\
+             \x20 io.print(tell(3) + tell(1.5) + tell(true) + dbg(\"s\"))\n}\n",
+            Emit::Check,
+        );
+        assert!(!c.failed(), "{}", c.render_diagnostics());
+        let c = compile("t.kite", "fn main() {\n  let d: dyn Display = 3\n  io.print(d.show())\n}\n", Emit::Check);
+        assert_eq!(codes(&c), vec!["E0200"], "{}", c.render_diagnostics());
+        let c = compile(
+            "t.kite",
+            "struct S<T> {\n  v: T\n}\n\
+             impl<T: Display> Display for S<T> {\n  fn show(self) -> str {\n    return \"S\"\n  }\n}\n\
+             fn need<T: Display>(x: T) -> str {\n  return x.show()\n}\n\
+             fn main() {\n  io.print(S{ v: 1 })\n  io.print(S{ v: [1] })\n  io.print(\"\\(S{ v: [2] })\")\n\
+             \x20 io.print(need(S{ v: [3] }))\n  io.print([4])\n}\n",
+            Emit::Check,
+        );
+        assert_eq!(codes(&c), vec!["E0200", "E0207", "E0208", "E0200"], "{}", c.render_diagnostics());
+        let text = c.render_diagnostics();
+        assert!(!text.contains("write `impl<T> Display for S<T>"), "{}", text);
+        assert!(text.contains("only where `T: Display`, and `[int]` is not one"), "{}", text);
+        assert!(text.contains("only where `T: prelude.Display`, and `[int]` is not one"), "{}", text);
+        assert!(text.contains("a `[int]` cannot be given an `impl`"), "{}", text);
+    }
+
+    /// `Wrapped.as(err)` at an argument its `impl Error` is bounded against
+    /// is told which bound the argument misses, not to write the `impl` it
+    /// already has.
+    #[test]
+    fn a_downcast_outside_a_bounded_error_impl_names_the_bound() {
+        let c = compile(
+            "t.kite",
+            "struct Wrapped<T> {\n  inner: T\n}\n\
+             impl<T: Display> Error for Wrapped<T> {\n  fn message(self) -> str {\n    return \"w\"\n  }\n}\n\
+             fn main() {\n  let e: error = nil\n  let w: Option<Wrapped<[int]>> = Wrapped.as(e)\n  io.print(w == nil)\n}\n",
+            Emit::Check,
+        );
+        let codes: Vec<&str> = c.diags.iter().filter_map(|d| d.code.map(|x| x.0)).collect();
+        assert_eq!(codes, vec!["E0205"], "{}", c.render_diagnostics());
+        let text = c.render_diagnostics();
+        assert!(text.contains("only where `T: Display`, and `[int]` is not one"), "{}", text);
+        assert!(!text.contains("write `impl<T> Error"), "{}", text);
+    }
+
+    /// A default method that asks of `Self` what its trait does not declare
+    /// is not told to "add the bound: `Self: Display`", which no program
+    /// can write.
+    #[test]
+    fn a_default_asking_more_of_self_is_not_told_to_bound_it() {
+        let c = compile(
+            "t.kite",
+            "fn tell<T: Display>(x: T) -> str {\n  return x.show()\n}\n\
+             trait Greet {\n  fn hi(self) -> str\n  fn a(self) -> str {\n    return tell(self)\n  }\n\
+             \x20 fn b(self) -> str {\n    return \"\\(self)\"\n  }\n}\nfn main() {\n}\n",
+            Emit::Check,
+        );
+        let codes: Vec<&str> = c.diags.iter().filter_map(|d| d.code.map(|x| x.0)).collect();
+        assert_eq!(codes, vec!["E0208", "E0207"], "{}", c.render_diagnostics());
+        let text = c.render_diagnostics();
+        assert!(!text.contains("add the bound"), "{}", text);
+        assert_eq!(text.matches("knows `Self` only by its trait's methods").count(), 2, "{}", text);
     }
 
     /// `wrap(wrap(…(x)))`, `depth` calls deep.

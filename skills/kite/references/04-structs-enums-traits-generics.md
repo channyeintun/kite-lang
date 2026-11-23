@@ -266,7 +266,11 @@ fn main() {
 ```
 
 In a trait's default method `Self` is whichever type implements the trait,
-known only by the trait's methods, so `Self{ … }` there is `E0204`.
+known only by the trait's methods, so `Self{ … }` there is `E0204`, a field
+read on `self` is `E0200` and a call to the type's inherent method is
+`E0205` — each said once, naming `Self`, however many `impl`s take the
+default. `self.hi()` in a default is always the trait's `hi`, even when the
+type has an inherent `hi` too.
 
 A method may introduce type parameters of its own, solved from its arguments:
 
@@ -943,16 +947,16 @@ fn main() {
 ```
 
 A trait may not be implemented for a primitive — `impl Doubler for int` is
-`E0204`, "an `impl` block needs a type declared in this module".
+`E0204`, "`int` is not a struct or an enum". Wrap it in a struct of your own;
+as a bound, the primitives already meet `Display`, `Debug` and `Hash`.
 
-When a type has both an inherent method and a trait method of the same name, the
-one that wins on the concrete type is whichever `impl` block comes **first in the
-file**. Inherent does not take priority, and nothing is reported — method lookup
-is a scan in declaration order that never asks which kind of block it found. A
-`dyn Trait` always runs the trait's body. This prints `trait` twice; swap the two
-blocks and the first line becomes `inherent`.
+A type has **one method of each name across all of its `impl` blocks**, trait
+implementations and the defaults they take included. An inherent method and a
+trait method of the same name, or two traits' methods of one name on one type,
+are `E0112` at the second block — the compiler used to run whichever block came
+first in the file, silently. Rename one, or implement only one of the traits.
 
-```kite
+```kite fails
 trait Greet {
     fn hi(self) -> str
 }
@@ -968,17 +972,18 @@ impl Greet for P {
 }
 
 impl P {
-    fn hi(self) -> str {
+    fn hi(self) -> str { //~ E0112
         return "inherent"
     }
 }
 
 fn main() {
     io.print(P{ n: 1 }.hi())
-    let d: dyn Greet = P{ n: 1 }
-    io.print(d.hi())
 }
 ```
+
+The same goes for a type parameter: with `T: A + B` where both traits declare
+`go`, `x.go()` is `E0112` at the call, since no type could implement both.
 
 ### The prelude's traits
 
@@ -1418,6 +1423,31 @@ A parameter satisfies exactly the bounds it was declared with, so a bounded one
 may be passed on to the same bound — `fn outer<T: Shape>(x: T)` may call
 `inner<T: Shape>(x)` — and an unbounded one may not.
 
+`int`, `float`, `bool` and `str` meet the prelude's `Display`, `Debug` and
+`Hash` bounds, so `Cache<K: Hash, V>` takes a `str` key and `fn tell<T:
+Display>` takes a `3`; through the bound, `x.hash()` and `x.debug()` are what
+`@derive` does with a field of that type, and `x.show()` is interpolation.
+That is all a primitive has: `3.hash()` written directly is still `E0205`, a
+`dyn Display` cannot hold one (`E0200`) — nor can a generic function make its
+`T` a `dyn` when that `T` is a primitive: `fn wrap<T: Display>(x: T) -> dyn
+Display` called with a `3` is `E0200` at the conversion, naming the copy
+`wrap<int>` — and slices, maps, tuples and optionals meet none of these bounds.
+
+```kite
+fn tell<T: Display>(x: T) -> str {
+    return "<\(x)>"
+}
+
+fn key<K: Hash>(k: K) -> int {
+    return k.hash()
+}
+
+fn main() {
+    io.print(tell(3) + tell("s"))
+    io.print(key("a") == hash_str("a"))
+}
+```
+
 A bound is checked at every call site of a generic **function**:
 
 ```kite fails
@@ -1598,7 +1628,7 @@ fn main() {
 ```
 
 A bound on a generic type holds everywhere. On the `struct` or `enum` header it
-is checked wherever a value is built, so a `Holder<int>` cannot exist; on the
+is checked wherever a value is built, so a `Holder<[int]>` cannot exist; on the
 `impl` header it is checked at every call of the block's methods, and it is what
 lets their bodies call the bound's methods. Write it on both:
 
@@ -1639,14 +1669,14 @@ struct Holder<T: Display> {
 }
 
 fn main() {
-    let h = Holder{ value: 5 } //~ E0208
+    let h = Holder{ value: [5] } //~ E0208
     io.print(1)
 }
 ```
 
 A generic type implements a trait only where its arguments meet the bounds of
 the `impl` that says so: after `impl<T: Display> Named for Holder<T>`, a
-`Holder<int>` is not `Named`, as a bound or as a `dyn`.
+`Holder<[int]>` is not `Named`, as a bound or as a `dyn`.
 
 A generic name used without arguments, or with the wrong number, is `E0208`:
 
@@ -1938,6 +1968,28 @@ struct Outer {
 
 fn main() {
     io.print(Outer{ inner: Plain{ x: 1 } }.inner.x)
+}
+```
+
+`Debug` and `Hash` derive for a generic type too. A field typed by one of its
+parameters is walked through that parameter's own method, and the generated
+`impl` bounds the parameter by the trait — `impl<T: Debug> Debug for Box<T>` —
+so a `Box<int>` is `Debug` and a `Box<[int]>` is not (`E0208` where it is
+used; `E0702` naming the field when a type deriving `Debug` has a
+`Box<[int]>` field). A parameter no field reaches gets no bound. `Encode` and `Decode` still
+refuse a generic type (`E0702`).
+
+```kite
+@derive(Debug, Hash)
+struct Box<T> {
+    value: T
+    tags: [str]
+}
+
+fn main() {
+    let b = Box{ value: 3, tags: ["a"] }
+    io.print(b.debug())
+    io.print(b.hash() == Box{ value: 3, tags: ["a"] }.hash())
 }
 ```
 

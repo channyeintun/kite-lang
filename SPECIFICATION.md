@@ -944,6 +944,10 @@ if NotFound.is(err) {
 let missing = NotFound.as(err)      // Option<NotFound>
 ```
 
+Only a type that implements `Error` can be asked about, since no error carries
+any other: `Plain.is(err)` on a type without that `impl` is `E0205`, not a test
+that is always false.
+
 Each specialisation of a generic type is its own type, and an error carries the
 one it was made from. So `as` on a generic type is told which by the type it is
 used as — `let w: Option<Wrapped<int>> = Wrapped.as(err)` — and `is`, which has
@@ -1282,7 +1286,11 @@ self` cannot be called on a binding the caller does not own mutably.
 `Rect.square(2.0)` calls the associated function; `r.area()` calls the method.
 
 Multiple `impl` blocks for the same type are permitted within a module, and a
-type has one method of each name across all of them (`E0112`). A type's
+type has one method of each name across all of them (`E0112`) — trait
+implementations, and the default methods they take, included. So an inherent
+method and a trait's of the same name, or two traits', cannot both be on one
+type, and `x.foo()` never depends on which block came first; a type parameter
+bounded by two traits that both declare `foo` makes `x.foo()` `E0112` too. A type's
 inherent methods must be declared in the module that declares the type — there
 are no extension methods, so `x.foo()` can always be resolved by looking at where
 `x`'s type is defined. An `impl` block for another module's type is `E0406`,
@@ -1500,12 +1508,13 @@ does. A generic method's type parameters may be bounded no more tightly than
 the trait's are (`E0208`): a caller through the trait meets the trait's bounds
 and no others.
 
-A default method's body is checked for each implementation that takes it, with
-`Self` read as that implementation's type, and a mistake in it is reported
-once, not once per implementation. A default no implementation takes — the
-trait has none yet, or each writes its own — is checked all the same, with
-`Self` standing for any implementation: what the trait declares is known of it,
-and nothing else.
+A default method's body is checked once, with `Self` standing for any
+implementation: what the trait declares is known of it, and nothing else — not
+the implementing type's fields, nor its inherent methods. So a mistake in it is
+reported once, not once per implementation, and it is checked whether or not
+any implementation takes it. Each implementation that takes it runs it with
+`Self` as that implementation's type, and `self.m()` in it is always the
+trait's `m`.
 
 ### 10.2 Coherence
 
@@ -1602,8 +1611,13 @@ than a silent replacement.
 
 The walk handles primitives, slices, maps, optionals, tuples, and other types
 that derive the same trait. Where it cannot go — a function field, a `dyn
-Trait`, a type parameter — it says which field stopped it and what would fix
-it, and the hand-written implementation is still there to write.
+Trait` — it says which field stopped it and what would fix it, and the
+hand-written implementation is still there to write. `Debug` and `Hash` derive
+for a generic type as well: a field of a parameter's type is walked through
+the parameter's own method, and the derived `impl` bounds that parameter by
+the trait, `impl<T: Debug> Debug for Box<T>`. `Encode` and `Decode` derive only
+for a type without parameters, because `Decode` builds each field through an
+associated function, which no bound can reach.
 
 `Decode` is an **associated function**, not a trait method: it produces the
 implementing type, and a trait method cannot say that without `Self` in return
@@ -1683,6 +1697,14 @@ Bounds are trait names, and a parameter satisfies one by implementing it. That
 is the whole of the system: a generic function is a function whose parameter
 types are named rather than fixed, and monomorphisation makes each use an
 ordinary call.
+
+The built-in `int`, `float`, `bool` and `str` satisfy the prelude's `Display`,
+`Debug` and `Hash` (§10.4) — what those ask of them is what interpolation and
+`@derive` already do with one — so `Cache<str, int>` above is a cache with
+string keys. They do so only as bounds: a primitive has no methods of its own
+to call directly, and is not a `dyn` of any trait — so a generic function
+that converts its `T` to a `dyn` cannot have a primitive for that `T`, which is
+`E0200` at the conversion in the copy that would do it.
 
 A bound holds wherever it is written. On a function, it is checked at every call
 (`E0208`). On a struct or an enum, it is checked wherever a value is built — a
