@@ -1240,12 +1240,26 @@ struct Checker<'a> {
     /// it left scope on one path is not reported again where the function
     /// ends.
     reported_unchecked: std::collections::HashSet<u32>,
-    /// Pairs of locals holding one and the same unchecked failure, because
-    /// one was made a copy of the other: `let e = err`, `e = err`, or a
-    /// `match err { x => … }` arm. A copy is not an inspection, so the
-    /// failure still has to be looked at — but through either name, so
-    /// inspecting one inspects both, and one left behind while the other is
-    /// still in scope has dropped nothing. Each pair is written lowest first.
+    /// Which locals hold what others hold. A pair `(a, b)` says that every
+    /// unchecked failure `a` holds, `b` holds unchecked too: inspecting `b`
+    /// inspects `a`, and `a` left behind or written over while `b` is still
+    /// in scope has dropped nothing.
+    ///
+    /// A copy — `let e = err`, `e = err`, a `match err { x => … }` arm —
+    /// holds one and the same failure as what it copies, so it is both
+    /// pairs: the two names share one obligation, met through either. A
+    /// pair in one direction alone is what a join leaves where a copy held
+    /// on one way in and the first name held nothing unchecked on the
+    /// other: after `var e: error = nil` and a loop of `e = c`, `e` holds
+    /// `c`'s failure or none, so writing over `e` again drops nothing, but
+    /// testing `e` says nothing of `c` on the way that skipped the loop.
+    ///
+    /// What keeps it sound: whenever `(a, b)` is here and `a` is Unchecked,
+    /// `b` is Unchecked too. A copy starts that way, inspecting `b` cleans
+    /// `a` with it, a write to either drops every pair that names it (what
+    /// `a` held is still held by what held it — see
+    /// [`Checker::forget_copies`]), and a join keeps a pair only where it
+    /// held on both ways in ([`join_copies`]).
     copies: std::collections::BTreeSet<(u32, u32)>,
     /// For a local holding a tuple of failures, one hidden local per element
     /// that can hold one, each Unchecked until that element is taken with
@@ -1435,20 +1449,25 @@ struct Enclosing {
     inferred_ret: Option<(TyId, Option<TyId>)>,
 }
 
-/// The copies that still hold where control arrives from either of two
-/// paths, each given as its copies and its taint.
+/// Which locals hold what others hold where control arrives from either of
+/// two paths, each given as its pairs and its taint (see
+/// [`Checker::copies`]).
 ///
-/// Two names hold one failure after the join only if inspecting either
-/// inspects the other on both ways in: they were copies on that path, or
-/// neither held anything unchecked there, so there was nothing to inspect.
+/// `(x, y)` holds after the join only if it held on both ways in: the pair
+/// was there, or `x` held nothing unchecked, so that everything it held —
+/// nothing — `y` held too. Each pair is taken alone, and each direction of
+/// a copy alone, so a copy that held on one way in, joined with a way in
+/// where its first name held nothing, keeps the one direction that is
+/// still true. That keeps the invariant: if `x` is Unchecked after the
+/// join it was Unchecked on some way in, where the pair was there and so
+/// `y` was Unchecked too, and the join of taint keeps it so.
 fn join_copies(
     a: (&std::collections::BTreeSet<(u32, u32)>, &[Taint]),
     b: (&std::collections::BTreeSet<(u32, u32)>, &[Taint]),
 ) -> std::collections::BTreeSet<(u32, u32)> {
     let holds = |(copies, taint): (&std::collections::BTreeSet<(u32, u32)>, &[Taint]),
                  pair: &(u32, u32)| {
-        copies.contains(pair)
-            || [pair.0, pair.1].iter().all(|i| taint.get(*i as usize) != Some(&Taint::Unchecked))
+        copies.contains(pair) || taint.get(pair.0 as usize) != Some(&Taint::Unchecked)
     };
     a.0.union(b.0).filter(|pair| holds(a, pair) && holds(b, pair)).copied().collect()
 }
@@ -2289,20 +2308,34 @@ impl<'a> Checker<'a> {
         }
     }
 
-    /// A local and every local holding the same failure as it, itself first.
+    /// A local and every local whose failure inspecting it inspects — each
+    /// that holds nothing it does not hold (see [`Self::copies`]) — itself
+    /// first. For a copy, that is every name of the failure.
     ///
     /// The pairs are read once into a table of neighbours and the group is
     /// walked over that. Scanning every pair for each member, and the group
     /// for each find, made a chain of a thousand copies take seconds: the
     /// cost was cubic in the number of copies of one error.
     fn copies_of(&self, id: u32) -> Vec<u32> {
+        self.reach(id, false)
+    }
+
+    /// A local and every local that holds everything it holds, itself
+    /// first: what may answer for its failure if it goes.
+    fn held_by(&self, id: u32) -> Vec<u32> {
+        self.reach(id, true)
+    }
+
+    /// `id` and every local reached from it along the pairs, forward (from
+    /// a holder to what holds all it holds) or backward.
+    fn reach(&self, id: u32, forward: bool) -> Vec<u32> {
         if !self.copies.iter().any(|&(a, b)| a == id || b == id) {
             return vec![id];
         }
         let mut next: std::collections::HashMap<u32, Vec<u32>> = std::collections::HashMap::new();
         for &(a, b) in &self.copies {
-            next.entry(a).or_default().push(b);
-            next.entry(b).or_default().push(a);
+            let (from, to) = if forward { (a, b) } else { (b, a) };
+            next.entry(from).or_default().push(to);
         }
         let mut group = vec![id];
         let mut seen: std::collections::HashSet<u32> = std::collections::HashSet::from([id]);
@@ -2319,32 +2352,71 @@ impl<'a> Checker<'a> {
     }
 
     /// Whether another name than `id` holds `id`'s failure unchecked and
-    /// stays in scope past what `leaves` says is going out.
+    /// stays in scope past what `leaves` says is going out. One that holds
+    /// everything `id` holds does: by the invariant on [`Self::copies`] it
+    /// is Unchecked wherever `id` holds a failure, and it still holds it.
     fn carried_elsewhere(&self, id: u32, leaves: impl Fn(u32) -> bool) -> bool {
-        self.copies_of(id)
+        self.held_by(id)
             .into_iter()
             .skip(1)
             .any(|j| self.taint.get(j as usize) == Some(&Taint::Unchecked) && !leaves(j))
     }
 
+    /// `a` was made a copy of `b`: each holds exactly what the other does.
     fn note_copy(&mut self, a: u32, b: u32) {
         if a != b {
-            self.copies.insert((a.min(b), a.max(b)));
+            self.copies.insert((a, b));
+            self.copies.insert((b, a));
         }
     }
 
-    /// A local is about to hold something else: it is no longer a copy of
-    /// anything. What it was a copy of, and what was a copy of it, still
-    /// hold one failure between them.
+    /// A local is about to hold something else, or nothing: no pair naming
+    /// it is true any more, so every one goes. What they said about the
+    /// others is still true and is kept: whatever held nothing `id` did not
+    /// still holds nothing that what held all of `id`'s does not, so each
+    /// of the first is joined to each of the second.
+    ///
+    /// The names `id` was a copy of are joined through one of them, as a
+    /// chain, rather than each to each: a failure with a thousand names
+    /// would otherwise make a million pairs.
     fn forget_copies(&mut self, id: u32) {
-        let others: Vec<u32> = self.copies_of(id).into_iter().skip(1).collect();
-        if others.is_empty() {
+        let mut into: Vec<u32> = Vec::new();
+        let mut from: Vec<u32> = Vec::new();
+        for &(a, b) in &self.copies {
+            if b == id && a != id {
+                into.push(a);
+            }
+            if a == id && b != id {
+                from.push(b);
+            }
+        }
+        if into.is_empty() && from.is_empty() {
             return;
         }
         self.copies.retain(|&(a, b)| a != id && b != id);
-        if others.len() > 1 {
-            for &x in &others[1..] {
-                self.note_copy(others[0], x);
+        let out: std::collections::HashSet<u32> = from.iter().copied().collect();
+        let both: Vec<u32> = into.iter().copied().filter(|x| out.contains(x)).collect();
+        let shared: std::collections::HashSet<u32> = both.iter().copied().collect();
+        match both.split_first() {
+            Some((&hub, rest)) => {
+                for &x in rest {
+                    self.note_copy(hub, x);
+                }
+                for &x in into.iter().filter(|x| !shared.contains(x)) {
+                    self.copies.insert((x, hub));
+                }
+                for &y in from.iter().filter(|y| !shared.contains(y)) {
+                    self.copies.insert((hub, y));
+                }
+            }
+            None => {
+                for &x in &into {
+                    for &y in &from {
+                        if x != y {
+                            self.copies.insert((x, y));
+                        }
+                    }
+                }
             }
         }
     }
@@ -8710,6 +8782,19 @@ impl<'a> Checker<'a> {
             // nothing; and a failure under several names leaving together is
             // one failure, reported once, under the first of them.
             if self.carried_elsewhere(id, |j| leaves(self, j)) {
+                continue;
+            }
+            // One that holds all this one holds, and more, is leaving with
+            // it: the report is that one's, which covers this one, since it
+            // is the name that answers for every failure the two hold. After
+            // `var e: error = nil` and a loop of `e = c`, it is `c` that the
+            // way around the loop leaves unread, not `e`.
+            let within: std::collections::HashSet<u32> = self.copies_of(id).into_iter().collect();
+            if self.held_by(id).into_iter().any(|j| {
+                !within.contains(&j)
+                    && self.taint.get(j as usize) == Some(&Taint::Unchecked)
+                    && !self.locals[j as usize].synthetic
+            }) {
                 continue;
             }
             let group: Vec<u32> = self

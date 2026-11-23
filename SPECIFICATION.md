@@ -1229,7 +1229,11 @@ error names the same failure (R7). A loop body is entered both from before the
 loop and from its own end and every `continue`, so the state at its top is the
 join of all of them, and a failure one iteration leaves unchecked is still
 there when the next writes over it: `var e: error = nil` then
-`for i in 0..3 { e = f(i) }` is `E0302` at the write. A body whose end changes
+`for i in 0..3 { e = f(i) }` is `E0302` at the write. A copy is followed
+around a loop one way at a time: after `var e: error = nil` and
+`for i in 0..n { e = c }`, `e` holds `c`'s failure or nothing, so the next
+iteration's `e = c` drops nothing, but testing `e` after the loop does not
+answer for `c` on the way that skipped it, and that is `E0302` at `c`. A body whose end changes
 nothing is checked once; one that does is checked again from the join, which
 ends because the lattice has height two and a state can only get worse. What
 follows a loop is reached from its top and from every `break` — except after a
