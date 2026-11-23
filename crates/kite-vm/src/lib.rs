@@ -2178,11 +2178,17 @@ impl<'a> Vm<'a> {
             Native::IoReadLine => {
                 #[cfg(not(target_arch = "wasm32"))]
                 {
-                    let mut line = String::new();
-                    let read = std::io::stdin().read_line(&mut line).unwrap_or(0);
+                    use std::io::BufRead;
+                    // Bytes, then a lossy decode: a line that is not UTF-8
+                    // reads with U+FFFD where the bad bytes were, because
+                    // reading it as text failed into the end-of-input `""`
+                    // and a reading loop stopped at it.
+                    let mut line = Vec::new();
+                    let read = std::io::stdin().lock().read_until(b'\n', &mut line).unwrap_or(0);
                     if read == 0 {
                         return Ok(Value::Str(Rc::from("")));
                     }
+                    let line = String::from_utf8_lossy(&line);
                     let trimmed = line.trim_end_matches('\n').trim_end_matches('\r');
                     Ok(Value::Str(Rc::from(trimmed)))
                 }

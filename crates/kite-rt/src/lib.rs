@@ -2697,15 +2697,17 @@ pub extern "C" fn kite_rt_error_unit() {
 }
 
 /// One line from standard input, without its newline. The empty string at end
-/// of input.
+/// of input. Read as bytes and decoded lossily, as the VM does: a line that is
+/// not UTF-8 gets U+FFFD for its bad bytes rather than reading as the end.
 #[no_mangle]
 pub extern "C" fn kite_rt_read_line() -> u64 {
     use std::io::BufRead;
-    let mut line = String::new();
-    let read = std::io::stdin().lock().read_line(&mut line).unwrap_or(0);
+    let mut line = Vec::new();
+    let read = std::io::stdin().lock().read_until(b'\n', &mut line).unwrap_or(0);
     if read == 0 {
         return make_str(b"");
     }
+    let line = String::from_utf8_lossy(&line);
     let trimmed = line.trim_end_matches('\n').trim_end_matches('\r');
     make_str(trimmed.as_bytes())
 }
