@@ -282,6 +282,11 @@ fn kitec_fix_puts_members_sharing_a_line_on_lines_of_their_own() {
             "struct P {\n    x: int, y: int,\n    z: int,\n    w: int\n}\n\nfn main() {\n    let p = P{ x: 1, y: 2, z: 3, w: 4 }\n    io.print(p.x)\n}\n",
         ),
         ("fix-enum-line", "enum E { A, B(int), C }\n\nfn main() {\n    io.print(1)\n}\n"),
+        // And a comma missing after `self` or between closure parameters.
+        (
+            "fix-self-comma",
+            "struct S {\n    n: int\n}\n\nimpl S {\n    fn m(self a: int) -> int {\n        return self.n + a\n    }\n}\n\nfn main() {\n    let f = |x: int y: int| x + y\n    io.print(S{ n: 1 }.m(2) + f(3, 4))\n}\n",
+        ),
     ] {
         let dir = scratch(name, "t.kite", src);
         let Some((ok, _, err)) = kitec_in(&dir, &["fix", "t.kite"]) else { return };

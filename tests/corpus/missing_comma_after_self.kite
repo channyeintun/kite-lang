@@ -1,0 +1,18 @@
+// A `,` missing after `self`, or between two closure parameters, is as
+// certain as one missing between two parameters: one E0100, with a fix that
+// adds it. The method is kept, so calling it is not E0205 as well.
+
+struct S {
+    n: int
+}
+
+impl S {
+    fn m(self a: int) -> int { //~ ERROR E0100
+        return self.n + a
+    }
+}
+
+fn main() {
+    let f = |x: int y: int| x + y //~ ERROR E0100
+    io.print(S{ n: 1 }.m(2) + f(3, 4))
+}

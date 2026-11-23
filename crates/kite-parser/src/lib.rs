@@ -1973,8 +1973,18 @@ impl<'a> Parser<'a> {
         } else {
             None
         };
+        // `self a: int` lacks the same comma `a: int b: int` does, and as
+        // certainly: it is supplied, with the fix, and the method is kept —
+        // dropping it made every call of it E0205 as well.
         if self_param.is_some() && !self.at(T::RParen) {
-            self.expect(T::Comma)?;
+            self.skip_newlines();
+            let another = (self.at(T::Ident) && self.peek_at(1) == T::Colon)
+                || (self.at(T::Var) && self.peek_at(1) == T::Ident);
+            if another {
+                self.missing_comma("parameters", true, None);
+            } else if !self.at(T::RParen) {
+                self.expect(T::Comma)?;
+            }
         }
 
         let params = self.parse_params(true)?;
@@ -4127,9 +4137,14 @@ impl<'a> Parser<'a> {
                     None
                 };
                 params.push(ClosureParam { name, ty });
-                if !self.eat(T::Comma) {
+                if self.eat(T::Comma) {
+                    continue;
+                }
+                // Between `|x: int` and `y` nothing but a comma can stand.
+                if !self.at(T::Ident) {
                     break;
                 }
+                self.missing_comma("parameters", true, None);
             }
             self.expect(T::Pipe)?;
         }
