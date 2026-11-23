@@ -360,6 +360,26 @@ fn an_error_in_a_doc_example_points_at_the_line_it_was_written_on() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// An example left open at its end is reported at the end of its last line,
+/// as the end of the example. The runner's wrapper brace stood for the
+/// fence's opening line, so the caret was on `/// ```kite`, labelled
+/// `found }` — a brace the reader never wrote.
+#[test]
+fn an_example_left_open_is_reported_at_its_end() {
+    let src = "/// Doubles.\n///\n/// ```kite\n/// let x = (1 +\n/// ```\n///\n/// ```kite\n/// let y = [1,\n/// ```\n\
+               pub fn double(n: int) -> int {\n    return n * 2\n}\n";
+    let dir = scratch("doc-open-end", "t.kite", src);
+    let Some((ok, out, err)) = kitec_in(&dir, &["test", "t.kite"]) else { return };
+    assert!(!ok, "{}{}", out, err);
+    let shown = format!("{}{}", out, err);
+    assert!(shown.contains("t.kite:4:17"), "the end of `(1 +`: {}", shown);
+    assert!(shown.contains("t.kite:8:16"), "the end of `[1,`: {}", shown);
+    assert!(shown.contains("found the end of the example"), "{}", shown);
+    assert!(!shown.contains("found }") && !shown.contains("t.kite:3:1"), "{}", shown);
+    assert!(out.contains("FAILED   ./t.kite:3 (doc example)") && out.contains("FAILED   ./t.kite:7 (doc example)"), "{}", out);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// One bad fence fails only itself. The fences used to be compiled as one
 /// unit, so a fence that mixes a declaration with a statement (which does not
 /// parse) marked every example in the file FAILED.
