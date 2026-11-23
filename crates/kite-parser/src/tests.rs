@@ -1031,6 +1031,27 @@ fn an_open_block_string_at_the_end_is_one_error() {
     assert_eq!(p.codes(), vec!["E0101"], "{}", p.render());
 }
 
+/// What an unterminated string swallowed is that one mistake too: the `)`
+/// after `io.print("""abc` (it was "expected `)`, found end of file"), the
+/// `)` a `"` string's line ended with, and a hole's `)` taken by a string in
+/// it. Whether the file ends in a line break does not matter: the parser asks
+/// the lexer, where it used to guess from the last token's text, and a
+/// `"""` at the very end looked closed.
+#[test]
+fn what_an_unterminated_string_swallowed_is_not_reported_again() {
+    for src in [
+        "fn main() {\n    io.print(\"\"\"abc\n}\n",
+        "fn main() {\n    io.print(\"abc\n}\n",
+        "fn main() {\n    let y = (1, \"abc\n    io.print(y)\n}\n",
+        "fn main() {\n    io.print(\"a \\(f(\"x) b\")\n}\n",
+        "fn main() {\n    let s = \"\"\"\n        x \\(g(\"\"\"",
+        "fn main() {\n    let s = \"\"\"\n        x \\(g(\"\"\"\n",
+    ] {
+        let p = parse_src(src);
+        assert_eq!(p.codes(), vec!["E0001"], "{:?}\n{}", src, p.render());
+    }
+}
+
 /// Code that is not indented says nothing about where a brace went missing,
 /// and is read as it always was — a `fn` at the margin of an unindented
 /// `impl` is a method.
@@ -1543,4 +1564,44 @@ fn a_statement_arm_is_fixed_by_the_block_it_was_written_as() {
     assert_eq!(p.codes(), vec!["E0100", "E0100"], "{}", p.render());
     assert!(p.render().contains("`=> { break outer }`"), "{}", p.render());
     assert!(p.render().contains("`=> { return }`"), "{}", p.render());
+}
+
+/// A `use` path written from the file ends with its line, even when the line
+/// ends in a `/` and the lexer joins the next one on. `use ../one/` above
+/// `fn main` took `main` into the path and then read the body as
+/// declarations: an `expected a declaration` at its `}`, and a note quoting
+/// the next three lines as the path. It is one error, and `main` is declared.
+#[test]
+fn a_use_path_with_dots_ends_with_its_line() {
+    for src in [
+        "use ../one/\nfn main() {\n    io.print(1)\n}\n",
+        "use ./\n\nfn main() {\n    io.print(1)\n}\n",
+        "use ../one/a\nfn main() {\n    io.print(1)\n}\n",
+    ] {
+        let p = parse_src(src);
+        assert_eq!(p.codes(), vec!["E0100"], "{:?}\n{}", src, p.render());
+        assert!(!p.diags.iter().any(|d| d.notes.iter().any(|n| n.contains("main"))), "{}", p.render());
+        assert_eq!(p.fns().iter().map(|f| f.name.name.as_str()).collect::<Vec<_>>(), vec!["main"]);
+    }
+}
+
+/// A comma between two members on one line becomes a line break indented to
+/// the first member on that line, found by tokens: a `{` in a member's own
+/// type (`m: {str: int}`) is not where the members start. Taken from the
+/// line's text, the third member went under the map type's brace.
+#[test]
+fn a_comma_between_members_is_fixed_at_the_first_members_column() {
+    for (src, indent) in [
+        ("struct P { x: Pair<int, int>, m: {str: int}, y: int }\n", "           "),
+        ("enum E {\n    A(x: {str: int}), B, C\n}\n", "    "),
+        ("struct P {\n\tm: {str: int}, y: int\n}\n", "\t"),
+    ] {
+        let p = parse_src(src);
+        assert_eq!(p.codes(), vec!["E0100"], "{}", p.render());
+        let edits = &p.diags.iter().next().unwrap().fixes[0].edits;
+        assert!(!edits.is_empty());
+        for e in edits {
+            assert_eq!(e.replacement, format!("\n{}", indent), "{:?}", src);
+        }
+    }
 }

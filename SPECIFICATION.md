@@ -168,6 +168,20 @@ true  false
 nil
 ```
 
+A string, `"…"` or `"""…"""`, reads these escapes and no others:
+
+| Escape | Means |
+|---|---|
+| `\n` `\t` `\r` `\0` | line feed, tab, carriage return, NUL |
+| `\\` `\"` `\'` | a backslash, a double quote, a single quote |
+| `\u{…}` | the Unicode scalar value whose hex digits are between the braces |
+| `\(…)` | a hole (below), not an escape |
+
+`\u` must be followed by `{`, one or more hex digits and `}`: no sign, no
+other character, and the value must be a scalar value (at most `10FFFF`, and
+not a surrogate). `\u{4E2D}` is `中`. Anything else after a `\` — `\q`, `\u41`,
+`\u{41`, `\u{+41}`, `\u{110000}` — is `E0003`, reported at the escape.
+
 String interpolation uses `\(expr)`:
 
 ```kite
@@ -186,6 +200,10 @@ character, so a line indented less loses what it has and a tab where the
 delimiter's line has spaces is kept. A line break in the source is a line
 break whether the file writes it LF or CRLF, so a block string's lines are
 joined by `\n` alone and never end in a `\r` that was not written as `\r`.
+A block string ends at the first `"""` that is not inside a hole. Escapes are
+read in a block string as in a `"` string, and an escaped quote is text: it is
+never the first quote of the closing delimiter, so `\""""` is a `"` and then
+the end, and `\"""` writes three quotes.
 
 `int`, `float`, `bool` and `str` render themselves; every other type renders
 through its own `Display`. Because a hole is an expression,
@@ -535,7 +553,8 @@ folding it would have had to pick one.
 - **`pub`** — visible to anything that imports the module.
 
 `pub` applies to functions, types, struct fields, traits and trait methods. A
-variant is exactly as visible as its enum, and cannot be marked on its own. There
+variant and its payload's fields are exactly as visible as their enum, and
+cannot be marked on their own: `pub` on either is an error. There
 is no `pub use`: a module's imports are its own (§13.1) and are not exported, so
 `pub` on a `use` is an error. A `pub struct` with unmarked fields is an opaque type: callers
 can hold it and pass it, but cannot read, construct, or destructure it — not
@@ -2129,6 +2148,13 @@ wins. So `ui/app.kite` above writing `use config` finds `ui/config/` if `ui`
 has one of its own and `config/` beside `ui/` otherwise, and a dependency never
 resolves a `use` into the program that imports it. A `use` that matches
 nowhere is `E0400`, and its note lists every place that was tried.
+
+A path is therefore a name and never written from the file: `use ../config`,
+`use ./config` and `use /config` are `E0100`, with a note giving the path to
+write instead (`use config`). A file's `use` lines
+come before anything it declares; one below a declaration is `E0100` too, and
+the import is still made, so the names it brings in are not reported missing as
+well.
 
 **Neither form is a module until a `use` names it.** A `.kite` file nothing
 imports is not compiled, and two files sharing a directory share nothing by

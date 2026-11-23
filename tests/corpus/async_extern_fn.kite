@@ -1,0 +1,11 @@
+// An `extern fn` cannot be `async`: one error at the `async`. What a call of
+// it would give back is unknown, so awaiting it is not refused a second time
+// as an `await` of an `int`.
+
+@host("x")
+async extern fn get() -> int //~ ERROR E0100
+
+async fn main() {
+    let v = await get()
+    io.print(v + 1)
+}

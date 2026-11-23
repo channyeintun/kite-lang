@@ -4082,11 +4082,13 @@ impl<'a> Checker<'a> {
                 match parse_int(text) {
                     Some(v) => self.lit(ExprKind::Int(v), TyId::INT, *span),
                     None => {
-                        self.diags.push(
-                            Diagnostic::error(codes::E0004, "integer literal is out of range")
-                                .with_primary(*span, "does not fit in `int`")
-                                .with_note("`int` is 64-bit signed"),
-                        );
+                        if int_overflows(text) {
+                            self.diags.push(
+                                Diagnostic::error(codes::E0004, "integer literal is out of range")
+                                    .with_primary(*span, "does not fit in `int`")
+                                    .with_note("`int` is 64-bit signed"),
+                            );
+                        }
                         self.lit(ExprKind::Error, TyId::ERROR, *span)
                     }
                 }
@@ -13165,22 +13167,18 @@ impl<'a> Checker<'a> {
         if let Some(s) = raw.strip_prefix("\"\"\"") {
             let body = s.strip_suffix("\"\"\"").unwrap_or(s);
             let dedented = dedent_block(body);
-            return self.decode_escapes(&dedented, span);
+            return decode_escapes_into(&dedented, raw, span, self.diags);
         }
         let s = raw.strip_prefix('"').unwrap_or(raw);
         let inner = s.strip_suffix('"').unwrap_or(s);
-        self.decode_escapes(inner, span)
+        decode_escapes_into(inner, raw, span, self.diags)
     }
 
     /// The text of one literal run inside an interpolated string. The parser
     /// has already excluded the quotes and the holes.
     fn text_run_value(&mut self, span: Span) -> String {
-        let raw = self.text(span).to_string();
-        self.decode_escapes(&raw, span)
-    }
-
-    fn decode_escapes(&mut self, inner: &str, span: Span) -> String {
-        decode_escapes_into(inner, span, self.diags)
+        let raw = self.text(span);
+        decode_escapes_into(raw, raw, span, self.diags)
     }
 
     /// Insert the wrap a `T` needs to stand where an `Option<T>` is wanted.
@@ -15296,14 +15294,17 @@ pub(crate) fn dedent_block(body: &str) -> String {
     let body = body.replace("\r\n", "\n");
     // Spaces after the opening delimiter go with its line break: they cannot
     // be seen, and keeping them kept the break as well.
-    let body = match body.find('\n') {
-        Some(at) if body[..at].chars().all(|c| c == ' ' || c == '\t') => &body[at + 1..],
-        _ => body.as_str(),
+    let (body, opened) = match body.find('\n') {
+        Some(at) if body[..at].chars().all(|c| c == ' ' || c == '\t') => (&body[at + 1..], true),
+        _ => (body.as_str(), false),
     };
     // Everything after the last line break is the closing delimiter's own
-    // indentation.
+    // indentation. When the opening line break was the only one, what is
+    // left is the closing line alone: the string has no lines, and
+    // `"""` above an indented `"""` is "", not the indentation.
     let (text, indent) = match body.rfind('\n') {
         Some(at) => (&body[..at], &body[at + 1..]),
+        None if opened => ("", body),
         None => (body, ""),
     };
     if !indent.chars().all(|c| c == ' ' || c == '\t') {
@@ -15641,14 +15642,28 @@ fn edit_distance(a: &str, b: &str) -> usize {
 /// A free function because two callers need it and only one of them has a
 /// [`Checker`]: a module-level constant is evaluated before any body is, so it
 /// has no function to be inside.
-pub(crate) fn decode_escapes_into(inner: &str, span: Span, diags: &mut DiagBag) -> String {
+///
+/// `source` is the text `span` covers, and `inner` is made from it: the same
+/// text, or a block string's with its quotes and indentation taken off. That
+/// removes only whitespace, never a `\\`, so the n-th escape of `inner` is the
+/// n-th of `source`, and an invalid one is underlined where it is written —
+/// it used to be the whole literal, which says less than the escape does.
+pub(crate) fn decode_escapes_into(
+    inner: &str,
+    source: &str,
+    span: Span,
+    diags: &mut DiagBag,
+) -> String {
     let mut out = String::with_capacity(inner.len());
     let mut chars = inner.chars();
+    let mut nth = 0;
     while let Some(c) = chars.next() {
         if c != '\\' {
             out.push(c);
             continue;
         }
+        nth += 1;
+        let at = |len: usize| escape_span(source, span, nth - 1, len);
         match chars.next() {
             Some('n') => out.push('\n'),
             Some('t') => out.push('\t'),
@@ -15680,17 +15695,20 @@ pub(crate) fn decode_escapes_into(inner: &str, span: Span, diags: &mut DiagBag) 
                     Some(c) => out.push(c),
                     None if !opened => diags.push(
                         Diagnostic::error(codes::E0003, "invalid unicode escape")
-                            .with_primary(span, "this `\\u` is not followed by `{`")
+                            .with_primary(at(2), "this `\\u` is not followed by `{`")
                             .with_note("a unicode escape is hex digits between braces: `\\u{41}`"),
                     ),
                     None if !closed => diags.push(
                         Diagnostic::error(codes::E0003, "unclosed unicode escape")
-                            .with_primary(span, "this `\\u{` is never closed")
+                            .with_primary(at(3), "this `\\u{` is never closed")
                             .with_note("a unicode escape is hex digits between braces: `\\u{41}`"),
                     ),
                     None => diags.push(
                         Diagnostic::error(codes::E0003, "invalid unicode escape")
-                            .with_primary(span, format!("`\\u{{{}}}` is not a character", hex)),
+                            .with_primary(
+                                at(hex.len() + 4),
+                                format!("`\\u{{{}}}` is not a character", hex),
+                            ),
                     ),
                 }
             }
@@ -15703,7 +15721,7 @@ pub(crate) fn decode_escapes_into(inner: &str, span: Span, diags: &mut DiagBag) 
             Some(other) => {
                 diags.push(
                     Diagnostic::error(codes::E0003, "invalid escape sequence")
-                        .with_primary(span, format!("`\\{}` is not recognised", other))
+                        .with_primary(at(1 + other.len_utf8()), format!("`\\{}` is not recognised", other))
                         .with_note("valid escapes: \\n \\t \\r \\0 \\\\ \\\" \\' \\u{...}"),
                 );
             }
@@ -15713,19 +15731,53 @@ pub(crate) fn decode_escapes_into(inner: &str, span: Span, diags: &mut DiagBag) 
     out
 }
 
+/// The span of the `nth` escape written in `source`, the text of `span`,
+/// `len` bytes long and kept inside `span`. Read as the lexer reads one: a
+/// `\\` and the character after it.
+fn escape_span(source: &str, span: Span, nth: usize, len: usize) -> Span {
+    let bytes = source.as_bytes();
+    let (mut i, mut seen) = (0, 0);
+    while i < bytes.len() {
+        if bytes[i] == b'\\' {
+            if seen == nth {
+                let start = span.start + i as u32;
+                return Span::new(span.file, start, (start + len as u32).min(span.end));
+            }
+            seen += 1;
+            i += 2;
+        } else {
+            i += 1;
+        }
+    }
+    span
+}
+
 pub(crate) fn parse_int(text: &str) -> Option<i64> {
+    read_int(text).ok()
+}
+
+/// Whether an integer literal fails to read because it is too large, rather
+/// than because it is not a number at all. The lexer has already reported
+/// a literal that is not one — `0x`, `0b102` — so the checker reports only
+/// the overflow: one bad literal, one error.
+pub(crate) fn int_overflows(text: &str) -> bool {
+    use std::num::IntErrorKind::{NegOverflow, PosOverflow};
+    read_int(text).is_err_and(|e| matches!(e.kind(), PosOverflow | NegOverflow))
+}
+
+fn read_int(text: &str) -> Result<i64, std::num::ParseIntError> {
     let text: String = text.chars().filter(|c| *c != '_').collect();
     let text = strip_int_suffix(&text);
     if let Some(h) = text.strip_prefix("0x").or_else(|| text.strip_prefix("0X")) {
-        return i64::from_str_radix(h, 16).ok();
+        return i64::from_str_radix(h, 16);
     }
     if let Some(o) = text.strip_prefix("0o").or_else(|| text.strip_prefix("0O")) {
-        return i64::from_str_radix(o, 8).ok();
+        return i64::from_str_radix(o, 8);
     }
     if let Some(b) = text.strip_prefix("0b").or_else(|| text.strip_prefix("0B")) {
-        return i64::from_str_radix(b, 2).ok();
+        return i64::from_str_radix(b, 2);
     }
-    text.parse().ok()
+    text.parse()
 }
 
 /// Whether an integer literal's digits are `2^63`: out of range alone, and

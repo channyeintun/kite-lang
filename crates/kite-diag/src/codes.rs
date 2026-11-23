@@ -64,8 +64,8 @@ codes! {
     E0001 = "E0001", "unterminated string literal",
         "A string literal was opened and never closed. The lexer reports it where the string starts. The situations:\n\
          \n\
-         - A `\"` string that reaches the end of its line. A `\"` string may not span lines, so a closing quote forgotten at the end of a line is this error, and so is a line break written inside one. The next line is read as code again.\n\
-         - A `\"\"\"` block string with no closing `\"\"\"`. It reads to the end of the file as its text, so this is the file's one error: the braces it swallowed are not reported as unclosed on top of it. A block string is how text is written over several lines (§2.4).\n\
+         - A `\"` string that reaches the end of its line. A `\"` string may not span lines, so a closing quote forgotten at the end of a line is this error, and so is a line break written inside one. What it swallowed on that line — a `)` closing a call — is not reported missing as well. The next line is read as code again.\n\
+         - A `\"\"\"` block string with no closing `\"\"\"`. It reads to the end of the file as its text, so this is the file's one error: the braces it swallowed are not reported as unclosed on top of it. When block strings are nested in holes, the innermost one that ran to the end of the file is the one reported. A block string is how text is written over several lines (§2.4).\n\
          - A character literal, `'a'`, with no closing `'`. Kite has no character type, so a closed one is refused too (`E0200`): write a one-character `str` in double quotes.\n\
          \n\
          Example:\n\
@@ -134,7 +134,9 @@ codes! {
          `0xFF_FF`, `1.5e1_0` — so it cannot end the digits, follow a radix \
          prefix, double up, or touch a `.` or an exponent: `1_`, `0x_F`, \
          `1__0` and `1_.5` are all refused. A float must have digits on both \
-         sides of the point.\n\n\
+         sides of the point. A digit outside the literal's radix — `0b102`, \
+         `0o8`, `0xFG` — makes the whole literal one bad number; it is not \
+         read as a number followed by another.\n\n\
          A literal too large for its type is refused too: an `int` above \
          9223372036854775807, and a `float` too large to be finite, such as \
          `1e999`, which would otherwise become infinity without a word.\n\n\

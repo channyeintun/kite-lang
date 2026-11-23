@@ -25,7 +25,10 @@ Everything here was checked against `target/release/kitec`. Where SPECIFICATION.
   Compilers through 0.1.9 ran fields in declaration order and the base once per
   field it supplied.
 - **Struct fields and enum variants are newline-separated.** A comma between them
-  is `E0100`. Commas are for *literals* and *patterns*, not declarations.
+  is `E0100`, once per declaration, and `kitec fix` repairs every one: it
+  removes a comma at the end of a line and turns one between two members on a
+  line into a line break. Commas are for *literals* and *patterns*, not
+  declarations.
 - **A `match` arm block of more than one statement produces `()`.** Kite has no
   tail expressions. A single-expression block arm does produce a value.
 - **`impl Trait for Type` may contain only that trait's methods** — anything else

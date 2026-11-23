@@ -269,6 +269,35 @@ fn kitec_fix_finishes_the_job_and_reports_what_is_left() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A comma between two members on one line is fixed too: it becomes the line
+/// break it stands for. It had no fix — removing it alone gives `x: int y:
+/// int`, another error — so `kitec fix` left it, and on a one-line struct
+/// said "nothing to fix" to a label reading "remove this comma".
+#[test]
+fn kitec_fix_puts_members_sharing_a_line_on_lines_of_their_own() {
+    for (name, src) in [
+        ("fix-one-line", "struct P { x: int, y: int }\nfn main() { io.print(P{ x: 1, y: 2 }.x) }\n"),
+        (
+            "fix-mid-line",
+            "struct P {\n    x: int, y: int,\n    z: int,\n    w: int\n}\n\nfn main() {\n    let p = P{ x: 1, y: 2, z: 3, w: 4 }\n    io.print(p.x)\n}\n",
+        ),
+        ("fix-enum-line", "enum E { A, B(int), C }\n\nfn main() {\n    io.print(1)\n}\n"),
+        // And a comma missing after `self` or between closure parameters.
+        (
+            "fix-self-comma",
+            "struct S {\n    n: int\n}\n\nimpl S {\n    fn m(self a: int) -> int {\n        return self.n + a\n    }\n}\n\nfn main() {\n    let f = |x: int y: int| x + y\n    io.print(S{ n: 1 }.m(2) + f(3, 4))\n}\n",
+        ),
+    ] {
+        let dir = scratch(name, "t.kite", src);
+        let Some((ok, _, err)) = kitec_in(&dir, &["fix", "t.kite"]) else { return };
+        assert!(ok, "{}: {}", name, err);
+        assert!(!err.contains("cannot fix"), "{}: {}", name, err);
+        let Some((ok, _, err)) = kitec_in(&dir, &["check", "t.kite"]) else { return };
+        assert!(ok, "{} still fails after kitec fix: {}", name, err);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
 /// An error inside a doc example is reported at the line of the `///` comment
 /// it was written on. The example is compiled appended to its module, and the
 /// span used to be printed as the line it landed on there: line 12 of an
