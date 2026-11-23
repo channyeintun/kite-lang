@@ -276,6 +276,48 @@ fn a_large_match_and_a_long_field_chain_are_checked_in_linear_time() {
     assert!(took < Duration::from_secs(20), "checking took {:?}", took);
 }
 
+/// A write to a name that others hold part of and that holds part of others
+/// (`m`, after a branch of `y = m` and a loop of `x = m`) once joined every
+/// one of the first to every one of the second: five hundred of each made a
+/// quarter of a million pairs, each read again for every name leaving at the
+/// end, and the check took minutes. Now a second or two.
+#[test]
+fn a_write_to_a_name_many_copies_lead_into_and_out_of_is_checked_quickly() {
+    let _turn = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+    let k = 500;
+    let mut src = String::from(
+        "fn f(i: int) -> error {\n  if i > 0 {\n    return errors.new(\"x\")\n  }\n  return nil\n}\n\n\
+         fn run(n: int, b: bool) {\n  var m: error = nil\n",
+    );
+    for j in 0..k {
+        src += &format!("  var y{}: error = f({})\n", j, j);
+    }
+    for i in 0..k {
+        src += &format!("  var x{}: error = nil\n", i);
+    }
+    src += "  if b {\n    m = f(9)\n";
+    for j in 0..k {
+        src += &format!("    y{} = m\n", j);
+    }
+    src += "  }\n  for i in 0..n {\n";
+    for i in 0..k {
+        src += &format!("    x{} = m\n", i);
+    }
+    src += "  }\n  m = nil\n";
+    for i in 0..k {
+        src += &format!("  if x{} != nil {{\n    io.print(\"x\")\n  }}\n", i);
+    }
+    src += "}\n\nfn main() {\n  run(1, true)\n}\n";
+    let started = Instant::now();
+    let c = compile("copies.kite", &src, Emit::Check);
+    let took = started.elapsed();
+    // Each `y = m` writes over the failure `y` was given: that, and only
+    // that, is reported.
+    let codes: Vec<String> = c.diags.iter().filter_map(|d| d.code.map(|x| x.0.to_string())).collect();
+    assert_eq!(codes, vec!["E0302".to_string(); k], "{}", c.render_diagnostics());
+    assert!(took < Duration::from_secs(20), "checking took {:?}", took);
+}
+
 /// A key is hashed whole, so keys that differ only far inside still spread
 /// over the buckets. The hash once stopped after 32 values, and 5,000 slice
 /// keys that shared their first 40 elements all landed in one bucket: a scan

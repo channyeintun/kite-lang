@@ -2409,6 +2409,14 @@ impl<'a> Checker<'a> {
                     self.copies.insert((hub, y));
                 }
             }
+            // With no name that holds just what `id` did, each is joined to
+            // each only while one side is a single name. Many on both sides
+            // would make every one of the first a pair with every one of the
+            // second — a thousand names in a loop of `x = m` and a thousand
+            // copies of `m` made a million pairs, and the check took minutes
+            // — so then the pairs are let go. Fewer pairs is never less
+            // sound: each only ever spares a report.
+            None if into.len() > 1 && from.len() > 1 => {}
             None => {
                 for &x in &into {
                     for &y in &from {
