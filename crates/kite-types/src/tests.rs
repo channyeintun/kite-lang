@@ -1111,6 +1111,19 @@ fn an_inert_index_or_interpolation_is_offered_a_discard() {
     assert!(!c.render().contains("_ = …"), "{}", c.render());
 }
 
+/// An inert arm of a `match` statement is not on a line of its own, so its
+/// note says nothing about lines, and the way to keep one that can trap is
+/// one an arm can hold: `_ = …` is a statement, so it takes braces. `()`
+/// says nothing happens, as `{}` does, and is left alone.
+#[test]
+fn an_inert_arm_is_told_what_an_arm_can_hold() {
+    let c = run("fn main() {\n  let n = 1\n  let xs = [1]\n  match n {\n    0 => -1,\n    1 => [n],\n    2 => xs[3],\n    3 => (),\n    _ => {},\n  }\n}\n");
+    assert_eq!(c.codes(), vec!["E0117", "E0117", "E0117"], "{}", c.render());
+    assert!(!c.render().contains("a line that begins"), "{}", c.render());
+    assert!(c.render().contains("an arm that does nothing is written `{}`"), "{}", c.render());
+    assert!(c.render().contains("write `{ _ = … }`"), "{}", c.render());
+}
+
 /// An exclusive range from a number to itself matches nothing, exactly as a
 /// reversed one does.
 #[test]

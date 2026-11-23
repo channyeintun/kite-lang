@@ -214,8 +214,8 @@ written for `done = true`. A statement that holds a call, such as `f() + 1`, is
 something happening and is left alone. An arm of a `match` statement is a
 statement in this sense too ([§9.2](#92-match)). An index that can trap, or an
 interpolation whose hole runs `show`, does not count as an effect — `n + 1` can
-overflow too — so a statement kept for that alone is written `_ = xs[i]`, and
-the diagnostic says so.
+overflow too — so a statement kept for that alone is written `_ = xs[i]` (as an
+arm, `{ _ = xs[i] }`), and the diagnostic says so.
 
 ---
 
@@ -1544,7 +1544,8 @@ agree in type: `0 => io.print("zero")` beside `_ => count()`, where `count`
 returns an `int`, is fine. Each arm is in statement position too: a `match` or
 `if` written as an arm discards its own branches' values, so they need not
 agree either, and an arm that does nothing — `0 => 1`, or `{ done == true }` —
-is [E0117](#16-diagnostics), exactly as the same line on its own is. An arm
+is [E0117](#16-diagnostics), exactly as the same line on its own is; `0 => ()`
+says that nothing happens, as `0 => {}` does, and is fine. An arm
 whose value is an `error` is still one dropped ([E0302](#16-diagnostics)), as a
 bare call's would be. A `match` used as a value needs every arm to produce the
 same type.

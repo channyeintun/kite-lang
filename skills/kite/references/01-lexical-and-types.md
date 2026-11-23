@@ -201,7 +201,8 @@ an index into the line above), `done == true` typed for `done = true`, a bare
 a `match` statement is a statement too, so `0 => 1` and `0 => { done == true }`
 are `E0117` there. An index or an interpolation is not counted as an effect even
 though one can trap and the other runs `show`: to keep one for that alone, write
-`_ = xs[i]` (the note says so).
+`_ = xs[i]` (as an arm, `0 => { _ = xs[i] }`; the note says so). `0 => ()` is fine:
+like `0 => {}`, it says nothing happens.
 
 ```kite fails
 fn main() {

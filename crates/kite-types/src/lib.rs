@@ -1648,7 +1648,7 @@ impl<'a> Checker<'a> {
                 // Asked after the expression is checked, so one already wrong
                 // for another reason is not reported a second time; and one
                 // that does nothing is not also an error dropped.
-                let inert = !self.types.is_poisoned(expr.ty) && self.inert_statement(e);
+                let inert = !self.types.is_poisoned(expr.ty) && self.inert_statement(e, false);
                 if !inert {
                     self.dropped_error(&expr);
                 }
@@ -7978,11 +7978,18 @@ impl<'a> Checker<'a> {
     ///
     /// Whether it reported one, so the statement is not reported again for
     /// the error its value holds: a bare `err` is one mistake, not two.
-    fn inert_statement(&mut self, e: &ast::Expr) -> bool {
+    ///
+    /// `arm` is set for the expression of an arm of a `match` statement. It
+    /// does not start a line, so nothing is said about lines; an assignment
+    /// is not an expression, so keeping one takes braces, `{ _ = … }`; and
+    /// `0 => ()` says that nothing happens, as `0 => {}` does, so it is not
+    /// refused.
+    fn inert_statement(&mut self, e: &ast::Expr, arm: bool) -> bool {
         if let ast::Expr::Closure { span, .. } = e {
-            self.diags.push(
-                Diagnostic::error(codes::E0117, "this closure is built and thrown away")
-                    .with_primary(*span, "nothing calls it, so nothing in it happens")
+            let mut d = Diagnostic::error(codes::E0117, "this closure is built and thrown away")
+                .with_primary(*span, "nothing calls it, so nothing in it happens");
+            if !arm {
+                d = d
                     .with_note(
                         "an `||` opening a line is a closure with no parameters, not the \
                          continuation of the line above",
@@ -7990,11 +7997,12 @@ impl<'a> Checker<'a> {
                     .with_note(
                         "a statement continues onto the next line when it *ends* in an \
                          operator — put the `||` at the end of the line it continues",
-                    ),
-            );
+                    );
+            }
+            self.diags.push(d);
             return true;
         }
-        if expr_acts(e) {
+        if expr_acts(e) || (arm && matches!(e, ast::Expr::Tuple { elems, .. } if elems.is_empty())) {
             return false;
         }
         let mut d = Diagnostic::error(codes::E0117, "this statement has no effect")
@@ -8002,6 +8010,11 @@ impl<'a> Checker<'a> {
         d = match e {
             ast::Expr::Binary { op: ast::BinaryOp::Eq, .. } => d.with_note(
                 "`==` compares and gives back a `bool`; to assign, write `=`",
+            ),
+            ast::Expr::Path(_) => d.with_note("naming a value does nothing; a call needs `()`"),
+            _ if arm => d.with_note(
+                "nothing in it calls a function or awaits a task, so its value is the \
+                 only thing it makes — an arm that does nothing is written `{}`",
             ),
             ast::Expr::Unary { op: ast::UnaryOp::Neg, .. } => d.with_note(
                 "a line that begins with `-` is a statement of its own, not the \
@@ -8013,7 +8026,6 @@ impl<'a> Checker<'a> {
                     "a line that begins with `[` or `(` is a statement of its own, not an \
                      index or a call on the line above; keep it on that line",
                 ),
-            ast::Expr::Path(_) => d.with_note("naming a value does nothing; a call needs `()`"),
             _ => d.with_note(
                 "nothing in it calls a function or awaits a task, so its value is the \
                  only thing it makes — bind it with `let`, or return it",
@@ -8028,7 +8040,8 @@ impl<'a> Checker<'a> {
             (false, false) => None,
         };
         if let Some(what) = what {
-            d = d.with_note(format!("{}; to evaluate it for that alone, write `_ = …`", what));
+            let keep = if arm { "`{ _ = … }`" } else { "`_ = …`" };
+            d = d.with_note(format!("{}; to evaluate it for that alone, write {}", what, keep));
         }
         self.diags.push(d);
         true
@@ -10036,7 +10049,7 @@ impl<'a> Checker<'a> {
             }
             _ => {
                 let x = self.expr(e, None);
-                let inert = !self.types.is_poisoned(x.ty) && self.inert_statement(e);
+                let inert = !self.types.is_poisoned(x.ty) && self.inert_statement(e, true);
                 return (x, inert);
             }
         };

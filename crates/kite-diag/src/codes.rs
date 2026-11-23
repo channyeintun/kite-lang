@@ -297,11 +297,14 @@ codes! {
          is left alone.\n\n\
          An arm of a `match` statement is a statement as well, since its value \
          is thrown away: `0 => 1` and `0 => { done == true }` are refused there \
-         as they are on a line of their own.\n\n\
+         as they are on a line of their own. `0 => ()` and `0 => {}` say \
+         that nothing happens, and are fine.\n\n\
          An index that can trap and an interpolation whose hole runs `show` \
          are not counted as effects, any more than an addition that can \
          overflow is. To evaluate one for that alone, say so:\n\n\
-         \x20   _ = xs[i]                       // traps if `i` is out of range";
+         \x20   _ = xs[i]                       // traps if `i` is out of range\n\n\
+         An arm holds an expression, not an assignment, so there it is \
+         `0 => { _ = xs[i] }`.";
 
     E0118 = "E0118", "module-level binding is not a constant",
         "A `let` at the top of a module names a value the compiler works out \
