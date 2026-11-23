@@ -679,8 +679,9 @@ fn main() {
 ### crypto — bindings, not implementations
 
 Thin declared boundary over the host's primitives (WebCrypto in a browser or
-Node). No ECB, no CBC, no MD5, no SHA-1, no raw RSA. Salts and nonces are
-generated, never passed. Keys are opaque handles; a private half never crosses
+Node). No ECB, no CBC, no MD5, no SHA-1, no raw RSA. Nonces are generated,
+never passed, and so are salts — except that `derive`, for matching a
+derivation made elsewhere, takes one. Keys are opaque handles; a private half never crosses
 the boundary.
 
 Sync: `random(count) -> str` (lowercase hex), `token() -> str`,
@@ -1636,7 +1637,9 @@ reopen a table a header defined. Whitespace is a space or a tab, and a carriage
 return is accepted only in the CRLF that ends a line. **Dates and times are not
 implemented** — a date is checked to be one of TOML's four forms and parses as
 the string it was written as, losslessly, rather than being half-mapped onto
-`std/time`. A document nesting deeper than 128 levels — each key segment, array
+`std/time`. `emit` writes a string of one of those forms back bare, so a date
+stays a date for the next reader — which means a *quoted* `"1979-05-27"` comes
+out unquoted too. A document nesting deeper than 128 levels — each key segment, array
 and inline table counting one — is refused with an error, as `std/json` refuses
 one, so that input cannot choose how much stack a parse uses.
 

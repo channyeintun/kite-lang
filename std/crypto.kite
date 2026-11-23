@@ -13,7 +13,9 @@
 //     dangerous by default is not offered.
 //   * **Salts and nonces are generated, never passed.** The most common
 //     failure in applied cryptography is a reused nonce, and an API that
-//     accepts one invites it.
+//     accepts one invites it. The one exception is `derive`, which takes a
+//     salt because its job is to agree with a derivation made elsewhere; a
+//     new password goes through `password_hash`, which makes its own.
 //   * **Secrets are compared with `crypto.equal`, not `==`.** Structural
 //     equality short-circuits, which is a timing oracle. The compiler warns
 //     when a value that came from here is compared with `==`.
