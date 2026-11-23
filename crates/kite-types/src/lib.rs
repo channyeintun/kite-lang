@@ -8855,17 +8855,15 @@ impl<'a> Checker<'a> {
             ty: elem,
             span,
         };
+        let mut stmts = vec![hir::Stmt::Let { local: hir::LocalId(slot), init: Some(i), span }];
+        // The element is read after the right-hand side has run (§5.4), which
+        // matters only where that writes the slice — a `match` arm block in
+        // it can — as it does for `n += v`.
+        let value = if value.writes(hir::LocalId(local)) { self.evaluated_first(value, &mut stmts) } else { value };
         let sum = self.binary(binop, current, value, a.span);
         let sum = self.accept(sum, elem, None);
-        Some((
-            hir::Stmt::Block(hir::Block {
-                stmts: vec![
-                    hir::Stmt::Let { local: hir::LocalId(slot), init: Some(i), span },
-                    hir::Stmt::SetIndex { base: seq, index: at, value: sum, span: a.span },
-                ],
-            }),
-            Flow::Falls,
-        ))
+        stmts.push(hir::Stmt::SetIndex { base: seq, index: at, value: sum, span: a.span });
+        Some((hir::Stmt::Block(hir::Block { stmts }), Flow::Falls))
     }
 
     /// Where a slice or map that is about to change in place is kept.

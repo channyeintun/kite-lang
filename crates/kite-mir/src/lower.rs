@@ -347,7 +347,15 @@ impl<'a> FnLowerer<'a> {
             }
             hir::Stmt::Block(b) => self.block(b),
             hir::Stmt::SetIndex { base, index, value, .. } => {
-                let [b, i, v] = self.operands_fixed([base, index, value]);
+                // The base is a local (the checker writes back any other
+                // holder), and it is the place written, not an operand read:
+                // fixing it in a temporary would store into a copy, and a
+                // value that reassigns the slice would lose the write.
+                let b = match base.kind {
+                    hir::ExprKind::Local(l) => Operand::Local(Local(l.0)),
+                    _ => self.operand(base),
+                };
+                let [i, v] = self.operands_fixed([index, value]);
                 self.emit(Inst::SetIndex { base: b, index: i, value: v });
             }
             hir::Stmt::MapSet { local, key, value, .. } => {

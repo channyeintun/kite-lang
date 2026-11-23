@@ -5389,6 +5389,23 @@ const EXPECTED: &[(&str, &str, &str)] = &[
         "arm\n6\ntarget\nvalue\n51\nelement\n51\nplain\n1\n",
     ),
     (
+        // §5.4: `xs[i] = v` stores into the slice the local holds when the
+        // store happens. Fixing operands where they are written put the base
+        // in a temporary too, so a value that reassigned `xs` lost the write
+        // into a copy (`7 8`); and `ys[0] += v` reads the element after `v`
+        // has run, as `n += v` does, where it read it first (`11 8`).
+        "an-indexed-store-lands-in-the-slice-the-local-holds",
+        "fn one(u: ()) -> int {\n  return 1\n}\n\
+         fn main() {\n\
+         \x20 var xs = [10, 20]\n  xs[0] = one(match 0 {\n    _ => {\n      xs = [7, 8]\n    }\n  })\n\
+         \x20 io.print(\"\\(xs[0]) \\(xs[1])\")\n\
+         \x20 var ys = [10, 20]\n  ys[0] += one(match 0 {\n    _ => {\n      ys = [7, 8]\n    }\n  })\n\
+         \x20 io.print(\"\\(ys[0]) \\(ys[1])\")\n\
+         \x20 var zs = [10, 20]\n  zs[0] += one(match 0 {\n    _ => {\n      io.print(\"arm\")\n    }\n  })\n\
+         \x20 io.print(zs[0])\n}\n",
+        "1 8\n8 8\narm\n11\n",
+    ),
+    (
         // §2.4, in a file written with CRLF line endings: a line break in the
         // source is a line break however it was written, so no line of a
         // block string ends in `\r` — with a hole, without one, in a
