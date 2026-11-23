@@ -4856,6 +4856,33 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// A call of a value that should be a function: `handlers[0](e)`,
+    /// `pick()(3)`, or a binding narrowed out of an `Option<fn(…)>`.
+    fn call_value(&mut self, value: hir::Expr, args: &[ast::Expr], span: Span) -> hir::Expr {
+        let TyKind::Fn { params: sig_params, ret } = self.types.kind(value.ty).clone() else {
+            self.diags.push(
+                Diagnostic::error(codes::E0205, "this is not a function")
+                    .with_primary(value.span, format!("this is {}", self.types.with_article(value.ty)))
+                    .with_note("only a value whose type is a `fn(…)` can be called"),
+            );
+            return self.lit(ExprKind::Error, TyId::ERROR, span);
+        };
+        if args.len() != sig_params.len() {
+            self.arity_error("this function", args.len(), sig_params.len(), span, None);
+        }
+        let mut hargs = Vec::with_capacity(args.len());
+        for (i, a) in args.iter().enumerate() {
+            let want = sig_params.get(i).copied();
+            let e = self.expr(a, want);
+            let e = self.coerce(e, want);
+            if let Some(w) = want {
+                self.expect_ty(e.ty, w, e.span, None);
+            }
+            hargs.push(e);
+        }
+        hir::Expr { kind: ExprKind::CallClosure { callee: Box::new(value), args: hargs }, ty: ret, span }
+    }
+
     fn call(
         &mut self,
         callee: &ast::Expr,
@@ -4926,35 +4953,7 @@ impl<'a> Checker<'a> {
             if self.types.is_poisoned(value.ty) {
                 return self.lit(ExprKind::Error, TyId::ERROR, span);
             }
-            let TyKind::Fn { params: sig_params, ret } = self.types.kind(value.ty).clone() else {
-                self.diags.push(
-                    Diagnostic::error(codes::E0205, "this is not a function")
-                        .with_primary(
-                            value.span,
-                            format!("this is {}", self.types.with_article(value.ty)),
-                        )
-                        .with_note("only a value whose type is a `fn(…)` can be called"),
-                );
-                return self.lit(ExprKind::Error, TyId::ERROR, span);
-            };
-            if args.len() != sig_params.len() {
-                self.arity_error("this function", args.len(), sig_params.len(), span, None);
-            }
-            let mut hargs = Vec::with_capacity(args.len());
-            for (i, a) in args.iter().enumerate() {
-                let want = sig_params.get(i).copied();
-                let e = self.expr(a, want);
-                let e = self.coerce(e, want);
-                if let Some(w) = want {
-                    self.expect_ty(e.ty, w, e.span, None);
-                }
-                hargs.push(e);
-            }
-            return hir::Expr {
-                kind: ExprKind::CallClosure { callee: Box::new(value), args: hargs },
-                ty: ret,
-                span,
-            };
+            return self.call_value(value, args, span);
         };
 
         match self.resolved.lookup_use(p.span) {
@@ -5009,6 +5008,17 @@ impl<'a> Checker<'a> {
                         ty: ret,
                         span,
                     };
+                }
+                // An `Option<fn(…)>` proved present here is the function it
+                // holds, as it is when read: `if f != nil { f(41) }`. The type
+                // looked at was the declared one, so it was "not a function".
+                if let TyKind::Optional(inner) = *self.types.kind(ty) {
+                    if matches!(self.types.kind(inner), TyKind::Fn { .. }) {
+                        let value = self.expr(callee, None);
+                        if matches!(self.types.kind(value.ty), TyKind::Fn { .. }) {
+                            return self.call_value(value, args, span);
+                        }
+                    }
                 }
                 // A local whose initialiser was already reported has no type
                 // to be wrong about: `let f = Rect.square` then `f(2)` is one

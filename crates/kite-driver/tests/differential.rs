@@ -5081,6 +5081,28 @@ fn main() {
         "[greet 1][greet 1]\n[greet 2][greet 2]\n[greet 5][greet 5]\n\
          [greet 6][greet 6]\n[q][q]\n",
     ),
+    // An `Option<fn(…)>` proved present is the function it holds, so it can
+    // be called as written, after an `if` or an early return. The call
+    // looked at the declared type and said it was not a function.
+    (
+        "a-narrowed-optional-function-is-called",
+        r#"fn run(f: Option<fn(int) -> int>, x: int) -> int {
+  if f == nil {
+    return -1
+  }
+  return f(x)
+}
+fn main() {
+  let f: Option<fn(int) -> int> = |a: int| a + 1
+  if f != nil {
+    io.print(f(41))
+  }
+  io.print(run(|a: int| a * 2, 4))
+  io.print(run(nil, 4))
+}
+"#,
+        "42\n8\n-1\n",
+    ),
     // The built-in types meet the prelude's `Display`, `Debug` and `Hash`
     // bounds, and a call through one is what `@derive` and interpolation do
     // with a field of that type. They met none, so the specification's own
