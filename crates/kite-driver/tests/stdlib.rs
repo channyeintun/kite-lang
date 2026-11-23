@@ -160,6 +160,19 @@ fn the_standard_librarys_tests_pass_on_wasm_too() {
 /// teaching a shape, and inventing a `Row` and a `body` to make it compile
 /// would make it a worse explanation of the thing it exists to explain.
 #[test]
+fn std_json_compiles_without_a_warning_as_its_own_entry() {
+    // `kitec test std/json.kite` compiles the module as the entry, where its
+    // own code is the program's: a warning there is one the library gives
+    // itself, over a cast or a comparison it meant. (`std/math`, `std/fmt` and
+    // the prelude still do, over casts that truncate on purpose.)
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../std/json.kite");
+    let src = std::fs::read_to_string(&path).expect("std/json.kite");
+    let compiled = compile(&path, &src, Emit::Check);
+    let shown = compiled.render_diagnostics();
+    assert!(shown.trim().is_empty(), "{}", shown);
+}
+
+#[test]
 fn the_standard_librarys_documentation_examples_run() {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../std");
     let entries = std::fs::read_dir(&dir)

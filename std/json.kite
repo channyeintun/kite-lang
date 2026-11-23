@@ -23,6 +23,8 @@
 // float nearest what the document wrote — `0.3` is 0.3 — and one too large
 // for a float is an error.
 
+use std/math
+
 /// A JSON value.
 ///
 /// Recursive with no boxing annotation, because every Kite aggregate is
@@ -806,8 +808,12 @@ fn whole_number(n: float) -> Option<int> {
     if !(n >= -9223372036854775808.0 && n < 9223372036854775808.0) {
         return nil
     }
-    let whole = n as int
-    if (whole as float) != n {
+    // `trunc_to` and a subtraction, which say the truncation and the exact
+    // comparison are meant: a bare `as int` or `!=` on floats warns, and the
+    // warning showed whenever this file was itself the test entry.
+    let whole = math.trunc_to(n)
+    let rest = n - (whole as float)
+    if rest > 0.0 || rest < 0.0 {
         return nil
     }
     return whole
