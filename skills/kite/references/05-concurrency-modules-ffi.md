@@ -1071,7 +1071,9 @@ IDL without JavaScript glue — so Kite defines the boundary explicitly.
 A host reference. On the web it lowers to `externref`. Asked for an artefact
 that cannot hold one, the compiler refuses rather than inventing a
 representation: `--emit kbc`, `--emit native` and `run --native` all report
-**`E0204`** — "`JsValue` is a host object, and this target has no host". Three
+**`E0204`** — "`JsValue` is a host object, and this target has no host" — once
+for the program, at its own first function holding one, with a note counting
+the rest (most of them inside `std/js`). Three
 paths deliberately do not: `kitec check` (a web program is valid Kite and must
 keep checking in an editor), and plain `kitec run` and `kitec build`, which
 trap at the first host call instead — see the end of this section.
