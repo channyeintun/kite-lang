@@ -761,6 +761,39 @@ impl<'a> Lexer<'a> {
         // reported again for standing where a line break was wanted.
         if ch == ';' {
             let span = Span::new(self.file, start as u32, self.pos as u32);
+            // Where no statement can end it is skipped instead: before a
+            // `{` on the same line, where it stands between a header and the
+            // body the header is waiting for — `fn one() -> int ; {`,
+            // `struct P ; {`, `if ok ; {` — and after a keyword that only
+            // begins a declaration (`fn; checks()`). As a line break it put
+            // the body or the name on a line of its own, which dropped the
+            // declaration, and every use of it was one more report. A block
+            // is not a statement, so the only statement a `{` could begin
+            // is a map literal whose value is thrown away.
+            let rest = self.src[self.pos..self.limit].trim_start_matches([' ', '\t', ';']);
+            let after_keyword = matches!(
+                self.last_kind(),
+                Some(
+                    TokenKind::Fn
+                        | TokenKind::Async
+                        | TokenKind::Pub
+                        | TokenKind::Struct
+                        | TokenKind::Enum
+                        | TokenKind::Trait
+                        | TokenKind::Impl
+                )
+            );
+            if rest.starts_with('{') || after_keyword {
+                self.diags.push(
+                    Diagnostic::error(codes::E0002, "invalid character `;` in source")
+                        .with_primary(span, "Kite has no `;`")
+                        .with_note(
+                            "a line break ends a statement, and none ends here, so this `;` is \
+                             skipped",
+                        ),
+                );
+                return None;
+            }
             self.diags.push(
                 Diagnostic::error(codes::E0002, "invalid character `;` in source")
                     .with_primary(span, "Kite has no `;`")

@@ -1382,13 +1382,24 @@ fn sendable_status(code: int) -> bool {
 /// assert(status_refused(status(204, "")) == nil, "no content, and none given")
 /// assert(status_refused(status(304, "stale")) != nil, "a body where there is none")
 /// assert(status_refused(status(205, "reset")) != nil, "a reset carries none either")
+/// let one = status_refused(status(205, "x"))
+/// assert(one != nil, "one character is a body")
+/// if one != nil {
+///     assert(one.message() == "http.respond: a 205 has no body, and this one has 1 character", "singular")
+/// }
+/// let two = status_refused(status(304, "xy"))
+/// if two != nil {
+///     assert(two.message() == "http.respond: a 304 has no body, and this one has 2 characters", "plural")
+/// }
 /// ```
 fn status_refused(response: Response) -> error {
     if !sendable_status(response.status) {
         return errors.new("http.respond: `\(response.status)` is not a status HTTP sends (200 to 599)")
     }
-    if (response.status == 204 || response.status == 205 || response.status == 304) && response.body.len() > 0 {
-        return errors.new("http.respond: a \(response.status) has no body, and this one has \(response.body.len()) characters")
+    let n = response.body.len()
+    if (response.status == 204 || response.status == 205 || response.status == 304) && n > 0 {
+        let unit = if n == 1 { "character" } else { "characters" }
+        return errors.new("http.respond: a \(response.status) has no body, and this one has \(n) \(unit)")
     }
     return nil
 }

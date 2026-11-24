@@ -1046,7 +1046,24 @@ impl<'a> FnLowerer<'a> {
         arms: &[hir::MatchArm],
         result_ty: Ty,
     ) -> Local {
-        let subject = self.operand(scrutinee);
+        // A `match` tests one value. A plain local is named, not copied, so
+        // each arm's test reads it again — after the guards of the arms
+        // before it have run, and a guard can write it (only a `match` arm
+        // block can: see [`hir::Expr::writes`]). Then a later arm tested the
+        // new value, and an exhaustive match could fall into `fail`. Such a
+        // local is copied where the scrutinee is evaluated; one no guard
+        // writes is named as before, so an ordinary match does not grow. Any
+        // other scrutinee is already in a temporary.
+        let subject = match scrutinee.kind {
+            hir::ExprKind::Local(l)
+                if arms.iter().any(|a| a.guard.as_ref().is_some_and(|g| g.writes(l))) =>
+            {
+                let t = self.temp(scrutinee.ty);
+                self.assign(t, Rvalue::Use(Operand::Local(Local(l.0))));
+                Operand::Local(t)
+            }
+            _ => self.operand(scrutinee),
+        };
         let result = self.temp(result_ty);
         let join = self.new_block();
         let mut join_reached = false;
