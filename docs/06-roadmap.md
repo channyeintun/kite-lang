@@ -2909,9 +2909,13 @@ what was accepted as it is rather than fixed.
   is. A name that is an embedded standard-library module the file does not
   `use` is an `E0111` that says which `use std/<name>` to add.
 - **Tokens Kite does not have.** `;` is one `E0002` — a line break ends a
-  statement — and a run of `?` is one `E0002`; a type that does not parse in an
-  annotation, parameter, field or return is one `E0100` and its declaration
-  stays declared; an assignment, `let`, `for`, `defer`, `check` or `_ =`
+  statement — and a run of `?` is one `E0002`; a type that itself fails to parse in an
+  annotation, parameter, field or return (`(int, 1)`, `Option<>`, `Option<int`,
+  and `[int` in a parameter, annotation or return) is one `E0100` and its
+  declaration stays declared — but a complete type followed by junk (`x: mut
+  int`, `x: int int`, `Option<int>>`), an unclosed `[` in a struct field and an
+  unclosed `{K: V` map type still drop their declaration, and what uses it is
+  then reported as not found; an assignment, `let`, `for`, `defer`, `check` or `_ =`
   written as a `match` arm is one `E0100` whose note shows the block form. A
   `#` comment is one `E0002` whose note says comments are `//`, a backtick
   string one whose note says strings are `"…"`, and `let y = ???` is the one
