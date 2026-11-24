@@ -8256,6 +8256,54 @@ fn main() {
 "#,
         "1\n1\n0\n0\n1\n1\n",
     ),
+    // A trait that declares no method is implemented by an empty block,
+    // which the resolver, knowing an implementation by its methods, has no
+    // record of. The checker counts the block (a written impl is an impl),
+    // and the type is a row of the trait's vtable, so a `dyn` of it holds
+    // the type on every backend: the WasmGC module was invalid without it.
+    (
+        "a-trait-with-no-methods-is-implemented-by-an-empty-block",
+        r#"trait Marker {}
+
+struct P {
+  a: int
+}
+
+enum K {
+  One
+  Two(int)
+}
+
+struct Box<T> {
+  v: T
+}
+
+impl Marker for P {}
+impl Marker for K {}
+impl<T> Marker for Box<T> {}
+
+fn keep(d: dyn Marker) -> dyn Marker {
+  return d
+}
+
+fn one<T: Marker>(x: T) -> int {
+  return 1
+}
+
+fn main() {
+  let xs: [dyn Marker] = [P{ a: 1 }, K.Two(2), K.One, Box{ v: "s" }]
+  var ys: [dyn Marker] = []
+  for x in xs {
+    ys.push(keep(x))
+  }
+  io.print(ys.len())
+  io.print(one(P{ a: 1 }) + one(Box{ v: [1] }) + one(K.One))
+  let m: {str: dyn Marker} = {"a": P{ a: 1 }, "b": K.One}
+  io.print(m.len())
+}
+"#,
+        "4\n3\n2\n",
+    ),
     // A value-`if` branch, or a `match` block arm, whose one expression is
     // an `if` or a `match` yields it. An `if` opening a block parses as a
     // statement, so the branch was "must produce a value" and the arm `()`.

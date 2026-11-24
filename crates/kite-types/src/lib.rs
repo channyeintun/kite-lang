@@ -806,7 +806,7 @@ pub fn check_recording(
     fns.append(&mut lifted);
     check_compared_params(&mut facts, resolved, &sigs, &impl_generics, &types, diags);
 
-    let vtables = build_vtables(resolved, &type_ids, &types);
+    let vtables = build_vtables(resolved, &type_ids, &types, &trait_impls);
 
     let program = hir::Program {
         types,
@@ -875,13 +875,25 @@ fn build_vtables(
     resolved: &ResolveMap,
     type_ids: &[Option<TypeTarget>],
     types: &Types,
+    trait_impls: &std::collections::HashMap<(u32, u32), usize>,
 ) -> Vec<hir::VTable> {
     let mut out = Vec::new();
     for (i, target) in type_ids.iter().enumerate() {
         let Some(TypeTarget::Trait(trait_id)) = target else { continue };
         let def = types.trait_def(*trait_id);
         let mut entries = Vec::new();
-        for ti in resolved.impls_of(i as u32) {
+        // The resolver knows an implementation by its methods, so a block of
+        // a trait that declares none (`impl Marker for P {}`) is only in the
+        // blocks `check_impls` recorded. The checker counts it as the
+        // implementation it is, so a `dyn` of the trait can hold the type,
+        // and the type is a row here like any other.
+        let mut implementors = resolved.impls_of(i as u32);
+        for &(ty, tr) in trait_impls.keys() {
+            if tr == i as u32 && !implementors.contains(&ty) {
+                implementors.push(ty);
+            }
+        }
+        for ti in implementors {
             let tag = match type_ids.get(ti as usize).and_then(|t| *t) {
                 Some(TypeTarget::Struct(s)) => hir::TypeTag::Struct(s),
                 Some(TypeTarget::Enum(e)) => hir::TypeTag::Enum(e),
