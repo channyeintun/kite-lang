@@ -2823,7 +2823,7 @@ A second review checked this phase's fixes and found them partial:
 
 ---
 
-## Phase 31 — Six passes of fixes, and what a program notices
+## Phase 31 — Seven passes of fixes, and what a program notices
 
 **Goal:** the language made better without a feature added to it — its bugs
 fixed, the standard library's gaps filled, and what the specification promised
@@ -2842,7 +2842,11 @@ the documents. A sixth, the closing pass, took what a check of the fourth had
 confirmed and what the fifth's reviewers named as open: a nil test in
 parentheses, a tuple of failures a pattern binds, one report for a returned
 pair, an incomplete impl, a token Kite does not have, a refused `use` and a
-qualified pattern, and `kitec fix`. There is no seventh. Each workstream's
+qualified pattern, and `kitec fix`. A seventh, the last sweep, took what a
+check of the fifth's changes confirmed: a `break` written inside an expression,
+a `match` guard that writes its scrutinee, `_` in a tuple pattern, `nil` for an
+optional scalar on Wasm, two reports that the fifth pass had made out of one,
+and these documents' own figures. There is no eighth. Each workstream's
 merge on `complete-kite` says what is true after it. This section is the one place that gathers what a program written
 against v0.1.9 will meet, and it is written as that program's author would want
 it: what stops compiling, what runs differently, what the library does now, and
@@ -2873,6 +2877,22 @@ what was accepted as it is rather than fixed.
   a tuple of failures (`match t { x => … }`), the arm after a `nil` arm, and a
   `for x in ts` binding follow the tuple element by element, so taking `x.0`
   leaves `x.1` owed, where it was dropped with no report.
+- **A failure read after a loop it was tested in.** A `break` is a `break`
+  wherever it is written outside a closure — as a statement, or in a `match`
+  arm used as a value, a `let` initializer, a call argument, an operand or an
+  interpolation — and a `for cond` loop that has one gives no narrowing after
+  it. So after `for err != nil { … match … { _ => { break } } }`, a read of
+  `err.message()` or of the value `err` guards is `E0301` again, as it was
+  before the break was written inside an expression.
+- **`_` in a tuple pattern** owes what a name there, never read, would owe.
+  In `let (a, _) = (1, f())`, `let (a, _, s) = three(1)` and
+  `for (j, _) in [(1, f())]`, where the element holds a failure, the `_` is
+  `E0302` ("an error may not be discarded with `_`"), with a note whose recipe
+  compiles; where a name would owe nothing (an `int`, `nil`, an element
+  already taken, a map's value) `_` owes nothing, and where the element is a
+  read of a binding (`(1, e)`) the failure stays with `e`, which answers for
+  it. `_ = f()` stays the one deliberate discard. (`var` has no destructuring
+  form, and the patterns of a `match` arm are not part of this: see below.)
 - **`task.park()` and `task.wait_host()`** outside an `async fn` are `E0521`,
   as `task.yield()` was.
 - **One name, one meaning.** A type with an inherent method and a trait method
@@ -2932,6 +2952,16 @@ mistake:
   through doubled parentheses. Where the literal really is a `V` with its
   error missing (`return (1, nil)` in `((int, Option<int>), error)`) it stays
   the generic `E0203`, and that is one report as well.
+- A slice or map literal of `nil`s wanted as the error type, or as a type
+  that holds an unknown one (`let y: [Nope] = [nil]`, `{str: Nope}` with
+  `{"a": nil}`, `take([nil])`), is the one `E0204` for the unknown name, as it
+  was before the fifth pass.
+- A `;` between a declaration's header and its body (`fn one() -> int ; {`,
+  `struct S ; {`, `impl T for P ; {`) is the one `E0002`,
+  and the declaration stays declared, so what uses it adds nothing; `let a = 1;
+  let b = 2` is still one report.
+- A refused `return a, b` in a function that is not fallible is still a
+  return, so it is the one `E0200`, with no `E0203` or `E0211` after it.
 - An `impl` that is written counts as an impl, complete or not: a missing
   method is reported once, at the `impl`, and printing, a bound, a `dyn`
   conversion, interpolation and `T.is` / `T.as` do not say the type has none.
@@ -2975,6 +3005,18 @@ mistake:
   fixed where it is evaluated, so a later `match` arm assigning a local does not
   change an earlier argument. `c.f op= v` reads `c.f` after `v` has run, as
   `xs[i] op= v` already did.
+- **A `match` tests one value.** A guard that writes the local the scrutinee
+  was read from changes neither which later arm matches nor what an arm's
+  bindings hold (the arm's body sees the variable as the guard left it); where
+  it used to reach the compiler's own `unreachable` on an exhaustive match, it
+  now runs. A match whose guards write nothing lowers as it did.
+- **Code after a loop whose only `break` is inside an expression** is
+  reached. It used to be dropped, or reported `E0116`; `for { … match … { _ =>
+  { break } } }` now falls through to what follows it on all three backends.
+- **`nil` for an optional scalar** on Wasm: `let y: [Option<int>] = [nil]`,
+  and `nil` in a map, a tuple, a push, a field or a return of such a type,
+  builds and runs as it does on the VM and natively, where the module was
+  invalid (`E0900`).
 - **A module constant in a pattern** matches its value, where it was a fresh
   binding that matched everything.
 - **`xs[a..=max_int]`** clamps rather than trapping or wrapping.
@@ -3126,6 +3168,15 @@ Each is stated where a reader of that part looks:
   statement gives two reports; a right-nested operand list is quadratic up to
   the depth limit; `E0404`'s move recipe through a chain not yet loaded; an
   own-package sibling path prints as `../src/sib.kite` from inside `src/`.
+- Left by the last sweep, each for a reason of size or because it is a rule
+  and not a bug: a `match` arm whose pattern takes a tuple or a variant payload
+  apart binds the failures in it as clean names, so they can be dropped without
+  a report; an element, push or map write through a field of a struct local
+  (`d.xs[0] = h(…)`, `d.xs.push(…)`, `d.m[k] = …`) reads the local after the
+  right-hand side, so a right-hand side that reassigns the local is written
+  into the new struct; a type followed by junk (`x: mut int`, `x: int int`,
+  `Option<int>>`), an unclosed `[` in a struct field and an unclosed `{K: V`
+  map type still drop their declaration.
 - Not bounded yet: the number of diagnostics one file can produce, the native
   compile time of a map literal of tens of thousands of entries, a function
   large enough to abort V8 below `E0902`'s limits, and the Wasm size of a
@@ -3175,7 +3226,7 @@ none.
 | 28 — Packages from a bundler | ✅ `vite-plugin-kite` and the WebAssembly `kitec` read `kite.toml` and compile what it declares; provided modules are keyed by their whole path and a package resolves its own imports inside itself; a one-file module reads its imports from its own directory; `kitec run` sees modules |
 | 29 — Imports are the boundary | ✅ a qualified name resolves only in a module that imported it, and the entry file is reachable from nowhere; a `use` is looked for outward from the importer as far as its package's root, so sibling directory modules import each other |
 | 30 — The boundary, reviewed | ✅ a module is where its source is; each package's dependencies are its own; the entry file and bare variants are gated too; `bundle`, `test`, `pkg` and the option parser do what they say. §4.3 no longer names `pub` on an enum variant or `pub use`: a variant is as visible as its enum, there is no `pub use`, and each is refused with one diagnostic |
-| 31 — Six passes of fixes | ✅ an audit, a re-check and four passes after it: bugs fixed on all three backends, about 130 library functions added, and the specification's claims checked by compiling them; maps are hash maps and field-held slices and maps are written in place on every target. What a v0.1.9 program notices is listed in the phase |
+| 31 — Seven passes of fixes | ✅ an audit, a re-check and five passes after it: bugs fixed on all three backends, about 130 library functions added, and the specification's claims checked by compiling them; maps are hash maps and field-held slices and maps are written in place on every target. What a v0.1.9 program notices is listed in the phase |
 
 More than 1,380 tests: unit tests per crate, an annotated compile-fail
 corpus, a differential corpus that runs every program on **three** backends and
