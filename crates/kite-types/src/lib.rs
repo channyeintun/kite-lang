@@ -3146,7 +3146,10 @@ impl<'a> Checker<'a> {
                         .with_primary(*span, "two values returned here")
                         .with_secondary(sig.name_span, "declare `-> (T, error)` to return a pair"),
                     );
-                    return None;
+                    // Still a way out, as a refused `return v` is: the
+                    // function, or the closure, is not then also said to
+                    // finish without returning.
+                    return Some((hir::Stmt::Return { value: None, span: r.span }, Flow::Diverges));
                 }
                 let inner = self.types.fallible_value(sig.ret).unwrap_or(TyId::ERROR);
                 let want = (!self.unlearned_ret(inner)).then_some(inner);
