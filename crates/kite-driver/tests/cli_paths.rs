@@ -610,6 +610,19 @@ fn a_local_that_hides_a_module_says_so() {
     let Some((ok, _, err)) = kitec_in(&dir, &["check", "t.kite"]) else { return };
     assert!(ok, "{}", err);
     let _ = std::fs::remove_dir_all(&dir);
+    // A call that succeeds says nothing of the module, though an argument's
+    // own report comes from inside it: `io.print` is `Logger`'s here.
+    let dir = scratch(
+        "local-hides-module-argument",
+        "t.kite",
+        "struct Logger {\n    n: int\n}\n\nimpl Logger {\n    fn print(self, s: str) {\n        io.print(s)\n    \
+         }\n}\n\nfn main() {\n    let io = Logger{ n: 1 }\n    let s = \"x\"\n    io.print(s.bogus())\n}\n",
+    );
+    let Some((ok, _, err)) = kitec_in(&dir, &["check", "t.kite"]) else { return };
+    assert!(!ok, "{}", err);
+    assert!(err.contains("`str` has no method `bogus`"), "{}", err);
+    assert!(!err.contains("hides the module"), "{}", err);
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// Calling a local that hides a prelude function says so, as a module's
