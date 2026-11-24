@@ -761,8 +761,8 @@ pub fn error_typed(program: &mut Program) -> Option<(String, kite_span::Span)> {
     let mut holds = |ty: TyId| *seen.entry(ty).or_insert_with(|| types.holds_error(ty));
     for f in fns.iter_mut() {
         // Expressions only: every read of a local is one, with its type. A
-        // local nothing reads may keep the error type harmlessly — a variant
-        // in an or-pattern that the resolver first took for a binding is one.
+        // local nothing reads may keep the error type harmlessly: one declared
+        // after a `return`, in code that never runs, is never typed.
         if let Some(span) = error_typed_block(&mut f.body, &mut holds) {
             return Some((f.name.clone(), span));
         }

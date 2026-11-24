@@ -8207,6 +8207,117 @@ fn main() {
 "#,
         "quick\nslow\nnone\nss\nq\n4\n",
     ),
+    // The same in an or-pattern, as std/text's `class_needs_bidi` writes
+    // it: a shared name among the alternatives is the variant and matches
+    // only it. The local the resolver declares for the name is never read,
+    // and no longer has the error type.
+    (
+        "a-shared-variant-name-in-an-or-pattern-is-the-variant",
+        r#"enum Bidi {
+  R
+  AL
+  L
+}
+
+enum Break {
+  AL
+  SP
+}
+
+fn strong(c: Bidi) -> int {
+  return match c {
+    R | AL => 1,
+    L => 0,
+  }
+}
+
+fn left(c: Bidi) -> int {
+  return match c {
+    L | AL => 1,
+    _ => 0,
+  }
+}
+
+fn space(b: Break) -> int {
+  return match b {
+    AL => 0,
+    SP => 1,
+  }
+}
+
+fn main() {
+  io.print(strong(Bidi.R))
+  io.print(strong(Bidi.AL))
+  io.print(strong(Bidi.L))
+  io.print(left(Bidi.R))
+  io.print(left(Bidi.AL))
+  io.print(space(Break.SP))
+}
+"#,
+        "1\n1\n0\n0\n1\n1\n",
+    ),
+    // A `let` after a `return` never runs and is never typed: its local
+    // keeps the error type, unread, and the program is the warning E0116
+    // and nothing else — not the guard's internal error.
+    (
+        "a-let-after-a-return-is-unreachable-not-an-internal-error",
+        r#"fn main() {
+  io.print(1)
+  return
+  let z = 5
+  io.print(z)
+}
+"#,
+        "1\n",
+    ),
+    // A trait that declares no method is implemented by an empty block,
+    // which the resolver, knowing an implementation by its methods, has no
+    // record of. The checker counts the block (a written impl is an impl),
+    // and the type is a row of the trait's vtable, so a `dyn` of it holds
+    // the type on every backend: the WasmGC module was invalid without it.
+    (
+        "a-trait-with-no-methods-is-implemented-by-an-empty-block",
+        r#"trait Marker {}
+
+struct P {
+  a: int
+}
+
+enum K {
+  One
+  Two(int)
+}
+
+struct Box<T> {
+  v: T
+}
+
+impl Marker for P {}
+impl Marker for K {}
+impl<T> Marker for Box<T> {}
+
+fn keep(d: dyn Marker) -> dyn Marker {
+  return d
+}
+
+fn one<T: Marker>(x: T) -> int {
+  return 1
+}
+
+fn main() {
+  let xs: [dyn Marker] = [P{ a: 1 }, K.Two(2), K.One, Box{ v: "s" }]
+  var ys: [dyn Marker] = []
+  for x in xs {
+    ys.push(keep(x))
+  }
+  io.print(ys.len())
+  io.print(one(P{ a: 1 }) + one(Box{ v: [1] }) + one(K.One))
+  let m: {str: dyn Marker} = {"a": P{ a: 1 }, "b": K.One}
+  io.print(m.len())
+}
+"#,
+        "4\n3\n2\n",
+    ),
     // A value-`if` branch, or a `match` block arm, whose one expression is
     // an `if` or a `match` yields it. An `if` opening a block parses as a
     // statement, so the branch was "must produce a value" and the arm `()`.

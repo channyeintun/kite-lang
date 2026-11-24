@@ -1,0 +1,69 @@
+// `return (p, nil)` in a `((int, int), error)` function is the pair written
+// as a tuple, as it is for a value that is no tuple: one error, at the tuple,
+// whose note shows `return p, nil`. The elements are not also checked as the
+// value tuple's, which said `p` was no `int` and `nil` no `int` either.
+
+fn pair() -> ((int, int), error) {
+    let p = (1, 2)
+    return ( //~ ERROR E0203
+        p,
+        nil
+    )
+}
+
+fn literal() -> ((int, int), error) {
+    return ((1, 2), nil) //~ ERROR E0203
+}
+
+fn failed(e: error) -> ((int, int), error) {
+    return ((1, 2), e) //~ ERROR E0203
+}
+
+// A value tuple of three elements cannot be the literal, so the literal is
+// the pair.
+fn three() -> ((int, int, int), error) {
+    return ((1, 2, 3), nil) //~ ERROR E0203
+}
+
+// A first element shaped like the whole value tuple, and not like its first
+// element, is the whole value, and is typed as it: `2` is the `Option<int>`,
+// `[]` a `[int]`, and `(1, 2)` the inner tuple, with no second report.
+fn optional_second() -> ((int, Option<int>), error) {
+    return ((1, 2), nil) //~ ERROR E0203
+}
+
+fn empty_slice() -> (([int], int), error) {
+    return (([], 1), nil) //~ ERROR E0203
+}
+
+fn nested() -> (((int, int), int), error) {
+    return (((1, 2), 3), nil) //~ ERROR E0203
+}
+
+// A pair that is neither the value nor the value tuple is one report too.
+fn other_arity() -> ((int, int, int), error) {
+    return (1, 2) //~ ERROR E0203
+}
+
+// Parentheses around the tuple change nothing.
+fn doubled() -> (int, error) {
+    return ((1, nil)) //~ ERROR E0203
+}
+
+// A first element that is not the whole value tuple makes the literal that
+// tuple with no error after it: the one generic E0203, and its `nil` is given
+// the tuple's type.
+fn missing() -> ((int, Option<int>), error) {
+    return ( //~ ERROR E0203
+        1,
+        nil
+    )
+}
+
+fn main() {
+    let (a, e) = pair()
+    if e != nil {
+        return
+    }
+    io.print(a.0)
+}

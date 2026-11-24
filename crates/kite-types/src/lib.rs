@@ -806,7 +806,7 @@ pub fn check_recording(
     fns.append(&mut lifted);
     check_compared_params(&mut facts, resolved, &sigs, &impl_generics, &types, diags);
 
-    let vtables = build_vtables(resolved, &type_ids, &types);
+    let vtables = build_vtables(resolved, &type_ids, &types, &trait_impls);
 
     let program = hir::Program {
         types,
@@ -875,13 +875,25 @@ fn build_vtables(
     resolved: &ResolveMap,
     type_ids: &[Option<TypeTarget>],
     types: &Types,
+    trait_impls: &std::collections::HashMap<(u32, u32), usize>,
 ) -> Vec<hir::VTable> {
     let mut out = Vec::new();
     for (i, target) in type_ids.iter().enumerate() {
         let Some(TypeTarget::Trait(trait_id)) = target else { continue };
         let def = types.trait_def(*trait_id);
         let mut entries = Vec::new();
-        for ti in resolved.impls_of(i as u32) {
+        // The resolver knows an implementation by its methods, so a block of
+        // a trait that declares none (`impl Marker for P {}`) is only in the
+        // blocks `check_impls` recorded. The checker counts it as the
+        // implementation it is, so a `dyn` of the trait can hold the type,
+        // and the type is a row here like any other.
+        let mut implementors = resolved.impls_of(i as u32);
+        for &(ty, tr) in trait_impls.keys() {
+            if tr == i as u32 && !implementors.contains(&ty) {
+                implementors.push(ty);
+            }
+        }
+        for ti in implementors {
             let tag = match type_ids.get(ti as usize).and_then(|t| *t) {
                 Some(TypeTarget::Struct(s)) => hir::TypeTag::Struct(s),
                 Some(TypeTarget::Enum(e)) => hir::TypeTag::Enum(e),
@@ -2865,6 +2877,38 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// Whether `e`'s tuple literals, at every depth, have the arity of the
+    /// tuples `ty` has there — the one thing a literal says about which type
+    /// it was written as before it is typed.
+    fn fits_shape(&self, e: &ast::Expr, ty: TyId) -> bool {
+        match (unparen(e), self.types.kind(ty)) {
+            (ast::Expr::Tuple { elems, .. }, TyKind::Tuple(ts)) => {
+                elems.len() == ts.len() && elems.iter().zip(ts.clone()).all(|(e, t)| self.fits_shape(e, t))
+            }
+            (ast::Expr::Tuple { .. }, _) => false,
+            _ => true,
+        }
+    }
+
+    /// `return (v, e)` in a `(T, error)` function, its `v` already checked:
+    /// checks `e` as the error and says the tuple is one value, with the
+    /// line the reader meant.
+    fn paren_pair(&mut self, span: Span, elems: &[ast::Expr], sig: &Signature) {
+        let e = self.expr(&elems[1], Some(TyId::ERR));
+        let e = self.coerce(e, Some(TyId::ERR));
+        self.expect_ty(e.ty, TyId::ERR, e.span, None);
+        self.diags.push(
+            Diagnostic::error(codes::E0203, "a fallible function returns two values")
+                .with_primary(span, "a tuple is one value, not two")
+                .with_secondary(sig.name_span, "declared `(T, error)` here")
+                .with_note(format!(
+                    "write `return {}, {}`, without the parentheses",
+                    self.text(elems[0].span()),
+                    self.text(elems[1].span()),
+                )),
+        );
+    }
+
     fn return_stmt(&mut self, r: &ast::ReturnStmt, sig: &Signature) -> Option<(hir::Stmt, Flow)> {
         if let Some(closure) = self.closure_ret_unknown {
             self.diags.push(
@@ -2929,14 +2973,17 @@ impl<'a> Checker<'a> {
             // checked as the pair's would be, so a value of the wrong type,
             // or a second element that is no error, is told too — the note
             // alone would be a fix that does not compile.
-            Some(ast::ReturnValue::Single(ast::Expr::Tuple { elems, span: tuple_span }))
+            // Parentheses around the tuple change nothing: `return ((1, nil))`
+            // is the same slip.
+            Some(ast::ReturnValue::Single(lit))
                 if sig.fallible
-                    && elems.len() == 2
+                    && pair_literal(lit).is_some()
                     && !self
                         .types
                         .fallible_value(sig.ret)
                         .is_some_and(|t| matches!(self.types.kind(t), TyKind::Tuple(_))) =>
             {
+                let elems = pair_literal(lit).unwrap_or_default();
                 let inner = self.types.fallible_value(sig.ret).unwrap_or(TyId::ERROR);
                 let want = (!self.unlearned_ret(inner)).then_some(inner);
                 let v = self.expr(&elems[0], want);
@@ -2944,19 +2991,81 @@ impl<'a> Checker<'a> {
                     let v = self.coerce(v, Some(inner));
                     self.expect_ty(v.ty, inner, v.span, Some(sig.name_span));
                 }
-                let e = self.expr(&elems[1], Some(TyId::ERR));
-                let e = self.coerce(e, Some(TyId::ERR));
-                self.expect_ty(e.ty, TyId::ERR, e.span, None);
-                self.diags.push(
-                    Diagnostic::error(codes::E0203, "a fallible function returns two values")
-                        .with_primary(*tuple_span, "a tuple is one value, not two")
-                        .with_secondary(sig.name_span, "declared `(T, error)` here")
-                        .with_note(format!(
-                            "write `return {}, {}`, without the parentheses",
-                            self.text(elems[0].span()),
-                            self.text(elems[1].span()),
-                        )),
-                );
+                self.paren_pair(lit.span(), elems, sig);
+                Some((hir::Stmt::Return { value: None, span: r.span }, Flow::Diverges))
+            }
+            // Where the value side is itself a tuple, the literal can be
+            // read two ways, and its first element says which: `(p, nil)`
+            // whose `p` is the whole `(int, int)` is the pair in parentheses,
+            // as above, and so is a first element that is a tuple literal
+            // shaped like the whole value tuple and not like its first
+            // element — it is typed as the whole value, so
+            // `((1, 2), nil)` in a `((int, Option<int>), error)` function
+            // gives `2` its optional type rather than an error. Otherwise
+            // (`(1, nil)` in that function) it is the value tuple with no
+            // error after it, typed element by element as a tuple literal
+            // is, and one generic report follows. A first element already
+            // reported leaves the second to decide: a `nil` that the value
+            // tuple's second element cannot hold is the error's.
+            Some(ast::ReturnValue::Single(lit)) if sig.fallible && pair_literal(lit).is_some() => {
+                let elems = pair_literal(lit).unwrap_or_default();
+                let inner = self.types.fallible_value(sig.ret).unwrap_or(TyId::ERROR);
+                let hint = match self.types.kind(inner) {
+                    TyKind::Tuple(ts) if ts.len() == 2 => Some((ts[0], ts[1])),
+                    _ => None,
+                };
+                let whole = matches!(unparen(&elems[0]), ast::Expr::Tuple { .. })
+                    && self.fits_shape(&elems[0], inner)
+                    && !hint.is_some_and(|h| self.fits_shape(&elems[0], h.0));
+                let v = match hint {
+                    Some((first, _)) if !whole => self.expr(&elems[0], Some(first)),
+                    _ => self.expr(&elems[0], Some(inner)),
+                };
+                let paren = whole
+                    || v.ty == inner
+                    || match hint {
+                        None => self.types.holds_error(v.ty),
+                        Some((_, second)) => {
+                            self.types.holds_error(v.ty)
+                                && matches!(unparen(&elems[1]), ast::Expr::Nil(_))
+                                && !matches!(self.types.kind(second), TyKind::Optional(_))
+                                && second != TyId::ERR
+                        }
+                    };
+                if paren {
+                    let v = self.coerce(v, Some(inner));
+                    self.expect_ty(v.ty, inner, v.span, Some(sig.name_span));
+                    self.paren_pair(lit.span(), elems, sig);
+                } else {
+                    // The value tuple with no error after it. With a value
+                    // tuple of another arity, the literal is no value of it
+                    // either, and the one report says what is missing.
+                    let (v, e) = match hint {
+                        Some((first, second)) => {
+                            let v = self.coerce(v, Some(first));
+                            self.expect_ty(v.ty, first, v.span, None);
+                            let e = self.expr(&elems[1], Some(second));
+                            let e = self.coerce(e, Some(second));
+                            self.expect_ty(e.ty, second, e.span, None);
+                            (v, e)
+                        }
+                        None => (v, self.expr(&elems[1], Some(TyId::ERR))),
+                    };
+                    // An element of the wrong type was told where it
+                    // is, and the whole tuple is not then told again.
+                    let ty = self.types.tuple_of(vec![v.ty, e.ty]);
+                    if !self.types.holds_error(ty) {
+                        self.diags.push(
+                            Diagnostic::error(codes::E0203, "a fallible function returns two values")
+                                .with_primary(r.span, "only one value returned")
+                                .with_secondary(sig.name_span, "declared `(T, error)` here")
+                                .with_note(
+                                    "write `return value, nil` on the success path, or return a \
+                                     call that is itself fallible",
+                                ),
+                        );
+                    }
+                }
                 Some((hir::Stmt::Return { value: None, span: r.span }, Flow::Diverges))
             }
             Some(ast::ReturnValue::Single(e)) if sig.fallible => {
@@ -5948,7 +6057,12 @@ impl<'a> Checker<'a> {
                     Some(Res::Variant(ti, vi)) => {
                         self.variant_value(ti, vi, args, arg_names, *fspan, span, expected)
                     }
-                    _ => self.method_call(base, name, args, span, expected),
+                    _ => {
+                        let from = self.diags.len();
+                        let call = self.method_call(base, name, args, span, expected);
+                        self.note_hidden_module(base, name, from);
+                        call
+                    }
                 };
             }
         }
@@ -7211,6 +7325,11 @@ impl<'a> Checker<'a> {
         }
 
         let Some(fn_index) = found else {
+            // A method the type's own `impl` of a trait leaves out was
+            // reported at that block, and that report stops the build.
+            if self.impl_lacks(ti, &name.name) {
+                return self.lit(ExprKind::Error, TyId::ERROR, span);
+            }
             let type_name = self.resolved.type_decl(ti).name.clone();
             let mut d = Diagnostic::error(
                 codes::E0205,
@@ -8571,7 +8690,7 @@ impl<'a> Checker<'a> {
         let (Some(ti), Some(tri)) = (self.type_index_of(ty), self.trait_index_of(tr)) else {
             return false;
         };
-        if !self.resolved.implements(ti, tri) {
+        if !self.has_impl(ti, tri) {
             return false;
         }
         let Some(defs) = self
@@ -8596,6 +8715,71 @@ impl<'a> Checker<'a> {
             }
         }
         true
+    }
+
+    /// Whether the program has an `impl` block of a trait for a type.
+    ///
+    /// The resolver knows a block by its methods, so an empty one — every
+    /// method of the trait missing — was no implementation at all, and the
+    /// one mistake was told again by whatever asked: `io.print`, a bound, a
+    /// `dyn`, each with a note to write the block that is already there. A
+    /// block that exists counts, complete or not: what it lacks is reported
+    /// once, at the block, and that report stops the build.
+    fn has_impl(&self, ti: u32, tri: u32) -> bool {
+        self.resolved.implements(ti, tri) || self.trait_impls.contains_key(&(ti, tri))
+    }
+
+    /// Whether an `impl` block for the type `ti` is of a trait that
+    /// declares `method` — asked where the type has no such method, so the
+    /// block is one that leaves it out, which `check_impls` has reported.
+    fn impl_lacks(&self, ti: u32, method: &str) -> bool {
+        self.trait_impls.keys().any(|&(t, tri)| {
+            t == ti
+                && matches!(
+                    self.type_ids.get(tri as usize),
+                    Some(Some(TypeTarget::Trait(tr))) if self.types.trait_def(*tr).method(method).is_some()
+                )
+        })
+    }
+
+    /// A method call on a local that failed (its own `E0205` among the
+    /// reports from `from` on), where the local's name is also a module this
+    /// file imports, or a builtin one such as `io`, and that module has the
+    /// member written: `let text = "ab"` and then `text.clusters(text)` most likely
+    /// meant the module, which the local hides. Said only when the module has
+    /// the member — `text.foo()` gets no such note.
+    fn note_hidden_module(&mut self, base: &ast::Expr, name: &ast::Ident, from: usize) {
+        let member = name.name.as_str();
+        let ast::Expr::Path(p) = base else { return };
+        if !p.is_simple() || !matches!(self.resolved.lookup_use(p.span), Some(Res::Local(_))) {
+            return;
+        }
+        let local = p.text();
+        let dotted = format!("{}.{}", local, member);
+        let canonical = self.resolved.modules.canonical(&self.module, &dotted);
+        let imported = self.resolved.modules.aliases.contains_key(&(self.module.clone(), local.clone()));
+        let written = imported
+            && (self.resolved.fn_by_name_in(&self.module, &dotted).is_some_and(|f| self.resolved.fns[f as usize].is_pub)
+                || self.resolved.const_by_name_in(&self.module, &dotted).is_some_and(|c| self.resolved.consts[c as usize].is_pub)
+                || self.resolved.type_by_name_in(&self.module, &dotted).is_some_and(|t| self.resolved.type_decl(t).is_pub));
+        if !written && BuiltinFn::from_path(&canonical).is_none() {
+            return;
+        }
+        // The call's own report, which points at the method's name or at the
+        // receiver — not one an argument raised: `io.print(s.bogus())` on a
+        // local `io` whose type has `print` says nothing of the module.
+        for i in from..self.diags.len() {
+            let Some(d) = self.diags.get_mut(i) else { continue };
+            if d.code == Some(codes::E0205)
+                && d.labels.iter().any(|l| l.span == name.span || l.span == p.span)
+            {
+                d.notes.push(format!(
+                    "this local `{0}` hides the module `{0}`; to use the module, rename the local",
+                    local
+                ));
+                return;
+            }
+        }
     }
 
     /// Whether a trait is `Share`, the one bound nobody implements.
@@ -9114,7 +9298,16 @@ impl<'a> Checker<'a> {
                  something that will, such as `task.all`",
             ),
         };
-        let what = if projected {
+        // A tuple or slice literal that holds failures is no call either:
+        // `(f(1), f(2))` as a statement is a tuple thrown away.
+        let literal = match &expr.kind {
+            ExprKind::TupleNew { .. } => Some("this tuple holds"),
+            ExprKind::SliceNew { .. } => Some("this slice holds"),
+            _ => None,
+        };
+        let what = if let (Some(literal), false) = (literal, projected) {
+            what.replace("this call returns", literal)
+        } else if projected {
             what.replace("this call returns", "this tuple element holds")
                 .replace("this call may return", "this tuple element may hold")
                 .replace("this call starts a task", "this tuple element is a task")
@@ -11637,7 +11830,7 @@ impl<'a> Checker<'a> {
                         }
                     }
                     _ if self.type_index_of(*t).is_some_and(|ti| {
-                        self.trait_index_of(*bound).is_some_and(|tri| self.resolved.implements(ti, tri))
+                        self.trait_index_of(*bound).is_some_and(|tri| self.has_impl(ti, tri))
                     }) =>
                     {
                         match self.unmet_impl_bound(*t, *bound) {
@@ -11909,6 +12102,14 @@ impl<'a> Checker<'a> {
             ast::Pattern::Binding(name) if self.unit_variant_of(scrut, &name.name).is_some() => {
                 let (ti, vi) = self.unit_variant_of(scrut, &name.name).expect("just checked");
                 self.check_bare_variant(ti, &name.name, name.span);
+                // The local the resolver declared for a name two enums share
+                // is never bound or read: it is given no type of the error
+                // kind to carry to the backends, which hold it as nothing.
+                if let Some(local) = self.resolved.lookup_binding(name.span) {
+                    if self.locals[local as usize].ty == TyId::ERROR {
+                        self.locals[local as usize].ty = TyId::UNIT;
+                    }
+                }
                 self.variant_pattern(ti, vi, None, scrut, name.span)
             }
 
@@ -14249,7 +14450,15 @@ impl<'a> Checker<'a> {
         if !self.type_implements(v.ty, tr) {
             return None;
         }
-        let show = self.display_method(v.ty)?;
+        // An `impl Display` with no `show` in it was reported where it is
+        // written, and that report stops the build: it is not also told that
+        // the type cannot be printed.
+        let Some(show) = self.display_method(v.ty) else {
+            let block = self.type_index_of(v.ty).zip(self.trait_index_of(tr));
+            return block
+                .is_some_and(|b| self.trait_impls.contains_key(&b))
+                .then_some(hir::Expr { span, kind: ExprKind::Error, ty: TyId::STR });
+        };
         let targs = self.receiver_args(v.ty);
         // The call is the compiler's, not the program's, but it runs the same
         // body `p.show()` would, so it is held to what that body compares as
@@ -14416,6 +14625,18 @@ impl<'a> Checker<'a> {
         // comparing it would print `expected [<error>]` for the mistake that
         // was reported where `Foo` was written.
         if self.mentions_error(found) || self.mentions_error(expected) {
+            return;
+        }
+        // An `impl Error` with no `message` in it was reported at the block,
+        // and the value is not then also told it is no `error`, with a note
+        // to write the block that is there.
+        if expected == TyId::ERR
+            && self.error_method(found).is_none()
+            && self
+                .type_index_of(found)
+                .zip(self.error_trait().and_then(|tr| self.trait_index_of(tr)))
+                .is_some_and(|b| self.trait_impls.contains_key(&b))
+        {
             return;
         }
         // A `(T, error)` written as a type is a tuple, and a fallible call's
@@ -17008,6 +17229,15 @@ fn is_tuple_projection(e: &ast::Expr) -> bool {
         ast::Expr::Paren { inner, .. } => is_tuple_projection(inner),
         ast::Expr::Field { name, .. } => name.name.bytes().all(|b| b.is_ascii_digit()),
         _ => false,
+    }
+}
+
+/// The two elements of `e`, where it is a two-element tuple literal inside
+/// any number of parentheses — what `return (v, nil)` is written as.
+fn pair_literal(e: &ast::Expr) -> Option<&[ast::Expr]> {
+    match unparen(e) {
+        ast::Expr::Tuple { elems, .. } if elems.len() == 2 => Some(elems),
+        _ => None,
     }
 }
 
