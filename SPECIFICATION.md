@@ -432,7 +432,8 @@ leaves `x` present. An `if x == nil` whose branch always leaves — by `return`,
 narrowing applies in a `match` arm once an earlier arm has covered `nil`. A
 write to a `var` ends its narrowing unless the value written cannot be nil
 either; inside a loop, that holds for every write the loop's body makes, since
-the body runs again after each of them.
+the body runs again after each of them. Parentheses change nothing: `(x) !=
+nil` and `(x != nil)` narrow as `x != nil` does.
 
 Those are the only places narrowing happens. It does not reach the right
 operand of `&&` or `||` — `x != nil && x.n > 2` reads `x.n` from an optional
@@ -1257,6 +1258,10 @@ The rules:
 > yet taken.
 > A chain of them goes down a level at each step: `t.0.0` takes one element of
 > `t.0` and leaves `t.0.1` owed, exactly as `let u = t.0` then `u.0` does.
+> A name a pattern binds owes what a `let` of the same value owes: the name of
+> a bare `match` arm, or of the arm after a `nil` arm, and a `for` binding over
+> a slice of tuples are followed element by element like any other binding of
+> a tuple, so `match t { x => … }` then `x.0` leaves `x.1` owed.
 > A projection of a tuple no binding holds — `(f(1), f(2)).0`, `pair().0` —
 > leaves nothing that could take the other elements later, so each failure among
 > them is `E0302` at the projection: at its element in a literal, at the call
@@ -1275,6 +1280,11 @@ The rules:
 > nil`, leaves the failure where nothing can reach it again, and is `E0302`
 > there; a field, entry or element tested in place is still where it was
 > stored.
+
+Parentheses change nothing in any of this. `(e) != nil`, `nil == ((r))`,
+`r == (nil)` and `(r == nil)` are the tests they are written without them:
+they prove what those prove, narrow what those narrow, and leave owed what
+those leave owed.
 
 R1–R5 are about bindings, and R6 and R7 close the shapes they leave open: a
 call written as a statement makes no binding, so nothing in R1–R5 ever sees it,

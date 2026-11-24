@@ -1,0 +1,109 @@
+// Parentheses change nothing in the error analysis. A nil test of a held
+// optional result written `(r) == nil`, `nil != ((r))` or `r == (nil)` asks
+// only whether a result is there, exactly as `r == nil` does, and leaves the
+// failure in it owed. Each was taken as reading `r`, and the error the
+// finished task gave was lost with no report.
+
+use std/task
+
+async fn save() -> error {
+    return errors.new("disk full")
+}
+
+async fn left_on_nil() {
+    let r = await task.timeout(save(), 10) //~ ERROR E0302
+    if (r) == nil {
+        return
+    }
+    io.print("in time")
+}
+
+async fn tested_present() {
+    let r = await task.timeout(save(), 10) //~ ERROR E0302
+    if nil != ((r)) {
+        io.print("in time")
+    }
+}
+
+async fn nil_in_parentheses() {
+    let r = await task.timeout(save(), 10) //~ ERROR E0302
+    let late = r == (nil)
+    io.print(late)
+}
+
+async fn beside_another_test(c: bool) {
+    let r = await task.timeout(save(), 10) //~ ERROR E0302
+    if c && (r) != nil {
+        io.print("in time")
+    }
+}
+
+// A held result a value `if` gives is not read by testing that value,
+// parenthesised or not.
+async fn chosen(c: bool) {
+    let r = await task.timeout(save(), 10) //~ ERROR E0302
+    if (if c { r } else { nil }) == nil {
+        io.print("late or not chosen")
+    }
+}
+
+async fn in_a_value_if() {
+    let r = await task.timeout(save(), 10) //~ ERROR E0302
+    let n = if (r) == nil { 0 } else { 1 }
+    io.print(n)
+}
+
+async fn in_a_guard(n: int) {
+    let r = await task.timeout(save(), 10) //~ ERROR E0302
+    match n {
+        _ if (r) != nil => io.print("in time"),
+        _ => io.print("late"),
+    }
+}
+
+// Narrowing follows the same test: after `if (r) == nil { return }`, `r` is
+// the error, and `(r) != nil` tests it.
+async fn handled() {
+    let r = await task.timeout(save(), 10)
+    if (r) == nil {
+        return
+    }
+    if (r) != nil {
+        io.print(r.message())
+    }
+}
+
+async fn handled_inside() {
+    let r = await task.timeout(save(), 10)
+    if ((r != nil)) {
+        if (r) != nil {
+            io.print(r.message())
+        }
+    }
+}
+
+fn pair() -> (int, error) {
+    return 1, nil
+}
+
+fn guarded() {
+    let (v, err) = pair()
+    if (err) != nil {
+        io.print(err.message())
+        return
+    }
+    io.print(v)
+}
+
+async fn main() {
+    await left_on_nil()
+    await tested_present()
+    await nil_in_parentheses()
+    await beside_another_test(true)
+    await chosen(true)
+    await in_a_value_if()
+    await in_a_guard(1)
+    await handled()
+    await handled_inside()
+    guarded()
+}

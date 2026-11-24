@@ -419,7 +419,9 @@ walking it with `for`, hands each failure to the name it lands in. `r.0` takes
 one element of a tuple and leaves the others owed — the tuple is settled once
 each has been taken, and taking it apart (or copying it) afterwards owes only
 the failures not yet taken. `t.0.0` goes a level down: it leaves `t.0.1` owed, as
-`let u = t.0` then `u.0` does. A projection of a tuple nobody holds, `(f(1), f(2)).0` or `pair().0`,
+`let u = t.0` then `u.0` does. A name a pattern binds owes what a `let` of
+the same value owes: after `match t { x => … }`, the arm after a `nil` arm, or
+`for x in ts` over a slice of tuples, `x.0` leaves `x.1` owed. A projection of a tuple nobody holds, `(f(1), f(2)).0` or `pair().0`,
 throws the other elements away on the spot, so each failure among them is
 `E0302` there; bind the tuple and take it apart, with `_` for one you mean to
 drop. `rs[0]` on a slice, though, counts as reading the whole slice, since a
@@ -496,6 +498,11 @@ async fn main() {
 So bind the result first: `if await task.timeout(save(), 100) == nil { … }`
 tests a result nothing holds, and the failure in it is lost — `E0302` at the
 `await`.
+
+Parentheses change nothing: `(r) == nil`, `nil != ((r))`, `r == (nil)` and
+`(r == nil)` are the same nil test as `r == nil`. They leave the failure owed,
+and they narrow `r` just as `r == nil` does, so `if (r) == nil { return }`
+followed by `if (r) != nil { io.print(r.message()) }` is the program above.
 
 The same holds however the failure got into a single binding — `var e = f()`,
 `let e = await f()`, `let e = if c { f() } else { g() }`, `let (n, e) = (1,
