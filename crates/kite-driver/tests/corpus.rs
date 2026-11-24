@@ -387,6 +387,41 @@ fn a_character_kite_does_not_have_is_one_diagnostic() {
     }
 }
 
+/// A `;` where no statement can end — between a declaration's header and
+/// its `{`, or after a keyword that begins one — is skipped, not read as a
+/// line break, so the declaration keeps its body and its uses find it. Read
+/// as a line break it dropped the declaration: E0111 at every call of the
+/// function, E0204 at the struct, E0205 at a method of the impl.
+#[test]
+fn a_semicolon_before_a_declarations_body_keeps_the_declaration() {
+    let cases = [
+        "fn one() -> int ; {\n    return 1\n}\nfn main() {\n    io.print(one())\n    io.print(one())\n}\n",
+        "pub fn one() ; {\n    io.print(1)\n}\nfn main() {\n    one()\n}\n",
+        "async fn save() -> error ; {\n    return nil\n}\nasync fn main() {\n    let e = await save()\n    \
+         if e != nil {\n        io.print(e.message())\n    }\n}\n",
+        "fn; checks() {\n}\nfn main() {\n    checks()\n}\n",
+        "fn id<T>(x: T) -> T ;{\n    return x\n}\nfn main() {\n    io.print(id(1))\n}\n",
+        "struct P ; {\n    x: int\n}\nfn main() {\n    let p = P{x: 1}\n    io.print(p.x)\n}\n",
+        "enum E ; {\n    A\n    B\n}\nfn main() {\n    match A {\n        A => io.print(\"a\"),\n        \
+         B => io.print(\"b\"),\n    }\n}\n",
+        "trait Named ; {\n    fn name(self) -> str\n}\nstruct P {\n    x: int\n}\nimpl Named for P {\n    \
+         fn name(self) -> str {\n        return \"p\"\n    }\n}\nfn main() {\n    io.print(P{x: 1}.name())\n}\n",
+        "struct P {\n    x: int\n}\nimpl P ; {\n    fn get(self) -> int {\n        return self.x\n    }\n}\n\
+         fn main() {\n    io.print(P{x: 1}.get())\n}\n",
+        "trait Named {\n    fn name(self) -> str\n}\nstruct P {\n    x: int\n}\nimpl Named for P ; {\n    \
+         fn name(self) -> str {\n        return \"p\"\n    }\n}\nfn main() {\n    io.print(P{x: 1}.name())\n}\n",
+        "struct P {\n    x: int\n}\nimpl P {\n    fn get(self) -> int ; {\n        return self.x\n    }\n}\n\
+         fn main() {\n    io.print(P{x: 1}.get())\n}\n",
+        "@host(\"env\")\nextern fn now() -> int ;\nfn main() {\n    io.print(now())\n}\n",
+        "fn main() {\n    for x in [1, 2] ; {\n        io.print(x)\n    }\n}\n",
+    ];
+    for src in cases {
+        let result = compile(Path::new("t.kite"), src, Emit::Check);
+        let errors: Vec<String> = actual(&result).into_values().flatten().collect();
+        assert_eq!(errors, vec!["E0002".to_string()], "{}\n{}", src, result.render_diagnostics());
+    }
+}
+
 /// Text Kite has no token for is one report, and nothing after it is
 /// reported on that account: a `#` comment to the end of its line, a
 /// backtick string, a run of `?`, a `$`. The text stood where a value was,

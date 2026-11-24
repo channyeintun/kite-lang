@@ -86,7 +86,7 @@ codes! {
     E0002 = "E0002", "invalid character in source",
         "The lexer found a character that cannot begin any Kite token. It skips the character and reports it where it stands. The ones that come in by habit:\n\
          \n\
-         - `;`. Kite has no semicolons: a statement ends at its line break (§3), so the `;` is read as one, and what follows it on the line is the next statement.\n\
+         - `;`. Kite has no semicolons: a statement ends at its line break (§3), so the `;` is read as one, and what follows it on the line is the next statement. Where no statement can end — before a `{` on the same line (`fn one() -> int ; {`, `struct P ; {`), or right after `fn`, `async`, `pub`, `struct`, `enum`, `trait` or `impl` — it is skipped instead, so the declaration keeps its body.\n\
          - `#` for a comment. Write `//`. The rest of the line, from the `#`, is skipped with it.\n\
          - A backtick string. Write `\"…\"`, with `\\(…)` for a value inside it. The text to the closing backtick on the line (or to the line's end) is skipped with it.\n\
          - `?`, `~` and `\\`. None is an operator or a delimiter in Kite.\n\

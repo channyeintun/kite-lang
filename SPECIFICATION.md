@@ -1660,6 +1660,11 @@ generic enum. A missing case is named however deep it is: `Add(Num(_),
 _)`. Numbers and strings have no finite set of values, so a match on one needs a
 catch-all. A guarded arm counts towards nothing, since its guard may fail.
 
+The scrutinee is evaluated once, and every arm tests that one value. A guard
+that assigns the variable the scrutinee was read from changes neither which
+later arm matches nor what that arm's names are bound to; the arm's body sees
+the variable as the guard left it.
+
 An arm no value can reach — everything it matches is taken by an unguarded arm
 above it — is a warning (`E0116`). The usual cause is a name meant as a variant
 that is not one: `Dir` where the enum says `Directory` is a binding, which takes

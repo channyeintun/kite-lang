@@ -805,8 +805,51 @@ fn live_nominals(program: &mir::Program, types: &Types) -> (Vec<bool>, Vec<bool>
     (structs, enums)
 }
 
+/// Every type a value of the program's types can hold inside it, through
+/// slices, maps, tuples and optionals — after those types themselves.
+///
+/// The collectors below declare a type the program mentions as the type of
+/// a local, a return or a live field. A type written only inside another one
+/// was missed: `[nil]` for a `[Option<int>]` builds no `Option<int>` local,
+/// since a `nil` is a constant, so the box was never declared and the
+/// element was given an `i32` — an invalid module. (A present value goes
+/// through a local of its type, which is why that never showed.) Each
+/// collector adds what this finds after what it found before, so a program
+/// in which it finds nothing new keeps every type index it had.
+fn parts_of(program: &mir::Program, types: &Types, live: &(Vec<bool>, Vec<bool>)) -> Vec<TyId> {
+    let mut work: Vec<TyId> = Vec::new();
+    for f in &program.fns {
+        work.push(f.ret);
+        work.extend(f.locals.iter().map(|l| l.ty));
+    }
+    for i in (0..types.struct_count()).filter(|&i| live.0[i]) {
+        work.extend(types.struct_def(kite_hir::StructId(i as u32)).fields.iter().map(|f| f.ty));
+    }
+    for i in (0..types.enum_count()).filter(|&i| live.1[i]) {
+        for v in &types.enum_def(kite_hir::EnumId(i as u32)).variants {
+            work.extend(v.fields.iter().map(|f| f.ty));
+        }
+    }
+    work.reverse();
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    while let Some(ty) = work.pop() {
+        if !seen.insert(ty) {
+            continue;
+        }
+        out.push(ty);
+        match types.kind(ty) {
+            TyKind::Slice(t) | TyKind::Optional(t) | TyKind::Fallible(t) => work.push(*t),
+            TyKind::Map(k, v) => work.extend([*v, *k]),
+            TyKind::Tuple(ts) => work.extend(ts.iter().rev().copied()),
+            _ => {}
+        }
+    }
+    out
+}
+
 /// Every map shape a program mentions, in a stable order.
-fn map_shapes(program: &mir::Program, types: &Types) -> Vec<TyId> {
+fn map_shapes(program: &mir::Program, types: &Types, parts: &[TyId]) -> Vec<TyId> {
     let mut seen = Vec::new();
     let note = |ty: TyId, seen: &mut Vec<TyId>| {
         if matches!(types.kind(ty), TyKind::Map(..)) && !seen.contains(&ty) {
@@ -819,11 +862,14 @@ fn map_shapes(program: &mir::Program, types: &Types) -> Vec<TyId> {
             note(l.ty, &mut seen);
         }
     }
+    for t in parts {
+        note(*t, &mut seen);
+    }
     seen
 }
 
 /// Every tuple shape a program mentions, in a stable order.
-fn tuple_shapes(program: &mir::Program, types: &Types) -> Vec<TyId> {
+fn tuple_shapes(program: &mir::Program, types: &Types, parts: &[TyId]) -> Vec<TyId> {
     let mut seen = Vec::new();
     let note = |ty: TyId, seen: &mut Vec<TyId>| {
         if matches!(types.kind(ty), TyKind::Tuple(_)) && !seen.contains(&ty) {
@@ -835,6 +881,9 @@ fn tuple_shapes(program: &mir::Program, types: &Types) -> Vec<TyId> {
         for l in &f.locals {
             note(l.ty, &mut seen);
         }
+    }
+    for t in parts {
+        note(*t, &mut seen);
     }
     seen
 }
@@ -859,7 +908,12 @@ fn pair_values(program: &mir::Program, types: &Types) -> Vec<TyId> {
 }
 
 /// Every slice element type a program mentions, in a stable order.
-fn slice_elements(program: &mir::Program, types: &Types, live: &(Vec<bool>, Vec<bool>)) -> Vec<TyId> {
+fn slice_elements(
+    program: &mir::Program,
+    types: &Types,
+    live: &(Vec<bool>, Vec<bool>),
+    parts: &[TyId],
+) -> Vec<TyId> {
     let mut seen = Vec::new();
     let note = |ty: TyId, seen: &mut Vec<TyId>| {
         if let TyKind::Slice(elem) = types.kind(ty) {
@@ -886,11 +940,19 @@ fn slice_elements(program: &mir::Program, types: &Types, live: &(Vec<bool>, Vec<
             }
         }
     }
+    for t in parts {
+        note(*t, &mut seen);
+    }
     seen
 }
 
 /// Every optional payload type a program mentions, in a stable order.
-fn option_payloads(program: &mir::Program, types: &Types, live: &(Vec<bool>, Vec<bool>)) -> Vec<TyId> {
+fn option_payloads(
+    program: &mir::Program,
+    types: &Types,
+    live: &(Vec<bool>, Vec<bool>),
+    parts: &[TyId],
+) -> Vec<TyId> {
     let mut seen = Vec::new();
     let note = |ty: TyId, seen: &mut Vec<TyId>| {
         if let TyKind::Optional(inner) = types.kind(ty) {
@@ -917,6 +979,10 @@ fn option_payloads(program: &mir::Program, types: &Types, live: &(Vec<bool>, Vec
                 note(f.ty, &mut seen);
             }
         }
+    }
+    // An optional written only inside another type: see `parts_of`.
+    for t in parts {
+        note(*t, &mut seen);
     }
     seen
 }
@@ -1043,12 +1109,13 @@ pub fn compile_with(program: &mir::Program, types: &Types, debug_info: bool) -> 
         map_record: std::collections::HashMap::new(),
         eq_cell: 0,
     };
-    let payloads = option_payloads(program, types, &live);
+    let parts = parts_of(program, types, &live);
+    let payloads = option_payloads(program, types, &live, &parts);
     for p in &payloads {
         layout.option_box.insert(*p, next);
         next += 1;
     }
-    let elements = slice_elements(program, types, &live);
+    let elements = slice_elements(program, types, &live, &parts);
     for e in &elements {
         layout.slice_array.insert(*e, next);
         layout.slice_record.insert(*e, next + 1);
@@ -1063,14 +1130,14 @@ pub fn compile_with(program: &mir::Program, types: &Types, debug_info: bool) -> 
         layout.pair_record.insert(*v, next);
         next += 1;
     }
-    let tuples = tuple_shapes(program, types);
+    let tuples = tuple_shapes(program, types, &parts);
     for s in &tuples {
         layout.tuple_record.insert(*s, next);
         next += 1;
     }
     // A map needs three types: the record, and one array for each side. Its
     // index is made of the string array's type, which every module has.
-    let maps = map_shapes(program, types);
+    let maps = map_shapes(program, types, &parts);
     for m in &maps {
         let TyKind::Map(k, v) = *types.kind(*m) else {
             continue;
