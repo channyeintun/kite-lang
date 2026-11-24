@@ -8658,6 +8658,66 @@ fn main() {
 "#,
         "ZERO\none\nmany\n2\n",
     ),
+    // A `match` tests one value. A guard that writes the local the
+    // scrutinee names changes neither which later arm matches nor what its
+    // bindings hold. The later arms read the local again, so the first
+    // match fell past its last arm into the compiler's own `unreachable` and
+    // the second chose `2`.
+    (
+        "a-match-guard-that-writes-the-scrutinee-does-not-change-what-is-tested",
+        r#"enum E {
+  P(n: int)
+  Q(n: int)
+}
+struct S {
+  kind: int
+}
+fn h(u: ()) -> int {
+  return 1
+}
+fn main() {
+  var e = P(n: 1)
+  let r = match e {
+    Q(n) => "q \(n)",
+    P(n) if h(match 0 { _ => { e = Q(n: 9) } }) > 5 => "p, guarded",
+    P(n) => "p \(n)",
+  }
+  io.print(r)
+  var a = 1
+  match a {
+    1 if h(match 0 { _ => { a = 2 } }) > 5 => io.print("one, guarded"),
+    2 => io.print("two"),
+    k if k == 2 => io.print("bound two"),
+    k => io.print("one \(k) \(a)"),
+  }
+  var b = 1
+  let t = match (b, 5) {
+    (1, y) if h(match 0 { _ => { b = 2 } }) > 5 => "guarded",
+    (2, y) => "two",
+    (x, y) => "\(x) \(y) \(b)",
+  }
+  io.print(t)
+  var s = S{kind: 1}
+  match s.kind {
+    1 if h(match 0 { _ => { s = S{kind: 2} } }) > 5 => io.print("guarded"),
+    2 => io.print("two"),
+    k => io.print("\(k) \(s.kind)"),
+  }
+  var c = 1
+  let u = match c {
+    1 if h(match c { 1 if h(match 0 { _ => { c = 3 } }) > 5 => (), _ => () }) > 5 => "outer guarded",
+    3 => "three",
+    1 => match c {
+      1 => "inner one",
+      _ => "inner \(c)",
+    },
+    _ => "other",
+  }
+  io.print(u)
+}
+"#,
+        "p 1\none 1 2\n1 5 2\n1 2\ninner 3\n",
+    ),
 ];
 
 #[test]
