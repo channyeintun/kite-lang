@@ -864,8 +864,16 @@ impl<'a> Parser<'a> {
         if self.panicking || self.unwinding {
             return;
         }
+        // The token was reported already, and recovery came back to it:
+        // `let z = @` skipped its line up to the `@`, where a declaration
+        // may start, and read it again as a statement, so the one report was
+        // made twice at the one caret.
+        let again = self.last_error_at == Some(self.pos);
         self.panicking = true;
         self.last_error_at = Some(self.pos);
+        if again {
+            return;
+        }
         let found = self.peek();
         // What an unterminated string swallowed is missing because of it:
         // the `)` its line ended with, or — for a block string — everything
@@ -1981,9 +1989,48 @@ impl<'a> Parser<'a> {
     /// still declared and nothing that uses it is reported as well. It was
     /// `expected a variant, found pub`, which says what was not written
     /// rather than why this cannot be.
+    ///
+    /// A run of them — `pub pub B`, or a `pub` on each of two lines — is one
+    /// mistake, reported once, so the fix removes the whole run and every
+    /// `pub` in it is read past here. It removed the first, and left a report
+    /// for the next that only a second `kitec fix` took.
     fn refuse_pub_on_variant(&mut self, enum_name: &Ident, enum_is_pub: bool, what: &str) {
         let at = self.span();
-        let next = self.tokens.get(self.pos + 1).map_or(at, |t| t.span);
+        let mut last = self.pos;
+        let mut j = self.pos + 1;
+        while let Some(t) = self.tokens.get(j) {
+            match t.kind {
+                T::Pub => last = j,
+                T::Newline => {}
+                _ => break,
+            }
+            j += 1;
+        }
+        let next = self.tokens.get(last + 1).map_or(at, |t| t.span);
+        // The cut never takes a comment: one between the `pub`s leaves the
+        // fix to the first, and `kitec fix` comes back for the rest. A run
+        // that is all its line holds goes with its line, so the `}` after it
+        // is not pulled up to the indentation the `pub` had.
+        let src = self.src;
+        let spaces_after = |i: usize| i + src[i..].bytes().take_while(|b| matches!(b, b' ' | b'\t')).count();
+        let run_end = self.tokens[last].span.end as usize;
+        let line_start = src[..at.start as usize].rfind('\n').map_or(0, |i| i + 1);
+        let line_end = src[run_end..].find('\n').map(|i| run_end + i);
+        let blank = |r: std::ops::Range<usize>| src[r].bytes().all(|b| matches!(b, b' ' | b'\t' | b'\r'));
+        let start = at.start as usize;
+        let gap = &src[run_end..(next.start as usize).max(run_end)];
+        let (whole_run, begin, end) = if src[start..run_end].contains("//") {
+            (false, start, spaces_after(at.end as usize))
+        } else if !gap.contains('\n') && !gap.contains("//") {
+            (true, start, (next.start as usize).max(run_end))
+        } else {
+            match line_end {
+                Some(e) if blank(line_start..start) && blank(run_end..e) => (true, line_start, e + 1),
+                _ => (true, start, spaces_after(run_end)),
+            }
+        };
+        let cut = Span::new(self.file, begin as u32, end as u32);
+        let each = whole_run && last > self.pos;
         let note = if enum_is_pub {
             format!("`{}` is `pub`, so its variants are visible wherever it is", enum_name.name)
         } else {
@@ -2001,12 +2048,14 @@ impl<'a> Parser<'a> {
                 )
                 .with_note(note)
                 .with_fix(Fix::replace(
-                    "remove `pub`",
-                    Span::new(self.file, at.start, next.start),
+                    if each { "remove each `pub`" } else { "remove `pub`" },
+                    cut,
                     "",
                 )),
         );
-        self.bump();
+        while self.pos <= last {
+            self.bump();
+        }
     }
 
     fn parse_variant(
@@ -2023,8 +2072,8 @@ impl<'a> Parser<'a> {
             self.skip_newlines();
             // `Circle(radius: float)` is named; `Number(float)` positional.
             // One token of lookahead past the first name decides — past a
-            // `pub`, which is refused.
-            let skip = (self.at(T::Pub) && self.peek_at(1) == T::Ident) as usize;
+            // `pub`, or a run of them, which is refused.
+            let skip = (0..).take_while(|&i| self.peek_at(i) == T::Pub).count();
             let named = self.peek_at(skip) == T::Ident && self.peek_at(skip + 1) == T::Colon;
             let payload = if named {
                 let mut fields = Vec::new();
@@ -3065,8 +3114,14 @@ impl<'a> Parser<'a> {
 
         if matches!(self.peek(), T::Newline | T::RBrace | T::Eof) {
             let span = start.to(self.prev_span());
+            // `return ?`: the value was text the lexer skipped and reported,
+            // so it is an error, not a missing value — an E0203 beside the
+            // one report.
+            let value = self.after_skipped_character().then(|| {
+                ReturnValue::Single(Expr::Error(Span::empty_at(self.file, span.end)))
+            });
             self.expect_terminator();
-            return Some(Stmt::Return(ReturnStmt { value: None, span }));
+            return Some(Stmt::Return(ReturnStmt { value, span }));
         }
 
         // `return _, err` — the failure arm.
@@ -3157,14 +3212,19 @@ impl<'a> Parser<'a> {
         // be a bare "expected an expression" with nothing to say what to
         // write instead. The rest of the statement is read, so the body is
         // not reported again for want of a header.
+        //
+        // The parser does not know what is walked, so the note gives the
+        // form for each: `for item in m` over a map is E0200, and a note that
+        // led with it sent a map's reader to another error.
         if self.at(T::Underscore) && self.peek_at(1) == T::In {
             let at = self.span();
             self.diags.push(
                 Diagnostic::error(codes::E0100, "a `for` loop needs a name for what it walks")
                     .with_primary(at, "`_` is not a binding on its own")
                     .with_note(
-                        "name the variable and leave it unread, as in `for item in xs`; `_` \
-                         stands for an element only inside a tuple binding, `for (_, v) in m`",
+                        "name what it walks and leave it unread: over a slice or a range, \
+                         `for item in xs`; over a map, `for (k, _) in m`, where `_` may stand \
+                         for one part of the pair",
                     ),
             );
             self.bump();
@@ -3878,7 +3938,25 @@ impl<'a> Parser<'a> {
                     // supplied, which leaves the call's meaning a guess.
                     let mut guessed = false;
                     self.skip_newlines();
-                    while !self.at(T::RParen) && !self.at_end() {
+                    while !self.at_end() {
+                        // `f($)`, `f(1, ?)`: an argument that was only text
+                        // the lexer skipped may have been one or none, so
+                        // the count is a guess, as with a comma supplied —
+                        // the call is not also short of one, nor `h(~)`
+                        // for an `h` that takes none given one too many.
+                        if (self.at(T::RParen) || self.at(T::Comma)) && self.after_skipped_character() {
+                            guessed = true;
+                            arg_names.push(None);
+                            args.push(Expr::Error(Span::empty_at(self.file, self.span().start)));
+                            if self.eat(T::Comma) {
+                                self.skip_newlines();
+                                continue;
+                            }
+                            break;
+                        }
+                        if self.at(T::RParen) {
+                            break;
+                        }
                         // `Circle(radius: 2.0)` names its payload field. A
                         // plain `f(x)` does not.
                         let name = if self.at(T::Ident) && self.peek_at(1) == T::Colon {

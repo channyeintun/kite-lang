@@ -889,8 +889,8 @@ fn main() {
 
 `_` stands for an element inside a tuple binding, `for (_, v) in m`, but is not
 a binding on its own: `for _ in 0..3` is `E0100` (`a for loop needs a name for
-what it walks`). Name the variable and leave it unread — an unread loop variable is not a
-warning.
+what it walks`). Name the variable and leave it unread — `for item in xs` over a slice
+or a range, `for (k, _) in m` over a map — an unread loop variable is not a warning.
 
 ```kite fails
 fn main() {

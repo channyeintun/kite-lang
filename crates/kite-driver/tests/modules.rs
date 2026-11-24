@@ -1616,6 +1616,41 @@ fn a_module_spelled_like_an_always_available_one_is_refused() {
     assert_eq!(p.run(&main).expect("compiles"), "null\nmine x\n");
 }
 
+/// A refused `use` is one report, however the name it would have brought in
+/// is then used. After `E0403` the program's `crypto.one()` added ``cannot
+/// find `crypto` ``, and `keys.x()` after `use crypto as keys` ``cannot find
+/// `keys` `` — once for every use: a call, a type, a literal, a function
+/// value, a pattern.
+#[test]
+fn a_refused_use_is_one_report() {
+    let p = Project::new("refused-use-once");
+    p.file(
+        "crypto.kite",
+        "pub fn one() -> int {\n  return 1\n}\n\npub struct K {\n  pub a: int\n}\n\npub enum E {\n  A\n}\n",
+    );
+    p.file(
+        "util.kite",
+        "pub fn only() -> int {\n  return 2\n}\n",
+    );
+    let uses = |m: &str| {
+        format!(
+            "fn f(k: {m}.K) -> int {{\n  return 1\n}}\n\nfn main() {{\n  let k = {m}.K{{ a: 1 }}\n  \
+             let g = {m}.one\n  let e = {m}.E.A\n  match e {{\n    {m}.E.A => io.print(1),\n  }}\n  \
+             io.print(f(k) + g() + {m}.one())\n}}\n"
+        )
+    };
+    for (name, head, spelling) in [
+        ("plain", "use crypto", "crypto"),
+        ("alias", "use crypto as keys", "keys"),
+        ("spelling", "use util as json", "json"),
+        ("missing", "use nothere", "nothere"),
+    ] {
+        let main = p.file(&format!("main_{}.kite", name), &format!("{}\n\n{}", head, uses(spelling)));
+        let said = p.run(&main).expect_err("refused");
+        assert_eq!(said.matches("error[").count(), 1, "{}: {}", name, said);
+    }
+}
+
 /// A standard module is `std/<name>`, exactly. Only the last segment used to
 /// be read, so any path ending in `json` under `std` was `std/json`.
 #[test]

@@ -87,11 +87,12 @@ codes! {
         "The lexer found a character that cannot begin any Kite token. It skips the character and reports it where it stands. The ones that come in by habit:\n\
          \n\
          - `;`. Kite has no semicolons: a statement ends at its line break (§3), so the `;` is read as one, and what follows it on the line is the next statement.\n\
-         - `#` for a comment. Write `//`.\n\
-         - `?`, `~`, a backtick and `\\`. None is an operator or a delimiter in Kite.\n\
+         - `#` for a comment. Write `//`. The rest of the line, from the `#`, is skipped with it.\n\
+         - A backtick string. Write `\"…\"`, with `\\(…)` for a value inside it. The text to the closing backtick on the line (or to the line's end) is skipped with it.\n\
+         - `?`, `~` and `\\`. None is an operator or a delimiter in Kite.\n\
          - A character that only looks like one: a curly quote in place of `\"`, an en dash in place of `-`. These arrive by copy and paste from a document or a web page; retype them.\n\
          \n\
-         An identifier may use any Unicode letter, so a name in another script is not this error. A run of one character, such as `??`, is one report. The gap a skipped character leaves — `let a = 1 $ 2` is two values side by side once the `$` is gone — is not reported again: removing the character is the whole fix.\n\
+         An identifier may use any Unicode letter, so a name in another script is not this error. A run of one character, such as `??`, is one report. The gap a skipped character leaves — `let a = 1 $ 2` is two values side by side once the `$` is gone, and `let y = ???` has no value — is not reported again: removing the character is the whole fix. Skipped text that ends its line ends the statement there, so the next line is not read as the value.\n\
          \n\
          Example:\n\
          \n\

@@ -177,12 +177,19 @@ pub struct Remap {
     augmented_starts: Vec<u32>,
     /// Byte offset of the start of each line of the real file, and its length.
     real_lines: Vec<(u32, u32)>,
+    /// Where in the augmented source each wrapper's closing `}` is.
+    closers: Vec<u32>,
 }
 
 impl Remap {
     /// The offset in the real file that `at`, an offset in the augmented
     /// source, stands for. Lines the compiler made up — a wrapper's header, a
     /// closing brace — stand for the line of the fence that caused them.
+    ///
+    /// **The closing brace is the end of the example's last line.** An
+    /// example left open (`let x = (1 +`) is reported at that brace, which
+    /// stood for the fence's opening line: the caret went on `/// ```kite`,
+    /// above everything the reader wrote.
     pub fn offset(&self, at: u32) -> u32 {
         let line = self.augmented_starts.partition_point(|&s| s <= at).saturating_sub(1);
         let Some(&(real, shift)) = self.origins.get(line).or(self.origins.last()) else {
@@ -249,6 +256,7 @@ pub fn augment_mapped(src: &str, tests: &[DocTest]) -> (String, Vec<String>, Rem
     out.push_str(src);
     origins.extend((1..=src.split('\n').count() as u32).map(|n| (n, 0)));
     let mut names = Vec::new();
+    let mut closers = Vec::new();
     out.push('\n');
     for (i, t) in tests.iter().enumerate() {
         out.push('\n');
@@ -274,8 +282,12 @@ pub fn augment_mapped(src: &str, tests: &[DocTest]) -> (String, Vec<String>, Rem
             let (line, shift) = real_line(t, k);
             origins.push((line, shift - 4));
         }
+        closers.push(out.len() as u32);
         out.push_str("}\n");
-        origins.push((t.line, 0));
+        let last = t.code.lines().count().saturating_sub(1);
+        let (line, _) = real_line(t, last);
+        let len = real_lines.get(line as usize - 1).map_or(0, |&(_, len)| len);
+        origins.push((line, len as i32));
         names.push(name);
     }
     let mut augmented_starts = vec![0u32];
@@ -284,7 +296,7 @@ pub fn augment_mapped(src: &str, tests: &[DocTest]) -> (String, Vec<String>, Rem
             augmented_starts.push(i as u32 + 1);
         }
     }
-    (out, names, Remap { origins, augmented_starts, real_lines })
+    (out, names, Remap { origins, augmented_starts, real_lines, closers })
 }
 
 /// The diagnostics of a compiled, augmented source, rendered against the real
@@ -342,6 +354,17 @@ pub fn render_diagnostics_where(
     for d in compiled.diags.iter().filter(|d| keep(d)) {
         let mut d = d.clone();
         for label in &mut d.labels {
+            // The brace is the runner's, not the reader's: what the parser
+            // found there is the end of what they wrote.
+            if Some(label.span.file) == entry && remap.closers.contains(&label.span.start) {
+                match label.message.as_str() {
+                    "found }" => label.message = "found the end of the example".to_string(),
+                    "this `}` is indented to close an outer block instead" => {
+                        label.message = "the example ends here".to_string()
+                    }
+                    _ => {}
+                }
+            }
             label.span = moved(label.span);
         }
         for edit in d.fixes.iter_mut().flat_map(|f| f.edits.iter_mut()) {
