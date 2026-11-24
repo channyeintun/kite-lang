@@ -1265,6 +1265,13 @@ The rules:
 > a bare `match` arm, or of the arm after a `nil` arm, and a `for` binding over
 > a slice of tuples are followed element by element like any other binding of
 > a tuple, so `match t { x => … }` then `x.0` leaves `x.1` owed.
+> `_` in a tuple pattern of a `let` or a `for` owes what a name there, never
+> read, would owe: over an element that holds a failure it is `E0302`, as `_`
+> in the error slot of `let (v, _) = f()` is, so `let (a, _, s) = three()` and
+> `let (n, _) = (1, f())` are refused, and `_` over an `int`, over a `nil` or
+> over an element already taken owes nothing. An element written as a read of a
+> binding, `(1, e)` or a slice `xs` walked by `for (n, _) in xs`, is not the
+> only holder of its failure: that binding still holds it and answers for it.
 > A projection of a tuple no binding holds — `(f(1), f(2)).0`, `pair().0` —
 > leaves nothing that could take the other elements later, so each failure among
 > them is `E0302` at the projection: at its element in a literal, at the call
@@ -1338,7 +1345,11 @@ worse. What follows a loop is reached from its top and from every `break` —
 except after a `for { }`, which has no header to leave from and is left only by
 `break`, so `for { if err == nil { break } … }` leaves only where `err` was
 tested, and one with no `break` has nothing after it: its only ways out are
-the `return`s in its body, each of which answers for what it leaves behind.
+the `return`s in its body, each of which answers for what it leaves behind. A
+`break` counts wherever it is written outside a closure — as a statement, or in
+a block inside an expression such as an arm of a `match` used as a value or a
+call's argument — and one inside a nested loop leaves that loop unless it names
+this one by its label.
 
 In practice:
 

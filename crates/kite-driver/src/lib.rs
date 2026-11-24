@@ -1841,6 +1841,53 @@ mod tests {
         let text = c.render_diagnostics();
         assert!(text.contains("`int` does not take type arguments"), "{}", text);
         assert!(!text.contains("unknown type") && !text.contains("similar type"), "{}", text);
+
+        // A slice or map literal, or the second branch of a value `if`,
+        // wanted as a type that is the error type whole: its `nil` is not a
+        // second report. Each added "cannot infer a type for `nil`" on c622434.
+        let programs = [
+            "fn main() {\n  let y: [Nope] = [nil]\n}\n",
+            "fn main() {\n  let z: {str: Nope} = {\"a\": nil}\n}\n",
+            "fn main() {\n  let y: [Option<Nope>] = [nil]\n}\n",
+            "fn main() {\n  let y: [(int, Nope)] = [(1, nil)]\n}\n",
+            "fn take(xs: [Nope]) {\n}\nfn main() {\n  take([nil])\n}\n",
+            "struct S {\n  xs: [Nope]\n}\nfn main() {\n  let s = S{ xs: [nil] }\n  io.print(s.xs.len())\n}\n",
+            "fn put(m: {str: Nope}) {\n}\nfn main() {\n  put({\"a\": nil})\n}\n",
+            "struct H {\n  o: Option<int>\n}\nfn g(c: bool, h: Nope) {\n  if (if c { h.o } else { nil }) == nil {\n    io.print(1)\n  }\n}\nfn main() {\n}\n",
+        ];
+        for src in programs {
+            let c = compile("t.kite", src, Emit::Check);
+            let codes: Vec<&str> = c.diags.iter().filter_map(|d| d.code.map(|x| x.0)).collect();
+            assert_eq!(codes, vec!["E0204"], "{}\n{}", src, c.render_diagnostics());
+            assert!(c.render_diagnostics().contains("unknown type `Nope`"), "{}", c.render_diagnostics());
+        }
+        // What is wrong besides is still said.
+        let c = compile(
+            "t.kite",
+            "fn main() {\n  let z: {str: Nope} = {\"a\": nil, 3: nil}\n}\n",
+            Emit::Check,
+        );
+        let codes: Vec<&str> = c.diags.iter().filter_map(|d| d.code.map(|x| x.0)).collect();
+        assert_eq!(codes, vec!["E0204", "E0200"], "{}", c.render_diagnostics());
+    }
+
+    /// A refused `return a, b` is still a return: the one E0200, with no
+    /// E0203 "not every path returns" or E0211 "can finish without
+    /// returning" after it, which each said on c622434 that a function whose
+    /// only path is that `return` falls off its end.
+    #[test]
+    fn a_refused_pair_return_is_still_a_return() {
+        let programs = [
+            "fn main() {\n  let f: fn(int) -> int = |n| { return n, nil }\n  io.print(f(1))\n}\n",
+            "fn g(n: int) -> int {\n  return n, nil\n}\nfn main() {\n  io.print(g(1))\n}\n",
+            "fn t() -> (int, error,) {\n  return 1, nil\n}\nfn main() {\n}\n",
+            "fn d() -> (int, int) {\n  return 1, 2\n}\nfn main() {\n}\n",
+        ];
+        for src in programs {
+            let c = compile("t.kite", src, Emit::Check);
+            let codes: Vec<&str> = c.diags.iter().filter_map(|d| d.code.map(|x| x.0)).collect();
+            assert_eq!(codes, vec!["E0200"], "{}\n{}", src, c.render_diagnostics());
+        }
     }
 
     /// Three notes that now name a fix that compiles: a module's trait

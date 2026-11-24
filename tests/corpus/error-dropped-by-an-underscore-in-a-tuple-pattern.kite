@@ -1,0 +1,59 @@
+// `_` in a tuple pattern owes what a name there, never read, would owe. Over
+// an element that holds a failure it drops it, exactly as `_` in the error
+// slot of `let (v, _) = f()` does, and each refused line here was once
+// accepted with the failure gone. Where a name would owe nothing, `_` owes
+// nothing; and an element read from a binding is still held by it.
+
+fn three(n: int) -> (int, error, str) {
+    return (n, errors.new("lost"), "s")
+}
+
+fn f() -> error {
+    return errors.new("lost too")
+}
+
+fn dropped() {
+    let (a, _, s) = three(1) //~ ERROR E0302
+    let (n, _) = (1, f()) //~ ERROR E0302
+    let (_, m) = (f(), 1) //~ ERROR E0302
+    let t = three(2)
+    let (b, _, r) = t //~ ERROR E0302
+    let (_, k) = ((1, f()), 2) //~ ERROR E0302
+    for (j, _) in [(1, f())] { //~ ERROR E0302
+        io.print(j)
+    }
+    io.print("\(a)\(s)\(n)\(m)\(b)\(r)\(k)")
+}
+
+fn nothing_owed(c: error) {
+    let (a, _) = (1, 2)
+    let (_, b) = ((1, 2), f())
+    if b != nil {
+        io.print("failed")
+    }
+    let t = three(3)
+    if t.1 != nil {
+        io.print("failed")
+    }
+    let (n, _, s) = t
+    // `c` still holds what `_` lets go of, and answers for it below.
+    let (m, _) = (1, c)
+    if c != nil {
+        io.print("failed")
+    }
+    io.print("\(a)\(n)\(s)\(m)")
+}
+
+// Read from a binding that nothing reads again: that binding is the one left
+// unchecked.
+fn held_by_the_binding() {
+    let e = f() //~ ERROR E0302
+    let (n, _) = (1, e)
+    io.print(n)
+}
+
+fn main() {
+    dropped()
+    nothing_owed(nil)
+    held_by_the_binding()
+}

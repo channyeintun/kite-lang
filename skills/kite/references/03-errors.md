@@ -299,6 +299,33 @@ fn main() {
 
 > `E0302: an error may not be discarded with `_` — the error slot cannot be dropped`
 
+The same holds for `_` over any element of a tuple pattern, in a `let` or a
+`for`, that holds a failure: `_` owes what a name there, never read, would owe.
+`_` over an `int`, a `str` or an element already taken with `.N` is fine.
+
+```kite fails
+fn three() -> (int, error, str) {
+    return (1, nil, "s")
+}
+
+fn f() -> error {
+    return nil
+}
+
+fn main() {
+    let (a, _, s) = three() //~ E0302
+    let (n, _) = (1, f()) //~ E0302
+    for (k, _) in [(1, f())] { //~ E0302
+        io.print(k)
+    }
+    io.print("\(a)\(s)\(n)")
+}
+```
+
+Bind the element and test it instead. Where the element was read from a
+binding — `(1, e)`, or `for (n, _) in xs` — that binding still holds the
+failure, and it is the one that has to be looked at.
+
 **A bare-statement call** (R6). This is the door the binding rules do not watch,
 and it is the ordinary shape in `std/dom`, where nearly every function answers
 with a bare `error`:
@@ -380,7 +407,7 @@ fn main() {
 ```
 
 Note the asymmetry: `_ = f()` discards the *whole* call and is fine; `_` standing
-in for the error inside a destructuring is not. `_ = …` takes only `=` — there is
+in for an error inside a destructuring is not. `_ = …` takes only `=` — there is
 no `_ +=`, since that would read the hole.
 
 **A whole `(T, error)` bound to one name.** Nothing is destructured, so R1
@@ -423,8 +450,8 @@ the failures not yet taken. `t.0.0` goes a level down: it leaves `t.0.1` owed, a
 the same value owes: after `match t { x => … }`, the arm after a `nil` arm, or
 `for x in ts` over a slice of tuples, `x.0` leaves `x.1` owed. A projection of a tuple nobody holds, `(f(1), f(2)).0` or `pair().0`,
 throws the other elements away on the spot, so each failure among them is
-`E0302` there; bind the tuple and take it apart, with `_` for one you mean to
-drop. `rs[0]` on a slice, though, counts as reading the whole slice, since a
+`E0302` there; bind the tuple and take it apart, with `_` only over an element
+that holds no failure. `rs[0]` on a slice, though, counts as reading the whole slice, since a
 slice cannot be followed element by element. Both results of `task.both` arrive
 together, so deal with both before any exit — a `check` on the first leaves the
 second behind:

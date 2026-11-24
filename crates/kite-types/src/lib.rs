@@ -3146,7 +3146,10 @@ impl<'a> Checker<'a> {
                         .with_primary(*span, "two values returned here")
                         .with_secondary(sig.name_span, "declare `-> (T, error)` to return a pair"),
                     );
-                    return None;
+                    // Still a way out, as a refused `return v` is: the
+                    // function, or the closure, is not then also said to
+                    // finish without returning.
+                    return Some((hir::Stmt::Return { value: None, span: r.span }, Flow::Diverges));
                 }
                 let inner = self.types.fallible_value(sig.ret).unwrap_or(TyId::ERROR);
                 let want = (!self.unlearned_ret(inner)).then_some(inner);
@@ -3782,7 +3785,24 @@ impl<'a> Checker<'a> {
             if let TyKind::Tuple(parts) = self.types.kind(elem).clone() {
                 if parts.len() == 2 {
                     let held = self.holds_obligation(&map, &before);
-                    return self.for_tuple_slice(f, elems, *span, map, elem, &parts, held, sig);
+                    // `_` owes what a name there would (see `let_tuple`) —
+                    // except that a slice read from a binding still holds
+                    // what `_` lets go of, so that binding answers for it. A
+                    // name beside the `_` takes a failure from another
+                    // position, which the binding still holds as well.
+                    let dropped = elems.iter().zip(parts.iter()).any(|(x, &p)| {
+                        matches!(x, ast::BindElem::Wildcard(_)) && self.may_hold_failure(p)
+                    });
+                    let mut owed = held;
+                    if held && dropped {
+                        if let Some((srcs, _)) = self.only_from(&map) {
+                            for src in srcs {
+                                self.keep_unread(src, &before);
+                            }
+                            owed = false;
+                        }
+                    }
+                    return self.for_tuple_slice(f, elems, *span, map, elem, &parts, held, owed, sig);
                 }
             }
         }
@@ -3910,6 +3930,7 @@ impl<'a> Checker<'a> {
         elem_ty: TyId,
         parts: &[TyId],
         held: bool,
+        dropped_owed: bool,
         sig: &Signature,
     ) -> Option<(hir::Stmt, Flow)> {
         if elems.len() != 2 {
@@ -3930,6 +3951,19 @@ impl<'a> Checker<'a> {
 
         let mut body_stmts = Vec::new();
         for (i, e) in elems.iter().enumerate() {
+            // `_` owes what a name here would, as in `let` (see `let_tuple`).
+            if let ast::BindElem::Wildcard(w) = e {
+                if dropped_owed && self.may_hold_failure(parts[i]) {
+                    self.diags.push(
+                        Diagnostic::error(codes::E0302, "an error may not be discarded with `_`")
+                            .with_primary(*w, "this element holds a failure nobody has looked at")
+                            .with_note(
+                                "bind it to a name and test it — `if err != nil { … }` — or \
+                                 `check` it",
+                            ),
+                    );
+                }
+            }
             let ast::BindElem::Name(name) = e else { continue };
             let Some(local) = self.resolved.lookup_binding(name.span) else { continue };
             self.locals[local as usize].ty = parts[i];
@@ -4796,7 +4830,13 @@ impl<'a> Checker<'a> {
 
                 let mut flat = Vec::with_capacity(entries.len() * 2);
                 let mut key_ty = hint.map(|(k, _)| k);
-                let mut val_ty = hint.map(|(_, v)| v);
+                // A wanted type that was itself reported (`{str: Nope}` is the
+                // error type whole) steers each value as the error type, as a
+                // tuple's elements are, so a `nil` among them is not a second
+                // report of that one cause. The keys say what they are.
+                let whole_error =
+                    expected.is_some_and(|e| matches!(self.types.kind(self.types.present(e)), TyKind::Error));
+                let mut val_ty = hint.map(|(_, v)| v).or(whole_error.then_some(TyId::ERROR));
                 // The keys the compiler knows, and where each was first given.
                 let mut known_keys: std::collections::HashMap<String, (Span, String)> =
                     std::collections::HashMap::new();
@@ -8902,6 +8942,70 @@ impl<'a> Checker<'a> {
                     }
             })
             .collect();
+        // **`_` owes what a name there, never read, would owe.** An element
+        // whose failure a name would have to answer for has nowhere else to
+        // go once the tuple is taken apart, so `_` over it drops it — as
+        // `let (v, _) = f()` does on the fallible pair, and in its words.
+        // Where a name would owe nothing, `_` owes nothing.
+        //
+        // An element of a tuple literal that is a read of a binding — `e`, or
+        // a value `if` of bindings and `nil` — was never the only holder of
+        // its failure: the binding it was read from still holds it, so `_`
+        // there hands it back, as a copy does (R7), and that binding answers
+        // for it. `let (n, _) = (1, e)` then `if e != nil { … }` drops
+        // nothing. Unless a name in the same pattern holds it too, from
+        // another element: then that name answers for it.
+        let literal = match &value.kind {
+            ExprKind::TupleNew { elems } => Some(elems),
+            _ => None,
+        };
+        // The bindings an element's failures were all read from, if they
+        // were: a nested literal's, `((1, e), 2)`, are its elements'.
+        fn read_from(c: &Checker<'_>, x: &hir::Expr, before: &[Taint]) -> Option<Vec<u32>> {
+            match &x.kind {
+                ExprKind::TupleNew { elems } => {
+                    let mut all = Vec::new();
+                    for y in elems {
+                        if c.may_hold_failure(y.ty) && c.holds_obligation(y, before) {
+                            all.extend(read_from(c, y, before)?);
+                        }
+                    }
+                    Some(all)
+                }
+                _ => c.only_from(x).map(|(s, _)| s),
+            }
+        }
+        let read_from: Vec<Option<Vec<u32>>> = (0..parts.len())
+            .map(|i| literal.and_then(|ls| read_from(self, &ls[i], before)))
+            .collect();
+        let mut handed_back: Vec<u32> = Vec::new();
+        for (i, e) in elems.iter().enumerate() {
+            if let (ast::BindElem::Wildcard(w), true) = (e, held[i]) {
+                if let Some(srcs) = &read_from[i] {
+                    let named_too = elems.iter().enumerate().any(|(j, other)| {
+                        j != i
+                            && matches!(other, ast::BindElem::Name(_))
+                            && read_from[j].as_ref().is_some_and(|o| o.iter().any(|s| srcs.contains(s)))
+                    });
+                    if !named_too {
+                        handed_back.extend(srcs);
+                    }
+                    continue;
+                }
+                self.diags.push(
+                    Diagnostic::error(codes::E0302, "an error may not be discarded with `_`")
+                        .with_primary(*w, "this element holds a failure nobody has looked at")
+                        .with_note(
+                            "bind it to a name and test it — `if err != nil { … }` — or \
+                             `check` it; `_ = …` on the whole value is the one deliberate \
+                             discard",
+                        ),
+                );
+            }
+        }
+        for src in handed_back {
+            self.keep_unread(src, before);
+        }
 
         // The tuple is held in a local of its own, so an initialiser with side
         // effects runs once however many elements are taken from it.
@@ -9756,7 +9860,12 @@ impl<'a> Checker<'a> {
         }
 
         let mut out = Vec::with_capacity(elems.len());
-        let mut elem_ty = hint;
+        // A wanted type that was itself reported (`[Nope]` is the error type
+        // whole) steers each element as the error type, as a tuple's are, so
+        // a `nil` in it is not a second report of that one cause.
+        let whole_error =
+            expected.is_some_and(|e| matches!(self.types.kind(self.types.present(e)), TyKind::Error));
+        let mut elem_ty = hint.or(whole_error.then_some(TyId::ERROR));
         for e in elems {
             let v = self.expr(e, elem_ty);
             let v = match elem_ty {
@@ -13654,7 +13763,14 @@ impl<'a> Checker<'a> {
         self.set_flow_state(entry);
 
         self.enter_branch(narrowing, cond, false);
-        let want = expected.or((!self.types.is_poisoned(t.ty)).then_some(t.ty));
+        // A first branch that is the error type — a field of a parameter
+        // whose type did not resolve — steers the second as the error type,
+        // so a `nil` there is not a second report of that one cause.
+        let want = expected.or(if matches!(self.types.kind(t.ty), TyKind::Error) {
+            Some(TyId::ERROR)
+        } else {
+            (!self.types.is_poisoned(t.ty)).then_some(t.ty)
+        });
         let e = match else_ {
             ast::ElseBranch::Block(b) => self.block_value(b, want),
             ast::ElseBranch::If(nested) => match nested.else_.as_deref() {
@@ -16323,36 +16439,44 @@ fn resolve_ty(t: &ast::Type, types: &mut Types, diags: &mut DiagBag) -> TyId {
 /// An unlabelled `break` in a nested loop belongs to that loop, and a labelled
 /// one belongs to whichever loop carries the label — so only the two cases
 /// that name this loop count.
+///
+/// **A `break` is a `break` wherever it is written**: as a statement, or in a
+/// block inside any expression — an arm of a `match` used as a value, a `let`
+/// initializer, a call's argument — at any depth. Only a closure's body is
+/// not looked into, being a function of its own. Looking at statement
+/// positions alone took `let y = match i { 3 => { break } _ => 1 }` in a
+/// `for { }` for a loop nothing leaves, so the code after it was dropped as
+/// unreachable, and under a `for err != nil` the narrowing after the loop
+/// was given to a loop that can be left with `err` untested.
 fn breaks_out(block: &ast::Block, label: Option<&str>) -> bool {
-    fn in_block(b: &ast::Block, label: Option<&str>, nested: bool) -> bool {
-        b.stmts.iter().any(|s| in_stmt(s, label, nested))
-    }
-    fn in_if(i: &ast::IfStmt, label: Option<&str>, nested: bool) -> bool {
-        in_block(&i.then, label, nested)
-            || match i.else_.as_deref() {
-                Some(ast::ElseBranch::Block(b)) => in_block(b, label, nested),
-                Some(ast::ElseBranch::If(next)) => in_if(next, label, nested),
-                None => false,
+    let names = |written: &Option<ast::Ident>, label: Option<&str>| match written {
+        None => true,
+        Some(l) => Some(l.name.as_str()) == label,
+    };
+    // Every `break` under the body that could name this loop, and those of
+    // them a loop nested in the body captures: an unlabelled one, or one
+    // naming that loop's own label.
+    let mut own: Vec<*const ast::Stmt> = Vec::new();
+    let mut captured: Vec<*const ast::Stmt> = Vec::new();
+    for s in &block.stmts {
+        visit_stmts(s, false, &mut |s| match s {
+            ast::Stmt::Break { label: written, .. } if names(written, label) => own.push(s),
+            ast::Stmt::For(inner) => {
+                let inner_label = inner.label.as_ref().map(|l| l.name.as_str());
+                for s in &inner.body.stmts {
+                    visit_stmts(s, false, &mut |s| {
+                        if let ast::Stmt::Break { label: written, .. } = s {
+                            if written.is_none() || (inner_label.is_some() && names(written, inner_label)) {
+                                captured.push(s);
+                            }
+                        }
+                    });
+                }
             }
+            _ => {}
+        });
     }
-    fn in_stmt(s: &ast::Stmt, label: Option<&str>, nested: bool) -> bool {
-        match s {
-            ast::Stmt::Break { label: written, .. } => match written {
-                None => !nested,
-                Some(l) => Some(l.name.as_str()) == label,
-            },
-            ast::Stmt::If(i) => in_if(i, label, nested),
-            // An inner loop captures an unlabelled `break`, so from here on
-            // only a labelled one can leave this one.
-            ast::Stmt::For(f) => in_block(&f.body, label, true),
-            ast::Stmt::Match(m) => m.arms.iter().any(|a| match &a.body {
-                ast::MatchBody::Block(b) => in_block(b, label, nested),
-                ast::MatchBody::Expr(_) => false,
-            }),
-            _ => false,
-        }
-    }
-    in_block(block, label, false)
+    own.iter().any(|b| !captured.iter().any(|c| std::ptr::eq(*b, *c)))
 }
 
 /// Whether a block body has a `return` that gives a value — `return v` or
