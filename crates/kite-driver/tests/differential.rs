@@ -8718,6 +8718,44 @@ fn main() {
 "#,
         "p 1\none 1 2\n1 5 2\n1 2\ninner 3\n",
     ),
+    // `nil` written where an optional is held inside another type, with no
+    // local of the optional's own type anywhere in the program. A `nil` is
+    // a constant and needs none, and the Wasm backend declared an optional's
+    // box only for such a local, so these were invalid modules there.
+    (
+        "nil-for-an-optional-inside-another-type-builds-on-wasm",
+        r#"struct H {
+  f: [Option<float>]
+}
+fn make() -> [Option<bool>] {
+  return [nil]
+}
+fn main() {
+  let a: [Option<int>] = [nil]
+  io.print(a.len())
+  let m: {str: Option<str>} = {"a": nil}
+  io.print(m.len())
+  let t: (Option<int>, int) = (nil, 3)
+  io.print(t.1)
+  var xs: [Option<str>] = []
+  xs.push(nil)
+  xs[0] = nil
+  io.print(xs.len())
+  var n: {str: Option<int>} = {}
+  n["k"] = nil
+  io.print(n.len())
+  let h = H{f: [nil, nil]}
+  io.print(h.f.len())
+  io.print(make().len())
+  let p: [Option<[int]>] = [nil]
+  let q: [Option<[int]>] = [nil]
+  io.print(p == q)
+  let r: [Option<(int, str)>] = [nil]
+  io.print(r == [nil])
+}
+"#,
+        "1\n1\n3\n1\n1\n2\n1\ntrue\ntrue\n",
+    ),
 ];
 
 #[test]
