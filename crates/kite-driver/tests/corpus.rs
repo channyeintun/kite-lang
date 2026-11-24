@@ -391,7 +391,8 @@ fn a_character_kite_does_not_have_is_one_diagnostic() {
 /// reported on that account: a `#` comment to the end of its line, a
 /// backtick string, a run of `?`, a `$`. The text stood where a value was,
 /// so the line ends there; the next line is not read as the value, a
-/// `return` of it is not missing one, and an argument of it is an argument.
+/// `return` of it is not missing one, and an argument of it leaves the
+/// count a guess, so no call is said to have too few or too many.
 #[test]
 fn skipped_text_leaves_no_gap_to_report() {
     let src = r#"fn g(a: int, b: int) -> int {
@@ -400,6 +401,10 @@ fn skipped_text_leaves_no_gap_to_report() {
 
 fn f() -> int {
     return ? //~ ERROR E0002
+}
+
+fn h() -> int {
+    return 1
 }
 
 fn main() {
@@ -416,12 +421,14 @@ fn main() {
     io.print(w + z)
     io.print(g(1, $)) //~ ERROR E0002
     io.print(g($, 2)) //~ ERROR E0002
+    io.print(g(1, 2, $)) //~ ERROR E0002
+    io.print(h(~)) //~ ERROR E0002
     io.print(f())
 }
 "#;
     let result = compile(Path::new("t.kite"), src, Emit::Check);
     assert_eq!(actual(&result), expectations(src), "{}", result.render_diagnostics());
-    assert_eq!(expectations(src).values().flatten().count(), 9);
+    assert_eq!(expectations(src).values().flatten().count(), 11);
 }
 
 /// A type that does not parse and leaves a bracket open is one diagnostic,

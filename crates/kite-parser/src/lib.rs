@@ -3940,9 +3940,12 @@ impl<'a> Parser<'a> {
                     self.skip_newlines();
                     while !self.at_end() {
                         // `f($)`, `f(1, ?)`: an argument that was only text
-                        // the lexer skipped is an argument still, and an
-                        // error, so the call is not also short of one.
+                        // the lexer skipped may have been one or none, so
+                        // the count is a guess, as with a comma supplied —
+                        // the call is not also short of one, nor `h(~)`
+                        // for an `h` that takes none given one too many.
                         if (self.at(T::RParen) || self.at(T::Comma)) && self.after_skipped_character() {
+                            guessed = true;
                             arg_names.push(None);
                             args.push(Expr::Error(Span::empty_at(self.file, self.span().start)));
                             if self.eat(T::Comma) {
