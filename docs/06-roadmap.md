@@ -2932,10 +2932,13 @@ what was accepted as it is rather than fixed.
   statement — and a run of `?` is one `E0002`; a type that itself fails to parse in an
   annotation, parameter, field or return (`(int, 1)`, `Option<>`, `Option<int`,
   and `[int` in a parameter, annotation or return) is one `E0100` and its
-  declaration stays declared — but a complete type followed by junk (`x: mut
-  int`, `x: int int`, `Option<int>>`), an unclosed `[` in a struct field and an
-  unclosed `{K: V` map type still drop their declaration, and what uses it is
-  then reported as not found; an assignment, `let`, `for`, `defer`, `check` or `_ =`
+  declaration stays declared — but not every malformed type is: a complete
+  type followed by junk (`x: mut int`, `x: int int`, `x: int]`,
+  `Option<int>>`) in a parameter or a return still drops its function, so a
+  call of it is `E0111` too, and in a `let` annotation leaves the binding
+  with no value (`E0110`); an unclosed `[` in a struct field drops that field
+  and the ones after it; and an unclosed `{K: V` map type drops its function
+  or those fields, or is a second report in an annotation; an assignment, `let`, `for`, `defer`, `check` or `_ =`
   written as a `match` arm is one `E0100` whose note shows the block form. A
   `#` comment is one `E0002` whose note says comments are `//`, a backtick
   string one whose note says strings are `"…"`, and `let y = ???` is the one
@@ -3175,8 +3178,10 @@ Each is stated where a reader of that part looks:
   (`d.xs[0] = h(…)`, `d.xs.push(…)`, `d.m[k] = …`) reads the local after the
   right-hand side, so a right-hand side that reassigns the local is written
   into the new struct; a type followed by junk (`x: mut int`, `x: int int`,
-  `Option<int>>`), an unclosed `[` in a struct field and an unclosed `{K: V`
-  map type still drop their declaration.
+  `Option<int>>`) in a parameter, return or annotation, an unclosed `[` in a
+  struct field and an unclosed `{K: V` map type still drop what they are
+  declared in (the function, the fields from there on or the binding's value)
+  or give a second report.
 - Not bounded yet: the number of diagnostics one file can produce, the native
   compile time of a map literal of tens of thousands of entries, a function
   large enough to abort V8 below `E0902`'s limits, and the Wasm size of a
