@@ -77,8 +77,8 @@ fn nothing_else_is_dropped(c: error) {
     if e != nil || d != nil || b != nil || c != nil {
         io.print("failed")
     }
-    let (x, _) = (f(4), f(5))
-    if x != nil {
+    let (x, y) = (f(4), f(5))
+    if x != nil || y != nil {
         io.print("failed")
     }
 }

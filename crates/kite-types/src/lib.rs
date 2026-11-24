@@ -3782,7 +3782,24 @@ impl<'a> Checker<'a> {
             if let TyKind::Tuple(parts) = self.types.kind(elem).clone() {
                 if parts.len() == 2 {
                     let held = self.holds_obligation(&map, &before);
-                    return self.for_tuple_slice(f, elems, *span, map, elem, &parts, held, sig);
+                    // `_` owes what a name there would (see `let_tuple`) —
+                    // except that a slice read from a binding still holds
+                    // what `_` lets go of, so that binding answers for it. A
+                    // name beside the `_` takes a failure from another
+                    // position, which the binding still holds as well.
+                    let dropped = elems.iter().zip(parts.iter()).any(|(x, &p)| {
+                        matches!(x, ast::BindElem::Wildcard(_)) && self.may_hold_failure(p)
+                    });
+                    let mut owed = held;
+                    if held && dropped {
+                        if let Some((srcs, _)) = self.only_from(&map) {
+                            for src in srcs {
+                                self.keep_unread(src, &before);
+                            }
+                            owed = false;
+                        }
+                    }
+                    return self.for_tuple_slice(f, elems, *span, map, elem, &parts, held, owed, sig);
                 }
             }
         }
@@ -3910,6 +3927,7 @@ impl<'a> Checker<'a> {
         elem_ty: TyId,
         parts: &[TyId],
         held: bool,
+        dropped_owed: bool,
         sig: &Signature,
     ) -> Option<(hir::Stmt, Flow)> {
         if elems.len() != 2 {
@@ -3930,6 +3948,19 @@ impl<'a> Checker<'a> {
 
         let mut body_stmts = Vec::new();
         for (i, e) in elems.iter().enumerate() {
+            // `_` owes what a name here would, as in `let` (see `let_tuple`).
+            if let ast::BindElem::Wildcard(w) = e {
+                if dropped_owed && self.may_hold_failure(parts[i]) {
+                    self.diags.push(
+                        Diagnostic::error(codes::E0302, "an error may not be discarded with `_`")
+                            .with_primary(*w, "this element holds a failure nobody has looked at")
+                            .with_note(
+                                "bind it to a name and test it — `if err != nil { … }` — or \
+                                 `check` it",
+                            ),
+                    );
+                }
+            }
             let ast::BindElem::Name(name) = e else { continue };
             let Some(local) = self.resolved.lookup_binding(name.span) else { continue };
             self.locals[local as usize].ty = parts[i];
@@ -8902,6 +8933,70 @@ impl<'a> Checker<'a> {
                     }
             })
             .collect();
+        // **`_` owes what a name there, never read, would owe.** An element
+        // whose failure a name would have to answer for has nowhere else to
+        // go once the tuple is taken apart, so `_` over it drops it — as
+        // `let (v, _) = f()` does on the fallible pair, and in its words.
+        // Where a name would owe nothing, `_` owes nothing.
+        //
+        // An element of a tuple literal that is a read of a binding — `e`, or
+        // a value `if` of bindings and `nil` — was never the only holder of
+        // its failure: the binding it was read from still holds it, so `_`
+        // there hands it back, as a copy does (R7), and that binding answers
+        // for it. `let (n, _) = (1, e)` then `if e != nil { … }` drops
+        // nothing. Unless a name in the same pattern holds it too, from
+        // another element: then that name answers for it.
+        let literal = match &value.kind {
+            ExprKind::TupleNew { elems } => Some(elems),
+            _ => None,
+        };
+        // The bindings an element's failures were all read from, if they
+        // were: a nested literal's, `((1, e), 2)`, are its elements'.
+        fn read_from(c: &Checker<'_>, x: &hir::Expr, before: &[Taint]) -> Option<Vec<u32>> {
+            match &x.kind {
+                ExprKind::TupleNew { elems } => {
+                    let mut all = Vec::new();
+                    for y in elems {
+                        if c.may_hold_failure(y.ty) && c.holds_obligation(y, before) {
+                            all.extend(read_from(c, y, before)?);
+                        }
+                    }
+                    Some(all)
+                }
+                _ => c.only_from(x).map(|(s, _)| s),
+            }
+        }
+        let read_from: Vec<Option<Vec<u32>>> = (0..parts.len())
+            .map(|i| literal.and_then(|ls| read_from(self, &ls[i], before)))
+            .collect();
+        let mut handed_back: Vec<u32> = Vec::new();
+        for (i, e) in elems.iter().enumerate() {
+            if let (ast::BindElem::Wildcard(w), true) = (e, held[i]) {
+                if let Some(srcs) = &read_from[i] {
+                    let named_too = elems.iter().enumerate().any(|(j, other)| {
+                        j != i
+                            && matches!(other, ast::BindElem::Name(_))
+                            && read_from[j].as_ref().is_some_and(|o| o.iter().any(|s| srcs.contains(s)))
+                    });
+                    if !named_too {
+                        handed_back.extend(srcs);
+                    }
+                    continue;
+                }
+                self.diags.push(
+                    Diagnostic::error(codes::E0302, "an error may not be discarded with `_`")
+                        .with_primary(*w, "this element holds a failure nobody has looked at")
+                        .with_note(
+                            "bind it to a name and test it — `if err != nil { … }` — or \
+                             `check` it; `_ = …` on the whole value is the one deliberate \
+                             discard",
+                        ),
+                );
+            }
+        }
+        for src in handed_back {
+            self.keep_unread(src, before);
+        }
 
         // The tuple is held in a local of its own, so an initialiser with side
         // effects runs once however many elements are taken from it.

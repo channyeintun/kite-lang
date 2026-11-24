@@ -1324,7 +1324,7 @@ codes! {
          \n\
          - A call written as a statement whose result is an `error` or a `(T, error)`: `save()` on a line of its own. The result is dropped on the spot.\n\
          - `let (v, err) = f()` and then `err` is never inspected. It is reported where `err` goes out of scope, which is also at each `return`, `break` or `continue` that leaves it behind: checking it on the path that falls through is not enough when an exit above the test takes another way.\n\
-         - `_` in the error slot, `let (v, _) = f()`: the Go habit, spelled out.\n\
+         - `_` in the error slot, `let (v, _) = f()`: the Go habit, spelled out. The same for `_` over any element of a tuple pattern that holds a failure, in a `let` or a `for`: `let (a, _, s) = three()`, `let (n, _) = (1, f())`. Where the element was read from a binding, `(1, e)`, that binding still holds the failure and answers for it instead.\n\
          - A whole call result bound to one name and never looked at: `let e = save()`. Naming it does not buy silence. Only `nil` starts out checked.\n\
          - Writing over an error that still holds a failure nobody looked at: `var e = f()` then `e = nil`. So does a loop, whose next pass writes over what this one left.\n\
          - Copying is not inspecting: after `let e = err` either name may be inspected, but one of them must be.\n\
