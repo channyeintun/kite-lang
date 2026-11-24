@@ -8207,6 +8207,55 @@ fn main() {
 "#,
         "quick\nslow\nnone\nss\nq\n4\n",
     ),
+    // The same in an or-pattern, as std/text's `class_needs_bidi` writes
+    // it: a shared name among the alternatives is the variant and matches
+    // only it. The local the resolver declares for the name is never read,
+    // and no longer has the error type (the E0901 guard looks at locals).
+    (
+        "a-shared-variant-name-in-an-or-pattern-is-the-variant",
+        r#"enum Bidi {
+  R
+  AL
+  L
+}
+
+enum Break {
+  AL
+  SP
+}
+
+fn strong(c: Bidi) -> int {
+  return match c {
+    R | AL => 1,
+    L => 0,
+  }
+}
+
+fn left(c: Bidi) -> int {
+  return match c {
+    L | AL => 1,
+    _ => 0,
+  }
+}
+
+fn space(b: Break) -> int {
+  return match b {
+    AL => 0,
+    SP => 1,
+  }
+}
+
+fn main() {
+  io.print(strong(Bidi.R))
+  io.print(strong(Bidi.AL))
+  io.print(strong(Bidi.L))
+  io.print(left(Bidi.R))
+  io.print(left(Bidi.AL))
+  io.print(space(Break.SP))
+}
+"#,
+        "1\n1\n0\n0\n1\n1\n",
+    ),
     // A value-`if` branch, or a `match` block arm, whose one expression is
     // an `if` or a `match` yields it. An `if` opening a block parses as a
     // statement, so the branch was "must produce a value" and the arm `()`.

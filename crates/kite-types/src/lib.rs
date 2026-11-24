@@ -12040,6 +12040,14 @@ impl<'a> Checker<'a> {
             ast::Pattern::Binding(name) if self.unit_variant_of(scrut, &name.name).is_some() => {
                 let (ti, vi) = self.unit_variant_of(scrut, &name.name).expect("just checked");
                 self.check_bare_variant(ti, &name.name, name.span);
+                // The local the resolver declared for a name two enums share
+                // is never bound or read: it is given no type of the error
+                // kind to carry to the backends, which hold it as nothing.
+                if let Some(local) = self.resolved.lookup_binding(name.span) {
+                    if self.locals[local as usize].ty == TyId::ERROR {
+                        self.locals[local as usize].ty = TyId::UNIT;
+                    }
+                }
                 self.variant_pattern(ti, vi, None, scrut, name.span)
             }
 

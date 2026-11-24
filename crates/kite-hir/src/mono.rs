@@ -760,9 +760,14 @@ pub fn error_typed(program: &mut Program) -> Option<(String, kite_span::Span)> {
     let mut seen: HashMap<TyId, bool> = HashMap::new();
     let mut holds = |ty: TyId| *seen.entry(ty).or_insert_with(|| types.holds_error(ty));
     for f in fns.iter_mut() {
-        // Expressions only: every read of a local is one, with its type. A
-        // local nothing reads may keep the error type harmlessly — a variant
-        // in an or-pattern that the resolver first took for a binding is one.
+        // Locals too, at their declaration: the one that used to keep the
+        // error type unread — the local the resolver declares for a variant
+        // name two enums share, which the checker then reads as the variant —
+        // is given `()` now, so a local left with it is a mistake like any
+        // other.
+        if let Some(local) = f.locals.iter().find(|l| holds(l.ty)) {
+            return Some((f.name.clone(), local.span));
+        }
         if let Some(span) = error_typed_block(&mut f.body, &mut holds) {
             return Some((f.name.clone(), span));
         }
