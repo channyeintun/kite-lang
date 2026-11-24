@@ -8210,7 +8210,7 @@ fn main() {
     // The same in an or-pattern, as std/text's `class_needs_bidi` writes
     // it: a shared name among the alternatives is the variant and matches
     // only it. The local the resolver declares for the name is never read,
-    // and no longer has the error type (the E0901 guard looks at locals).
+    // and no longer has the error type.
     (
         "a-shared-variant-name-in-an-or-pattern-is-the-variant",
         r#"enum Bidi {
@@ -8255,6 +8255,20 @@ fn main() {
 }
 "#,
         "1\n1\n0\n0\n1\n1\n",
+    ),
+    // A `let` after a `return` never runs and is never typed: its local
+    // keeps the error type, unread, and the program is the warning E0116
+    // and nothing else — not the guard's internal error.
+    (
+        "a-let-after-a-return-is-unreachable-not-an-internal-error",
+        r#"fn main() {
+  io.print(1)
+  return
+  let z = 5
+  io.print(z)
+}
+"#,
+        "1\n",
     ),
     // A trait that declares no method is implemented by an empty block,
     // which the resolver, knowing an implementation by its methods, has no
