@@ -2345,7 +2345,11 @@ impl<'a> FnResolver<'a> {
             }
         }
 
-        if let Some(&(ty, vi)) = self.map.variant_index.get(name) {
+        // Only a bare name is looked up among the module's own variants. A
+        // qualified one whose owner is no type was read by its last segment,
+        // the qualifier thrown away: `Shapee.Circle`, or `zzz.Kind.A` beside
+        // a local enum that has an `A`, matched that variant silently.
+        if let (1, Some(&(ty, vi))) = (path.segments.len(), self.map.variant_index.get(name)) {
             self.map.uses.insert(path.span, Res::Variant(ty, vi));
             return;
         }
@@ -2372,28 +2376,67 @@ impl<'a> FnResolver<'a> {
         // so a head that is no module this file imported is what is wrong.
         // It said ``cannot find `A` ``, naming the one segment that exists,
         // where an expression or a type says the module is not in scope.
+        //
+        // Two segments are a type and a variant or a module and a type, and
+        // the owner is no type (that was looked up first), so the head is
+        // what is wrong there too. A head that is a type with three segments
+        // after it (`Kind.A.B`) names no enum: it was read as `B`.
         let head = &path.segments[0];
-        if path.segments.len() >= 3
-            && !self.map.modules.aliases.contains_key(&(self.module.clone(), head.name.clone()))
-        {
+        let n = path.segments.len();
+        let head_is_module =
+            self.map.modules.aliases.contains_key(&(self.module.clone(), head.name.clone()));
+        if n >= 3 && !head_is_module && self.find_type(&head.name).is_some() {
+            let owner = segments_text(&path.segments[..n - 1]);
+            self.diags.push(
+                Diagnostic::error(codes::E0111, format!("`{}` is not an enum", owner))
+                    .with_primary(path.span, "no such type or variant"),
+            );
+            return;
+        }
+        if n >= 2 && !head_is_module {
+            let what = if n == 2 {
+                "no type or module of this name is in scope"
+            } else {
+                "no module of this name is in scope"
+            };
             let mut d = Diagnostic::error(codes::E0111, format!("cannot find `{}`", head.name))
-                .with_primary(head.span, "no module of this name is in scope");
+                .with_primary(head.span, what);
             let declares = self.map.modules.std_declares;
             if let Some(alias) = self.imported_as(&head.name) {
+                // The whole path only where it names a type the module has,
+                // so the recipe is one that resolves.
                 let rest = segments_text(&path.segments[1..]);
-                d = d.with_note(format!(
-                    "`{}` is imported here as `{}`, so this file writes `{}.{}`",
-                    head.name, alias, alias, rest
-                ));
+                let owner = format!("{}.{}", alias, segments_text(&path.segments[1..n - 1]));
+                d = d.with_note(if n >= 3 && self.find_type(&owner).is_some() {
+                    format!(
+                        "`{}` is imported here as `{}`, so this file writes `{}.{}`",
+                        head.name, alias, alias, rest
+                    )
+                } else {
+                    format!(
+                        "`{}` is imported here as `{}`, so this file writes the module `{}`",
+                        head.name, alias, alias
+                    )
+                });
             } else if declares.is_some_and(|has| has(&head.name, &path.segments[1].name)) {
                 d = d.with_note(format!(
                     "`{}.{}` is in the standard library's `{}` module, which this file does \
                      not import: add `use std/{}`",
                     head.name, path.segments[1].name, head.name, head.name
                 ));
+            } else if let Some(sugg) = self.suggest(&head.name) {
+                d = d.with_note(format!("a similar name is in scope: `{}`", sugg));
             }
             self.diags.push(d);
             return;
+        }
+        // `m.Nope.A`: the module is there and the type is not, which is what
+        // the same path says in an expression.
+        if n == 3 {
+            if let Some(d) = self.map.missing_type_member(&self.module, &path.segments[..2], codes::E0111) {
+                self.diags.push(d);
+                return;
+            }
         }
         let mut d = Diagnostic::error(codes::E0111, format!("cannot find `{}`", name))
             .with_primary(path.span, "no such type or variant");
