@@ -269,6 +269,51 @@ fn kitec_fix_finishes_the_job_and_reports_what_is_left() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A run of `pub`s before a variant is one report, and its fix removes the
+/// run: it removed the first, and `kitec fix` said "1 error left that
+/// `kitec fix` cannot fix" of the next, which a second run then fixed.
+/// "Cannot fix" is said only of an error that has no fix.
+#[test]
+fn kitec_fix_removes_a_run_of_pub_and_says_cannot_only_of_what_has_no_fix() {
+    for (name, src) in [
+        ("fix-pub-run", "pub enum K {\n    A\n    pub pub\n}\n\nfn main() {\n    io.print(1)\n}\n"),
+        ("fix-pub-run-b", "pub enum K {\n    A\n    pub pub B\n}\n\nfn main() {\n    io.print(1)\n}\n"),
+        ("fix-pub-lines", "enum K {\n    A,\n    pub\n    pub\n}\n\nfn main() {\n    io.print(1)\n}\n"),
+        (
+            "fix-pub-fields",
+            "enum E { A, pub pub B, pub C(pub pub x: int), D(pub pub int) }\n\nfn main() {\n    io.print(1)\n}\n",
+        ),
+    ] {
+        let dir = scratch(name, "t.kite", src);
+        let Some((ok, _, err)) = kitec_in(&dir, &["check", "t.kite"]) else { return };
+        assert!(!ok);
+        assert!(!err.contains("expected"), "{}: one report per run of `pub`: {}", name, err);
+        let Some((ok, _, err)) = kitec_in(&dir, &["fix", "t.kite"]) else { return };
+        assert!(ok, "{}: {}", name, err);
+        assert!(!err.contains("cannot fix"), "{}: {}", name, err);
+        let Some((ok, _, err)) = kitec_in(&dir, &["check", "t.kite"]) else { return };
+        assert!(ok, "{} still fails after kitec fix: {}", name, err);
+        let Some((ok, _, err)) = kitec_in(&dir, &["fmt", "--check", "t.kite"]) else { return };
+        assert!(ok || name == "fix-pub-fields", "{}: {}", name, err);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // Beside an error that has no fix, the fixes are made and only that
+    // error is counted as one `kitec fix` cannot fix.
+    let mixed = "enum K {\n    A\n    pub pub B\n}\n\nfn main() {\n    let a = 1\n    a = 2\n    a = 3\n    \
+                 let n: int = \"s\"\n    io.print(a + n)\n}\n";
+    let dir = scratch("fix-pub-mixed", "t.kite", mixed);
+    let Some((ok, _, err)) = kitec_in(&dir, &["fix", "t.kite"]) else { return };
+    assert!(!ok, "{}", err);
+    // The `pub`s, and `let` to `var` once although two assignments ask it.
+    assert!(err.contains("applied 2 fixes"), "{}", err);
+    assert!(err.contains("1 error left that `kitec fix` cannot fix"), "{}", err);
+    assert!(err.contains("E0200") && !err.contains("E0100") && !err.contains("E0114"), "{}", err);
+    let fixed = std::fs::read_to_string(dir.join("t.kite")).expect("read");
+    assert!(fixed.contains("\n    B\n") && fixed.contains("var a = 1"), "{}", fixed);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// A comma between two members on one line is fixed too: it becomes the line
 /// break it stands for. It had no fix — removing it alone gives `x: int y:
 /// int`, another error — so `kitec fix` left it, and on a one-line struct
@@ -312,6 +357,26 @@ fn an_error_in_a_doc_example_points_at_the_line_it_was_written_on() {
     assert!(shown.contains("t.kite:4:18"), "the fence's own line and column: {}", shown);
     assert!(shown.contains("4 │ /// let y: int = \"s\""), "the real line is shown: {}", shown);
     assert!(!shown.contains("t.kite:12"), "no line past the file's end: {}", shown);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// An example left open at its end is reported at the end of its last line,
+/// as the end of the example. The runner's wrapper brace stood for the
+/// fence's opening line, so the caret was on `/// ```kite`, labelled
+/// `found }` — a brace the reader never wrote.
+#[test]
+fn an_example_left_open_is_reported_at_its_end() {
+    let src = "/// Doubles.\n///\n/// ```kite\n/// let x = (1 +\n/// ```\n///\n/// ```kite\n/// let y = [1,\n/// ```\n\
+               pub fn double(n: int) -> int {\n    return n * 2\n}\n";
+    let dir = scratch("doc-open-end", "t.kite", src);
+    let Some((ok, out, err)) = kitec_in(&dir, &["test", "t.kite"]) else { return };
+    assert!(!ok, "{}{}", out, err);
+    let shown = format!("{}{}", out, err);
+    assert!(shown.contains("t.kite:4:17"), "the end of `(1 +`: {}", shown);
+    assert!(shown.contains("t.kite:8:16"), "the end of `[1,`: {}", shown);
+    assert!(shown.contains("found the end of the example"), "{}", shown);
+    assert!(!shown.contains("found }") && !shown.contains("t.kite:3:1"), "{}", shown);
+    assert!(out.contains("FAILED   ./t.kite:3 (doc example)") && out.contains("FAILED   ./t.kite:7 (doc example)"), "{}", out);
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -543,6 +608,30 @@ fn a_module_used_by_its_old_name_says_what_it_is_called_here() {
     // A type through the old name, as a parameter's type or a literal's.
     assert!(err.contains("`json` is imported here as `j`, so this file writes `j.Json`"), "{}", err);
     assert!(!err.contains("is that module imported?"), "{}", err);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A qualified pattern is resolved from its first segment: `json.Json.Null`
+/// after `use std/json as j` is the module's old name, said once with the
+/// alias, and `zzz.Kind.A` names a module that is not there. Both said
+/// ``cannot find `Null` `` — the one segment that exists.
+#[test]
+fn a_pattern_through_a_module_not_in_scope_names_the_module() {
+    let dir = scratch(
+        "alias-pattern",
+        "t.kite",
+        "use std/json as j\n\nfn f(v: j.Json) -> int {\n    return match v {\n        \
+         json.Json.Null => 1,\n        json.Json.Number(n) => 2,\n        zzz.Kind.A => 3,\n        \
+         _ => 4,\n    }\n}\n\nfn main() {\n    io.print(f(j.Json.Null))\n}\n",
+    );
+    let Some((ok, _, err)) = kitec_in(&dir, &["check", "t.kite"]) else { return };
+    assert!(!ok, "{}", err);
+    assert_eq!(err.matches("cannot find `json`").count(), 2, "{}", err);
+    assert!(err.contains("`json` is imported here as `j`, so this file writes `j.Json.Null`"), "{}", err);
+    assert!(err.contains("`json` is imported here as `j`, so this file writes `j.Json.Number`"), "{}", err);
+    assert!(err.contains("cannot find `zzz`"), "{}", err);
+    assert!(err.contains("due to 3 previous errors"), "{}", err);
+    assert!(!err.contains("cannot find `Null`") && !err.contains("cannot find `A`"), "{}", err);
     let _ = std::fs::remove_dir_all(&dir);
 }
 

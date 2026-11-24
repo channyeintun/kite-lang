@@ -2787,7 +2787,10 @@ Requirements on the implementation:
   function, a type, a field or a method alike; an `impl` in the wrong module is
   `E0406`, whether it adds methods or implements a trait.
 - **`kitec fix`** applies every machine-applicable suggestion, then checks the
-  file again and exits non-zero if errors remain.
+  file again and exits non-zero if errors remain. A fix can uncover another, so
+  it repeats until a round applies nothing (at most eight rounds); its closing
+  line counts the errors left, and says it cannot fix only those that carry no
+  fix.
 - **A name section and source map** are emitted for the Wasm target so browser
   stack traces name `.kite` files and lines. The name section is what gives a
   frame its *name*; the map, written beside the module as `app.wasm.map` and

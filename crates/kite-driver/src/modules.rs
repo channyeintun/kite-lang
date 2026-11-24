@@ -1266,6 +1266,9 @@ impl Loader {
                     .with_primary(u.span, "this name belongs to the standard library")
                     .with_note(reserved_because(last, "rename this module")),
                 );
+                // Refused, as a `use` that finds nothing is: what it would
+                // have brought in is not reported again at each use of it.
+                self.unresolved.insert((owner.clone(), spelling.clone()));
                 continue;
             }
             // **And so is the spelling, not only the path.** The check above
@@ -1289,6 +1292,7 @@ impl Loader {
                     .with_note(reserved_because(&spelling, "spell this module another way"))
                     .with_note("`use … as …` takes any other name"),
                 );
+                self.unresolved.insert((owner.clone(), spelling.clone()));
                 continue;
             }
 

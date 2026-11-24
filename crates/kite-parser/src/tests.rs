@@ -1647,3 +1647,26 @@ fn a_run_of_invalid_characters_is_one_report() {
     let p = parse_src("fn main() {\n    let a = 1 $ 2\n    io.print(a)\n}\n");
     assert_eq!(p.codes(), vec!["E0002"], "{}", p.render());
 }
+
+/// `for _ in m` is refused before anyone knows what `m` is, so the note gives
+/// a form for a slice or range and one for a map. It led with `for item in
+/// xs`, which over a map is E0200.
+#[test]
+fn the_note_for_an_unnamed_walk_has_a_form_for_a_map() {
+    let p = parse_src("fn main() {\n    let m = { \"a\": 1 }\n    for _ in m {\n        io.print(1)\n    }\n}\n");
+    assert_eq!(p.codes(), vec!["E0100"], "{}", p.render());
+    let note = p.diags.iter().flat_map(|d| d.notes.iter()).next().expect("a note").clone();
+    assert!(note.contains("`for item in xs`") && note.contains("`for (k, _) in m`"), "{}", note);
+    assert!(note.find("slice").unwrap() < note.find("`for item in xs`").unwrap(), "{}", note);
+}
+
+/// A token recovery comes back to is not reported a second time at the one
+/// caret: `var z = @` skipped its line to the `@`, where a declaration may
+/// start, and read it again as a statement.
+#[test]
+fn a_token_read_again_after_recovery_is_reported_once() {
+    for src in ["fn main() {\n    var z = @\n    io.print(1)\n}\n", "fn main() {\n    let z = 1 + @\n    io.print(1)\n}\n"] {
+        let p = parse_src(src);
+        assert_eq!(p.codes(), vec!["E0100"], "{}", p.render());
+    }
+}

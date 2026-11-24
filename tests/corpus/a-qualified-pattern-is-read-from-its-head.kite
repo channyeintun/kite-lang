@@ -1,0 +1,21 @@
+// A qualified pattern is resolved from its first segment (§9.3). Whose
+// variant it is comes from the qualifier, so a qualifier that names nothing
+// is the error, reported once at its head. These were read by their last
+// segment, the qualifier thrown away: `Shapee.Circle` matched `Circle`, and
+// `zzz.Shape.Dot` matched this file's own `Dot`, silently.
+
+enum Shape {
+    Circle
+    Dot
+}
+
+fn main() {
+    let s = Shape.Dot
+    let n = match s {
+        Shapee.Circle => 1, //~ ERROR E0111
+        zzz.Shape.Dot => 2, //~ ERROR E0111
+        Shape.Dot.Circle => 3, //~ ERROR E0111
+        _ => 4,
+    }
+    io.print(n)
+}

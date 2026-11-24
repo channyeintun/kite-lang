@@ -387,6 +387,50 @@ fn a_character_kite_does_not_have_is_one_diagnostic() {
     }
 }
 
+/// Text Kite has no token for is one report, and nothing after it is
+/// reported on that account: a `#` comment to the end of its line, a
+/// backtick string, a run of `?`, a `$`. The text stood where a value was,
+/// so the line ends there; the next line is not read as the value, a
+/// `return` of it is not missing one, and an argument of it leaves the
+/// count a guess, so no call is said to have too few or too many.
+#[test]
+fn skipped_text_leaves_no_gap_to_report() {
+    let src = r#"fn g(a: int, b: int) -> int {
+    return a + b
+}
+
+fn f() -> int {
+    return ? //~ ERROR E0002
+}
+
+fn h() -> int {
+    return 1
+}
+
+fn main() {
+    # say hello //~ ERROR E0002
+    let s = `hello` //~ ERROR E0002
+    io.print(s)
+    let t = `unclosed //~ ERROR E0002
+    io.print(t)
+    let y = ??? //~ ERROR E0002
+    io.print(y)
+    var z = $ //~ ERROR E0002
+    z = 2
+    let w: int = $ //~ ERROR E0002
+    io.print(w + z)
+    io.print(g(1, $)) //~ ERROR E0002
+    io.print(g($, 2)) //~ ERROR E0002
+    io.print(g(1, 2, $)) //~ ERROR E0002
+    io.print(h(~)) //~ ERROR E0002
+    io.print(f())
+}
+"#;
+    let result = compile(Path::new("t.kite"), src, Emit::Check);
+    assert_eq!(actual(&result), expectations(src), "{}", result.render_diagnostics());
+    assert_eq!(expectations(src).values().flatten().count(), 11);
+}
+
 /// A type that does not parse and leaves a bracket open is one diagnostic,
 /// and the declaration it is in is kept: a parameter's, a return type's, a
 /// payload's, an `impl` header's, a closure's. Each was an error at every use
