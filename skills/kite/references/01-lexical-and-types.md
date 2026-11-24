@@ -52,7 +52,10 @@ fn main() {
 
 ## 2. Comments
 
-Three forms, all line comments. There is no block comment.
+Three forms, all line comments. There is no block comment, and `#` does not
+start one: a `#` comment is one `E0002` for the `#` and the rest of its line, with
+a note that comments are `//`. A backtick string is one `E0002` too, with a note
+that strings are `"…"`; nothing else is reported on their account.
 
 ```kite
 //! Module documentation — the file's own text. Goes at the top.
@@ -1161,7 +1164,7 @@ were not iterable at all; that was wrong.
 | `E0201` | cannot apply operator to these types |
 | `E0202` | condition must be `bool` |
 | `E0204` | unknown type; also an empty `[]` or `{}` with nothing to infer from |
-| `E0205` | no such method, function, or callable value |
+| `E0205` | no such method, function, or callable value (a method call on a local named like an imported module, `text.clusters(text)`, says the local hides the module) |
 | `E0207` | value cannot be interpolated (needs `Display`) |
 | `E0212` | invalid cast |
 | `E0213` | type has no identity (`ptr.same` on a non-cell type) |

@@ -759,6 +759,12 @@ fn main() {
 }
 ```
 
+**A refused `use` is one report.** What the `use` would have brought in adds
+nothing: after `use crypto` is refused, `crypto.one()` is not also a `cannot find`,
+and after `use util as json`, `json.x()` and `json.K` are not either. Rename the
+sibling (or pick another name after `as`), and the errors that remain are the
+ones the program has.
+
 **The name after `as` is checked too.** `io`, `errors`, `text`, `task`, `time`,
 `js`, `draw` and `ptr` are in scope in every file without a `use`, so a module
 spelled like one shared the spelling with it: under `use util as errors`,

@@ -128,7 +128,10 @@ type     use      var
 /// Markdown is permitted. Code fences are extracted and compiled as tests.
 ```
 
-There is no block comment: `/*` is `E0005`.
+There is no block comment: `/*` is `E0005`. A `#` comment, as another language
+writes it, is one `E0002` for the `#` and the rest of its line, whose note says
+comments are `//`; a backtick string is one `E0002` whose note says strings are
+`"…"`. Nothing else is reported on their account.
 
 A ` ```kite ` fence is compiled and run by `kitec test`, alongside the file's
 `test_…` functions. It is appended to the module it was written in, so
@@ -1751,7 +1754,10 @@ qualified by its module as well, `shapes.Shape.Circle(r)` (§13.1). A bare unit
 pattern is looked up among the scrutinee's variants, so two enums may each
 declare `Slow`. A bare pattern with a payload is looked up by name, as a bare
 constructor is, so once two enums in scope declare `Circle`, `Circle(r)` is
-`E0111` and is written `Shape.Circle(r)`.
+`E0111` and is written `Shape.Circle(r)`. A qualified pattern is read from its
+first segment: in `models.Kind.A` the head `models` must be a module this file
+imports (under the name written), or it is one `E0111` for `models`, with a note
+naming the alias where the module is imported as another name.
 
 ---
 

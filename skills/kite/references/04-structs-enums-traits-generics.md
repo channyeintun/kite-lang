@@ -33,6 +33,9 @@ Everything here was checked against `target/release/kitec`. Where SPECIFICATION.
   tail expressions. A single-expression block arm does produce a value.
 - **`impl Trait for Type` may contain only that trait's methods** — anything else
   is `E0200` and belongs in an inherent `impl`.
+- **An `impl` that is written is an impl, complete or not.** A trait method it
+  leaves out is reported once, at the `impl`; printing the type, a bound, a `dyn`
+  conversion or interpolation add no "does not implement" report of their own.
 - **A `Display` bound makes a type parameter printable**, and so does holding a
   `dyn Display`: `io.print(x)` and `"\(x)"` both work on either.
 - **`==` is structural on every value and is not a trait.** There is no `Eq` to
@@ -50,7 +53,9 @@ Everything here was checked against `target/release/kitec`. Where SPECIFICATION.
   pattern as in an expression, and is how a payload variant two enums share is
   matched. A qualified name the enum does not have is `E0111` — in a pattern,
   a value or a call alike; the enum's own name where a variant belongs,
-  `Shape(r)`, is `E0200`.
+  `Shape(r)`, is `E0200`. A qualified pattern is read from its first segment:
+  `models.Kind.A` where `models` is not a module this file imports is one
+  `E0111` for `models`, with the alias note when it is imported as another name.
 
 ---
 

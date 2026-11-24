@@ -2821,7 +2821,7 @@ A second review checked this phase's fixes and found them partial:
 
 ---
 
-## Phase 31 — Five rounds of fixes, and what a program notices
+## Phase 31 — Six passes of fixes, and what a program notices
 
 **Goal:** the language made better without a feature added to it — its bugs
 fixed, the standard library's gaps filled, and what the specification promised
@@ -2836,8 +2836,12 @@ diagnostics that said two things about one cause) closed what the third's
 reviewers had open, and a fifth took what a final re-check by seven checkers,
 each claim tried by a skeptic, still confirmed: the error analysis, the types
 and notes, the parser and module loader, the write-in-place analysis, a 205 and
-the documents. Each workstream's merge on `complete-kite` says what is true
-after it. This section is the one place that gathers what a program written
+the documents. A sixth, the closing pass, took what a check of the fourth had
+confirmed and what the fifth's reviewers named as open: a nil test in
+parentheses, a tuple of failures a pattern binds, one report for a returned
+pair, an incomplete impl, a token Kite does not have, a refused `use` and a
+qualified pattern, and `kitec fix`. There is no seventh. Each workstream's
+merge on `complete-kite` says what is true after it. This section is the one place that gathers what a program written
 against v0.1.9 will meet, and it is written as that program's author would want
 it: what stops compiling, what runs differently, what the library does now, and
 what was accepted as it is rather than fixed.
@@ -2859,7 +2863,14 @@ what was accepted as it is rather than fixed.
   and is `E0302` at the temporary; `t.0.0` of a nested tuple leaves the error
   beside it, `t.0.1`, owed. A present optional does not prove the error in it,
   so after `if r == nil { return }` a `r.message()` is `E0301` until `r != nil`
-  is tested.
+  is tested. **Parentheses change nothing in the analysis:** `if (r) == nil`,
+  `nil != ((r))` and `(r == nil)` are the nil tests they are without them, so
+  a failure held in `r` and "handled" by one of them is owed as it is by the
+  plain test. **A name a
+  pattern binds owes what a `let` of it owes:** a bare `match` arm that binds
+  a tuple of failures (`match t { x => … }`), the arm after a `nil` arm, and a
+  `for x in ts` binding follow the tuple element by element, so taking `x.0`
+  leaves `x.1` owed, where it was dropped with no report.
 - **`task.park()` and `task.wait_host()`** outside an `async fn` are `E0521`,
   as `task.yield()` was.
 - **One name, one meaning.** A type with an inherent method and a trait method
@@ -2883,7 +2894,11 @@ what was accepted as it is rather than fixed.
   `E0404`; a package dependency cycle is refused by `run`, `check`, `test` and
   `build` as `kitec pkg` refuses it; and a `kite.toml` that repeats a key or a
   table, or ends an inline table with a comma, is `E0405`. `pub use` and `pub`
-  on an enum variant are one diagnostic each.
+  on an enum variant are one diagnostic each. A qualified pattern is
+  read from its first segment: `Shapee.Circle` no longer matches
+  `Shape.Circle` by its last segment, and `models.Kind.A` where `models` is no
+  module in scope is one `E0111` for `models`, with the alias note where the
+  module is imported under another name.
 - **Lexical.** `"\u{41"` and `\u{+41}` are `E0003`, and an escaped quote never
   closes a block string.
 - **Types written wrongly are one report.** `bogus.Thing<int>` and
@@ -2895,7 +2910,40 @@ what was accepted as it is rather than fixed.
   statement — and a run of `?` is one `E0002`; a type that does not parse in an
   annotation, parameter, field or return is one `E0100` and its declaration
   stays declared; an assignment, `let`, `for`, `defer`, `check` or `_ =`
-  written as a `match` arm is one `E0100` whose note shows the block form.
+  written as a `match` arm is one `E0100` whose note shows the block form. A
+  `#` comment is one `E0002` whose note says comments are `//`, a backtick
+  string one whose note says strings are `"…"`, and `let y = ???` is the one
+  `E0002` with no `E0200` after it. `for _ in m` says `for item in xs` over a
+  slice or a range and `for (k, _) in m` over a map, and each compiles.
+
+### One report for one cause
+
+What gave two reports, or named the compiler's own error type, for one
+mistake:
+
+- `return (v, nil)` in a function declared `-> (V, error)` is one `E0203`
+  with the note that shows `return v, nil`, whatever `V` is — a tuple too — and
+  through doubled parentheses. Where the literal really is a `V` with its
+  error missing (`return (1, nil)` in `((int, Option<int>), error)`) it stays
+  the generic `E0203`, and that is one report as well.
+- An `impl` that is written counts as an impl, complete or not: a missing
+  method is reported once, at the `impl`, and printing, a bound, a `dyn`
+  conversion, interpolation and `T.is` / `T.as` do not say the type has none.
+- A tuple or slice literal thrown away with failures in it is labelled a tuple
+  or a slice, not "this call".
+- A method call that fails on a local named like an imported (or builtin)
+  module that has the member gains one note: the local hides the module, and
+  to rename it.
+- A `use` refused for a standard-library name (`E0403`) is the one report;
+  `crypto.one()` or `keys.x()` after it add nothing.
+- Text Kite does not have where a value or an argument goes is the one
+  `E0002`: `return ?` is not also short of a value, and `g($)` or `g($, 2)`
+  is not also short of an argument; `var z = @` is one `E0100`, not two at
+  one caret.
+- A run of `pub` before a variant is one report with one fix that removes the
+  run, and a doc example left open is reported at the end of its last line,
+  not at a brace the reader did not write. No message, label or note prints
+  `<error>`; one test holds a program for each that used to.
 
 ### Programs that compiled and were refused, and are accepted now
 
@@ -2908,6 +2956,11 @@ what was accepted as it is rather than fixed.
   only as the pair `(T, error)`.
 - A closure where an `Option<fn(T) -> T>` is wanted, or beside a `nil` that
   an argument later types, is typed from that argument, as §4.5 says.
+- A nil test in parentheses narrows as the plain one does: after
+  `if (x) != nil`, or `if (x == nil) { return }`, `x` is the value, where it
+  stayed optional.
+- A type with an empty `impl` of a trait that declares no method
+  (`impl Marker for P {}`) converts to `dyn Marker`, on all three targets.
 
 ### Programs that run differently
 
@@ -3005,7 +3058,11 @@ module by module.
 ### The tools
 
 - `kitec fix` exits non-zero while errors remain, and names the other files
-  whose errors have fixes of their own.
+  whose errors have fixes of their own. It applies every machine-applicable
+  suggestion, including one that only appears once another was applied: it
+  repeats, at most eight rounds, until a round applies nothing, then checks
+  again. Its closing line counts only what is left and says it cannot fix only
+  of errors that carry no fix.
 - `kitec doc` refuses a file that does not parse, and escapes what a Markdown
   reader would take for HTML.
 - `kitec test` says so when it found nothing to run, and reads fences as
@@ -3051,6 +3108,18 @@ Each is stated where a reader of that part looks:
   optional, as for any other field, rather than reading it as empty (§10.4).
 - `task.park()` is woken by every task that finishes, as specified; only an
   `await` waits on the one task it names (Phase 5).
+- Left by the closing pass, each for a reason of size: taking the rest of a
+  tuple's failures partly through a copy and partly through the original is a
+  false `E0302`, and destructuring then re-reading through the original is
+  refused (so a `match` arm that takes part of a tuple it binds, and leaves
+  the rest to be read through the tuple itself, is refused as the `let` of it
+  is, and a `for` over a slice literal of a tuple already partly taken owes
+  all of it again); `let e = if x { nil } else { c }` with `nil` first is `E0204`;
+  `h(|n| n, nope)` misses the closure's own `E0211`; a closure inside a slice
+  literal does not wait for a later argument; a `;` in the middle of a
+  statement gives two reports; a right-nested operand list is quadratic up to
+  the depth limit; `E0404`'s move recipe through a chain not yet loaded; an
+  own-package sibling path prints as `../src/sib.kite` from inside `src/`.
 - Not bounded yet: the number of diagnostics one file can produce, the native
   compile time of a map literal of tens of thousands of entries, a function
   large enough to abort V8 below `E0902`'s limits, and the Wasm size of a
@@ -3100,9 +3169,9 @@ none.
 | 28 — Packages from a bundler | ✅ `vite-plugin-kite` and the WebAssembly `kitec` read `kite.toml` and compile what it declares; provided modules are keyed by their whole path and a package resolves its own imports inside itself; a one-file module reads its imports from its own directory; `kitec run` sees modules |
 | 29 — Imports are the boundary | ✅ a qualified name resolves only in a module that imported it, and the entry file is reachable from nowhere; a `use` is looked for outward from the importer as far as its package's root, so sibling directory modules import each other |
 | 30 — The boundary, reviewed | ✅ a module is where its source is; each package's dependencies are its own; the entry file and bare variants are gated too; `bundle`, `test`, `pkg` and the option parser do what they say. §4.3 no longer names `pub` on an enum variant or `pub use`: a variant is as visible as its enum, there is no `pub use`, and each is refused with one diagnostic |
-| 31 — Five rounds of fixes | ✅ an audit, a re-check and three rounds after it: bugs fixed on all three backends, about 130 library functions added, and the specification's claims checked by compiling them; maps are hash maps and field-held slices and maps are written in place on every target. What a v0.1.9 program notices is listed in the phase |
+| 31 — Six passes of fixes | ✅ an audit, a re-check and four passes after it: bugs fixed on all three backends, about 130 library functions added, and the specification's claims checked by compiling them; maps are hash maps and field-held slices and maps are written in place on every target. What a v0.1.9 program notices is listed in the phase |
 
-More than 1,370 tests: unit tests per crate, an annotated compile-fail
+More than 1,380 tests: unit tests per crate, an annotated compile-fail
 corpus, a differential corpus that runs every program on **three** backends and
 compares, the standard library's own suite on all three, the standard library's own
 documentation examples, the host boundary and a real socket under Node, the one
