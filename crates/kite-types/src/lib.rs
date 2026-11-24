@@ -16323,36 +16323,44 @@ fn resolve_ty(t: &ast::Type, types: &mut Types, diags: &mut DiagBag) -> TyId {
 /// An unlabelled `break` in a nested loop belongs to that loop, and a labelled
 /// one belongs to whichever loop carries the label — so only the two cases
 /// that name this loop count.
+///
+/// **A `break` is a `break` wherever it is written**: as a statement, or in a
+/// block inside any expression — an arm of a `match` used as a value, a `let`
+/// initializer, a call's argument — at any depth. Only a closure's body is
+/// not looked into, being a function of its own. Looking at statement
+/// positions alone took `let y = match i { 3 => { break } _ => 1 }` in a
+/// `for { }` for a loop nothing leaves, so the code after it was dropped as
+/// unreachable, and under a `for err != nil` the narrowing after the loop
+/// was given to a loop that can be left with `err` untested.
 fn breaks_out(block: &ast::Block, label: Option<&str>) -> bool {
-    fn in_block(b: &ast::Block, label: Option<&str>, nested: bool) -> bool {
-        b.stmts.iter().any(|s| in_stmt(s, label, nested))
-    }
-    fn in_if(i: &ast::IfStmt, label: Option<&str>, nested: bool) -> bool {
-        in_block(&i.then, label, nested)
-            || match i.else_.as_deref() {
-                Some(ast::ElseBranch::Block(b)) => in_block(b, label, nested),
-                Some(ast::ElseBranch::If(next)) => in_if(next, label, nested),
-                None => false,
+    let names = |written: &Option<ast::Ident>, label: Option<&str>| match written {
+        None => true,
+        Some(l) => Some(l.name.as_str()) == label,
+    };
+    // Every `break` under the body that could name this loop, and those of
+    // them a loop nested in the body captures: an unlabelled one, or one
+    // naming that loop's own label.
+    let mut own: Vec<*const ast::Stmt> = Vec::new();
+    let mut captured: Vec<*const ast::Stmt> = Vec::new();
+    for s in &block.stmts {
+        visit_stmts(s, false, &mut |s| match s {
+            ast::Stmt::Break { label: written, .. } if names(written, label) => own.push(s),
+            ast::Stmt::For(inner) => {
+                let inner_label = inner.label.as_ref().map(|l| l.name.as_str());
+                for s in &inner.body.stmts {
+                    visit_stmts(s, false, &mut |s| {
+                        if let ast::Stmt::Break { label: written, .. } = s {
+                            if written.is_none() || (inner_label.is_some() && names(written, inner_label)) {
+                                captured.push(s);
+                            }
+                        }
+                    });
+                }
             }
+            _ => {}
+        });
     }
-    fn in_stmt(s: &ast::Stmt, label: Option<&str>, nested: bool) -> bool {
-        match s {
-            ast::Stmt::Break { label: written, .. } => match written {
-                None => !nested,
-                Some(l) => Some(l.name.as_str()) == label,
-            },
-            ast::Stmt::If(i) => in_if(i, label, nested),
-            // An inner loop captures an unlabelled `break`, so from here on
-            // only a labelled one can leave this one.
-            ast::Stmt::For(f) => in_block(&f.body, label, true),
-            ast::Stmt::Match(m) => m.arms.iter().any(|a| match &a.body {
-                ast::MatchBody::Block(b) => in_block(b, label, nested),
-                ast::MatchBody::Expr(_) => false,
-            }),
-            _ => false,
-        }
-    }
-    in_block(block, label, false)
+    own.iter().any(|b| !captured.iter().any(|c| std::ptr::eq(*b, *c)))
 }
 
 /// Whether a block body has a `return` that gives a value — `return v` or

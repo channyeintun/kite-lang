@@ -1338,7 +1338,11 @@ worse. What follows a loop is reached from its top and from every `break` —
 except after a `for { }`, which has no header to leave from and is left only by
 `break`, so `for { if err == nil { break } … }` leaves only where `err` was
 tested, and one with no `break` has nothing after it: its only ways out are
-the `return`s in its body, each of which answers for what it leaves behind.
+the `return`s in its body, each of which answers for what it leaves behind. A
+`break` counts wherever it is written outside a closure — as a statement, or in
+a block inside an expression such as an arm of a `match` used as a value or a
+call's argument — and one inside a nested loop leaves that loop unless it names
+this one by its label.
 
 In practice:
 

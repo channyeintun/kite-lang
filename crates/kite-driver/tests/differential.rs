@@ -8658,6 +8658,69 @@ fn main() {
 "#,
         "ZERO\none\nmany\n2\n",
     ),
+    // A `break` is a `break` wherever it is written. One inside a `match`
+    // used as a value — a `let` initializer, a call's argument, a tuple's
+    // element, an arm of a match in an arm — leaves the loop, so what follows
+    // it runs. The checker once looked for a `break` in statement positions
+    // only, took each of these `for { }` loops for one nothing leaves and
+    // dropped the code after it: the VM gave `()` from an `-> int`
+    // function, native failed Cranelift's verifier and Wasm trapped.
+    (
+        "a-break-inside-an-expression-leaves-the-loop",
+        r#"fn g(n: int) -> int {
+  var i = 0
+  for {
+    i += 1
+    let y = match i {
+      3 => { break }
+      _ => 1,
+    }
+    if y == n {
+      return 0
+    }
+  }
+  return 7
+}
+fn h() -> error {
+  for {
+    io.print(match 1 {
+      1 => { break }
+      _ => 0,
+    })
+  }
+  return errors.new("after the loop")
+}
+fn main() {
+  io.print(g(9))
+  var i = 0
+  for {
+    i += 1
+    match i {
+      3 => match i {
+        3 => { break }
+        _ => {}
+      },
+      _ => io.print(i),
+    }
+  }
+  io.print("after \(i)")
+  var o = 0
+  outer: for {
+    for k in 0..2 {
+      let p = (match o { 1 => { break outer }, _ => o + k }, 2)
+      io.print(p.0)
+    }
+    o += 1
+  }
+  io.print("left at \(o)")
+  let e = h()
+  if e != nil {
+    io.print(e.message())
+  }
+}
+"#,
+        "7\n1\n2\nafter 3\n0\n1\nleft at 1\nafter the loop\n",
+    ),
 ];
 
 #[test]

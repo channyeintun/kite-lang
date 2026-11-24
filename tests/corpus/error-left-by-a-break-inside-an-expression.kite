@@ -1,0 +1,75 @@
+// A `break` is a `break` wherever it is written: in an arm of a `match` used
+// as a value, in a `let` initializer, in a call's argument. A `for cond` loop
+// with one is not left only where its condition failed, so what follows it
+// is not narrowed. Each refused case here was once accepted, and read the
+// value its error said was not there.
+
+fn load() -> (int, error) {
+    return _, errors.new("no value")
+}
+
+fn f(n: int) -> error {
+    if n > 2 {
+        return errors.new("stop at \(n)")
+    }
+    return nil
+}
+
+fn in_a_let_initializer() {
+    let (n, err) = load()
+    for err != nil {
+        let y = match 1 {
+            1 => { break }
+            _ => 0,
+        }
+        io.print(y)
+    }
+    io.print(n + 1) //~ ERROR E0301
+}
+
+fn in_a_call_argument() {
+    let (n, err) = load()
+    for err != nil {
+        io.print(match 1 {
+                1 => { break }
+                _ => 1,
+            })
+    }
+    io.print(n + 1) //~ ERROR E0301
+}
+
+fn in_an_interpolation() {
+    var n = 0
+    var e = f(n)
+    for e == nil {
+        n += 1
+        io.print("at \(match n { 9 => { break }, _ => n })")
+        e = f(n)
+    }
+    io.print(e.message()) //~ ERROR E0301
+}
+
+// A `break` inside a nested loop leaves that loop, so this one is still left
+// only where its condition failed.
+fn in_a_nested_loop() {
+    var n = 0
+    var e = f(n)
+    for e == nil {
+        for k in 0..3 {
+            io.print(match k {
+                    1 => { break }
+                    _ => k,
+                })
+        }
+        n += 1
+        e = f(n)
+    }
+    io.print(e.message())
+}
+
+fn main() {
+    in_a_let_initializer()
+    in_a_call_argument()
+    in_an_interpolation()
+    in_a_nested_loop()
+}
