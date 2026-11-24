@@ -1951,6 +1951,52 @@ mod tests {
             assert!(c.failed(), "{}", src);
             assert!(!text.contains("<error>"), "{}\n{}", src, text);
         }
+        // One of each message that printed it before round five, as the
+        // generator in round six found them (an unknown name, an unknown
+        // type or an untyped closure, then each kind of use): every one is
+        // silent now, the cause having been reported.
+        let pre = "struct Wrap<T> {\n  v: T\n}\nfn take(n: int) -> int {\n  return n\n}\n\
+                   fn same<T>(a: T, b: T) -> bool {\n  return a == b\n}\n\
+                   fn has<T: Display>(t: T) -> str {\n  return t.show()\n}\n";
+        let generated = [
+            "let x = |n| n\n  let y = x < x",
+            "let x: [Nope] = nil\n  take(x)",
+            "let x = |n| n\n  let y = x != nil",
+            "let x = |n| n\n  let y = x + 1",
+            "let x = [nope]\n  let y = x.foo()",
+            "let x = |n| n\n  let y = x.v",
+            "let x = [nope]\n  let y = match x {\n    nil => 1\n    _ => 2\n  }",
+            "let x = |n| n\n  io.print(\"\\(x)\")",
+            "let x = |n| n\n  io.print(x)",
+            "let x = |n| n\n  let y = same(x, x)",
+            "let y = 1 as [Nope]\n  io.print(y)",
+            "let x = |n| n\n  let y = {x: 1}",
+            "let x = |n| n\n  let y = !x",
+            "let x = |n| n\n  let y = has(x)",
+            "let x = |n| n\n  let y = x[0]",
+            "let x = |n| n\n  x.push(1)",
+            "let x = {\"a\": nope}[\"a\"]\n  for v in x {\n    io.print(v)\n  }",
+            "let x = {\"a\": nope}[\"a\"]\n  let y = same(x, x)",
+            "let x = |n| n\n  let y = x[1..2]",
+            "let x = (nil, 1)\n  let y = x.v",
+            "let x: Wrap<Nope> = nil\n  let y = x.0",
+            "let x: Option<Nope> = nil\n  let y = same(x, x)",
+            "let x: {Nope: str} = {}\n  let y = x.foo()",
+        ];
+        for body in generated {
+            let src = format!("{}async fn main() {{\n  {}\n}}\n", pre, body);
+            let c = compile("t.kite", &src, Emit::Check);
+            let text = c.render_diagnostics();
+            assert!(c.failed(), "{}", src);
+            assert!(!text.contains("<error>"), "{}\n{}", src, text);
+        }
+        // A trait method whose declared result is built from an unknown
+        // name is not then said to differ from the impl's.
+        let src = "trait T {\n  fn get(self) -> Option<Nope>\n}\nstruct S {\n  a: int\n}\n\
+                   impl T for S {\n  fn get(self) -> int {\n    return 1\n  }\n}\nfn main() {\n}\n";
+        let c = compile("t.kite", src, Emit::Check);
+        assert!(c.failed(), "{}", src);
+        assert!(!c.render_diagnostics().contains("<error>"), "{}", c.render_diagnostics());
     }
 
     /// `first(nil, 3)` stays an error — only a closure waits for a later
