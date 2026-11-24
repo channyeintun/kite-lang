@@ -4827,7 +4827,13 @@ impl<'a> Checker<'a> {
 
                 let mut flat = Vec::with_capacity(entries.len() * 2);
                 let mut key_ty = hint.map(|(k, _)| k);
-                let mut val_ty = hint.map(|(_, v)| v);
+                // A wanted type that was itself reported (`{str: Nope}` is the
+                // error type whole) steers each value as the error type, as a
+                // tuple's elements are, so a `nil` among them is not a second
+                // report of that one cause. The keys say what they are.
+                let whole_error =
+                    expected.is_some_and(|e| matches!(self.types.kind(self.types.present(e)), TyKind::Error));
+                let mut val_ty = hint.map(|(_, v)| v).or(whole_error.then_some(TyId::ERROR));
                 // The keys the compiler knows, and where each was first given.
                 let mut known_keys: std::collections::HashMap<String, (Span, String)> =
                     std::collections::HashMap::new();
@@ -9851,7 +9857,12 @@ impl<'a> Checker<'a> {
         }
 
         let mut out = Vec::with_capacity(elems.len());
-        let mut elem_ty = hint;
+        // A wanted type that was itself reported (`[Nope]` is the error type
+        // whole) steers each element as the error type, as a tuple's are, so
+        // a `nil` in it is not a second report of that one cause.
+        let whole_error =
+            expected.is_some_and(|e| matches!(self.types.kind(self.types.present(e)), TyKind::Error));
+        let mut elem_ty = hint.or(whole_error.then_some(TyId::ERROR));
         for e in elems {
             let v = self.expr(e, elem_ty);
             let v = match elem_ty {
@@ -13749,7 +13760,14 @@ impl<'a> Checker<'a> {
         self.set_flow_state(entry);
 
         self.enter_branch(narrowing, cond, false);
-        let want = expected.or((!self.types.is_poisoned(t.ty)).then_some(t.ty));
+        // A first branch that is the error type — a field of a parameter
+        // whose type did not resolve — steers the second as the error type,
+        // so a `nil` there is not a second report of that one cause.
+        let want = expected.or(if matches!(self.types.kind(t.ty), TyKind::Error) {
+            Some(TyId::ERROR)
+        } else {
+            (!self.types.is_poisoned(t.ty)).then_some(t.ty)
+        });
         let e = match else_ {
             ast::ElseBranch::Block(b) => self.block_value(b, want),
             ast::ElseBranch::If(nested) => match nested.else_.as_deref() {
