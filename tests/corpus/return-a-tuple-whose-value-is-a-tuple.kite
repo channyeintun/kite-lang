@@ -25,6 +25,26 @@ fn three() -> ((int, int, int), error) {
     return ((1, 2, 3), nil) //~ ERROR E0203
 }
 
+// A first element shaped like the whole value tuple, and not like its first
+// element, is the whole value, and is typed as it: `2` is the `Option<int>`,
+// `[]` a `[int]`, and `(1, 2)` the inner tuple, with no second report.
+fn optional_second() -> ((int, Option<int>), error) {
+    return ((1, 2), nil) //~ ERROR E0203
+}
+
+fn empty_slice() -> (([int], int), error) {
+    return (([], 1), nil) //~ ERROR E0203
+}
+
+fn nested() -> (((int, int), int), error) {
+    return (((1, 2), 3), nil) //~ ERROR E0203
+}
+
+// A pair that is neither the value nor the value tuple is one report too.
+fn other_arity() -> ((int, int, int), error) {
+    return (1, 2) //~ ERROR E0203
+}
+
 // Parentheses around the tuple change nothing.
 fn doubled() -> (int, error) {
     return ((1, nil)) //~ ERROR E0203

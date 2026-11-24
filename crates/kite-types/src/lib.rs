@@ -2865,6 +2865,19 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// Whether `e`'s tuple literals, at every depth, have the arity of the
+    /// tuples `ty` has there — the one thing a literal says about which type
+    /// it was written as before it is typed.
+    fn fits_shape(&self, e: &ast::Expr, ty: TyId) -> bool {
+        match (unparen(e), self.types.kind(ty)) {
+            (ast::Expr::Tuple { elems, .. }, TyKind::Tuple(ts)) => {
+                elems.len() == ts.len() && elems.iter().zip(ts.clone()).all(|(e, t)| self.fits_shape(e, t))
+            }
+            (ast::Expr::Tuple { .. }, _) => false,
+            _ => true,
+        }
+    }
+
     /// `return (v, e)` in a `(T, error)` function, its `v` already checked:
     /// checks `e` as the error and says the tuple is one value, with the
     /// line the reader meant.
@@ -2972,14 +2985,16 @@ impl<'a> Checker<'a> {
             // Where the value side is itself a tuple, the literal can be
             // read two ways, and its first element says which: `(p, nil)`
             // whose `p` is the whole `(int, int)` is the pair in parentheses,
-            // as above, and so is any first element in a function whose value
-            // tuple has no two elements. Otherwise (`(1, nil)` in a
-            // `((int, Option<int>), error)` function) it is the value tuple
-            // with no error after it, typed element by element as a tuple
-            // literal is, and the arm below's one report follows. A first
-            // element already reported leaves the second to decide: a `nil`
-            // that the value tuple's second element cannot hold is the
-            // error's.
+            // as above, and so is a first element that is a tuple literal
+            // shaped like the whole value tuple and not like its first
+            // element — it is typed as the whole value, so
+            // `((1, 2), nil)` in a `((int, Option<int>), error)` function
+            // gives `2` its optional type rather than an error. Otherwise
+            // (`(1, nil)` in that function) it is the value tuple with no
+            // error after it, typed element by element as a tuple literal
+            // is, and one generic report follows. A first element already
+            // reported leaves the second to decide: a `nil` that the value
+            // tuple's second element cannot hold is the error's.
             Some(ast::ReturnValue::Single(lit)) if sig.fallible && pair_literal(lit).is_some() => {
                 let elems = pair_literal(lit).unwrap_or_default();
                 let inner = self.types.fallible_value(sig.ret).unwrap_or(TyId::ERROR);
@@ -2987,43 +3002,56 @@ impl<'a> Checker<'a> {
                     TyKind::Tuple(ts) if ts.len() == 2 => Some((ts[0], ts[1])),
                     _ => None,
                 };
-                let v = self.expr(&elems[0], Some(hint.map_or(inner, |h| h.0)));
-                let paren = match hint {
-                    None => true,
-                    Some((_, second)) => {
-                        v.ty == inner
-                            || (self.types.holds_error(v.ty)
+                let whole = matches!(unparen(&elems[0]), ast::Expr::Tuple { .. })
+                    && self.fits_shape(&elems[0], inner)
+                    && !hint.is_some_and(|h| self.fits_shape(&elems[0], h.0));
+                let v = match hint {
+                    Some((first, _)) if !whole => self.expr(&elems[0], Some(first)),
+                    _ => self.expr(&elems[0], Some(inner)),
+                };
+                let paren = whole
+                    || v.ty == inner
+                    || match hint {
+                        None => self.types.holds_error(v.ty),
+                        Some((_, second)) => {
+                            self.types.holds_error(v.ty)
                                 && matches!(unparen(&elems[1]), ast::Expr::Nil(_))
                                 && !matches!(self.types.kind(second), TyKind::Optional(_))
-                                && second != TyId::ERR)
-                    }
-                };
-                match hint {
-                    Some((first, second)) if !paren => {
-                        let v = self.coerce(v, Some(first));
-                        self.expect_ty(v.ty, first, v.span, None);
-                        let e = self.expr(&elems[1], Some(second));
-                        let e = self.coerce(e, Some(second));
-                        self.expect_ty(e.ty, second, e.span, None);
-                        // An element of the wrong type was told where it
-                        // is, and the whole tuple is not then told again.
-                        let ty = self.types.tuple_of(vec![v.ty, e.ty]);
-                        if !self.types.holds_error(ty) {
-                            self.diags.push(
-                                Diagnostic::error(codes::E0203, "a fallible function returns two values")
-                                    .with_primary(r.span, "only one value returned")
-                                    .with_secondary(sig.name_span, "declared `(T, error)` here")
-                                    .with_note(
-                                        "write `return value, nil` on the success path, or return a \
-                                         call that is itself fallible",
-                                    ),
-                            );
+                                && second != TyId::ERR
                         }
-                    }
-                    _ => {
-                        let v = self.coerce(v, Some(inner));
-                        self.expect_ty(v.ty, inner, v.span, Some(sig.name_span));
-                        self.paren_pair(lit.span(), elems, sig);
+                    };
+                if paren {
+                    let v = self.coerce(v, Some(inner));
+                    self.expect_ty(v.ty, inner, v.span, Some(sig.name_span));
+                    self.paren_pair(lit.span(), elems, sig);
+                } else {
+                    // The value tuple with no error after it. With a value
+                    // tuple of another arity, the literal is no value of it
+                    // either, and the one report says what is missing.
+                    let (v, e) = match hint {
+                        Some((first, second)) => {
+                            let v = self.coerce(v, Some(first));
+                            self.expect_ty(v.ty, first, v.span, None);
+                            let e = self.expr(&elems[1], Some(second));
+                            let e = self.coerce(e, Some(second));
+                            self.expect_ty(e.ty, second, e.span, None);
+                            (v, e)
+                        }
+                        None => (v, self.expr(&elems[1], Some(TyId::ERR))),
+                    };
+                    // An element of the wrong type was told where it
+                    // is, and the whole tuple is not then told again.
+                    let ty = self.types.tuple_of(vec![v.ty, e.ty]);
+                    if !self.types.holds_error(ty) {
+                        self.diags.push(
+                            Diagnostic::error(codes::E0203, "a fallible function returns two values")
+                                .with_primary(r.span, "only one value returned")
+                                .with_secondary(sig.name_span, "declared `(T, error)` here")
+                                .with_note(
+                                    "write `return value, nil` on the success path, or return a \
+                                     call that is itself fallible",
+                                ),
+                        );
                     }
                 }
                 Some((hir::Stmt::Return { value: None, span: r.span }, Flow::Diverges))
