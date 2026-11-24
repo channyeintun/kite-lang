@@ -2823,7 +2823,9 @@ Requirements on the implementation:
   `--release`**: debug information is not semantics, and it is bytes a shipped
   page does not need — in the module of `examples/hello.kite` the name section
   and the custom section naming the map are 61 of its 834 bytes, and the map is
-  a file of 389 bytes beside it.
+  a file of 303 bytes beside it (built from the repository root with
+  `--out dist`; the map names its source by the path from `--out`, so its size
+  depends on where it is built).
 
 ---
 
