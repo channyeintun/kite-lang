@@ -2840,8 +2840,8 @@ the documents. A sixth, the closing pass, took what a check of the fourth had
 confirmed and what the fifth's reviewers named as open: a nil test in
 parentheses, a tuple of failures a pattern binds, one report for a returned
 pair, an incomplete impl, a token Kite does not have, a refused `use` and a
-qualified pattern, and `kitec fix`. There is no seventh. Each workstream's merge on `complete-kite` says what is true
-after it. This section is the one place that gathers what a program written
+qualified pattern, and `kitec fix`. There is no seventh. Each workstream's
+merge on `complete-kite` says what is true after it. This section is the one place that gathers what a program written
 against v0.1.9 will meet, and it is written as that program's author would want
 it: what stops compiling, what runs differently, what the library does now, and
 what was accepted as it is rather than fixed.
@@ -2866,7 +2866,7 @@ what was accepted as it is rather than fixed.
   is tested. **Parentheses change nothing in the analysis:** `if (r) == nil`,
   `nil != ((r))` and `(r == nil)` are the nil tests they are without them, so
   a failure held in `r` and "handled" by one of them is owed as it is by the
-  plain test (and `if (x) != nil` narrows as `if x != nil` does). **A name a
+  plain test. **A name a
   pattern binds owes what a `let` of it owes:** a bare `match` arm that binds
   a tuple of failures (`match t { x => … }`), the arm after a `nil` arm, and a
   `for x in ts` binding follow the tuple element by element, so taking `x.0`
@@ -2936,6 +2936,10 @@ mistake:
   to rename it.
 - A `use` refused for a standard-library name (`E0403`) is the one report;
   `crypto.one()` or `keys.x()` after it add nothing.
+- Text Kite does not have where a value or an argument goes is the one
+  `E0002`: `return ?` is not also short of a value, and `g($)` or `g($, 2)`
+  is not also short of an argument; `var z = @` is one `E0100`, not two at
+  one caret.
 - A run of `pub` before a variant is one report with one fix that removes the
   run, and a doc example left open is reported at the end of its last line,
   not at a brace the reader did not write. No message, label or note prints
@@ -2952,6 +2956,11 @@ mistake:
   only as the pair `(T, error)`.
 - A closure where an `Option<fn(T) -> T>` is wanted, or beside a `nil` that
   an argument later types, is typed from that argument, as §4.5 says.
+- A nil test in parentheses narrows as the plain one does: after
+  `if (x) != nil`, or `if (x == nil) { return }`, `x` is the value, where it
+  stayed optional.
+- A type with an empty `impl` of a trait that declares no method
+  (`impl Marker for P {}`) converts to `dyn Marker`, on all three targets.
 
 ### Programs that run differently
 
@@ -3102,9 +3111,10 @@ Each is stated where a reader of that part looks:
 - Left by the closing pass, each for a reason of size: taking the rest of a
   tuple's failures partly through a copy and partly through the original is a
   false `E0302`, and destructuring then re-reading through the original is
-  refused (so a `match` arm that binds a tuple is refused as the `let` of it
-  is, and a `for` over a slice literal of a partly taken tuple owes it all
-  again); `let e = if x { nil } else { c }` with `nil` first is `E0204`;
+  refused (so a `match` arm that takes part of a tuple it binds, and leaves
+  the rest to be read through the tuple itself, is refused as the `let` of it
+  is, and a `for` over a slice literal of a tuple already partly taken owes
+  all of it again); `let e = if x { nil } else { c }` with `nil` first is `E0204`;
   `h(|n| n, nope)` misses the closure's own `E0211`; a closure inside a slice
   literal does not wait for a later argument; a `;` in the middle of a
   statement gives two reports; a right-nested operand list is quadratic up to
