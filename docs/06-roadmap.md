@@ -3161,7 +3161,7 @@ none.
 | 30 — The boundary, reviewed | ✅ a module is where its source is; each package's dependencies are its own; the entry file and bare variants are gated too; `bundle`, `test`, `pkg` and the option parser do what they say. §4.3 no longer names `pub` on an enum variant or `pub use`: a variant is as visible as its enum, there is no `pub use`, and each is refused with one diagnostic |
 | 31 — Six passes of fixes | ✅ an audit, a re-check and four passes after it: bugs fixed on all three backends, about 130 library functions added, and the specification's claims checked by compiling them; maps are hash maps and field-held slices and maps are written in place on every target. What a v0.1.9 program notices is listed in the phase |
 
-More than 1,370 tests: unit tests per crate, an annotated compile-fail
+More than 1,380 tests: unit tests per crate, an annotated compile-fail
 corpus, a differential corpus that runs every program on **three** backends and
 compares, the standard library's own suite on all three, the standard library's own
 documentation examples, the host boundary and a real socket under Node, the one
