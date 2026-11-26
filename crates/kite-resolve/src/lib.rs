@@ -2132,11 +2132,13 @@ impl<'a> FnResolver<'a> {
                     ),
                 );
             }
-            self.labels.push(l.name.clone());
         }
-        self.loop_depth += 1;
         self.push_scope();
 
+        // The header is not part of the loop: it is evaluated where the loop
+        // stands, so a `break` or `continue` written in it leaves the loop
+        // around this one, and cannot name this one's label. With no loop
+        // around, it has none to leave.
         match &f.header {
             ForHeader::In { binding, iter } => {
                 self.expr(iter);
@@ -2145,6 +2147,10 @@ impl<'a> FnResolver<'a> {
             ForHeader::While(c) => self.expr(c),
             ForHeader::Loop => {}
         }
+        if let Some(l) = &f.label {
+            self.labels.push(l.name.clone());
+        }
+        self.loop_depth += 1;
 
         // The body is a scope nested in the header's, as a function's body is
         // in its parameters': the loop variable is visible, and the body may
