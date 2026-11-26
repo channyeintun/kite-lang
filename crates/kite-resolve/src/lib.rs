@@ -2139,10 +2139,10 @@ impl<'a> FnResolver<'a> {
         }
         self.push_scope();
 
-        // The header is not part of the loop: it is evaluated where the loop
-        // stands, so a `break` or `continue` written in it leaves the loop
-        // around this one, and cannot name this one's label. With no loop
-        // around, it has none to leave.
+        // A `break` or `continue` written in the header does not belong to
+        // this loop, since the header is not one of its iterations to leave or
+        // go on to: it leaves the loop around this one, and cannot name this
+        // one's label. With no loop around, it has none to leave.
         match &f.header {
             ForHeader::In { binding, iter } => {
                 self.expr(iter);
@@ -2190,8 +2190,9 @@ impl<'a> FnResolver<'a> {
                     )
                     .with_primary(l.span, "this label is on the loop whose header holds the jump")
                     .with_note(
-                        "a loop's header is evaluated where the loop stands, not as a step of it, \
-                         so a jump there can leave only a loop around that one",
+                        "a jump in a loop's header does not belong to that loop, since the header \
+                         is not one of its iterations to leave or go on to, so it can leave only a \
+                         loop around that one",
                     ),
                 );
             } else if !open.contains(&l.name.as_str()) {

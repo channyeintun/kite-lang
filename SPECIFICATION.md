@@ -1064,13 +1064,16 @@ A loop inside another may not take the label of the one around it
 ([E0112](#16-diagnostics)): `break outer` would then leave the inner loop, and
 the outer one could not be named from inside at all.
 
-A loop's header — the sequence of `for x in`, a range's bounds, the condition
-of `for cond` — is not part of the loop: it is evaluated where the loop stands.
-So a `break` or `continue` written in it, in a block arm of a `match` or
-anywhere else in its expression, leaves the loop around this one, or the loop
-its label names; it cannot name this loop's own label
-([E0111](#16-diagnostics)), and with no loop around it, it is outside a loop
-([E0115](#16-diagnostics)).
+A `break` or `continue` written in a loop's header — the sequence of
+`for x in`, a range's bounds, the condition of `for cond` — in a block arm of
+a `match` or anywhere else in its expression outside a closure, does not belong
+to that loop: the header is not one of its iterations to leave or go on to. It
+leaves the loop around this one, or the loop its label names; it cannot name
+this loop's own label ([E0111](#16-diagnostics)), and with no loop around it,
+it is outside a loop ([E0115](#16-diagnostics)). That is all the header is
+excused: the condition of `for cond` runs again before every iteration, so a
+`let` declared outside the loop without a value cannot be assigned in any of
+its headers ([E0114](#16-diagnostics)).
 
 ### 6.3 `defer`
 
@@ -1357,8 +1360,9 @@ the `return`s in its body, each of which answers for what it leaves behind. A
 `break` counts wherever it is written outside a closure — as a statement, or in
 a block inside an expression such as an arm of a `match` used as a value or a
 call's argument — and one inside a nested loop leaves that loop unless it names
-this one by its label. One in a nested loop's header is not inside that loop
-(§6.2), so it leaves this one, and what it hands on is the state where the header
+this one by its label. One in the header of a loop written directly in this
+one's body does not belong to that loop (§6.2), so it leaves this one unless it
+names another by its label, and what it hands on is the state where that header
 is evaluated.
 
 In practice:
