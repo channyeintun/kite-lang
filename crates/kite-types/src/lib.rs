@@ -3661,7 +3661,7 @@ impl<'a> Checker<'a> {
                     // Iterating a slice. The `Iterate` trait generalises this
                     // later; slices are the case that matters now.
                     let before = self.taint.clone();
-                    let seq = self.expr(iter, None);
+                    let seq = self.header(|s| s.expr(iter, None));
                     let Some(elem) = self.types.slice_elem(seq.ty) else {
                         if !self.types.is_poisoned(seq.ty) {
                             let found = self.types.with_article(seq.ty);
@@ -3709,8 +3709,8 @@ impl<'a> Checker<'a> {
                     return (Some(stmt), false);
                 };
 
-                let start_e = self.expr(start, Some(TyId::INT));
-                let end_e = self.expr(end, Some(TyId::INT));
+                let (start_e, end_e) =
+                    self.header(|s| (s.expr(start, Some(TyId::INT)), s.expr(end, Some(TyId::INT))));
                 self.expect_ty(start_e.ty, TyId::INT, start_e.span, None);
                 self.expect_ty(end_e.ty, TyId::INT, end_e.span, None);
                 // Two literal ends, the first before the second: the body runs.
@@ -3741,7 +3741,7 @@ impl<'a> Checker<'a> {
             ast::ForHeader::While(c) => {
                 self.loop_start();
                 let narrowing = self.nil_test(c);
-                let cond = self.condition(c);
+                let cond = self.header(|s| s.condition(c));
                 // The loop is left where the condition failed, and the body
                 // entered where it held, exactly as for an `if`'s two sides:
                 // `for e == nil { … }` runs its body knowing `e` is nil.
@@ -3775,7 +3775,7 @@ impl<'a> Checker<'a> {
             return None;
         };
         let before = self.taint.clone();
-        let map = self.expr(iter, None);
+        let map = self.header(|s| s.expr(iter, None));
 
         // A slice of two-element tuples destructures the same way a map does,
         // and it has to: `zip` and `enumerate` both answer with one, and a
@@ -4038,6 +4038,29 @@ impl<'a> Checker<'a> {
         self.copies = join_copies((entry_copies, entry), (&self.copies, &self.taint));
         let merged = self.join_taint(entry, &self.taint);
         self.restore_taint(merged);
+    }
+
+    /// Check part of a loop's header: the iterable of `for x in …`, a
+    /// range's bounds, the condition of `for cond`. **A header is not part
+    /// of its loop's body**: it is evaluated where the loop stands, so a
+    /// `break` or `continue` written in it — in a block arm of a `match`, at
+    /// any depth — leaves the loop around this one, or the one its label
+    /// names, as it does on every backend. The loop being checked is taken
+    /// off the stack of loops a jump can name, and the error states its
+    /// jumps hand on with it, while its header is checked, so that every
+    /// question about which loop a jump leaves — the state it hands on, what
+    /// it leaves behind unchecked — gets that one answer. Checked as part of
+    /// the loop, the state at such a `break` was handed to the end of the
+    /// loop it is written in, which went on round to the outer loop's test:
+    /// `for err != nil { for k in 0..(match 1 { 1 => { break } _ => 2 }) {
+    /// … } }` made the value guarded by `err` readable after it.
+    fn header<T>(&mut self, check: impl FnOnce(&mut Self) -> T) -> T {
+        let this = self.loops.pop();
+        let edges = self.loop_edges.pop();
+        let out = check(self);
+        self.loops.extend(this);
+        self.loop_edges.extend(edges);
+        out
     }
 
     /// A loop body, noting the state its end hands back to its start. A

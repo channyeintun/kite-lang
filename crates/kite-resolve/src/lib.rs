@@ -1723,7 +1723,10 @@ struct FnResolver<'a> {
     locals: Vec<LocalInfo>,
     scopes: Vec<HashMap<String, u32>>,
     loop_depth: u32,
-    labels: Vec<String>,
+    /// The labels of the loops around, innermost last, each with whether a
+    /// jump can name it: not while its own header is resolved, which is not
+    /// part of the loop, though a loop written there still may not reuse it.
+    labels: Vec<(String, bool)>,
     /// The module this body was declared in. Its own names win over everything
     /// but locals.
     module: String,
@@ -2119,7 +2122,7 @@ impl<'a> FnResolver<'a> {
             // An inner loop taking the label of one around it makes `break a`
             // leave the inner loop, whichever the writer meant — and the
             // outer one cannot be named from inside at all.
-            if self.labels.contains(&l.name) {
+            if self.labels.iter().any(|(name, _)| *name == l.name) {
                 self.diags.push(
                     Diagnostic::error(
                         codes::E0112,
@@ -2132,11 +2135,14 @@ impl<'a> FnResolver<'a> {
                     ),
                 );
             }
-            self.labels.push(l.name.clone());
+            self.labels.push((l.name.clone(), false));
         }
-        self.loop_depth += 1;
         self.push_scope();
 
+        // The header is not part of the loop: it is evaluated where the loop
+        // stands, so a `break` or `continue` written in it leaves the loop
+        // around this one, and cannot name this one's label. With no loop
+        // around, it has none to leave.
         match &f.header {
             ForHeader::In { binding, iter } => {
                 self.expr(iter);
@@ -2145,6 +2151,10 @@ impl<'a> FnResolver<'a> {
             ForHeader::While(c) => self.expr(c),
             ForHeader::Loop => {}
         }
+        if let Some((_, open)) = f.label.as_ref().and(self.labels.last_mut()) {
+            *open = true;
+        }
+        self.loop_depth += 1;
 
         // The body is a scope nested in the header's, as a function's body is
         // in its parameters': the loop variable is visible, and the body may
@@ -2168,14 +2178,30 @@ impl<'a> FnResolver<'a> {
             return;
         }
         if let Some(l) = label {
-            if !self.labels.contains(&l.name) {
+            let open: Vec<&str> =
+                self.labels.iter().filter(|(_, open)| *open).map(|(name, _)| name.as_str()).collect();
+            if !open.contains(&l.name.as_str()) && self.labels.iter().any(|(name, _)| *name == l.name) {
+                // The label is written on the loop whose header this is in,
+                // which the jump does not belong to.
+                self.diags.push(
+                    Diagnostic::error(
+                        codes::E0111,
+                        format!("`{} {}` names the loop whose header it is in", what, l.name),
+                    )
+                    .with_primary(l.span, "this label is on the loop whose header holds the jump")
+                    .with_note(
+                        "a loop's header is evaluated where the loop stands, not as a step of it, \
+                         so a jump there can leave only a loop around that one",
+                    ),
+                );
+            } else if !open.contains(&l.name.as_str()) {
                 self.diags.push(
                     Diagnostic::error(codes::E0111, format!("unknown loop label `{}`", l.name))
                         .with_primary(l.span, "no enclosing loop has this label")
-                        .with_note(if self.labels.is_empty() {
+                        .with_note(if open.is_empty() {
                             "no enclosing loop is labelled".to_string()
                         } else {
-                            format!("labels in scope: {}", self.labels.join(", "))
+                            format!("labels in scope: {}", open.join(", "))
                         }),
                 );
             }

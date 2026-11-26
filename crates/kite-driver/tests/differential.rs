@@ -8819,6 +8819,57 @@ fn main() {
 "#,
         "1\n1\n3\n1\n1\n2\n1\ntrue\ntrue\n",
     ),
+    // A loop's header is evaluated where the loop stands, not as a step of
+    // it, so a `break` or `continue` written there leaves the loop around it:
+    // a `continue` in a range's bound goes on to the outer loop's next turn,
+    // a `break` in a `for cond` condition on its second evaluation leaves the
+    // `for { }` around it, a `continue outer` in a map's sequence and a
+    // `break` in a slice's element leave the loops they name. Every backend
+    // has always run it so; the error analysis once credited the jump to the
+    // loop whose header it is in.
+    (
+        "a-jump-in-a-loop-header-leaves-the-loop-around-it",
+        r#"fn mk(n: int) -> {str: int} {
+  return {"a": n}
+}
+fn main() {
+  var i = 0
+  for i < 3 {
+    i += 1
+    for k in 0..(match i { 2 => { continue }, _ => 1 }) {
+      io.print("k \(k) at \(i)")
+    }
+    io.print("end of \(i)")
+  }
+  var n = 0
+  for {
+    n += 1
+    var q = 0
+    for q < (match q { 1 => { break }, _ => 3 }) {
+      q += 1
+      io.print("q \(q)")
+    }
+    io.print("not after a break")
+  }
+  io.print("left at \(n)")
+  outer: for a in [1, 2] {
+    for b in 0..2 {
+      for (x, y) in mk(match b { 1 => { continue outer }, _ => a }) {
+        io.print("\(a) \(b) \(x) \(y)")
+      }
+    }
+    io.print("not after a continue")
+  }
+  for r in 0..3 {
+    for s in [match r { 1 => { break }, _ => r }] {
+      io.print("s \(s)")
+    }
+  }
+  io.print("done")
+}
+"#,
+        "k 0 at 1\nend of 1\nk 0 at 3\nend of 3\nq 1\nleft at 1\n1 0 a 1\n2 0 a 2\ns 0\ndone\n",
+    ),
 ];
 
 #[test]

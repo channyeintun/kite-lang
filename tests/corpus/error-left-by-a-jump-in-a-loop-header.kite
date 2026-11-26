@@ -1,0 +1,151 @@
+// A loop's header is not part of its body: it is evaluated where the loop
+// stands, so a `break` or `continue` written in it, in a block arm of a
+// `match`, leaves the loop around it, or the one its label names. The state
+// at such a jump was once handed to the end of the loop whose header it is
+// in, and on round to the outer loop's test, so each unlabelled case here was
+// accepted and read a value its error said was not there, or lost a failure.
+
+fn load() -> (int, error) {
+    return _, errors.new("no value")
+}
+
+fn load2(n: int) -> (int, error) {
+    if n % 2 == 1 {
+        return _, errors.new("odd")
+    }
+    return n, nil
+}
+
+fn pick(n: int) -> int {
+    return n % 2
+}
+
+fn mk(n: int) -> { str: int } {
+    return { "a": n }
+}
+
+fn break_in_a_range_bound() {
+    let (v, err) = load()
+    for err != nil {
+        for k in 0..(match 1 { 1 => { break }, _ => 2 }) {
+            io.print(k)
+        }
+    }
+    io.print(v + 1) //~ ERROR E0301
+}
+
+fn break_in_a_range_start() {
+    let (v, err) = load()
+    for err != nil {
+        for k in (match 1 { 1 => { break }, _ => 0 })..2 {
+            io.print(k)
+        }
+    }
+    io.print(v + 1) //~ ERROR E0301
+}
+
+// The way out that tests `err` is not the only one, so `err` is also
+// left unchecked on the way that skips the test.
+fn break_in_a_slice() {
+    let (v, err) = load() //~ ERROR E0302
+    for {
+        for k in [match pick(1) { 1 => { break }, _ => 2 }] {
+            io.print(k)
+        }
+        if err == nil {
+            break
+        }
+    }
+    io.print(v + 1) //~ ERROR E0301
+}
+
+fn break_in_a_map() {
+    let (v, err) = load()
+    for err != nil {
+        for (a, b) in mk(match 1 { 1 => { break }, _ => 2 }) {
+            io.print("\(a) \(b)")
+        }
+    }
+    io.print(v + 1) //~ ERROR E0301
+}
+
+fn break_in_a_condition() {
+    let (v, err) = load()
+    for err != nil {
+        var q = 0
+        for q < (match q { 1 => { break }, _ => 3 }) {
+            q += 1
+        }
+    }
+    io.print(v + 1) //~ ERROR E0301
+}
+
+// A label names the loop it leaves, which was always found by its name.
+fn labelled_break_in_a_nested_header() {
+    let (v, err) = load()
+    outer: for err != nil {
+        for i in 0..2 {
+            for k in 0..(match i { 1 => { break outer }, _ => 2 }) {
+                io.print(k)
+            }
+        }
+    }
+    io.print(v + 1) //~ ERROR E0301
+}
+
+// The jump leaves the outer loop's body, and what that body left unchecked
+// goes out of scope with it.
+fn break_leaves_a_failure_behind() {
+    for n in 0..3 {
+        let (w, e) = load2(n)
+        for k in 0..(match pick(n) { 1 => { break }, _ => 2 }) { //~ ERROR E0302
+            io.print(k)
+        }
+        if e != nil {
+            io.print(e.message())
+        } else {
+            io.print(w)
+        }
+    }
+}
+
+fn continue_leaves_a_failure_behind() {
+    for n in 0..3 {
+        let (w, e) = load2(n)
+        for k in [match pick(n) { 1 => { continue }, _ => 2 }] { //~ ERROR E0302
+            io.print(k)
+        }
+        if e != nil {
+            io.print(e.message())
+        } else {
+            io.print(w)
+        }
+    }
+}
+
+fn continue_in_a_condition_skips_the_test() {
+    for n in 0..3 {
+        let (w, e) = load2(n)
+        var q = 0
+        for q < (match pick(n) { 1 => { continue }, _ => 3 }) { //~ ERROR E0302
+            q += 1
+        }
+        if e != nil {
+            io.print(e.message())
+        } else {
+            io.print(w)
+        }
+    }
+}
+
+fn main() {
+    break_in_a_range_bound()
+    break_in_a_range_start()
+    break_in_a_slice()
+    break_in_a_map()
+    break_in_a_condition()
+    labelled_break_in_a_nested_header()
+    break_leaves_a_failure_behind()
+    continue_leaves_a_failure_behind()
+    continue_in_a_condition_skips_the_test()
+}

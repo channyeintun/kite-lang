@@ -366,7 +366,9 @@ codes! {
          `Up` and `Down`. The note lists the variants it has. The same \
          holds in a pattern.\n\
          - A loop label no enclosing loop carries: `break outer` with no \
-         `outer: for …` around it.\n\
+         `outer: for …` around it, or a jump in a loop's header naming \
+         that loop's own label: the header is evaluated where the loop \
+         stands, not as a step of it.\n\
          - `self` in a function that is not a method. `self` is the \
          receiver of a method, so there is none to name.\n\
          \n\
@@ -505,6 +507,7 @@ codes! {
          - Nowhere near a loop: in a function body, or in an `if` or a `match` that no `for` encloses.\n\
          - Inside a closure that is written in a loop. A closure is a function of its own and runs when it is called, not as one step of the loop, so it has no loop to leave. Have the closure return a value and let the loop decide.\n\
          - After the loop's `}`, which is outside it.\n\
+         - In the loop's header — a range's bounds, the sequence of `for x in`, the condition of `for cond` — which is evaluated where the loop stands, not as a step of it: a jump there leaves the loop around this one, and with none around it there is no loop to leave.\n\
          \n\
          To leave a function early, `return`; to leave an outer loop from an inner one, label it (`break outer`).\n\
          \n\
