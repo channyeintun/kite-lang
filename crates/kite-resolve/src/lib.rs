@@ -2180,7 +2180,21 @@ impl<'a> FnResolver<'a> {
         if let Some(l) = label {
             let open: Vec<&str> =
                 self.labels.iter().filter(|(_, open)| *open).map(|(name, _)| name.as_str()).collect();
-            if !open.contains(&l.name.as_str()) {
+            if !open.contains(&l.name.as_str()) && self.labels.iter().any(|(name, _)| *name == l.name) {
+                // The label is written on the loop whose header this is in,
+                // which the jump does not belong to.
+                self.diags.push(
+                    Diagnostic::error(
+                        codes::E0111,
+                        format!("`{} {}` names the loop whose header it is in", what, l.name),
+                    )
+                    .with_primary(l.span, "this label is on the loop whose header holds the jump")
+                    .with_note(
+                        "a loop's header is evaluated where the loop stands, not as a step of it, \
+                         so a jump there can leave only a loop around that one",
+                    ),
+                );
+            } else if !open.contains(&l.name.as_str()) {
                 self.diags.push(
                     Diagnostic::error(codes::E0111, format!("unknown loop label `{}`", l.name))
                         .with_primary(l.span, "no enclosing loop has this label")

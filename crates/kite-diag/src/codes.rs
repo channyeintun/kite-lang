@@ -366,7 +366,9 @@ codes! {
          `Up` and `Down`. The note lists the variants it has. The same \
          holds in a pattern.\n\
          - A loop label no enclosing loop carries: `break outer` with no \
-         `outer: for …` around it.\n\
+         `outer: for …` around it, or a jump in a loop's header naming \
+         that loop's own label: the header is evaluated where the loop \
+         stands, not as a step of it.\n\
          - `self` in a function that is not a method. `self` is the \
          receiver of a method, so there is none to name.\n\
          \n\
