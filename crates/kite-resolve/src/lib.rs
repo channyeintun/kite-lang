@@ -1723,7 +1723,10 @@ struct FnResolver<'a> {
     locals: Vec<LocalInfo>,
     scopes: Vec<HashMap<String, u32>>,
     loop_depth: u32,
-    labels: Vec<String>,
+    /// The labels of the loops around, innermost last, each with whether a
+    /// jump can name it: not while its own header is resolved, which is not
+    /// part of the loop, though a loop written there still may not reuse it.
+    labels: Vec<(String, bool)>,
     /// The module this body was declared in. Its own names win over everything
     /// but locals.
     module: String,
@@ -2119,7 +2122,7 @@ impl<'a> FnResolver<'a> {
             // An inner loop taking the label of one around it makes `break a`
             // leave the inner loop, whichever the writer meant — and the
             // outer one cannot be named from inside at all.
-            if self.labels.contains(&l.name) {
+            if self.labels.iter().any(|(name, _)| *name == l.name) {
                 self.diags.push(
                     Diagnostic::error(
                         codes::E0112,
@@ -2132,6 +2135,7 @@ impl<'a> FnResolver<'a> {
                     ),
                 );
             }
+            self.labels.push((l.name.clone(), false));
         }
         self.push_scope();
 
@@ -2147,8 +2151,8 @@ impl<'a> FnResolver<'a> {
             ForHeader::While(c) => self.expr(c),
             ForHeader::Loop => {}
         }
-        if let Some(l) = &f.label {
-            self.labels.push(l.name.clone());
+        if let Some((_, open)) = f.label.as_ref().and(self.labels.last_mut()) {
+            *open = true;
         }
         self.loop_depth += 1;
 
@@ -2174,14 +2178,16 @@ impl<'a> FnResolver<'a> {
             return;
         }
         if let Some(l) = label {
-            if !self.labels.contains(&l.name) {
+            let open: Vec<&str> =
+                self.labels.iter().filter(|(_, open)| *open).map(|(name, _)| name.as_str()).collect();
+            if !open.contains(&l.name.as_str()) {
                 self.diags.push(
                     Diagnostic::error(codes::E0111, format!("unknown loop label `{}`", l.name))
                         .with_primary(l.span, "no enclosing loop has this label")
-                        .with_note(if self.labels.is_empty() {
+                        .with_note(if open.is_empty() {
                             "no enclosing loop is labelled".to_string()
                         } else {
-                            format!("labels in scope: {}", self.labels.join(", "))
+                            format!("labels in scope: {}", open.join(", "))
                         }),
                 );
             }
