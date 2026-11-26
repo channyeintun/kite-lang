@@ -1071,9 +1071,11 @@ to that loop: the header is not one of its iterations to leave or go on to. It
 leaves the loop around this one, or the loop its label names; it cannot name
 this loop's own label ([E0111](#16-diagnostics)), and with no loop around it,
 it is outside a loop ([E0115](#16-diagnostics)). That is all the header is
-excused: the condition of `for cond` runs again before every iteration, so a
-`let` declared outside the loop without a value cannot be assigned in any of
-its headers ([E0114](#16-diagnostics)).
+excused: a write in it is still written in the loop, so a `let` declared
+outside the loop without a value cannot be assigned in its header, any more
+than in its body ([E0114](#16-diagnostics)). Every header counts, the
+condition of `for cond`, which runs again before every iteration, and a bound
+or a sequence alike.
 
 ### 6.3 `defer`
 
