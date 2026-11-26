@@ -1,0 +1,57 @@
+// A jump written in a loop's header leaves the loop around it, but a write
+// there is still written in the loop: a `for cond` condition runs before
+// every iteration, so a `let` declared without a value and assigned in it
+// would take a new value each time. Every header counts, as it always has.
+
+fn in_a_condition() {
+    let z: int
+    var q = 0
+    for q < ((match q { _ => { z = q } }), 3).1 { //~ ERROR E0114
+        q += 1
+    }
+}
+
+fn in_a_condition_in_another_loop() {
+    for i in 0..3 {
+        let x: int
+        var q = 0
+        for [match 1 { _ => { x = q } }].len() + q < 4 { //~ ERROR E0114
+            q += i
+        }
+    }
+}
+
+fn in_a_bound() {
+    let x: int
+    for k in 0..[match 1 { _ => { x = 2 } }].len() { //~ ERROR E0114
+        io.print(k)
+    }
+}
+
+fn in_a_sequence() {
+    let x: int
+    for u in [match 1 { _ => { x = 5 } }] { //~ ERROR E0114
+        io.print("once")
+    }
+}
+
+fn in_a_header_in_a_header() {
+    let x: int
+    for k in [match 1 {
+            _ => {
+                for u in [match 1 { _ => { x = 5 } }] { //~ ERROR E0114
+                    io.print("once")
+                }
+            }
+        }] {
+        io.print("once")
+    }
+}
+
+fn main() {
+    in_a_condition()
+    in_a_condition_in_another_loop()
+    in_a_bound()
+    in_a_sequence()
+    in_a_header_in_a_header()
+}
