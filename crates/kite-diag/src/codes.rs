@@ -367,8 +367,9 @@ codes! {
          holds in a pattern.\n\
          - A loop label no enclosing loop carries: `break outer` with no \
          `outer: for …` around it, or a jump in a loop's header naming \
-         that loop's own label: the header is evaluated where the loop \
-         stands, not as a step of it.\n\
+         that loop's own label: a jump there does not belong to the loop \
+         whose header it is in, which is not one of its iterations to leave \
+         or go on to.\n\
          - `self` in a function that is not a method. `self` is the \
          receiver of a method, so there is none to name.\n\
          \n\
@@ -466,7 +467,7 @@ codes! {
          - Changing a field that is not `var`: `c.n = 2` where the struct says `n: int`. A field is immutable unless the struct marks it `var`, or the value can be rebuilt with `Counter{ ..c, n: 2 }`.\n\
          - Changing what a `let` holds in place: `xs.push(2)`, `xs[0] = 3` or `m[k] = v` on a `let` slice or map. A slice or a map is a value, so changing its contents changes the binding that holds it.\n\
          - Changing `self` in a method whose receiver is plain `self`: write `var self`, and the caller must then hold the value in a `var` (which is what makes the change visible where the call is written). Calling a `var self` method on a `let` is the same error.\n\
-         - Assigning inside a loop to a `let` declared without a value (`let x: int`, which may be assigned once). The body could run twice.\n\
+         - Assigning inside a loop, in its body or its header, to a `let` declared without a value (`let x: int`, which may be assigned once). The body could run twice, and a `for cond` condition runs before every iteration.\n\
          - Assigning to something that is not a place at all: `f() = 1`, or `a + b = 1`. A place is a name, a field or an element.\n\
          \n\
          Example:\n\
@@ -507,7 +508,7 @@ codes! {
          - Nowhere near a loop: in a function body, or in an `if` or a `match` that no `for` encloses.\n\
          - Inside a closure that is written in a loop. A closure is a function of its own and runs when it is called, not as one step of the loop, so it has no loop to leave. Have the closure return a value and let the loop decide.\n\
          - After the loop's `}`, which is outside it.\n\
-         - In the loop's header — a range's bounds, the sequence of `for x in`, the condition of `for cond` — which is evaluated where the loop stands, not as a step of it: a jump there leaves the loop around this one, and with none around it there is no loop to leave.\n\
+         - In a loop's header — a range's bounds, the sequence of `for x in`, the condition of `for cond` — with no loop around that one. A jump there does not belong to the loop whose header it is in, since the header is not one of its iterations to leave or go on to; it leaves the loop around this one, and with none around it there is no loop to leave.\n\
          \n\
          To leave a function early, `return`; to leave an outer loop from an inner one, label it (`break outer`).\n\
          \n\

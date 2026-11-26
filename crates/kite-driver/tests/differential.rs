@@ -8819,8 +8819,9 @@ fn main() {
 "#,
         "1\n1\n3\n1\n1\n2\n1\ntrue\ntrue\n",
     ),
-    // A loop's header is evaluated where the loop stands, not as a step of
-    // it, so a `break` or `continue` written there leaves the loop around it:
+    // A jump in a loop's header does not belong to that loop, since the
+    // header is not one of its iterations to leave or go on to, so a `break`
+    // or `continue` written there leaves the loop around it:
     // a `continue` in a range's bound goes on to the outer loop's next turn,
     // a `break` in a `for cond` condition on its second evaluation leaves the
     // `for { }` around it, a `continue outer` in a map's sequence and a
