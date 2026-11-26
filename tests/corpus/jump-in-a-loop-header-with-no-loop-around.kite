@@ -1,0 +1,27 @@
+// A `break` or `continue` in a loop's header leaves the loop around that
+// loop, not the loop itself. With no loop around, there is none to leave;
+// and a header cannot name its own loop's label. Each was once an internal
+// compiler error.
+
+fn no_loop_around() {
+    for k in 0..(match 1 { 1 => { break }, _ => 2 }) { //~ ERROR E0115
+        io.print(k)
+    }
+    var q = 0
+    for q < (match q { 0 => { continue }, _ => 2 }) { //~ ERROR E0115
+        q += 1
+    }
+}
+
+fn own_label() {
+    for i in 0..2 {
+        inner: for k in [match i { 1 => { break inner }, _ => 2 }] { //~ ERROR E0111
+            io.print(k)
+        }
+    }
+}
+
+fn main() {
+    no_loop_around()
+    own_label()
+}
