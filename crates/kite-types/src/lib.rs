@@ -645,6 +645,7 @@ pub fn check_recording(
             error_nonnil: std::collections::HashSet::new(),
             loops: Vec::new(),
             loop_edges: Vec::new(),
+            headers: Vec::new(),
             loop_writes: Vec::new(),
             closure_sig: None,
             closure_ret_unknown: None,
@@ -1235,6 +1236,12 @@ struct Checker<'a> {
     /// Beside each of `loops`, the error states its body hands back to its
     /// top and out past its end, for the loop to join.
     loop_edges: Vec<LoopEdges>,
+    /// The loops whose header is being checked, innermost last, each with
+    /// the depth it had in `loops`, from which it is taken while its header
+    /// is. A jump there cannot name it, but its header runs as often as it
+    /// does — a `for cond` condition before every iteration — so whether a
+    /// write may run more than once still counts it (see `repeating`).
+    headers: Vec<(usize, Span)>,
     /// While a loop's body is checked on trial to learn which narrowings
     /// survive it: per such loop, innermost last, every local a write in the
     /// body may have made nil.
@@ -1461,6 +1468,7 @@ struct Enclosing {
     defers: Option<u32>,
     loops: Vec<(Span, Option<String>)>,
     loop_edges: Vec<LoopEdges>,
+    headers: Vec<(usize, Span)>,
     sig: Option<Signature>,
     ret_unknown: Option<Span>,
     inferred_ret: Option<(TyId, Option<TyId>)>,
@@ -2054,10 +2062,8 @@ impl<'a> Checker<'a> {
                     // which would be a second write to an immutable binding —
                     // unless the binding is declared inside that same loop,
                     // when each iteration has a fresh one.
-                    let in_loop = self
-                        .loops
-                        .last()
-                        .is_some_and(|(l, _)| !self.declared_inside(local_id, *l));
+                    let in_loop =
+                        self.repeating().is_some_and(|l| !self.declared_inside(local_id, l));
                     if in_loop {
                         self.diags.push(
                             Diagnostic::error(
@@ -4041,26 +4047,47 @@ impl<'a> Checker<'a> {
     }
 
     /// Check part of a loop's header: the iterable of `for x in …`, a
-    /// range's bounds, the condition of `for cond`. **A header is not part
-    /// of its loop's body**: it is evaluated where the loop stands, so a
-    /// `break` or `continue` written in it — in a block arm of a `match`, at
-    /// any depth — leaves the loop around this one, or the one its label
-    /// names, as it does on every backend. The loop being checked is taken
-    /// off the stack of loops a jump can name, and the error states its
-    /// jumps hand on with it, while its header is checked, so that every
-    /// question about which loop a jump leaves — the state it hands on, what
-    /// it leaves behind unchecked — gets that one answer. Checked as part of
-    /// the loop, the state at such a `break` was handed to the end of the
-    /// loop it is written in, which went on round to the outer loop's test:
-    /// `for err != nil { for k in 0..(match 1 { 1 => { break } _ => 2 }) {
-    /// … } }` made the value guarded by `err` readable after it.
+    /// range's bounds, the condition of `for cond`. **A jump in a header
+    /// does not belong to that loop**: a `break` or `continue` written in it
+    /// — in a block arm of a `match`, at any depth — leaves the loop around
+    /// this one, or the one its label names, as it does on every backend.
+    /// The loop being checked is taken off the stack of loops a jump can
+    /// name, and the error states its jumps hand on with it, while its
+    /// header is checked, so that every question about which loop a jump
+    /// leaves — the state it hands on, what it leaves behind unchecked —
+    /// gets that one answer. Checked as part of the loop, the state at such
+    /// a `break` was handed to the end of the loop it is written in, which
+    /// went on round to the outer loop's test: `for err != nil { for k in
+    /// 0..(match 1 { 1 => { break } _ => 2 }) { … } }` made the value
+    /// guarded by `err` readable after it.
+    ///
+    /// Only jumps are answered so. A `for cond` condition runs again before
+    /// every iteration, so the loop is kept in `headers`, and a write there
+    /// to a `let` declared without a value may still run more than once.
     fn header<T>(&mut self, check: impl FnOnce(&mut Self) -> T) -> T {
         let this = self.loops.pop();
         let edges = self.loop_edges.pop();
+        if let Some((span, _)) = &this {
+            self.headers.push((self.loops.len(), *span));
+        }
         let out = check(self);
+        if this.is_some() {
+            self.headers.pop();
+        }
         self.loops.extend(this);
         self.loop_edges.extend(edges);
         out
+    }
+
+    /// The innermost loop whose next round may run the code being checked
+    /// again — its header included, which a jump cannot leave but which is
+    /// written in the loop all the same. A header whose loop is taken off
+    /// `loops` sits at the depth it had there, below any loop pushed since.
+    fn repeating(&self) -> Option<Span> {
+        match self.headers.last() {
+            Some(&(depth, span)) if depth >= self.loops.len() => Some(span),
+            _ => self.loops.last().map(|(s, _)| *s),
+        }
     }
 
     /// A loop body, noting the state its end hands back to its start. A
@@ -5140,6 +5167,7 @@ impl<'a> Checker<'a> {
             defers: self.defers.take(),
             loops: std::mem::take(&mut self.loops),
             loop_edges: std::mem::take(&mut self.loop_edges),
+            headers: std::mem::take(&mut self.headers),
             sig: self.closure_sig.replace(sig.clone()),
             ret_unknown: std::mem::replace(
                 &mut self.closure_ret_unknown,
@@ -5236,6 +5264,7 @@ impl<'a> Checker<'a> {
         self.defers = outer.defers;
         self.loops = outer.loops;
         self.loop_edges = outer.loop_edges;
+        self.headers = outer.headers;
         self.closure_sig = outer.sig;
         self.closure_ret_unknown = outer.ret_unknown;
         self.inferred_ret = outer.inferred_ret;
