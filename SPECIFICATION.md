@@ -1064,6 +1064,14 @@ A loop inside another may not take the label of the one around it
 ([E0112](#16-diagnostics)): `break outer` would then leave the inner loop, and
 the outer one could not be named from inside at all.
 
+A loop's header — the sequence of `for x in`, a range's bounds, the condition
+of `for cond` — is not part of the loop: it is evaluated where the loop stands.
+So a `break` or `continue` written in it, in a block arm of a `match` or
+anywhere else in its expression, leaves the loop around this one, or the loop
+its label names; it cannot name this loop's own label
+([E0111](#16-diagnostics)), and with no loop around it, it is outside a loop
+([E0115](#16-diagnostics)).
+
 ### 6.3 `defer`
 
 ```kite
@@ -1349,7 +1357,9 @@ the `return`s in its body, each of which answers for what it leaves behind. A
 `break` counts wherever it is written outside a closure — as a statement, or in
 a block inside an expression such as an arm of a `match` used as a value or a
 call's argument — and one inside a nested loop leaves that loop unless it names
-this one by its label.
+this one by its label. One in a nested loop's header is not inside that loop
+(§6.2), so it leaves this one, and what it hands on is the state where the header
+is evaluated.
 
 In practice:
 

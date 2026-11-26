@@ -2846,7 +2846,12 @@ qualified pattern, and `kitec fix`. A seventh, the last sweep, took what a
 check of the fifth's changes confirmed: a `break` written inside an expression,
 a `match` guard that writes its scrutinee, `_` in a tuple pattern, `nil` for an
 optional scalar on Wasm, two reports that the fifth pass had made out of one,
-and these documents' own figures. There is no eighth. Each workstream's
+and these documents' own figures. There is no eighth. The final check of the
+finished tree after the seventh found one regression, and it was fixed
+afterwards: a `break` or `continue` written in a nested loop's header leaves the
+loop around it, as every backend has always run it, but the error analysis
+credited it to the nested loop, so a value whose error was never tested could
+be read after the outer loop. Each workstream's
 merge on `complete-kite` says what is true after it. This section is the one place that gathers what a program written
 against v0.1.9 will meet, and it is written as that program's author would want
 it: what stops compiling, what runs differently, what the library does now, and

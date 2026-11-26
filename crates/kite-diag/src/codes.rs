@@ -505,6 +505,7 @@ codes! {
          - Nowhere near a loop: in a function body, or in an `if` or a `match` that no `for` encloses.\n\
          - Inside a closure that is written in a loop. A closure is a function of its own and runs when it is called, not as one step of the loop, so it has no loop to leave. Have the closure return a value and let the loop decide.\n\
          - After the loop's `}`, which is outside it.\n\
+         - In the loop's header — a range's bounds, the sequence of `for x in`, the condition of `for cond` — which is evaluated where the loop stands, not as a step of it: a jump there leaves the loop around this one, and with none around it there is no loop to leave.\n\
          \n\
          To leave a function early, `return`; to leave an outer loop from an inner one, label it (`break outer`).\n\
          \n\
