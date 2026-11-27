@@ -41,6 +41,11 @@ fn an_invalid_utf8_line_reads_lossily_not_as_end_of_input() {
     let input = b"one\ntw\xffo\r\nthree\n";
     let want = "[one] 3\n[tw\u{fffd}o] 4\n[three] 5\n[] 0\n";
     for flags in [&[][..], &["--native"][..]] {
+        // The native backend refuses Windows; see `kite_codegen_clif::supported_here`.
+        if flags == ["--native"] && cfg!(all(windows, target_arch = "x86_64")) {
+            eprintln!("skipping --native: the native backend does not run on Windows");
+            continue;
+        }
         assert_eq!(run_with_stdin(flags, &program, input), want, "kitec run {:?}", flags);
     }
     let _ = std::fs::remove_dir_all(&dir);
