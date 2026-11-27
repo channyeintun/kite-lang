@@ -762,8 +762,8 @@ fn define_thunk<M: Module>(
 
     let closure = b.block_params(entry)[0];
     let mut args = Vec::with_capacity(lifted.param_count);
-    for i in 0..count {
-        let ty = cl_type(lifted.locals[i].ty, cx.types);
+    for (i, local) in lifted.locals[..count].iter().enumerate() {
+        let ty = cl_type(local.ty, cx.types);
         // Captures sit after the header and the thunk slot.
         let off = 16 + 8 + 8 * i as i32;
         args.push(b.ins().load(ty, MemFlagsData::trusted(), closure, off));

@@ -694,11 +694,11 @@ impl fmt::Display for Display_<'_> {
 impl Display_<'_> {
     fn write_fn(&self, f: &mut fmt::Formatter<'_>, func: &Function) -> fmt::Result {
         write!(f, "fn {}(", func.name)?;
-        for i in 0..func.param_count {
+        for (i, l) in func.locals[..func.param_count].iter().enumerate() {
             if i > 0 {
                 write!(f, ", ")?;
             }
-            write!(f, "_{}: {}", i, self.types.name(func.locals[i].ty))?;
+            write!(f, "_{}: {}", i, self.types.name(l.ty))?;
         }
         writeln!(f, ") -> {} {{", self.types.name(func.ret))?;
 
