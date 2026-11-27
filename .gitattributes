@@ -28,3 +28,14 @@ dist/* linguist-generated
 # every file in the tree on CI. Without this git hands Windows CRLF and every
 # one of them "fails" for a reason that has nothing to do with layout.
 *.kite text eol=lf
+
+# The scheduling programs' expected outputs are compared byte for byte with
+# what the programs print, and a program prints `\n` on every platform. Without
+# this git hands Windows CRLF and every one of them "differs" by a carriage
+# return the program never wrote.
+*.out text eol=lf
+
+# Inputs the fuzzer found, kept as the bytes that broke the formatter and
+# compiled into its test by `include_str!`. Converted to CRLF on Windows they
+# would be a different input, and the test would no longer be about them.
+crates/kite-fmt/tests/*.txt text eol=lf
